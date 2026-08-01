@@ -28,6 +28,10 @@ _Avoid_: Repository, application
 A Git-compatible source-storage and object-transfer unit used by a Source Space or Workspace. It is a compatibility boundary, not the complete Project, Change, or collaboration model.
 _Avoid_: Project, Source Space
 
+**Repository Mirror**:
+An external Git repository synchronized bidirectionally with an Anyam Source Space for permitted refs and history. Remote commits enter Anyam as proposed Changes; only Landing advances the canonical Project Revision, after which accepted refs may propagate outward.
+_Avoid_: Second canonical repository, last-writer-wins synchronization
+
 **Source Space**:
 An independently versioned source and object-graph boundary with its own visibility, access, licensing, and model-processing policy. Source outside an Actor's authority is not reachable or discoverable through that boundary.
 _Avoid_: Private folder, hidden branch

@@ -4,6 +4,8 @@ Type: map
 Status: open
 Label: wayfinder:map
 
+> Migrated to [GitHub issue #1](https://github.com/wms2537/anyam/issues/1). GitHub is the authoritative tracker; these local files are retained only as the bootstrap snapshot.
+
 ## Destination
 
 Produce an evidence-backed, implementation-ready blueprint and phased delivery program for building, launching, operating, and evolving Anyam from this empty repository into an open-source, Cloudflare-first project SCM for humans and agents. The map is complete when no material product, domain, security, source-model, developer-experience, platform, portability, operational, commercial, or sequencing decision remains unresolved before implementation planning can begin.
@@ -20,13 +22,13 @@ Produce an evidence-backed, implementation-ready blueprint and phased delivery p
 - Plan for Codex, Claude Code, Cursor, and model-independent agents; Anyam is the trust, workspace, evidence, and delivery control plane rather than the coding model.
 - Authentication, Git credentials, MCP credentials, runner credentials, integrations, and promotion authority are separate security classes.
 - Current date for external research: 2026-07-31. Record exact source dates and distinguish GA, beta, preview, and inference.
-- The issue tracker for this effort is local Markdown under `.scratch/anyam-platform-blueprint/`.
+- The issue tracker for this effort is GitHub Issues in `wms2537/anyam`.
 
 ## Decisions so far
 
 <!-- Resolved tickets are indexed here. The detailed decision lives only in the ticket. -->
 
-- [Verify the current platform and standards assumptions](./issues/01-verify-current-platform-assumptions.md) — Cloudflare is viable for Anyam's control plane and bounded Linux execution, with mandatory provider abstractions, an Anyam-owned Realm authorization layer, and explicit qualification gates for Artifacts and the current MCP stack.
+- [Verify the current platform and standards assumptions](https://github.com/wms2537/anyam/issues/2) — Cloudflare is viable for Anyam's control plane and bounded Linux execution, with mandatory provider abstractions, an Anyam-owned Realm authorization layer, and explicit qualification gates for Artifacts and the current MCP stack.
 
 ## Not yet specified
 

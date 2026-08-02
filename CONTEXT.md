@@ -200,6 +200,8 @@ _Avoid_: Issue, Session
 Narrow, temporary, audience-bound authority delegated to an Actor for specified resources, effects, tools, networks, secret use, budgets, and duration. Explicit denial takes precedence over grants.
 _Avoid_: Personal access token, role
 
+Anyam's current authentication profile uses WebAuthn/passkeys and authorization-code OIDC/OAuth for browser and CLI identity, the MCP 2026-07-28 HTTP authorization profile for remote MCP, a local authenticated broker for stdio MCP, the Anyam Git Gateway plus `git-credential-anyam` for Git, and distinct audience-bound credentials for Git, MCP, runners, integrations, and Targets. OAuth and enterprise identity standards carry requests; the Realm remains authoritative for Capability Grants and policy.
+
 **Secret Use**:
 Authority to invoke an approved credential-backed operation while the credential value remains outside the Actor's Workspace, process environment, logs, and model context.
 _Avoid_: Secret read, credential injection into an agent

@@ -357,3 +357,15 @@ _Avoid_: Cloud deployment, installer
 **Hosting-mode migration**:
 An explicit signed Project Export/import operation that moves a Project between Hosted SaaS, Managed Customer-Account, and Customer-operated Realm while preserving permitted content, lineage, policies, Evidence metadata, Releases, and recovery material without transferring credentials.
 _Avoid_: In-place tenant switch, silent repoint
+
+**Acceptance Criterion**:
+A versioned, evidence-backed statement that one explicit Project/Reference Fixture journey satisfies an expected invariant under exact source, policy, toolchain, Runner, Capability Grant, and disclosure inputs. Missing, failed, stale, or indeterminate Criteria block the relevant Stage Gate.
+_Avoid_: Checklist item, green UI status
+
+**Reference Fixture**:
+A small source-controlled Project used to qualify a generalized Anyam workflow: the initial set is a Cloudflare Worker, a TypeScript CLI/library, and a hybrid public/private Source Space Project. A fixture is not a customer workload benchmark or a universal buildability claim.
+_Avoid_: Demo app, performance benchmark
+
+**Validation Journey**:
+A normal or adversarial end-to-end path across Anyam interfaces and Trust Boundaries, with explicit preconditions, expected invariants, Evidence, disclosure projection, and recovery behavior. A journey exercises the same policy-governed commands as a real Actor.
+_Avoid_: Manual click-through, happy path only

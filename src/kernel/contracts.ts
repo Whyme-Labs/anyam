@@ -277,8 +277,13 @@ export type DomainEvent<TPayload> = {
 export type ProjectExport = {
   protocol: typeof CONTRACT_VERSIONS.export;
   version: "v1";
+  exportId: string;
+  createdAt: string;
   project: Project;
   sourceSpaces: readonly SourceSpace[];
+  repositories: readonly RepositoryExport[];
+  largeObjects: readonly LargeObjectRef[];
+  lineage: readonly ProjectExportLineage[];
   projectRevisions: readonly ProjectRevision[];
   changes: readonly Change[];
   evidence: readonly Evidence[];
@@ -290,6 +295,60 @@ export type ProjectExport = {
   policies: readonly string[];
   auditEventIds: readonly string[];
   recoveryCheckpointIds: readonly string[];
+  recovery: ProjectExportRecovery;
+  integrity: ProjectExportIntegrity;
+};
+
+export type GitObjectFormat = "sha1" | "sha256";
+
+export type GitRef = {
+  name: string;
+  oid: string;
+};
+
+export type LargeObjectRef = {
+  oid: string;
+  size: number;
+  mediaType?: string;
+  relativePath?: string;
+  digest?: string;
+};
+
+export type RepositoryExport = {
+  protocol: "anyam.repository-export/v1";
+  repositoryId: string;
+  sourceSpaceId: string;
+  objectFormat: GitObjectFormat;
+  defaultBranch: string | null;
+  refs: readonly GitRef[];
+  bundle: {
+    relativePath: string;
+    digest: string;
+    bytes: number;
+  };
+  lfs: {
+    state: "empty" | "complete" | "incomplete" | "unavailable";
+    objects: readonly LargeObjectRef[];
+  };
+};
+
+export type ProjectExportLineage = {
+  projectRevisionId: string;
+  sourceSpaceSnapshots: Readonly<Record<string, string>>;
+};
+
+export type ProjectExportRecovery = {
+  checkpointId: string;
+  state: "verified" | "incomplete";
+  resumeAction: string;
+  receipt: string;
+};
+
+export type ProjectExportIntegrity = {
+  manifestDigest: string;
+  repositoryDigests: readonly string[];
+  credentialFree: boolean;
+  receipt: string;
 };
 
 export function createProject(input: ProjectInput): Project {

@@ -249,3 +249,11 @@ _Avoid_: Green check, unsupported build claim
 **Target Adapter**:
 An extension that declares a Target's accepted Artifact types and required capabilities or checks, then performs provider-specific mechanics while Anyam retains Release, Promotion, provenance, policy, disclosure, and audit authority.
 _Avoid_: Deployment script, environment-specific kernel logic
+
+**Runner**:
+An enrolled execution provider with declared operating-system, architecture, isolation, toolchain, resource, network, Secret Use, cache, output, and Target capabilities. A Runner executes bounded Run attempts but never decides Anyam authorization, Source Space visibility, Landing, or Promotion.
+_Avoid_: CI server, canonical executor
+
+**Runner Job**:
+A short-lived, lease-bound assignment for one Run attempt, carrying an immutable input manifest, one Project View, one Action or Verifier, scoped output locations, and a narrowed job Capability Grant. A Runner Job is replay-safe and cannot write canonical source.
+_Avoid_: PAT, workflow as source of truth

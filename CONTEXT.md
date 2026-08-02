@@ -33,7 +33,7 @@ An external Git repository synchronized bidirectionally with an Anyam Source Spa
 _Avoid_: Second canonical repository, last-writer-wins synchronization
 
 **Source Space**:
-An independently versioned source and object-graph boundary with its own visibility, access, licensing, and model-processing policy. Source outside an Actor's authority is not reachable or discoverable through that boundary.
+An independently versioned source and object-graph boundary with its own visibility, access, licensing, and model-processing policy. Every Snapshot belongs to one Source Space, and inaccessible source is neither reachable nor discoverable through another Source Space.
 _Avoid_: Private folder, hidden branch
 
 **Open-source Project**:
@@ -49,11 +49,11 @@ A Project whose source required to build its published Artifacts is not publicly
 _Avoid_: Private Project when referring only to source licensing
 
 **Project View**:
-A safe composition of the Source Spaces an Actor is entitled to discover and access, containing no references or metadata from inaccessible Source Spaces.
+A collision-free composition selected by a Project Profile from the Source Spaces an Actor and, when applicable, its model provider may discover and access. A Project View contains no references or metadata from inaccessible Source Spaces and never silently weakens a requested Project Profile.
 _Avoid_: Sparse checkout, filtered listing
 
 **Project Profile**:
-An owner-declared selection of Source Spaces, modules, actions, outputs, and policies for a particular community, commercial, internal, or other Project configuration. Anyam enforces disclosure integrity for the resulting Project View but does not impose a universal definition of functional completeness.
+An owner-declared selection of Source Spaces, collision-free mounts, modules, actions, outputs, and policies for a particular community, commercial, internal, or other Project configuration. A Project Profile selects but never grants access; Anyam enforces disclosure integrity without imposing a universal definition of functional completeness.
 _Avoid_: Edition when the distinction is only a declared composition
 
 **Project Export**:
@@ -69,16 +69,20 @@ Minimal operational or usage measurements intentionally emitted outside a Realm 
 _Avoid_: Project Content, hidden analytics
 
 **Disclosure Projection**:
-A capability-safe representation of an Intent, Change, review, Run, Evidence, Artifact, Release, Target, or activity record for a particular audience. Restricted titles, identifiers, timing, search data, notifications, and context are omitted rather than exposed as permission errors.
+A capability-safe representation of an Intent, Change, review, Run, Evidence, Artifact, Release, Target, or activity record for a particular audience. Its identifiers and metadata derive only from disclosed state; restricted titles, identifiers, timing, search data, notifications, and context are omitted rather than exposed as permission errors.
 _Avoid_: Redacted object when hidden metadata remains discoverable
 
 **Snapshot**:
-An immutable, content-addressed representation of source state within one Source Space. In a Git-backed Source Space, an exact Git commit identifies the Snapshot.
+An immutable, content-addressed representation of source state belonging to exactly one Source Space. In a Git-backed Source Space, an exact Git commit identifies the Snapshot.
 _Avoid_: Working tree
 
 **Project Revision**:
-An immutable manifest identifying the exact Snapshots that form one coherent Project state across Source Spaces.
+The authoritative immutable manifest identifying the exact Snapshots that form one coherent Project state across all participating Source Spaces. Restricted audiences receive Project View Revisions rather than a redacted Project Revision or its identifier.
 _Avoid_: Commit, release
+
+**Project View Revision**:
+An immutable manifest and identifier for the exact disclosed Snapshots in one Project View, derived only from that disclosed state. Project Revisions that differ solely in inaccessible state produce the same Project View Revision for an unchanged audience.
+_Avoid_: Redacted Project Revision, partial Project Revision
 
 **Intent**:
 A desired outcome, problem, request, or hypothesis that motivates work.

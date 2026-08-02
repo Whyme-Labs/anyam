@@ -381,3 +381,23 @@ _Avoid_: Best-effort fallback, generic 500
 **Recovery Runbook**:
 A versioned, owner-approved procedure for detecting, freezing, restoring, reconciling, verifying, and resuming an Anyam capability from a named Recovery Checkpoint. A Runbook records affected data classes, authority, Evidence, roles, and rollback/compensation behavior.
 _Avoid_: Retry script, undocumented operations knowledge
+
+**Usage Receipt**:
+An immutable attribution record for logical Anyam work and provider consumption, bound to a Hosting Mode, Realm, Project, Source Space, Task/Run, provider resource, quantity/unit, price version when known, retry class, and idempotency source. A Usage Receipt is not an invoice.
+_Avoid_: Cloud provider bill, seat count
+
+**Provider Cost Receipt**:
+A reconciliation record linking Usage Receipts to provider usage or invoice rows, with consumed and billed quantities, included allocation, corrections, shared overhead, variance, and feed status. A provider feed may be delayed or unavailable without invalidating the Anyam ledger.
+_Avoid_: Estimated charge, raw API metric
+
+**Budget Policy**:
+A versioned Realm/Organization/Project/Source Space/Target/Task policy that governs resource dimensions, warnings, approvals, degradation, hard tripwires, and reset/reconciliation behavior. A Budget Policy never silently widens authority or hides a requested amount.
+_Avoid_: Provider plan, arbitrary timeout
+
+**Budget Decision**:
+An explicit allow, warn, approval-required, degraded, or exhausted result for a Budget Policy evaluation, naming scope, configured/provider limit, requested and consumed amount, receipt, expiry/reset, uncertainty, and remediation.
+_Avoid_: Rate-limit error, disabled button
+
+**Billing Owner**:
+The Hosting Mode-specific principal responsible for provider usage and invoice authority: the customer for Customer-operated and Managed Customer-Account resources, and Anyam for Hosted SaaS resources. Billing Owner does not change Project Content ownership or Anyam capability parity.
+_Avoid_: Account owner when billing and authority differ

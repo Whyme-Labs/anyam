@@ -36,6 +36,11 @@ export type Capability =
   | "landing.request"
   | "target.read"
   | "target.promote"
+  | "extension.install"
+  | "extension.manage"
+  | "extension.invoke"
+  | "governance.profile.manage"
+  | "governance.profile.evaluate"
   | "policy.manage"
   | "identity.manage";
 
@@ -410,10 +415,10 @@ const ROLE_CAPABILITIES: Readonly<Record<RealmRole, readonly Capability[]>> = {
   viewer: ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "evidence.read", "target.read"],
   contributor: ["project.inspect", "source.read", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "review.submit_finding", "run.invoke", "evidence.read", "target.read"],
   reviewer: ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "review.submit_finding", "change.approve", "evidence.read", "target.read"],
-  maintainer: ["project.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "landing.request", "target.read"],
-  "release-manager": ["project.inspect", "source.read", "change.inspect", "review.submit_finding", "change.approve", "evidence.read", "target.read", "target.promote", "landing.request"],
-  "security-reviewer": ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "target.read"],
-  owner: ["project.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "secret.use", "landing.request", "target.read", "target.promote", "policy.manage", "identity.manage"],
+  maintainer: ["project.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "landing.request", "target.read", "extension.install", "extension.manage", "extension.invoke", "governance.profile.evaluate"],
+  "release-manager": ["project.inspect", "source.read", "change.inspect", "review.submit_finding", "change.approve", "evidence.read", "target.read", "target.promote", "landing.request", "extension.invoke"],
+  "security-reviewer": ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "target.read", "governance.profile.evaluate"],
+  owner: ["project.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "secret.use", "landing.request", "target.read", "target.promote", "extension.install", "extension.manage", "extension.invoke", "governance.profile.manage", "governance.profile.evaluate", "policy.manage", "identity.manage"],
 };
 
 function clone<T>(value: T): T {
@@ -442,7 +447,7 @@ function randomToken(): string {
 
 function resourceMatches(scope: ResourceRef, resource: ResourceRef): boolean {
   if (scope.realmId !== resource.realmId) return false;
-  for (const key of ["projectId", "sourceSpaceId", "workspaceId", "changeId", "runId", "releaseId", "targetId"] as const) {
+  for (const key of ["organizationId", "projectId", "sourceSpaceId", "workspaceId", "changeId", "runId", "releaseId", "targetId"] as const) {
     const expected = scope[key];
     if (expected !== undefined && resource[key] !== expected) return false;
   }

@@ -314,6 +314,18 @@ _Avoid_: CI server, canonical executor
 A short-lived, lease-bound assignment for one Run attempt, carrying an immutable input manifest, one Project View, one Action or Verifier, scoped output locations, and a narrowed job Capability Grant. A Runner Job is replay-safe and cannot write canonical source.
 _Avoid_: PAT, workflow as source of truth
 
+**Runner Attempt**:
+The immutable execution lease for one Runner Job. An Attempt records the enrolled Runner identity, challenge proof, lease, credential digest, signed result digest, terminal state, and recovery action. Retries create a fresh Attempt without rewriting the previous Attempt.
+_Avoid_: retry in place, provider task ID as Anyam authority
+
+**Runner Output**:
+A typed, disclosure-checked reference to a Run-scoped log, Artifact, or Evidence object. Anyam attaches the authoritative Run and Attempt identity after validating the declared location, digest, output contract, and disclosure policy.
+_Avoid_: arbitrary upload URL, provider result as Evidence
+
+**Runner Job Credential**:
+An opaque, short-lived credential issued only after an enrolled Runner proves possession of its identity for one offered Attempt. It is bound to that Job, Attempt, Runner, and lease; Anyam stores only its digest and it cannot authorize Git, MCP, deployment, or canonical source writes.
+_Avoid_: PAT, repository token, Realm session
+
 **Threat Model**:
 A versioned inventory of protected assets, trust boundaries, adversaries, abuse cases, security requirements, qualification gates, and explicitly accepted residual risks. A Threat Model is updated when a material architecture, provider, Source Space, Runner, verifier, Target, disclosure, or policy boundary changes.
 _Avoid_: Security checklist, one-time review

@@ -17,6 +17,7 @@ export const CONTRACT_VERSIONS = {
   target: "anyam.target/v1",
   verifiedRelease: "anyam.verified-release/v1",
   promotion: "anyam.promotion/v1",
+  releasePublication: "anyam.release-publication/v1",
   healthObservation: "anyam.health-observation/v1",
   targetAdapter: "anyam.target-adapter/v1",
   capability: "anyam.capability/v1",

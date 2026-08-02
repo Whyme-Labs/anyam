@@ -24,6 +24,8 @@ export const CONTRACT_VERSIONS = {
   policy: "anyam.policy/v1",
   credential: "anyam.credential/v1",
   audit: "anyam.audit/v1",
+  installation: "anyam.installation/v1",
+  recovery: "anyam.recovery/v1",
   command: "anyam.command/v1",
   event: "anyam.event/v1",
   export: "anyam.export/v1",

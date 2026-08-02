@@ -458,6 +458,10 @@ _Avoid_: Region label, Cloudflare-only claim
 A versioned mapping from a Governance Profile requirement to Anyam policy, Audit Events, Evidence, operational controls, customer responsibility, and qualification status. A Control Mapping is audit preparation, not a certification or legal guarantee.
 _Avoid_: Certification, compliance claim
 
+**Governance Control Evidence**:
+An immutable, capability-neutral observation produced when a Governance Profile control is evaluated against an exact scope, policy version, authorization epoch, owner, and Evidence references. It records readiness, failure, or indeterminacy without making a certification, compliance, or legal claim.
+_Avoid_: Certification, compliance guarantee, attestation of legal compliance
+
 **Extension Manifest**:
 A signed/digested, versioned declaration for a RepositoryDriver, Action, Verifier, TargetAdapter, ProjectExperience, IDE integration, AgentSkill, or installed App. It declares mechanics, compatibility, provenance, and requested effects; it never grants Anyam authority.
 _Avoid_: Marketplace listing, permission token

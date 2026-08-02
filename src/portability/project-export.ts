@@ -7,6 +7,12 @@ import {
   type Artifact,
   type Change,
   type Evidence,
+  type ExtensionEvent,
+  type ExtensionInstallation,
+  type ExtensionManifest,
+  type GovernanceControlEvidence,
+  type GovernanceEvaluation,
+  type GovernanceProfile,
   type LargeObjectRef,
   type Project,
   type ProjectExport,
@@ -68,6 +74,12 @@ export type ProjectExportInput = {
   artifacts?: readonly Artifact[];
   releases?: readonly Release[];
   targets?: readonly Target[];
+  extensions?: readonly ExtensionManifest[];
+  extensionInstallations?: readonly ExtensionInstallation[];
+  extensionEvents?: readonly ExtensionEvent[];
+  governanceProfiles?: readonly GovernanceProfile[];
+  governanceControlEvidence?: readonly GovernanceControlEvidence[];
+  governanceEvaluations?: readonly GovernanceEvaluation[];
   mirrors?: readonly RepositoryMirror[];
   mirrorOperationIds?: readonly string[];
   policies?: readonly string[];
@@ -536,7 +548,12 @@ export class LocalProjectExporter {
         ...(input.mirrors ? { mirrors: input.mirrors.map((mirror) => ({ ...mirror, refMappings: mirror.refMappings.map((mapping) => ({ ...mapping })), canonicalRefs: mirror.canonicalRefs.map((ref) => ({ ...ref })), remoteRefs: mirror.remoteRefs.map((ref) => ({ ...ref })), pendingInboundChangeIds: [...mirror.pendingInboundChangeIds] })) } : {}),
         ...(input.mirrorOperationIds ? { mirrorOperationIds: [...input.mirrorOperationIds] } : {}),
         capabilityGrants: [],
-        extensions: [],
+        extensions: [...(input.extensions ?? [])],
+        ...(input.extensionInstallations ? { extensionInstallations: [...input.extensionInstallations] } : {}),
+        ...(input.extensionEvents ? { extensionEvents: [...input.extensionEvents] } : {}),
+        ...(input.governanceProfiles ? { governanceProfiles: [...input.governanceProfiles] } : {}),
+        ...(input.governanceControlEvidence ? { governanceControlEvidence: [...input.governanceControlEvidence] } : {}),
+        ...(input.governanceEvaluations ? { governanceEvaluations: [...input.governanceEvaluations] } : {}),
         policies: [...(input.policies ?? [])],
         auditEventIds: [...(input.auditEventIds ?? [])],
         recoveryCheckpointIds: [checkpoint.checkpointId],

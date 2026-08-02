@@ -58,6 +58,12 @@ export const CONTRACT_VERSIONS = {
   event: "anyam.event/v1",
   export: "anyam.export/v1",
   extension: "anyam.extension/v1",
+  extensionInstallation: "anyam.extension-installation/v1",
+  extensionEvent: "anyam.extension-event/v1",
+  governanceProfile: "anyam.governance-profile/v1",
+  governanceProfileExport: "anyam.governance-profile-export/v1",
+  governanceControlEvidence: "anyam.governance-control-evidence/v1",
+  governanceEvaluation: "anyam.governance-evaluation/v1",
   publicProjection: "anyam.public-projection/v1",
   publicationChange: "anyam.publication-change/v1",
   sealedVerifier: "anyam.sealed-verifier/v1",
@@ -543,15 +549,195 @@ export type CapabilityGrant = {
   status: CapabilityGrantStatus;
 };
 
+export type ExtensionKind =
+  | "repository-driver"
+  | "action"
+  | "verifier"
+  | "target-adapter"
+  | "project-experience"
+  | "ide"
+  | "agent-skill"
+  | "app";
+
+export type ExtensionTrust = "first-party" | "verified" | "unverified";
+
+export type ExtensionLifecycle =
+  | "proposed"
+  | "installed"
+  | "enabled"
+  | "suspended"
+  | "deprecated"
+  | "replaced"
+  | "revoked"
+  | "blocked";
+
+export type ExtensionProvenance = {
+  source: string;
+  publisher: string;
+  signer?: string;
+  attestation?: string;
+  receipt: string;
+};
+
 export type ExtensionManifest = {
   protocol: typeof CONTRACT_VERSIONS.extension;
   id: string;
   name: string;
   version: string;
+  kind: ExtensionKind;
+  trust: ExtensionTrust;
+  source: string;
   digest: string;
   requestedEffects: readonly string[];
-  lifecycle: "installed" | "suspended" | "revoked";
+  requestedCapabilities: readonly string[];
+  lifecycle: ExtensionLifecycle;
   compatibility: readonly string[];
+  provenance: ExtensionProvenance;
+  deprecationReason?: string;
+};
+
+export type ExtensionScope =
+  | { kind: "realm"; realmId: string }
+  | { kind: "organization"; realmId: string; organizationId: string }
+  | { kind: "project"; realmId: string; organizationId?: string; projectId: string };
+
+export type ExtensionInstallation = {
+  protocol: typeof CONTRACT_VERSIONS.extensionInstallation;
+  id: string;
+  manifestId: string;
+  manifestVersion: string;
+  manifestDigest: string;
+  scope: ExtensionScope;
+  lifecycle: ExtensionLifecycle;
+  grantedEffects: readonly string[];
+  grantedCapabilities: readonly string[];
+  grantId: string;
+  policyVersion: string;
+  authorizationEpoch: number;
+  installedBy: ActorRef;
+  installedAt: string;
+  lineageId: string;
+  replacesInstallationId?: string;
+  providerMigrationFrom?: string;
+  receipt: string;
+};
+
+export type ExtensionEventKind =
+  | "registered"
+  | "install-requested"
+  | "installed"
+  | "enabled"
+  | "suspended"
+  | "deprecated"
+  | "replaced"
+  | "provider-migrated"
+  | "revoked"
+  | "blocked"
+  | "invocation-proposed"
+  | "invoked"
+  | "invocation-blocked";
+
+export type ExtensionEvent = {
+  protocol: typeof CONTRACT_VERSIONS.extensionEvent;
+  id: string;
+  kind: ExtensionEventKind;
+  installationId?: string;
+  manifestId: string;
+  previousInstallationId?: string;
+  nextInstallationId?: string;
+  actor?: ActorRef;
+  occurredAt: string;
+  reason: string;
+  receipt: string;
+};
+
+export type GovernanceScope = {
+  realmId: string;
+  organizationId?: string;
+  projectId?: string;
+};
+
+export type GovernanceControl = {
+  id: string;
+  title: string;
+  requirement: string;
+  owner: string;
+  required: boolean;
+  evidenceKinds: readonly string[];
+  customerResponsibility?: string;
+};
+
+export type GovernanceProfile = {
+  protocol: typeof CONTRACT_VERSIONS.governanceProfile;
+  id: string;
+  name: string;
+  version: string;
+  digest: string;
+  scope: GovernanceScope;
+  controls: readonly GovernanceControl[];
+  provenance: ExtensionProvenance;
+  policyVersion: string;
+  lifecycle: "draft" | "active" | "retired";
+  receipt: string;
+};
+
+export type GovernanceControlObservation = {
+  controlId: string;
+  status: "satisfied" | "failed" | "indeterminate";
+  evidenceRefs: readonly string[];
+  observedAt: string;
+  owner: string;
+  nextAction: string;
+  disclosure: DisclosurePolicyRef;
+  receipt: string;
+};
+
+export type GovernanceControlEvidence = {
+  protocol: typeof CONTRACT_VERSIONS.governanceControlEvidence;
+  id: string;
+  profileId: string;
+  profileDigest: string;
+  scope: GovernanceScope;
+  controlId: string;
+  status: GovernanceControlObservation["status"];
+  evidenceRefs: readonly string[];
+  policyVersion: string;
+  authorizationEpoch: number;
+  observedAt: string;
+  owner: string;
+  nextAction: string;
+  disclosure: DisclosurePolicyRef;
+  certificationClaim: false;
+  receipt: string;
+};
+
+export type GovernanceEvaluation = {
+  protocol: typeof CONTRACT_VERSIONS.governanceEvaluation;
+  id: string;
+  profileId: string;
+  profileDigest: string;
+  scope: GovernanceScope;
+  status: "ready" | "blocked" | "indeterminate";
+  evidenceIds: readonly string[];
+  blockers: readonly string[];
+  advisories: readonly string[];
+  policyVersion: string;
+  authorizationEpoch: number;
+  certificationClaim: false;
+  receipt: string;
+};
+
+export type GovernanceProfileExport = {
+  protocol: typeof CONTRACT_VERSIONS.governanceProfileExport;
+  version: "v1";
+  exportId: string;
+  createdAt: string;
+  profile: GovernanceProfile;
+  observations: readonly GovernanceControlObservation[];
+  evaluation: GovernanceEvaluation;
+  credentialFree: true;
+  integrityDigest: string;
+  receipt: string;
 };
 
 export type ActorRef = {
@@ -563,6 +749,7 @@ export type ActorRef = {
 
 export type ResourceRef = {
   realmId: string;
+  organizationId?: string;
   projectId?: string;
   sourceSpaceId?: string;
   workspaceId?: string;
@@ -625,6 +812,11 @@ export type ProjectExport = {
   mirrorOperationIds?: readonly string[];
   capabilityGrants: readonly CapabilityGrant[];
   extensions: readonly ExtensionManifest[];
+  extensionInstallations?: readonly ExtensionInstallation[];
+  extensionEvents?: readonly ExtensionEvent[];
+  governanceProfiles?: readonly GovernanceProfile[];
+  governanceControlEvidence?: readonly GovernanceControlEvidence[];
+  governanceEvaluations?: readonly GovernanceEvaluation[];
   policies: readonly string[];
   auditEventIds: readonly string[];
   recoveryCheckpointIds: readonly string[];

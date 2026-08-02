@@ -218,6 +218,8 @@ _Avoid_: Mandatory manifest, hidden convention for advanced behavior
 A human- and machine-readable account of why an operation is allowed or blocked, which policy and Project state produced the decision, and what permitted action can satisfy it.
 _Avoid_: Disabled button, unexplained denial
 
+Every Policy Explanation is `allow`, `deny`, or `indeterminate`, records the policy version and authorization epoch, and exposes only capability-safe operation, resource, blocker, and remediation details. Unknown required context fails closed for protected operations; hidden resources use a safe `not_found` projection.
+
 **Audit Event**:
 An immutable, attributable record of an authority-bearing operation, its policy decision, and its result. Audit Events exclude credential values, private model reasoning, and inaccessible Project Content.
 _Avoid_: Mutable activity log, model chain of thought

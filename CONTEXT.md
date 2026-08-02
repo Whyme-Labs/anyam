@@ -269,3 +269,23 @@ _Avoid_: CI server, canonical executor
 **Runner Job**:
 A short-lived, lease-bound assignment for one Run attempt, carrying an immutable input manifest, one Project View, one Action or Verifier, scoped output locations, and a narrowed job Capability Grant. A Runner Job is replay-safe and cannot write canonical source.
 _Avoid_: PAT, workflow as source of truth
+
+**Threat Model**:
+A versioned inventory of protected assets, trust boundaries, adversaries, abuse cases, security requirements, qualification gates, and explicitly accepted residual risks. A Threat Model is updated when a material architecture, provider, Source Space, Runner, verifier, Target, disclosure, or policy boundary changes.
+_Avoid_: Security checklist, one-time review
+
+**Trust Boundary**:
+A point where untrusted identity, content, execution, provider state, or protocol data enters an Anyam resource or state transition and must be authenticated, authorized, validated, constrained, or projected. Cloudflare account ownership, network location, Runner enrollment, or a valid signature does not remove a Trust Boundary.
+_Avoid_: Network perimeter, trusted internal call
+
+**Security Requirement**:
+A normative protection for an asset or Trust Boundary, expressed with the authority, disclosure, integrity, availability, or recovery property it preserves and the failure behavior it requires.
+_Avoid_: Best practice, security aspiration
+
+**Qualification Gate**:
+An executable verification obligation for a Security Requirement, bound to exact source, policy, toolchain, Runner, grant, and disclosure context. A gate produces Evidence; a passed gate becomes stale when material inputs change.
+_Avoid_: Green check, informal test
+
+**Residual Risk**:
+A known threat that remains after the selected controls and qualification gates, with a named owner, mitigation, and acceptance decision. Residual Risk never authorizes silently weakening a hard boundary.
+_Avoid_: Untracked exception, accepted vulnerability

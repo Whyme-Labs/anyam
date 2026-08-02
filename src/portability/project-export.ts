@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import {
   opaqueId,
+  type Artifact,
   type Change,
   type Evidence,
   type LargeObjectRef,
@@ -63,6 +64,7 @@ export type ProjectExportInput = {
   projectRevisions?: readonly ProjectRevision[];
   changes?: readonly Change[];
   evidence?: readonly Evidence[];
+  artifacts?: readonly Artifact[];
   releases?: readonly Release[];
   targets?: readonly Target[];
   policies?: readonly string[];
@@ -525,7 +527,7 @@ export class LocalProjectExporter {
         projectRevisions: [...(input.projectRevisions ?? [])],
         changes: [...(input.changes ?? [])],
         evidence: [...(input.evidence ?? [])],
-        artifacts: [],
+        artifacts: [...(input.artifacts ?? [])],
         releases: [...(input.releases ?? [])],
         targets: [...(input.targets ?? [])],
         capabilityGrants: [],

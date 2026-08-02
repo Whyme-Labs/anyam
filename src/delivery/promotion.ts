@@ -317,16 +317,16 @@ export function createWorkerTarget(input: {
 }
 
 /**
- * Seals the exact Release, Artifacts, and Evidence that a Worker Target may
- * consume. The returned snapshot is detached from the caller and is the only
- * object a Promotion adapter receives.
+ * Seals the exact Release, Artifacts, and Evidence that a Target may consume.
+ * The returned snapshot is detached from the caller and is the only object a
+ * Promotion or publication adapter receives.
  */
 export function sealVerifiedRelease(input: {
   projectId: string;
   release: Release;
   artifacts: readonly Artifact[];
   evidence: readonly Evidence[];
-  target: WorkerTarget;
+  target: Target;
 }): ImmutableRelease {
   const release = clone(input.release);
   const artifacts = clone(input.artifacts);
@@ -361,7 +361,7 @@ export function sealVerifiedRelease(input: {
   if (release.artifactIds.length === 0) {
     error({
       code: "invalid-release",
-      message: `Release ${release.id} has no Artifacts for Worker Target ${input.target.id}.`,
+      message: `Release ${release.id} has no Artifacts for Target ${input.target.id}.`,
       affectedObject,
       recoveryAction: "build and attach at least one Target-compatible Artifact",
       receipt: `release=${release.id}; artifacts=0; target=${input.target.id}`,
@@ -395,7 +395,7 @@ export function sealVerifiedRelease(input: {
         code: "invalid-release",
         message: `Target ${input.target.id} does not accept Artifact type ${artifact.type}.`,
         affectedObject: artifact.id,
-        recoveryAction: "declare a Worker Artifact type accepted by the Target or select another Target",
+        recoveryAction: "declare an Artifact type accepted by the Target or select another Target",
         receipt: `target=${input.target.id}; accepted=${input.target.acceptedArtifactTypes.join(",")}; artifactType=${artifact.type}`,
       });
     }
@@ -454,10 +454,11 @@ export function sealVerifiedRelease(input: {
     });
   }
 
+  const targetContractDigest = "contractDigest" in input.target ? input.target.contractDigest : undefined;
   const releaseDigest = digest({
     projectId: input.projectId,
     targetId: input.target.id,
-    targetContractDigest: input.target.contractDigest,
+    targetContractDigest,
     release,
     artifacts,
     evidence,

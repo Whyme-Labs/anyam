@@ -401,3 +401,15 @@ _Avoid_: Rate-limit error, disabled button
 **Billing Owner**:
 The Hosting Mode-specific principal responsible for provider usage and invoice authority: the customer for Customer-operated and Managed Customer-Account resources, and Anyam for Hosted SaaS resources. Billing Owner does not change Project Content ownership or Anyam capability parity.
 _Avoid_: Account owner when billing and authority differ
+
+**Governance Profile**:
+A versioned, portable set of identity, policy, audit, retention, residency, encryption, support, recovery, isolation, and compliance-control requirements applied to the same open-source Anyam model. A Profile tightens obligations and produces Evidence; it does not grant access or create a proprietary edition.
+_Avoid_: Enterprise tier, compliance checkbox
+
+**Residency Policy**:
+A data-class placement and disclosure policy covering source, metadata, indexes, grants, logs, queues, Evidence, Artifacts, backups, mirrors, Runner inputs/outputs, caches, and model context. A provider path that cannot prove the requested placement is rejected or explicitly downgraded.
+_Avoid_: Region label, Cloudflare-only claim
+
+**Control Mapping**:
+A versioned mapping from a Governance Profile requirement to Anyam policy, Audit Events, Evidence, operational controls, customer responsibility, and qualification status. A Control Mapping is audit preparation, not a certification or legal guarantee.
+_Avoid_: Certification, compliance claim

@@ -441,12 +441,15 @@ the validity key.
 ```text
 proposed → validating → approved → applying → healthy
                 │            │           ├── failed
-                └────────────┴───────────└── blocked/degraded
+                └────────────┴───────────└── blocked/degraded → rolled-back
 ```
 
 `failed`, `blocked`, and `degraded` retain the requested Release, expected
 Target state, provider response, Evidence, and recovery action. A retry is
-idempotent; a compensation or rollback is a new audited state transition.
+idempotent; a health-verified compensation or rollback is a new audited state
+transition. The Target pointer changes only after the desired Release is
+health-verified; a failed health check leaves the prior known-good Release
+serving or leaves the Target explicitly degraded.
 
 ## Architecture
 
@@ -756,7 +759,7 @@ implementation work package, not an unowned promise.
 | Project authority and Git drivers | [ADR 0002](../adr/0002-keep-project-authority-above-replaceable-git-repositories.md), [ADR 0017](../adr/0017-portable-project-exports-and-single-authority-mirrors.md) |
 | Publication and sealed verification | [ADR 0004](../adr/0004-publication-changes-and-sealed-verification.md), [ADR 0032](../adr/0032-hybrid-public-private-projections-and-sealed-verifiers.md) |
 | Changes and Landing | [ADR 0005](../adr/0005-stable-changes-and-compare-and-swap-landing.md) |
-| Artifacts, Releases, Targets | [ADR 0006](../adr/0006-generalize-artifacts-releases-and-targets.md) |
+| Artifacts, Releases, Targets, Worker Promotion | [ADR 0006](../adr/0006-generalize-artifacts-releases-and-targets.md), [ADR 0033](../adr/0033-worker-release-promotion-and-rollback.md) |
 | Identity and capability policy | [ADR 0007](../adr/0007-realm-owned-authentication-and-delegation.md), [ADR 0008](../adr/0008-explainable-capability-policy.md), [ADR 0030](../adr/0030-realm-identity-and-capability-policy.md) |
 | CLI, Git, MCP, agents | [ADR 0009](../adr/0009-cli-git-mcp-agent-connection.md) |
 | Manifests, Actions, Verifiers, Runners | [ADR 0011](../adr/0011-portable-project-manifest-contract.md), [ADR 0012](../adr/0012-cloudflare-default-and-portable-pull-runners.md) |

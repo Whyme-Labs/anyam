@@ -289,3 +289,15 @@ _Avoid_: Green check, informal test
 **Residual Risk**:
 A known threat that remains after the selected controls and qualification gates, with a named owner, mitigation, and acceptance decision. Residual Risk never authorizes silently weakening a hard boundary.
 _Avoid_: Untracked exception, accepted vulnerability
+
+**Bounded Context**:
+A domain boundary with one authoritative state model, invariants, and owner. Other contexts consume versioned events or read projections and cannot silently become authority for its protected transitions.
+_Avoid_: Microservice, table group
+
+**Authoritative State**:
+The state source allowed to decide a protected transition for one resource or aggregate. A cache, read model, queue message, provider event, signature, or workflow instance is not Authoritative State unless the owning context explicitly validates and records it.
+_Avoid_: Latest value, database row
+
+**Read Model**:
+A rebuildable, query-optimized projection of Authoritative State. Read Models may be stale or unavailable and never authorize protected mutations.
+_Avoid_: Source of truth, audit ledger

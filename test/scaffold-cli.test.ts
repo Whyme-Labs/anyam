@@ -31,6 +31,7 @@ test("create-anyam exposes both package-manager entry points", async () => {
   assert.equal(packageManifestMetadata.name, "create-anyam");
   assert.ok(packageManifestMetadata.bin["create-anyam"]);
   assert.ok(packageManifestMetadata.bin.anyam);
+  assert.ok(packageManifestMetadata.bin["git-credential-anyam"]);
   assert.equal(packageManifestMetadata.scripts.prepare, "npm run build");
   assert.equal(packageManifestMetadata.scripts.prepack, "npm run build");
 });

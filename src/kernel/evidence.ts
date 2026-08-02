@@ -18,6 +18,8 @@ export type EvidenceRequirement = {
   currentValidityKey: string;
   expectedProjectRevisionId?: string;
   expectedProjectViewId?: string;
+  expectedChangeRevisionId?: string;
+  expectedTargetId?: string;
   expectedDisclosureClassification?: "public" | "project" | "restricted";
 };
 
@@ -84,6 +86,7 @@ export class EvidenceLedger {
       inputDigests: [...record.inputDigests],
       effectDigests: [...record.effectDigests],
       producer: { ...record.producer },
+      ...(record.sourceSpaceSnapshots ? { sourceSpaceSnapshots: { ...record.sourceSpaceSnapshots } } : {}),
     };
   }
 }
@@ -111,6 +114,8 @@ export function evaluateStageGate(input: {
     const contextMismatch = (requirement.expectedProjectRevisionId !== undefined
       && record.projectRevisionId !== requirement.expectedProjectRevisionId)
       || (requirement.expectedProjectViewId !== undefined && record.projectViewId !== requirement.expectedProjectViewId)
+      || (requirement.expectedChangeRevisionId !== undefined && record.changeRevisionId !== requirement.expectedChangeRevisionId)
+      || (requirement.expectedTargetId !== undefined && record.targetId !== requirement.expectedTargetId)
       || (requirement.expectedDisclosureClassification !== undefined
         && record.disclosure.classification !== requirement.expectedDisclosureClassification);
     const outcome = record.outcome === "passed"

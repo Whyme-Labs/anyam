@@ -53,7 +53,7 @@ export const referenceFixtures: readonly ReferenceFixture[] = [
       sourceSpaceIds: ["worker-source"],
     },
     sourceSpaces: [sourceSpace("worker-source", "worker-source", "public")],
-    expectedFiles: ["worker/src/index.ts", "worker/wrangler.jsonc", "worker/README.md"],
+    expectedFiles: ["worker/src/index.ts", "worker/wrangler.jsonc", "worker/README.md", "worker/anyam.json"],
     journeys: [
       {
         id: "scaffold",
@@ -104,7 +104,7 @@ export const referenceFixtures: readonly ReferenceFixture[] = [
       sourceSpaceIds: ["typescript-library-source"],
     },
     sourceSpaces: [sourceSpace("typescript-library-source", "typescript-library-source", "public")],
-    expectedFiles: ["typescript-library/src/index.ts", "typescript-library/package.json", "typescript-library/README.md"],
+    expectedFiles: ["typescript-library/src/index.ts", "typescript-library/package.json", "typescript-library/README.md", "typescript-library/anyam.json"],
     journeys: [
       {
         id: "scaffold",

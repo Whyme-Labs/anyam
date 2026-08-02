@@ -149,8 +149,20 @@ A disposable, pre-Release result linked to a Change Revision, such as a preview,
 _Avoid_: Artifact, Release, deployment
 
 **Evidence**:
-A structured, reproducible assertion about a Snapshot, Change Revision, Run, Artifact, or Release. Evidence records its declared inputs, verifier or producer version, disclosure policy, and freshness state; it becomes stale when a declared input or governing policy changes. An unsupported human or agent explanation is not Evidence.
+A structured, reproducible assertion about a Snapshot, Change Revision, Run, Artifact, or Release. Evidence records an exact validity key over its material source, Action/Verifier, toolchain, dependency, effect, policy, Target, disclosure, and provenance inputs; it becomes stale when a declared input or governing policy changes. An unsupported human or agent explanation is not Evidence.
 _Avoid_: Green check
+
+**Evidence Key**:
+The complete normalized identity of the material inputs that determine whether an Evidence assertion remains valid, including source, Action/Verifier, toolchain, dependencies, effects, policy, Target, disclosure contract, and sealed inputs where applicable. A partial cache match is not an Evidence Key match.
+_Avoid_: Source hash alone, cache key without policy
+
+**Effect Declaration**:
+A structured statement that a Change or Run may affect an API, contract, database, secret use, infrastructure binding, dependency, toolchain, Target, or other governed surface. Effects drive policy and review but are not proof that an effect occurred.
+_Avoid_: Semantic proof, changed-files summary
+
+**Attestation**:
+A signed or externally produced statement about an Artifact, Run, source, dependency, or security result that Anyam preserves and normalizes at its boundary without upgrading insufficient provenance into an Anyam-reproducible Build claim.
+_Avoid_: Evidence without a producer contract, signature as authority
 
 **Artifact**:
 An immutable, content-addressed output produced from exact source and execution inputs, with a typed versioned schema, provenance, disclosure policy, and access policy. Artifact types are extensible; imported outputs retain their external origin and attestation status.

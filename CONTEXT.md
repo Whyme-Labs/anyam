@@ -137,7 +137,7 @@ A Run that produces one or more immutable Artifacts from exact commits, Project 
 _Avoid_: Release, deployment
 
 **Evidence**:
-A structured, reproducible assertion about a Snapshot, Change Revision, Run, Artifact, or Release. An unsupported human or agent explanation is not Evidence.
+A structured, reproducible assertion about a Snapshot, Change Revision, Run, Artifact, or Release. Evidence records its declared inputs, verifier or producer version, disclosure policy, and freshness state; it becomes stale when a declared input or governing policy changes. An unsupported human or agent explanation is not Evidence.
 _Avoid_: Green check
 
 **Artifact**:
@@ -161,11 +161,11 @@ A Promotion to a runtime Target. Deployment uses the already verified Artifacts 
 _Avoid_: Merge, build, release
 
 **Publication Change**:
-A governed Change that creates or extends a less-restricted source lineage from more-restricted source.
+A governed Change that creates or extends a new curated lineage inside an existing less-restricted Source Space from more-restricted source. Publication is a dedicated, previewable, and irreversible disclosure workflow: full history and private metadata require explicit opt-in, structural disclosure failures block it, high-risk cases require independent approval, and later revocation is prospective only.
 _Avoid_: Visibility toggle
 
 **Sealed Verifier**:
-A verifier whose implementation or inputs are restricted while its permitted result is disclosed.
+A verifier that is explicitly opted into external invocation, whose implementation or inputs are restricted while a versioned contract discloses only policy-selected results. Each Run binds to exact source, verifier, toolchain, and owner-controlled inputs; side-channel policy, audience, appeal behavior, and Evidence freshness are part of that contract.
 _Avoid_: Private CI job
 
 **Principal**:

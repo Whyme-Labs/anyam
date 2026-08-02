@@ -346,6 +346,10 @@ _Avoid_: Calendar milestone, edition
 An observable entry or exit obligation for a Stage, satisfied by exact Evidence over source, policy, toolchain, Runner, Capability Grant, and disclosure context. A Stage Gate becomes stale when a material input changes and cannot be satisfied by a UI status alone.
 _Avoid_: Launch date, green check
 
+**Delivery Program**:
+A capability-and-evidence sequence of Workstreams and Stages whose dependencies, integration points, receipts, recovery behavior, and Residual Risk owners are explicit without treating calendar dates or staffing hypotheses as commitments.
+_Avoid_: Calendar roadmap, headcount plan
+
 **Reference Project**:
 A deliberately selected project archetype used to qualify the generalized Anyam workflow. The initial references are a Cloudflare Worker application and a TypeScript CLI/library; a hybrid-source project additionally qualifies public/private Source Space boundaries.
 _Avoid_: Demo app, supported framework matrix

@@ -301,3 +301,11 @@ _Avoid_: Latest value, database row
 **Read Model**:
 A rebuildable, query-optimized projection of Authoritative State. Read Models may be stale or unavailable and never authorize protected mutations.
 _Avoid_: Source of truth, audit ledger
+
+**Command Envelope**:
+A versioned semantic mutation request carrying the Actor, resource, Task/grant context, operation, idempotency key, expected aggregate version, and operation payload. REST, SDK, CLI, and MCP adapters normalize into the same Command Envelope.
+_Avoid_: HTTP request, provider API call
+
+**Domain Event**:
+An immutable fact emitted after its owning Bounded Context records an authoritative transition. Domain Events are replay-safe notifications with aggregate version and Disclosure Projection metadata; they are not commands or authorization grants.
+_Avoid_: Webhook command, queue message as source of truth

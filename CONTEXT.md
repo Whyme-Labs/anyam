@@ -105,11 +105,11 @@ A desired outcome, problem, request, or hypothesis that motivates work.
 _Avoid_: Ticket when referring to the domain object
 
 **Change**:
-A stable unit of proposed work that transforms one Project Revision into another.
+A stable unit of proposed work that transforms one Project Revision into another. Its identity survives new Change Revisions, rebase, review iterations, and revert relationships; a Change never requires rewriting an earlier revision to advance.
 _Avoid_: Branch when referring to the stable work identity; a pull request is a valid compatibility view
 
 **Change Revision**:
-An immutable version of a Change, identified by the exact participating Git commits or other Source Space Snapshots.
+An immutable version of a Change, identified by the exact participating Git commits or other Source Space Snapshots and its base Project Revision. A later revision may supersede an earlier one for Landing, but never erases it; rebase and revert are new revision or Change operations.
 _Avoid_: Force-pushed state, patch overwrite
 
 **Workspace**:
@@ -117,7 +117,7 @@ An isolated, mutable local or remote environment based on an exact Project Revis
 _Avoid_: Branch when referring to the complete composed environment; use branch for an actual Git ref
 
 **Integration Cohort**:
-A set of Changes composed and verified together against an explicit base Project Revision.
+A set of Changes and exact Change Revisions composed and verified together against an explicit base Project Revision. Effect overlap is a blocking Conflict, claim overlap is a coordination warning, and a cohort cannot Land after its base Project Revision becomes stale.
 _Avoid_: Merge queue when the cohort spans source boundaries or semantics a Git merge queue cannot represent
 
 **Conflict**:
@@ -125,8 +125,16 @@ Durable, inspectable state showing that source, symbols, contracts, schemas, dep
 _Avoid_: Temporary merge error, silently accepted AI resolution
 
 **Landing**:
-The policy-governed creation of a new canonical Project Revision from one or more approved Change Revisions. Only trusted Anyam authority performs Landing; developer tools and coding agents publish Change Revisions instead.
+The policy-governed, compare-and-swap creation of a new canonical Project Revision from one or more approved Change Revisions in an Integration Cohort. Landing fails explicitly if the cohort base is stale or required Conflict, review, Evidence, or policy state is unresolved. Only trusted Anyam authority performs Landing; developer tools and coding agents publish Change Revisions instead.
 _Avoid_: Direct push; use merge for the participating Git operation and Landing for the complete Project transition
+
+**Claim**:
+A time-bounded, inspectable statement that an Actor is working on a declared scope. Claims coordinate overlapping work and may produce warnings, but they are not exclusive locks and do not by themselves block a Change.
+_Avoid_: Hard lock, ownership transfer
+
+**Revert Change**:
+A new Change whose declared effects restore selected state from a previously landed Change. It creates new revisions and a new Landing; it never deletes or rewrites the landed history.
+_Avoid_: History rewrite, destructive rollback
 
 **Run**:
 An execution of a declared action against exact, immutable inputs.

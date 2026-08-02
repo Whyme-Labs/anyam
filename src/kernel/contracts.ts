@@ -92,7 +92,8 @@ export type Change = {
   intentId: string;
   baseProjectRevisionId: string;
   status: ChangeStatus;
-  latestRevisionId: string | undefined;
+  /** JSON-stable empty state; a Change with no published revision has null. */
+  latestRevisionId: string | null;
 };
 
 export type ChangeRevision = {

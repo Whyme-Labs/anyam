@@ -1,0 +1,16 @@
+{
+  "name": "create-anyam",
+  "version": "0.0.0",
+  "description": "Package-manager-neutral TypeScript scaffolding and local Anyam CLI",
+  "type": "module",
+  "bin": {
+    "create-anyam": "dist/create-anyam.js",
+    "anyam": "dist/anyam.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build",
+    "prepack": "npm run build"
+  }
+}

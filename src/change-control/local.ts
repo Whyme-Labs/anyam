@@ -11,6 +11,7 @@ import {
   type Conflict,
   type ConflictKind,
   type Landing,
+  type ActorRef,
   type Project,
   type ProjectRevision,
   type ProjectView,
@@ -179,15 +180,21 @@ function cloneWorkspace(workspace: Workspace): Workspace {
 }
 
 function cloneChange(change: Change): Change {
-  return { ...change };
+  return {
+    ...change,
+    ...(change.author ? { author: { ...change.author } } : {}),
+  };
 }
 
 function cloneRevision(revision: ChangeRevision): ChangeRevision {
   return {
     ...revision,
     declaredEffects: [...revision.declaredEffects],
+    ...(revision.author ? { author: { ...revision.author } } : {}),
     ...(revision.sourceSpaceSnapshots ? { sourceSpaceSnapshots: { ...revision.sourceSpaceSnapshots } } : {}),
     ...(revision.affectedSourceSpaceIds ? { affectedSourceSpaceIds: [...revision.affectedSourceSpaceIds] } : {}),
+    ...(revision.affectedModuleIds ? { affectedModuleIds: [...revision.affectedModuleIds] } : {}),
+    ...(revision.affectedTargetIds ? { affectedTargetIds: [...revision.affectedTargetIds] } : {}),
     ...(revision.conflictIds ? { conflictIds: [...revision.conflictIds] } : {}),
   };
 }
@@ -418,6 +425,7 @@ export class LocalChangeCoordinator {
     return {
       ...this.canonical,
       sourceSpaceSnapshots: { ...this.canonical.sourceSpaceSnapshots },
+      ...(this.canonical.landedChangeRevisionIds ? { landedChangeRevisionIds: [...this.canonical.landedChangeRevisionIds] } : {}),
     };
   }
 
@@ -482,7 +490,7 @@ export class LocalChangeCoordinator {
     };
   }
 
-  createChange(input: { intentId: string; workspaceId: string; id?: string }): Change {
+  createChange(input: { intentId: string; workspaceId: string; id?: string; author?: ActorRef }): Change {
     const workspace = this.workspaces.get(input.workspaceId);
     if (!workspace) {
       failure({
@@ -520,6 +528,7 @@ export class LocalChangeCoordinator {
       status: "active",
       latestRevisionId: null,
       workspaceId: workspace.id,
+      ...(input.author ? { author: { ...input.author } } : {}),
     };
     this.changes.set(change.id, change);
     this.workspaces.set(workspace.id, { ...workspace, changeId: change.id });
@@ -615,6 +624,9 @@ export class LocalChangeCoordinator {
     declaredEffects: readonly string[];
     conflictIds?: readonly string[];
     kind?: ChangeRevisionKind;
+    actor?: ActorRef;
+    affectedModuleIds?: readonly string[];
+    affectedTargetIds?: readonly string[];
   }): ChangeRevision {
     const change = this.requireChange(input.changeId);
     const workspaceId = input.workspaceId ?? change.workspaceId;
@@ -702,6 +714,9 @@ export class LocalChangeCoordinator {
       workspaceId: workspace.id,
       sourceSpaceSnapshots,
       affectedSourceSpaceIds: workspace.mounts.map((mount) => mount.sourceSpaceId),
+      ...(input.affectedModuleIds ? { affectedModuleIds: [...input.affectedModuleIds] } : {}),
+      ...(input.affectedTargetIds ? { affectedTargetIds: [...input.affectedTargetIds] } : {}),
+      ...(input.actor ? { author: { ...input.actor } } : (change.author ? { author: { ...change.author } } : {})),
       conflictIds: [...(input.conflictIds ?? relevantConflicts.map((conflict) => conflict.id))],
       kind: input.kind ?? "implementation",
     };
@@ -814,34 +829,86 @@ export class LocalChangeCoordinator {
   }
 
   landChange(input: { changeId: string; changeRevisionId: string; expectedCanonicalProjectRevisionId: string }): Landing {
-    const change = this.requireChange(input.changeId);
-    const revision = this.revisions.get(input.changeRevisionId);
-    if (!revision) {
+    return this.landCohort({
+      members: [{ changeId: input.changeId, changeRevisionId: input.changeRevisionId }],
+      expectedCanonicalProjectRevisionId: input.expectedCanonicalProjectRevisionId,
+    });
+  }
+
+  /**
+   * Atomically Lands one or more exact Change Revisions. All validation runs
+   * before the compare-and-swap mutation, so a failed cohort never partially
+   * advances one Source Space or Change.
+   */
+  landCohort(input: {
+    cohortId?: string;
+    members: readonly { changeId: string; changeRevisionId: string }[];
+    expectedCanonicalProjectRevisionId: string;
+  }): Landing {
+    if (input.members.length === 0) {
       failure({
-        code: "change-revision-not-found",
-        message: `Landing requested an unknown Change Revision.`,
-        affectedObject: input.changeRevisionId,
-        recoveryAction: "refresh the Change and select an immutable published revision",
-        receipt: `change=${change.id}; revision=${input.changeRevisionId}`,
+        code: "landing-blocked",
+        message: "Landing requires at least one Change Revision.",
+        affectedObject: input.cohortId ?? "landing",
+        recoveryAction: "compose a non-empty Integration Cohort and retry Landing",
+        receipt: "members=0",
       });
     }
-    if (revision.changeId !== change.id) {
+    const uniqueChanges = new Set(input.members.map((member) => member.changeId));
+    if (uniqueChanges.size !== input.members.length) {
       failure({
-        code: "change-revision-not-found",
-        message: `Landing requested a Change Revision from another Change.`,
-        affectedObject: input.changeRevisionId,
-        recoveryAction: "select a revision belonging to the requested Change",
-        receipt: `change=${change.id}; revision=${input.changeRevisionId}`,
+        code: "landing-blocked",
+        message: "Landing cannot include the same Change more than once.",
+        affectedObject: input.cohortId ?? "landing",
+        recoveryAction: "select one exact Change Revision for each stable Change",
+        receipt: `members=${input.members.length}; uniqueChanges=${uniqueChanges.size}`,
       });
     }
-    if (change.latestRevisionId !== revision.id) {
-      failure({
-        code: "change-revision-not-latest",
-        message: `Only the latest immutable Change Revision can be landed.`,
-        affectedObject: change.id,
-        recoveryAction: "land the latest revision or publish a new revision from it",
-        receipt: `change=${change.id}; latest=${change.latestRevisionId ?? "none"}; requested=${revision.id}`,
-      });
+    const selected: Array<{ change: Change; revision: ChangeRevision }> = [];
+    for (const member of input.members) {
+      const change = this.requireChange(member.changeId);
+      const revision = this.revisions.get(member.changeRevisionId);
+      if (!revision) {
+        failure({
+          code: "change-revision-not-found",
+          message: "Landing requested an unknown Change Revision.",
+          affectedObject: member.changeRevisionId,
+          recoveryAction: "refresh the Change and select an immutable published revision",
+          receipt: `change=${change.id}; revision=${member.changeRevisionId}`,
+        });
+      }
+      if (revision.changeId !== change.id) {
+        failure({
+          code: "change-revision-not-found",
+          message: "Landing requested a Change Revision from another Change.",
+          affectedObject: member.changeRevisionId,
+          recoveryAction: "select a revision belonging to the requested Change",
+          receipt: `change=${change.id}; revision=${member.changeRevisionId}`,
+        });
+      }
+      if (change.latestRevisionId !== revision.id) {
+        failure({
+          code: "change-revision-not-latest",
+          message: "Only the latest immutable Change Revision can be landed.",
+          affectedObject: change.id,
+          recoveryAction: "land the latest revision or publish a new revision from it",
+          receipt: `change=${change.id}; latest=${change.latestRevisionId ?? "none"}; requested=${revision.id}`,
+        });
+      }
+      const openConflicts = [...this.conflicts.values()].filter(
+        (conflict) => conflict.changeId === change.id && conflict.workspaceId === revision.workspaceId && conflict.state === "open",
+      );
+      if (openConflicts.length > 0) {
+        failure({
+          code: "landing-blocked",
+          message: "Landing is blocked by unresolved explicit Conflicts.",
+          affectedObject: change.id,
+          recoveryAction: "resolve the Conflicts, publish a new Change Revision, and retry Landing",
+          receipt: `change=${change.id}; open-conflicts=${openConflicts.length}`,
+          conflictingIds: openConflicts.map((conflict) => conflict.id),
+        });
+      }
+      selected.push({ change, revision });
     }
 
     // This compare happens before any state mutation. A stale request is a
@@ -849,74 +916,80 @@ export class LocalChangeCoordinator {
     if (this.canonical.id !== input.expectedCanonicalProjectRevisionId) {
       failure({
         code: "stale-canonical-revision",
-        message: `Landing is stale because the canonical Project Revision advanced.`,
-        affectedObject: change.id,
-        recoveryAction: `rebase ${change.id} onto the current canonical Project Revision and reverify`,
+        message: "Landing is stale because the canonical Project Revision advanced.",
+        affectedObject: input.cohortId ?? selected[0]!.change.id,
+        recoveryAction: "rebase every Change in the Integration Cohort onto the current canonical Project Revision and reverify",
         receipt: `expected=${input.expectedCanonicalProjectRevisionId}; actual=${this.canonical.id}; compare-and-swap=false`,
       });
     }
 
-    const baseProjectRevisionId = revision.baseProjectRevisionId ?? revision.projectRevisionId;
-    if (baseProjectRevisionId !== this.canonical.id || change.baseProjectRevisionId !== this.canonical.id) {
-      failure({
-        code: "change-revision-base-mismatch",
-        message: `Change Revision is not based on the canonical Project Revision.`,
-        affectedObject: change.id,
-        recoveryAction: `rebase ${change.id} onto ${this.canonical.id}, then publish and verify a new revision`,
-        receipt: `change-base=${change.baseProjectRevisionId}; revision-base=${baseProjectRevisionId}; canonical=${this.canonical.id}`,
-      });
-    }
-
-    const openConflicts = [...this.conflicts.values()].filter(
-      (conflict) => conflict.changeId === change.id && conflict.workspaceId === revision.workspaceId && conflict.state === "open",
-    );
-    if (openConflicts.length > 0) {
-      failure({
-        code: "landing-blocked",
-        message: `Landing is blocked by unresolved explicit Conflicts.`,
-        affectedObject: change.id,
-        recoveryAction: "resolve the Conflicts, publish a new Change Revision, and retry Landing",
-        receipt: `change=${change.id}; open-conflicts=${openConflicts.length}`,
-        conflictingIds: openConflicts.map((conflict) => conflict.id),
-      });
-    }
-
-    const candidateSnapshots = revision.sourceSpaceSnapshots ?? {};
-    for (const sourceSpaceId of Object.keys(candidateSnapshots)) {
-      if (!this.project.sourceSpaceIds.includes(sourceSpaceId)) {
+    // Preserve the compare-and-swap error as the first stale-state signal.
+    // Once the caller has the current canonical revision, validate each
+    // member's declared base before composing Source Space snapshots.
+    for (const { change, revision } of selected) {
+      const baseProjectRevisionId = revision.baseProjectRevisionId ?? revision.projectRevisionId;
+      if (baseProjectRevisionId !== this.canonical.id || change.baseProjectRevisionId !== this.canonical.id) {
         failure({
-          code: "landing-source-space-invalid",
-          message: `Change Revision names a Source Space outside the Project.`,
+          code: "change-revision-base-mismatch",
+          message: "Change Revision is not based on the canonical Project Revision.",
           affectedObject: change.id,
-          recoveryAction: "publish a revision containing only Project Source Spaces",
-          receipt: `change=${change.id}; rule=project-source-spaces-only`,
+          recoveryAction: `rebase ${change.id} onto ${this.canonical.id}, then publish and verify a new revision`,
+          receipt: `change-base=${change.baseProjectRevisionId}; revision-base=${baseProjectRevisionId}; canonical=${this.canonical.id}`,
         });
       }
     }
 
-    const nextSnapshots = {
-      ...this.canonical.sourceSpaceSnapshots,
-      ...candidateSnapshots,
-    };
+    const nextSnapshots = { ...this.canonical.sourceSpaceSnapshots };
+    for (const { change, revision } of selected) {
+      for (const [sourceSpaceId, snapshotId] of Object.entries(revision.sourceSpaceSnapshots ?? {})) {
+        if (!this.project.sourceSpaceIds.includes(sourceSpaceId)) {
+          failure({
+            code: "landing-source-space-invalid",
+            message: "Change Revision names a Source Space outside the Project.",
+            affectedObject: change.id,
+            recoveryAction: "publish a revision containing only Project Source Spaces",
+            receipt: `change=${change.id}; sourceSpace=${sourceSpaceId}; rule=project-source-spaces-only`,
+          });
+        }
+        const existing = nextSnapshots[sourceSpaceId];
+        if (existing !== undefined && existing !== snapshotId && existing !== this.canonical.sourceSpaceSnapshots[sourceSpaceId]) {
+          failure({
+            code: "landing-blocked",
+            message: "Integration Cohort contains incompatible Snapshots for one Source Space.",
+            affectedObject: input.cohortId ?? change.id,
+            recoveryAction: "resolve the Source Space conflict in a new Change Revision, then refresh the Integration Cohort",
+            receipt: `sourceSpace=${sourceSpaceId}; existing=${existing}; incoming=${snapshotId}`,
+          });
+        }
+        nextSnapshots[sourceSpaceId] = snapshotId;
+      }
+    }
     const previousProjectRevisionId = this.canonical.id;
+    const changeIds = selected.map(({ change }) => change.id);
+    const changeRevisionIds = selected.map(({ revision }) => revision.id);
     const next = createProjectRevision({
       projectId: this.project.id,
       sourceSpaceSnapshots: nextSnapshots,
       parentProjectRevisionId: previousProjectRevisionId,
-      landedChangeRevisionId: revision.id,
+      landedChangeRevisionId: changeRevisionIds[0]!,
+      landedChangeRevisionIds: changeRevisionIds,
+      ...(input.cohortId ? { landingCohortId: input.cohortId } : {}),
     });
     this.projectRevisions.set(next.id, next);
     this.canonical = next;
-    this.changes.set(change.id, { ...change, status: "landed" });
+    for (const { change } of selected) this.changes.set(change.id, { ...change, status: "landed" });
     return {
       protocol: CONTRACT_VERSIONS.landing,
       id: opaqueId("landing"),
       projectId: this.project.id,
-      changeId: change.id,
-      changeRevisionId: revision.id,
+      changeId: changeIds[0]!,
+      changeRevisionId: changeRevisionIds[0]!,
       previousProjectRevisionId,
       projectRevisionId: next.id,
-      receipt: `compare-and-swap=true; previous=${previousProjectRevisionId}; next=${next.id}; change=${change.id}`,
+      ...(input.cohortId ? { cohortId: input.cohortId } : {}),
+      changeIds,
+      changeRevisionIds,
+      receipt: `compare-and-swap=true; previous=${previousProjectRevisionId}; next=${next.id}; changes=${changeIds.join(",")}; cohort=${input.cohortId ?? "single-change"}`,
     };
   }
 

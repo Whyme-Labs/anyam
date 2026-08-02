@@ -17,6 +17,11 @@ export const CONTRACT_VERSIONS = {
   collaborationAudit: "anyam.collaboration-audit/v1",
   collaborationPolicyExplanation: "anyam.collaboration-policy-explanation/v1",
   run: "anyam.run/v1",
+  runner: "anyam.runner/v1",
+  runnerJob: "anyam.runner-job/v1",
+  runnerAttempt: "anyam.runner-attempt/v1",
+  runnerOutput: "anyam.runner-output/v1",
+  runnerEvent: "anyam.runner-event/v1",
   evidence: "anyam.evidence/v1",
   artifact: "anyam.artifact/v1",
   release: "anyam.release/v1",
@@ -275,6 +280,7 @@ export type Run = {
   projectRevisionId: string;
   projectViewId: string;
   runnerId: string;
+  attemptId?: string;
   status: RunStatus;
   outputDigest: string | undefined;
   changeRevisionId?: string;
@@ -292,6 +298,129 @@ export type Run = {
   exitCode?: number;
   stdoutDigest?: string;
   stderrDigest?: string;
+};
+
+export type RunnerStatus = "enrolled" | "active" | "unavailable" | "disabled" | "quarantined";
+
+export type RunnerProfile = {
+  protocol: typeof CONTRACT_VERSIONS.runner;
+  id: string;
+  realmId: string;
+  provider: string;
+  publicKey: string;
+  platform: {
+    operatingSystem: string;
+    architecture: string;
+    isolation: string;
+  };
+  capabilities: readonly string[];
+  networkDestinations: readonly string[];
+  secretUse: "brokered" | "none" | "unverified";
+  canUploadArtifacts: boolean;
+  canUploadEvidence: boolean;
+  status: RunnerStatus;
+  profileDigest: string;
+  enrolledAt: string;
+  updatedAt: string;
+  receipt: string;
+};
+
+export type RunnerJobState = "queued" | "offered" | "claimed" | "running" | "cancel-requested" | "succeeded" | "failed" | "indeterminate" | "cancelled" | "expired" | "quarantined";
+
+export type RunnerOutputLocations = {
+  logs: string;
+  artifacts: string;
+  evidence: string;
+};
+
+export type RunnerJob = {
+  protocol: typeof CONTRACT_VERSIONS.runnerJob;
+  id: string;
+  projectId: string;
+  runId: string;
+  actionId: string;
+  verifierId?: string;
+  projectRevisionId: string;
+  projectViewId: string;
+  sourceSpaceSnapshots: Readonly<Record<string, string>>;
+  changeRevisionId?: string;
+  workspaceId?: string;
+  targetId?: string;
+  inputManifestDigest: string;
+  inputDigests: readonly string[];
+  outputPaths: readonly string[];
+  effectDigests: readonly string[];
+  dependencyDigest: string;
+  toolchainDigest: string;
+  environmentDigest: string;
+  policyVersion: string;
+  authorizationEpoch: string;
+  capabilityGrantId: string;
+  actor: ActorRef;
+  disclosure: DisclosurePolicyRef;
+  runnerRequirements: readonly string[];
+  networkDestinations: readonly string[];
+  secretUseAliases: readonly string[];
+  outputLocations: RunnerOutputLocations;
+  state: RunnerJobState;
+  idempotencyKey: string;
+  attemptIds: readonly string[];
+  currentAttemptId: string;
+  currentRunnerId?: string;
+  createdAt: string;
+  updatedAt: string;
+  recoveryAction?: string;
+  receipt: string;
+};
+
+export type RunnerAttemptState = "queued" | "offered" | "claimed" | "running" | "cancel-requested" | "succeeded" | "failed" | "indeterminate" | "cancelled" | "expired" | "quarantined";
+
+export type RunnerAttempt = {
+  protocol: typeof CONTRACT_VERSIONS.runnerAttempt;
+  id: string;
+  jobId: string;
+  runId: string;
+  runnerId?: string;
+  state: RunnerAttemptState;
+  leaseExpiresAt: string;
+  challengeDigest?: string;
+  jobCredentialDigest?: string;
+  claimedAt?: string;
+  lastHeartbeatAt?: string;
+  completedAt?: string;
+  resultDigest?: string;
+  recoveryAction?: string;
+  receipt: string;
+};
+
+export type RunnerOutputKind = "log" | "artifact" | "evidence";
+
+export type RunnerOutputReference = {
+  protocol: typeof CONTRACT_VERSIONS.runnerOutput;
+  id: string;
+  kind: RunnerOutputKind;
+  runId: string;
+  attemptId: string;
+  location: string;
+  digest: string;
+  disclosure: DisclosurePolicyRef;
+  receipt: string;
+};
+
+export type RunnerEvent = {
+  protocol: typeof CONTRACT_VERSIONS.runnerEvent;
+  id: string;
+  sequence: number;
+  type: string;
+  runnerId?: string;
+  jobId?: string;
+  attemptId?: string;
+  runId?: string;
+  actor?: ActorRef;
+  from?: RunnerJobState | RunnerAttemptState;
+  to?: RunnerJobState | RunnerAttemptState;
+  occurredAt: string;
+  receipt: string;
 };
 
 export type DisclosurePolicyRef = {

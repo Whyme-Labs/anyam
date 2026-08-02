@@ -4,7 +4,10 @@ export const CONTRACT_VERSIONS = {
   kernel: "anyam.kernel/v1",
   project: "anyam.project/v1",
   sourceSpace: "anyam.source-space/v1",
+  workspace: "anyam.workspace/v1",
   change: "anyam.change/v1",
+  conflict: "anyam.conflict/v1",
+  landing: "anyam.landing/v1",
   run: "anyam.run/v1",
   evidence: "anyam.evidence/v1",
   artifact: "anyam.artifact/v1",
@@ -44,6 +47,10 @@ export type ProjectRevision = {
   id: string;
   projectId: string;
   sourceSpaceSnapshots: Readonly<Record<string, string>>;
+  /** The accepted Project Revision immediately before this one, when landed. */
+  parentProjectRevisionId?: string;
+  /** The Change Revision whose Landing produced this Project Revision. */
+  landedChangeRevisionId?: string;
 };
 
 export type ProjectView = {
@@ -94,7 +101,13 @@ export type Change = {
   status: ChangeStatus;
   /** JSON-stable empty state; a Change with no published revision has null. */
   latestRevisionId: string | null;
+  /** The current Workspace for this Change, when one has been assigned. */
+  workspaceId?: string;
+  /** Set only for a Revert Change; the landed Change Revision it restores. */
+  revertsChangeRevisionId?: string;
 };
+
+export type ChangeRevisionKind = "implementation" | "rebase" | "conflict-resolution" | "handoff" | "revert";
 
 export type ChangeRevision = {
   protocol: typeof CONTRACT_VERSIONS.change;
@@ -105,6 +118,65 @@ export type ChangeRevision = {
   sequence: number;
   parentRevisionId: string | undefined;
   declaredEffects: readonly string[];
+  /** The exact base that the Workspace was created from. */
+  baseProjectRevisionId?: string;
+  /** The Workspace that produced this immutable revision. */
+  workspaceId?: string;
+  /** Source Space snapshots changed by this revision. */
+  sourceSpaceSnapshots?: Readonly<Record<string, string>>;
+  /** Source Spaces whose content or disclosure policy is affected. */
+  affectedSourceSpaceIds?: readonly string[];
+  /** Conflicts explicitly considered by this revision. */
+  conflictIds?: readonly string[];
+  kind?: ChangeRevisionKind;
+};
+
+export type WorkspaceMount = {
+  sourceSpaceId: string;
+  snapshotId: string;
+  mountPath: string;
+};
+
+export type WorkspaceState = "active" | "blocked" | "closed";
+
+export type Workspace = {
+  protocol: typeof CONTRACT_VERSIONS.workspace;
+  id: string;
+  projectId: string;
+  projectRevisionId: string;
+  projectViewId: string;
+  mounts: readonly WorkspaceMount[];
+  state: WorkspaceState;
+  changeId?: string;
+  actorId?: string;
+};
+
+export type ConflictKind = "textual" | "structural" | "disclosure";
+export type ConflictState = "open" | "resolved";
+
+export type Conflict = {
+  protocol: typeof CONTRACT_VERSIONS.conflict;
+  id: string;
+  projectId: string;
+  changeId: string;
+  workspaceId: string;
+  kind: ConflictKind;
+  sourceSpaceIds: readonly string[];
+  paths: readonly string[];
+  description: string;
+  state: ConflictState;
+  resolutionRevisionId?: string;
+};
+
+export type Landing = {
+  protocol: typeof CONTRACT_VERSIONS.landing;
+  id: string;
+  projectId: string;
+  changeId: string;
+  changeRevisionId: string;
+  previousProjectRevisionId: string;
+  projectRevisionId: string;
+  receipt: string;
 };
 
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "indeterminate";
@@ -359,12 +431,16 @@ export function createProjectRevision(input: {
   projectId: string;
   sourceSpaceSnapshots: Readonly<Record<string, string>>;
   id?: string;
+  parentProjectRevisionId?: string;
+  landedChangeRevisionId?: string;
 }): ProjectRevision {
   return {
     protocol: CONTRACT_VERSIONS.kernel,
     id: input.id ?? opaqueId("project-revision"),
     projectId: input.projectId,
     sourceSpaceSnapshots: { ...input.sourceSpaceSnapshots },
+    ...(input.parentProjectRevisionId ? { parentProjectRevisionId: input.parentProjectRevisionId } : {}),
+    ...(input.landedChangeRevisionId ? { landedChangeRevisionId: input.landedChangeRevisionId } : {}),
   };
 }
 

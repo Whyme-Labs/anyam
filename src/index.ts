@@ -5,3 +5,4 @@ export * from "./harness/k0.ts";
 export * from "./portability/repository-driver.ts";
 export * from "./portability/local-git.ts";
 export * from "./portability/project-export.ts";
+export * from "./change-control/local.ts";

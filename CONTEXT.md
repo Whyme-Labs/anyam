@@ -369,3 +369,15 @@ _Avoid_: Demo app, performance benchmark
 **Validation Journey**:
 A normal or adversarial end-to-end path across Anyam interfaces and Trust Boundaries, with explicit preconditions, expected invariants, Evidence, disclosure projection, and recovery behavior. A journey exercises the same policy-governed commands as a real Actor.
 _Avoid_: Manual click-through, happy path only
+
+**Reliability Objective**:
+A Hosting Mode- and Stage-specific user-visible reliability contract expressed through measured SLIs, a declared SLO, an error budget, and an owner. Reliability Objectives cover serving, mutation correctness, execution, recovery, and dependency behavior separately; no numeric target is valid without a receipt.
+_Avoid_: Platform uptime number, provider SLA
+
+**Degraded Mode**:
+An explicit safe behavior when a dependency or provider is unavailable: allowed reads or pending states, forbidden authority-bearing actions, visible reason, and recovery signal. A Degraded Mode never silently widens authority or claims success.
+_Avoid_: Best-effort fallback, generic 500
+
+**Recovery Runbook**:
+A versioned, owner-approved procedure for detecting, freezing, restoring, reconciling, verifying, and resuming an Anyam capability from a named Recovery Checkpoint. A Runbook records affected data classes, authority, Evidence, roles, and rollback/compensation behavior.
+_Avoid_: Retry script, undocumented operations knowledge

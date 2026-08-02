@@ -343,7 +343,7 @@ An executable verification obligation for a Security Requirement, bound to exact
 _Avoid_: Green check, informal test
 
 **Residual Risk**:
-A known threat that remains after the selected controls and qualification gates, with a named owner, mitigation, and acceptance decision. Residual Risk never authorizes silently weakening a hard boundary.
+A known threat that remains after the selected controls and qualification gates, with a named owner, mitigation, qualification gate, receipt-backed decision, and an explicit accepted or deferred state. An open Residual Risk blocks its Stage Gate; an accepted or deferred risk remains visible. Residual Risk never authorizes silently weakening a hard boundary.
 _Avoid_: Untracked exception, accepted vulnerability
 
 **Bounded Context**:
@@ -371,7 +371,7 @@ A releasable capability boundary in Anyam's layered delivery sequence: K0 kernel
 _Avoid_: Calendar milestone, edition
 
 **Stage Gate**:
-An observable entry or exit obligation for a Stage, satisfied by exact Evidence over source, policy, toolchain, Runner, Capability Grant, and disclosure context. A Stage Gate becomes stale when a material input changes and cannot be satisfied by a UI status alone.
+An observable entry or exit obligation for a Stage, satisfied by exact Qualification Evidence over source, policy, toolchain, Runner, Capability Grant, and disclosure context plus the Stage's required operational receipts, Recovery Drills, and Residual Risk decisions. Missing, failed, stale, or indeterminate records block the gate and name the next action; a Stage Gate becomes stale when a material input changes and cannot be satisfied by a UI status alone.
 _Avoid_: Launch date, green check
 
 **Delivery Program**:
@@ -394,6 +394,10 @@ _Avoid_: In-place tenant switch, silent repoint
 A versioned, evidence-backed statement that one explicit Project/Reference Fixture journey satisfies an expected invariant under exact source, policy, toolchain, Runner, Capability Grant, and disclosure inputs. Missing, failed, stale, or indeterminate Criteria block the relevant Stage Gate.
 _Avoid_: Checklist item, green UI status
 
+**Qualification Evidence**:
+An immutable result for an Acceptance Criterion, indexed by its Stage and Reference Fixture and bound to the exact Project Revision, Project View, Source Space snapshots, policy version, authorization epoch, toolchain, dependencies, environment, Runner, Capability Grant, disclosure projection, and validity key. It records status, owner, receipt, and the next action; a passed result becomes stale when a material input changes.
+_Avoid_: CI check mark, unbound test output
+
 **Reference Fixture**:
 A small source-controlled Project used to qualify a generalized Anyam workflow: the initial set is a Cloudflare Worker, a TypeScript CLI/library, and a hybrid public/private Source Space Project. A fixture is not a customer workload benchmark or a universal buildability claim.
 _Avoid_: Demo app, performance benchmark
@@ -406,6 +410,10 @@ _Avoid_: Manual click-through, happy path only
 A Hosting Mode- and Stage-specific user-visible reliability contract expressed through measured SLIs, a declared SLO, an error budget, and an owner. Reliability Objectives cover serving, mutation correctness, execution, recovery, and dependency behavior separately; no numeric target is valid without a receipt.
 _Avoid_: Platform uptime number, provider SLA
 
+**Measured Quantity**:
+A value used for a Reliability Objective, Usage Receipt, Provider Cost Receipt, Budget Policy, or Budget Decision together with its unit, measurement source, method, observation time, and receipt. A numeric limit, target, request, consumption, or cost without this measurement record is not a valid public contract.
+_Avoid_: Bare number, unverified quota
+
 **Degraded Mode**:
 An explicit safe behavior when a dependency or provider is unavailable: allowed reads or pending states, forbidden authority-bearing actions, visible reason, and recovery signal. A Degraded Mode never silently widens authority or claims success.
 _Avoid_: Best-effort fallback, generic 500
@@ -413,6 +421,10 @@ _Avoid_: Best-effort fallback, generic 500
 **Recovery Runbook**:
 A versioned, owner-approved procedure for detecting, freezing, restoring, reconciling, verifying, and resuming an Anyam capability from a named Recovery Checkpoint. A Runbook records affected data classes, authority, Evidence, roles, and rollback/compensation behavior.
 _Avoid_: Retry script, undocumented operations knowledge
+
+**Recovery Drill**:
+An executed Validation Journey that deliberately exercises a failure or recovery boundary such as import, provider outage, partial Landing or Promotion, mirror divergence, credential compromise, or restore. A Drill records its checkpoint, exact context, expected invariant, observed result, status, owner, receipt, and next action; an unrun or failed Drill cannot satisfy a Stage Gate.
+_Avoid_: Untested runbook, successful retry
 
 **Usage Receipt**:
 An immutable attribution record for logical Anyam work and provider consumption, bound to a Hosting Mode, Realm, Project, Source Space, Task/Run, provider resource, quantity/unit, price version when known, retry class, and idempotency source. A Usage Receipt is not an invoice.

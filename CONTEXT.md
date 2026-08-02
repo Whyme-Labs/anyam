@@ -113,7 +113,7 @@ An immutable version of a Change, identified by the exact participating Git comm
 _Avoid_: Force-pushed state, patch overwrite
 
 **Workspace**:
-An isolated, mutable local or remote environment based on an exact Project Revision and associated with a Change. A local Workspace supports the routine edit, snapshot, diff, undo, and check loop without continuous Realm connectivity.
+An isolated, mutable local or remote environment based on an exact Project Revision and associated with a Change. A multi-Source-Space Workspace materializes one Workspace Repository per authorized Source Space under explicit collision-free mounts and presents one composed filesystem. Editors work against that filesystem; Anyam provides unified status and diff, automatic Snapshots, sync, and undo, while standard Git operations remain valid against the individual Workspace Repositories rather than a synthetic cross-space repository. A local Workspace supports the routine edit, snapshot, diff, undo, and check loop without continuous Realm connectivity.
 _Avoid_: Branch when referring to the complete composed environment; use branch for an actual Git ref
 
 **Integration Cohort**:

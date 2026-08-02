@@ -329,6 +329,66 @@ function manifestDigest(manifest: ProjectExport): string {
   return digestText(stableStringify(manifestForDigest(manifest)));
 }
 
+/** Digest used by installation and recovery adapters without exposing the
+ * manifest's private integrity implementation. */
+export function projectExportDigest(manifest: ProjectExport): string {
+  return manifestDigest(manifest);
+}
+
+export function verifyProjectExportManifest(manifest: ProjectExport): PortabilityResult<ProjectExport> {
+  const problems = manifestProblems(manifest);
+  if (manifest.protocol !== "anyam.export/v1" || manifest.version !== "v1") {
+    return {
+      status: "failed",
+      errorCode: "export.protocol_invalid",
+      message: "Project Export protocol is not supported.",
+      retryable: false,
+      affectedObject: manifest.exportId || "export",
+      checkpointId: "checkpoint:manifest:invalid",
+      recoveryAction: "provide an anyam.export/v1 manifest",
+      budget: budgetReceipt("a v1 Project Export manifest", `protocol=${String(manifest.protocol)}; version=${String(manifest.version)}`),
+    };
+  }
+  if (problems.length > 0) {
+    return {
+      status: "failed",
+      errorCode: "export.shape_invalid",
+      message: "Project Export shape is incomplete.",
+      retryable: false,
+      affectedObject: manifest.exportId || "export",
+      checkpointId: "checkpoint:manifest:shape",
+      recoveryAction: "regenerate the Project Export with complete Source Space repositories and lineage",
+      budget: budgetReceipt("the declared Project Export shape", problems.join("; ")),
+    };
+  }
+  if (!isProjectExportCredentialFree(manifest)) {
+    return {
+      status: "failed",
+      errorCode: "export.credential_present",
+      message: "Project Export contains credential material.",
+      retryable: false,
+      affectedObject: manifest.exportId || "export",
+      checkpointId: "checkpoint:manifest:credentials",
+      recoveryAction: "remove credential material and regenerate the export",
+      budget: budgetReceipt("a credential-free Project Export", "credential field detected in manifest"),
+    };
+  }
+  const actualDigest = manifestDigest(manifest);
+  if (manifest.integrity.manifestDigest !== actualDigest) {
+    return {
+      status: "failed",
+      errorCode: "export.manifest_digest_mismatch",
+      message: "Project Export manifest digest does not match its contents.",
+      retryable: false,
+      affectedObject: manifest.exportId || "export",
+      checkpointId: "checkpoint:manifest:digest",
+      recoveryAction: "restore the manifest from the owner-controlled export source",
+      budget: budgetReceipt("the declared manifest digest", `expected=${manifest.integrity.manifestDigest}; actual=${actualDigest}`),
+    };
+  }
+  return { status: "succeeded", value: manifest };
+}
+
 function credentialField(value: unknown): string | undefined {
   if (Array.isArray(value)) {
     for (const item of value) {

@@ -360,6 +360,23 @@ type RealmState = {
   audit: AuditEvent[];
 };
 
+export type RealmRecoverySnapshot = {
+  realm: Realm;
+  principals: Record<string, Principal>;
+  passkeys: Record<string, PasskeyCredential>;
+  oidcProviders: Record<string, OidcProvider>;
+  oidcIdentities: Record<string, OidcIdentity>;
+  clients: Record<string, RealmClient>;
+  actors: Record<string, RealmActor>;
+  sessions: Record<string, RealmSession>;
+  tasks: Record<string, RealmTask>;
+  relationships: Record<string, Relationship>;
+  sourceSpacePolicies: Record<string, SourceSpacePolicy>;
+  grants: Record<string, RealmCapabilityGrant>;
+  audit: readonly AuditEvent[];
+  credentialFree: true;
+};
+
 export class RealmIdentityError extends Error {
   readonly code: string;
   readonly explanation: PolicyExplanation | undefined;
@@ -527,9 +544,70 @@ export class RealmIdentityPolicy {
   }
 
   snapshot(): RealmState {
-    const snapshot = clone(this.state);
-    for (const credential of Object.values(snapshot.credentials)) credential.tokenDigest = credential.tokenDigest;
-    return snapshot;
+    return clone(this.state);
+  }
+
+  getRecoverySnapshot(): RealmRecoverySnapshot {
+    return {
+      realm: clone(this.state.realm),
+      principals: clone(this.state.principals),
+      passkeys: clone(this.state.passkeys),
+      oidcProviders: clone(this.state.oidcProviders),
+      oidcIdentities: clone(this.state.oidcIdentities),
+      clients: clone(this.state.clients),
+      actors: clone(this.state.actors),
+      sessions: clone(this.state.sessions),
+      tasks: clone(this.state.tasks),
+      relationships: clone(this.state.relationships),
+      sourceSpacePolicies: clone(this.state.sourceSpacePolicies),
+      grants: clone(this.state.grants),
+      audit: this.state.audit.map((event) => clone(event)),
+      credentialFree: true,
+    };
+  }
+
+  restoreRecoverySnapshot(snapshot: RealmRecoverySnapshot): Realm {
+    if (snapshot.credentialFree !== true) throw new RealmIdentityError({ code: "recovery.credentials_present", message: "Realm recovery snapshots must not contain active credential material.", recoveryAction: "create a credential-free recovery export and retry verification", receipt: "credentialFree=true required" });
+    if (snapshot.realm.id !== this.state.realm.id) throw new RealmIdentityError({ code: "recovery.realm_mismatch", message: "Recovery snapshot belongs to another Realm.", recoveryAction: "restore the snapshot into an installation with the same Realm identity or start a deliberate Realm migration", receipt: `expected=${this.state.realm.id}; actual=${snapshot.realm.id}` });
+    return this.loadSnapshot(snapshot, true);
+  }
+
+  restoreOperationalSnapshot(snapshot: RealmRecoverySnapshot): Realm {
+    if (snapshot.credentialFree !== true) throw new RealmIdentityError({ code: "recovery.credentials_present", message: "Operational Realm snapshots must not contain active credential material.", recoveryAction: "create a credential-free Realm snapshot and retry hydration", receipt: "credentialFree=true required" });
+    if (snapshot.realm.id !== this.state.realm.id) throw new RealmIdentityError({ code: "recovery.realm_mismatch", message: "Realm snapshot belongs to another Realm.", recoveryAction: "hydrate the snapshot into an installation with the same Realm identity", receipt: `expected=${this.state.realm.id}; actual=${snapshot.realm.id}` });
+    return this.loadSnapshot(snapshot, false);
+  }
+
+  private loadSnapshot(snapshot: RealmRecoverySnapshot, revokeAuthority: boolean): Realm {
+    const restoredSessions = Object.fromEntries(Object.entries(snapshot.sessions).map(([id, session]) => [id, revokeAuthority ? { ...clone(session), status: "revoked" as const } : clone(session)]));
+    const restoredTasks = Object.fromEntries(Object.entries(snapshot.tasks).map(([id, task]) => [id, revokeAuthority ? { ...clone(task), status: "closed" as const } : clone(task)]));
+    const restoredGrants = Object.fromEntries(Object.entries(snapshot.grants).map(([id, grant]) => [id, revokeAuthority ? { ...clone(grant), status: "revoked" as const } : clone(grant)]));
+    const restoredRealm: Realm = { ...clone(snapshot.realm), authorizationEpoch: revokeAuthority ? Math.max(this.state.realm.authorizationEpoch, snapshot.realm.authorizationEpoch) + 1 : snapshot.realm.authorizationEpoch };
+    Object.assign(this.state, {
+      realm: restoredRealm,
+      principals: clone(snapshot.principals),
+      passkeys: clone(snapshot.passkeys),
+      oidcProviders: clone(snapshot.oidcProviders),
+      oidcIdentities: clone(snapshot.oidcIdentities),
+      clients: clone(snapshot.clients),
+      actors: clone(snapshot.actors),
+      sessions: restoredSessions,
+      tasks: restoredTasks,
+      relationships: clone(snapshot.relationships),
+      sourceSpacePolicies: clone(snapshot.sourceSpacePolicies),
+      grants: restoredGrants,
+      credentials: {},
+      audit: [...clone(snapshot.audit)],
+    });
+    if (revokeAuthority) {
+      this.audit({
+        eventType: "realm.recovery.restored",
+        outcome: "observed",
+        authorityClass: "none",
+        details: { restoredRealmId: restoredRealm.id, authorizationEpoch: restoredRealm.authorizationEpoch, activeCredentialsRestored: false, sessionsRevoked: Object.values(restoredSessions).filter((session) => session.status === "revoked").length, grantsRevoked: Object.values(restoredGrants).filter((grant) => grant.status === "revoked").length },
+      });
+    }
+    return clone(restoredRealm);
   }
 
   listAuditEvents(): readonly AuditEvent[] {

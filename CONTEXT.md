@@ -141,27 +141,31 @@ An execution of a declared action against exact, immutable inputs.
 _Avoid_: Check when referring to the recorded execution
 
 **Build**:
-A Run that produces one or more immutable Artifacts from exact commits, Project Revision, dependencies, toolchain, and declared inputs.
+A Run that produces one or more immutable Artifacts from exact commits, Project Revision, dependencies, toolchain, and declared inputs. An external or imported Artifact may enter through an explicit attestation, but is not represented as an Anyam-reproducible Build unless its provenance supports that claim.
 _Avoid_: Release, deployment
+
+**Candidate Output**:
+A disposable, pre-Release result linked to a Change Revision, such as a preview, test package, rendered document, model playground, plan, or simulator result. A Candidate Output may expire or be replaced and is never directly promotable.
+_Avoid_: Artifact, Release, deployment
 
 **Evidence**:
 A structured, reproducible assertion about a Snapshot, Change Revision, Run, Artifact, or Release. Evidence records its declared inputs, verifier or producer version, disclosure policy, and freshness state; it becomes stale when a declared input or governing policy changes. An unsupported human or agent explanation is not Evidence.
 _Avoid_: Green check
 
 **Artifact**:
-An immutable output produced from exact source and execution inputs.
+An immutable, content-addressed output produced from exact source and execution inputs, with a typed versioned schema, provenance, disclosure policy, and access policy. Artifact types are extensible; imported outputs retain their external origin and attestation status.
 _Avoid_: Release, deployment
 
 **Release**:
-A named, approved collection of Artifacts, configuration, and Evidence.
+A named, immutable, approved manifest of one or more Artifacts, configuration references and digests, and Evidence. Release names are Project-defined while Anyam assigns an immutable identity; a Release may be promoted to many Targets without being rebuilt or mutated.
 _Avoid_: Build, deployment
 
 **Target**:
-A destination or channel to which a Release can be promoted.
+A destination or channel to which a Release can be promoted, with declared capabilities, policy, current Release pointer, health state, and append-only Promotion history. A Target may be a runtime, registry, store, device cohort, publication channel, or other adapter-owned destination.
 _Avoid_: Environment when the destination is not a runtime environment
 
 **Promotion**:
-A policy-governed state transition that makes a Release current at a Target.
+A policy-governed, idempotent, expected-state-guarded state transition that makes an existing Release current at a Target. Promotion has explicit execution and verification state, never rebuilds source, and rollback is a new Promotion to an earlier Release subject to Target-specific Evidence.
 _Avoid_: Merge, rebuild
 
 **Deployment**:

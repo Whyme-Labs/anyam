@@ -425,3 +425,11 @@ _Avoid_: Global plugin, package download
 **Target Proposal**:
 A normalized result from a TargetAdapter describing a requested provider-side Promotion. Anyam validates Release, Evidence, policy, disclosure, and expected state before a trusted Promotion service applies it.
 _Avoid_: Adapter deploy, direct promotion
+
+**Project Forge**:
+Anyam's product category: a Git-compatible Project workflow for humans and agents that adds Source Space, Change, Evidence, Release, Target, Capability, and Promotion semantics without replacing exact Git objects or operations.
+_Avoid_: GitHub clone, Cloudflare SCM wrapper
+
+**Adoption Path**:
+The sequence by which a Project begins local-first, imports existing Git, uses standard clients and optional bidirectional mirrors, and chooses Anyam as canonical only after the owner has evidence of value. An Adoption Path never requires migration at signup.
+_Avoid_: Forced migration, repository lock-in

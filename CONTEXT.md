@@ -413,3 +413,15 @@ _Avoid_: Region label, Cloudflare-only claim
 **Control Mapping**:
 A versioned mapping from a Governance Profile requirement to Anyam policy, Audit Events, Evidence, operational controls, customer responsibility, and qualification status. A Control Mapping is audit preparation, not a certification or legal guarantee.
 _Avoid_: Certification, compliance claim
+
+**Extension Manifest**:
+A signed/digested, versioned declaration for a RepositoryDriver, Action, Verifier, TargetAdapter, ProjectExperience, IDE integration, AgentSkill, or installed App. It declares mechanics, compatibility, provenance, and requested effects; it never grants Anyam authority.
+_Avoid_: Marketplace listing, permission token
+
+**Extension Installation**:
+A Realm/Organization/Project-scoped activation record for an Extension Manifest, including exact package digest, trust/provenance, narrowed Capability Grant, policy decision, lifecycle, and revocation state.
+_Avoid_: Global plugin, package download
+
+**Target Proposal**:
+A normalized result from a TargetAdapter describing a requested provider-side Promotion. Anyam validates Release, Evidence, policy, disclosure, and expected state before a trusted Promotion service applies it.
+_Avoid_: Adapter deploy, direct promotion

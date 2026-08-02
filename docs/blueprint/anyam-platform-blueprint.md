@@ -757,7 +757,7 @@ implementation work package, not an unowned promise.
 | Publication and sealed verification | [ADR 0004](../adr/0004-publication-changes-and-sealed-verification.md) |
 | Changes and Landing | [ADR 0005](../adr/0005-stable-changes-and-compare-and-swap-landing.md) |
 | Artifacts, Releases, Targets | [ADR 0006](../adr/0006-generalize-artifacts-releases-and-targets.md) |
-| Identity and capability policy | [ADR 0007](../adr/0007-realm-owned-authentication-and-delegation.md), [ADR 0008](../adr/0008-explainable-capability-policy.md) |
+| Identity and capability policy | [ADR 0007](../adr/0007-realm-owned-authentication-and-delegation.md), [ADR 0008](../adr/0008-explainable-capability-policy.md), [ADR 0030](../adr/0030-realm-identity-and-capability-policy.md) |
 | CLI, Git, MCP, agents | [ADR 0009](../adr/0009-cli-git-mcp-agent-connection.md) |
 | Manifests, Actions, Verifiers, Runners | [ADR 0011](../adr/0011-portable-project-manifest-contract.md), [ADR 0012](../adr/0012-cloudflare-default-and-portable-pull-runners.md) |
 | Evidence, threats, Cloudflare architecture | [ADR 0013](../adr/0013-evidence-validity-policy-and-provenance.md), [ADR 0014](../adr/0014-system-threat-model.md), [ADR 0015](../adr/0015-cloudflare-first-architecture-and-provider-boundaries.md) |

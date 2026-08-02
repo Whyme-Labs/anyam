@@ -16,6 +16,14 @@ export const CONTRACT_VERSIONS = {
   release: "anyam.release/v1",
   target: "anyam.target/v1",
   capability: "anyam.capability/v1",
+  realm: "anyam.realm/v1",
+  principal: "anyam.principal/v1",
+  actor: "anyam.actor/v1",
+  session: "anyam.session/v1",
+  task: "anyam.task/v1",
+  policy: "anyam.policy/v1",
+  credential: "anyam.credential/v1",
+  audit: "anyam.audit/v1",
   command: "anyam.command/v1",
   event: "anyam.event/v1",
   export: "anyam.export/v1",
@@ -364,6 +372,7 @@ export type ResourceRef = {
   realmId: string;
   projectId?: string;
   sourceSpaceId?: string;
+  workspaceId?: string;
   changeId?: string;
   runId?: string;
   releaseId?: string;

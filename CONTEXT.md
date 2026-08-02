@@ -28,6 +28,22 @@ _Avoid_: Repository, application
 A Git-compatible source-storage and object-transfer unit used by a Source Space or Workspace. It is a compatibility boundary, not the complete Project, Change, or collaboration model.
 _Avoid_: Project, Source Space
 
+**Canonical Repository**:
+The Git repository containing landed source for one Source Space. Its source refs are repairable projections of canonical Project Revisions, and only the trusted Landing service may write them.
+_Avoid_: Project authority, directly writable main repository
+
+**Workspace Repository**:
+An isolated writable Git repository materialized from an exact Source Space Snapshot for one Workspace and bounded Change task. A Workspace may span several Workspace Repositories while presenting one composed filesystem.
+_Avoid_: Canonical repository, shared agent branch namespace
+
+**Repository Driver**:
+The replaceable provider adapter that creates and inspects Git repositories, transfers source, issues credentials, verifies integrity, exports, restores, and reconciles provider state. A Repository Driver reports capabilities but never decides Anyam authorization, policy, Change identity, cross-space atomicity, or disclosure.
+_Avoid_: Project repository abstraction, authorization service
+
+**Git Gateway**:
+The Realm-owned Smart HTTP boundary that gives clients stable Git URLs, anonymous public reads, short-lived credential exchange, policy enforcement, audit, and provider migration without exposing Repository Driver credentials or endpoints.
+_Avoid_: Cloudflare Artifacts remote, public mirror
+
 **Repository Mirror**:
 An external Git repository synchronized bidirectionally with an Anyam Source Space for permitted refs and history. Remote commits enter Anyam as proposed Changes; only Landing advances the canonical Project Revision, after which accepted refs may propagate outward.
 _Avoid_: Second canonical repository, last-writer-wins synchronization

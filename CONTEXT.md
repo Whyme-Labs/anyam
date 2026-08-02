@@ -204,6 +204,16 @@ Anyam's current authentication profile uses WebAuthn/passkeys and authorization-
 
 The CLI and MCP surfaces do not replace Git: Git transfers source objects, while MCP and the CLI coordinate semantic Change, Workspace, Run, Evidence, review, and Promotion operations. Local agents receive task-scoped Workspace authority and publish Change Revisions; canonical repositories remain writable only by trusted Landing authority.
 
+Anyam's primary end-to-end developer experience is terminal-first. The CLI and
+Git-compatible tools keep the active Change, Workspace, revision, checks,
+Candidate Output, review, Landing, Release, Promotion, health, and rollback
+states explicit; the web Project view is a companion rendering of the same
+state. Progressive Ceremony changes the required approvals and next action by
+policy and risk, not by separate solo, team, or agent product modes. Source
+Spaces, Project Views, Capability Grants, Evidence freshness, provenance, and
+policy explanations remain discoverable from the relevant Change or Deployment
+context rather than becoming mandatory top-level navigation. See ADR 0010.
+
 **Secret Use**:
 Authority to invoke an approved credential-backed operation while the credential value remains outside the Actor's Workspace, process environment, logs, and model context.
 _Avoid_: Secret read, credential injection into an agent

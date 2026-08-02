@@ -11,6 +11,7 @@ import {
   type ProjectInput,
   type SourceSpace,
 } from "../kernel/contracts.ts";
+import { createPublicProjection, type PublicProjectionSource } from "../disclosure/hybrid.ts";
 
 export type ReferenceFixtureId = "worker" | "typescript-library" | "hybrid-source";
 
@@ -249,6 +250,37 @@ export async function validateReferenceFixtures(root: string): Promise<FixtureVa
             });
             if (view.visibleSourceSpaceIds.includes(step.sourceSpaceId)) {
               failedJourneys.push(`${fixture.id}:${journey.id}:disclosed:${step.sourceSpaceId}`);
+            }
+            if (fixture.id === "hybrid-source") {
+              const sources: PublicProjectionSource[] = fixture.sourceSpaces.map((space) => {
+                const prefix = `hybrid/${space.id}/`;
+                const files = Object.fromEntries(
+                  fixture.expectedFiles
+                    .filter((expectedPath) => expectedPath.startsWith(prefix))
+                    .map((expectedPath) => [expectedPath.slice(prefix.length), readFileSync(join(root, expectedPath), "utf8")]),
+                );
+                return {
+                  sourceSpaceId: space.id,
+                  snapshotId: `fixture:${space.id}`,
+                  files,
+                };
+              });
+              const publicProjection = createPublicProjection({
+                project,
+                canonicalRevision: revision,
+                sourceSpaces: fixture.sourceSpaces,
+                publicSourceSpaceIds: fixture.sourceSpaces
+                  .filter((space) => space.classification === "public")
+                  .map((space) => space.id),
+                sources,
+              });
+              const serializedProjection = JSON.stringify(publicProjection);
+              if (serializedProjection.includes(step.sourceSpaceId) || serializedProjection.includes("private-codec")) {
+                failedJourneys.push(`${fixture.id}:${journey.id}:private-metadata-disclosed`);
+              }
+              if (serializedProjection.includes(revision.id)) {
+                failedJourneys.push(`${fixture.id}:${journey.id}:canonical-revision-disclosed`);
+              }
             }
           } catch (error) {
             const code = error instanceof ProjectViewProjectionError ? error.code : "unknown-projection-error";

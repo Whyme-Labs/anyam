@@ -140,12 +140,20 @@ _Avoid_: Branch when referring to the stable work identity; a pull request is a 
 An immutable version of a Change, identified by the exact participating Git commits or other Source Space Snapshots and its base Project Revision. A later revision may supersede an earlier one for Landing, but never erases it; rebase and revert are new revision or Change operations.
 _Avoid_: Force-pushed state, patch overwrite
 
+**Review Finding**:
+A durable comment, request for changes, security observation, or policy observation attached to a stable Change and one exact Change Revision. Its resolution records review state without rewriting the source revision; a new revision may invalidate the Finding's applicability.
+_Avoid_: PR comment on a moving branch, dismissed warning without lineage
+
+**Review Approval**:
+An independent reviewer decision bound to one exact Change Revision, ownership requirement, Evidence set, and collaboration policy version. Approval becomes stale when any material binding changes and remains historical rather than silently authorizing a later revision.
+_Avoid_: Boolean approved flag, approval on a branch name
+
 **Workspace**:
 An isolated, mutable local or remote environment based on an exact Project Revision and associated with a Change. A multi-Source-Space Workspace materializes one Workspace Repository per authorized Source Space under explicit collision-free mounts and presents one composed filesystem. Editors work against that filesystem; Anyam provides unified status and diff, automatic Snapshots, sync, and undo, while standard Git operations remain valid against the individual Workspace Repositories rather than a synthetic cross-space repository. A local Workspace supports the routine edit, snapshot, diff, undo, and check loop without continuous Realm connectivity.
 _Avoid_: Branch when referring to the complete composed environment; use branch for an actual Git ref
 
 **Integration Cohort**:
-A set of Changes and exact Change Revisions composed and verified together against an explicit base Project Revision. Effect overlap is a blocking Conflict, claim overlap is a coordination warning, and a cohort cannot Land after its base Project Revision becomes stale.
+A set of Changes and exact Change Revisions composed and verified together against an explicit base Project Revision. Installed analyzers may report typed textual, semantic, schema, dependency, policy, or disclosure Conflicts; effect overlap is conservative evidence rather than a universal behavior proof. A cohort cannot Land after its base Project Revision becomes stale or required review/Evidence is unresolved.
 _Avoid_: Merge queue when the cohort spans source boundaries or semantics a Git merge queue cannot represent
 
 **Conflict**:

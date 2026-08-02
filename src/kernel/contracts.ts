@@ -10,6 +10,12 @@ export const CONTRACT_VERSIONS = {
   change: "anyam.change/v1",
   conflict: "anyam.conflict/v1",
   landing: "anyam.landing/v1",
+  reviewFinding: "anyam.review-finding/v1",
+  reviewApproval: "anyam.review-approval/v1",
+  integrationCohort: "anyam.integration-cohort/v1",
+  integrationConflict: "anyam.integration-conflict/v1",
+  collaborationAudit: "anyam.collaboration-audit/v1",
+  collaborationPolicyExplanation: "anyam.collaboration-policy-explanation/v1",
   run: "anyam.run/v1",
   evidence: "anyam.evidence/v1",
   artifact: "anyam.artifact/v1",
@@ -97,6 +103,10 @@ export type ProjectRevision = {
   parentProjectRevisionId?: string;
   /** The Change Revision whose Landing produced this Project Revision. */
   landedChangeRevisionId?: string;
+  /** All Change Revisions landed atomically by an Integration Cohort. */
+  landedChangeRevisionIds?: readonly string[];
+  /** The Integration Cohort whose Landing produced this Project Revision. */
+  landingCohortId?: string;
 };
 
 export type ProjectView = {
@@ -151,6 +161,8 @@ export type Change = {
   workspaceId?: string;
   /** Set only for a Revert Change; the landed Change Revision it restores. */
   revertsChangeRevisionId?: string;
+  /** The Actor that authored the stable Change, when the caller can disclose it. */
+  author?: ActorRef;
 };
 
 export type ChangeRevisionKind = "implementation" | "rebase" | "conflict-resolution" | "handoff" | "revert";
@@ -172,6 +184,12 @@ export type ChangeRevision = {
   sourceSpaceSnapshots?: Readonly<Record<string, string>>;
   /** Source Spaces whose content or disclosure policy is affected. */
   affectedSourceSpaceIds?: readonly string[];
+  /** Modules whose declared scope is affected by this revision. */
+  affectedModuleIds?: readonly string[];
+  /** Targets whose declared scope is affected by this revision. */
+  affectedTargetIds?: readonly string[];
+  /** The Actor that authored this immutable revision, when disclosed. */
+  author?: ActorRef;
   /** Conflicts explicitly considered by this revision. */
   conflictIds?: readonly string[];
   kind?: ChangeRevisionKind;
@@ -197,7 +215,7 @@ export type Workspace = {
   actorId?: string;
 };
 
-export type ConflictKind = "textual" | "structural" | "disclosure";
+export type ConflictKind = "textual" | "structural" | "semantic" | "schema" | "dependency" | "policy" | "disclosure";
 export type ConflictState = "open" | "resolved";
 
 export type Conflict = {
@@ -223,6 +241,12 @@ export type Landing = {
   previousProjectRevisionId: string;
   projectRevisionId: string;
   receipt: string;
+  /** The cohort that atomically produced this Landing, when applicable. */
+  cohortId?: string;
+  /** All stable Changes included in this Landing, when applicable. */
+  changeIds?: readonly string[];
+  /** All exact Change Revisions included in this Landing, when applicable. */
+  changeRevisionIds?: readonly string[];
 };
 
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "indeterminate";
@@ -510,6 +534,8 @@ export function createProjectRevision(input: {
   id?: string;
   parentProjectRevisionId?: string;
   landedChangeRevisionId?: string;
+  landedChangeRevisionIds?: readonly string[];
+  landingCohortId?: string;
 }): ProjectRevision {
   return {
     protocol: CONTRACT_VERSIONS.kernel,
@@ -518,6 +544,8 @@ export function createProjectRevision(input: {
     sourceSpaceSnapshots: { ...input.sourceSpaceSnapshots },
     ...(input.parentProjectRevisionId ? { parentProjectRevisionId: input.parentProjectRevisionId } : {}),
     ...(input.landedChangeRevisionId ? { landedChangeRevisionId: input.landedChangeRevisionId } : {}),
+    ...(input.landedChangeRevisionIds ? { landedChangeRevisionIds: [...input.landedChangeRevisionIds] } : {}),
+    ...(input.landingCohortId ? { landingCohortId: input.landingCohortId } : {}),
   };
 }
 

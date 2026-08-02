@@ -30,6 +30,10 @@ export const CONTRACT_VERSIONS = {
   event: "anyam.event/v1",
   export: "anyam.export/v1",
   extension: "anyam.extension/v1",
+  publicProjection: "anyam.public-projection/v1",
+  publicationChange: "anyam.publication-change/v1",
+  sealedVerifier: "anyam.sealed-verifier/v1",
+  disclosure: "anyam.disclosure/v1",
 } as const;
 
 export type SourceSpaceClassification = "public" | "internal" | "restricted" | "result-only";

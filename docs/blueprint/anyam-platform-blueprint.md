@@ -754,7 +754,7 @@ implementation work package, not an unowned promise.
 | --- | --- |
 | Source Spaces, Views, revisions | [ADR 0001](../adr/0001-capability-safe-project-view-revisions.md), [ADR 0003](../adr/0003-materialize-composed-workspaces-over-source-spaces.md) |
 | Project authority and Git drivers | [ADR 0002](../adr/0002-keep-project-authority-above-replaceable-git-repositories.md), [ADR 0017](../adr/0017-portable-project-exports-and-single-authority-mirrors.md) |
-| Publication and sealed verification | [ADR 0004](../adr/0004-publication-changes-and-sealed-verification.md) |
+| Publication and sealed verification | [ADR 0004](../adr/0004-publication-changes-and-sealed-verification.md), [ADR 0032](../adr/0032-hybrid-public-private-projections-and-sealed-verifiers.md) |
 | Changes and Landing | [ADR 0005](../adr/0005-stable-changes-and-compare-and-swap-landing.md) |
 | Artifacts, Releases, Targets | [ADR 0006](../adr/0006-generalize-artifacts-releases-and-targets.md) |
 | Identity and capability policy | [ADR 0007](../adr/0007-realm-owned-authentication-and-delegation.md), [ADR 0008](../adr/0008-explainable-capability-policy.md), [ADR 0030](../adr/0030-realm-identity-and-capability-policy.md) |

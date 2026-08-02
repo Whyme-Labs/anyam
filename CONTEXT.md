@@ -48,6 +48,10 @@ _Avoid_: Cloudflare Artifacts remote, public mirror
 An external Git repository synchronized bidirectionally with an Anyam Source Space for permitted refs and history. Remote commits enter Anyam as proposed Changes; only Landing advances the canonical Project Revision, after which accepted refs may propagate outward.
 _Avoid_: Second canonical repository, last-writer-wins synchronization
 
+**Federation**:
+An explicit, capability-scoped exchange between independently operated Realms that preserves local authority, disclosure policy, lineage, revocation, and abuse controls. Federation is later than Git-compatible mirroring and never creates shared canonical authority.
+_Avoid_: Multi-primary mirror, implicit cross-Realm trust
+
 **Source Space**:
 An independently versioned source and object-graph boundary with its own visibility, access, licensing, and model-processing policy. Every Snapshot belongs to one Source Space, and inaccessible source is neither reachable nor discoverable through another Source Space.
 _Avoid_: Private folder, hidden branch

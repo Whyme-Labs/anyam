@@ -16,6 +16,18 @@ _Avoid_: Instance account, global account
 A Realm deployed in and controlled through the customer's own Cloudflare account, with no required Anyam SaaS, third-party forge, customer-managed always-on server, database cluster, shared Git filesystem, or permanent runner. Cloudflare remains its managed infrastructure dependency; specialized execution may use optional pull-based runners.
 _Avoid_: Self-hosted when implying independence from Cloudflare
 
+**Hosting Mode**:
+One of Anyam's supported operational topologies: Hosted SaaS, Managed Customer-Account, or Customer-operated Realm. Hosting Mode changes responsibility and placement, not Project/API/Export semantics or first-party capability availability.
+_Avoid_: Edition, proprietary tier
+
+**Managed Customer-Account**:
+A Hosting Mode in which Anyam operates selected collaboration/control-plane services while the customer owns the Cloudflare account, source repositories, applications, data, secrets, domains, and Targets through explicit revocable grants.
+_Avoid_: Hosted customer account, shared admin token
+
+**Hosted SaaS**:
+A Hosting Mode in which Anyam operates the control plane and selected execution or application Targets in its own qualified Cloudflare account. The customer retains Project Content ownership, policy authority, export rights, and mode-transition rights.
+_Avoid_: Anyam-owned source, proprietary product tier
+
 **Organization**:
 A group of principals, teams, and projects governed together inside a Realm.
 _Avoid_: Realm, tenant

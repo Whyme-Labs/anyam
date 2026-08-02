@@ -12,6 +12,7 @@ import {
   type ConflictKind,
   type Landing,
   type ActorRef,
+  type ChangeOrigin,
   type Project,
   type ProjectRevision,
   type ProjectView,
@@ -183,6 +184,7 @@ function cloneChange(change: Change): Change {
   return {
     ...change,
     ...(change.author ? { author: { ...change.author } } : {}),
+    ...(change.origin ? { origin: { ...change.origin, ...(change.origin.remoteAuthor ? { remoteAuthor: { ...change.origin.remoteAuthor } } : {}) } } : {}),
   };
 }
 
@@ -490,7 +492,7 @@ export class LocalChangeCoordinator {
     };
   }
 
-  createChange(input: { intentId: string; workspaceId: string; id?: string; author?: ActorRef }): Change {
+  createChange(input: { intentId: string; workspaceId: string; id?: string; author?: ActorRef; origin?: ChangeOrigin }): Change {
     const workspace = this.workspaces.get(input.workspaceId);
     if (!workspace) {
       failure({
@@ -529,6 +531,7 @@ export class LocalChangeCoordinator {
       latestRevisionId: null,
       workspaceId: workspace.id,
       ...(input.author ? { author: { ...input.author } } : {}),
+      ...(input.origin ? { origin: { ...input.origin, ...(input.origin.remoteAuthor ? { remoteAuthor: { ...input.origin.remoteAuthor } } : {}) } } : {}),
     };
     this.changes.set(change.id, change);
     this.workspaces.set(workspace.id, { ...workspace, changeId: change.id });

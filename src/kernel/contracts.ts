@@ -4,6 +4,8 @@ export const CONTRACT_VERSIONS = {
   kernel: "anyam.kernel/v1",
   project: "anyam.project/v1",
   sourceSpace: "anyam.source-space/v1",
+  action: "anyam.action/v1",
+  verifier: "anyam.verifier/v1",
   workspace: "anyam.workspace/v1",
   change: "anyam.change/v1",
   conflict: "anyam.conflict/v1",
@@ -40,6 +42,31 @@ export type SourceSpace = {
   id: string;
   name: string;
   classification: SourceSpaceClassification;
+};
+
+export type Action = {
+  protocol: typeof CONTRACT_VERSIONS.action;
+  id: string;
+  moduleId: string;
+  moduleRoot: string;
+  dependencyIds: readonly string[];
+  command: string;
+  inputGlobs: readonly string[];
+  outputPaths: readonly string[];
+  network: readonly string[];
+  resources: Readonly<Record<string, string | number | boolean>>;
+  contractDigest: string;
+};
+
+export type VerifierDisclosure = "full" | "result-only";
+
+export type Verifier = {
+  protocol: typeof CONTRACT_VERSIONS.verifier;
+  id: string;
+  actionId: string;
+  disclosure: VerifierDisclosure;
+  requiredFor: readonly string[];
+  contractDigest: string;
 };
 
 export type ProjectRevision = {
@@ -190,6 +217,21 @@ export type Run = {
   runnerId: string;
   status: RunStatus;
   outputDigest: string | undefined;
+  changeRevisionId?: string;
+  workspaceId?: string;
+  inputDigests?: readonly string[];
+  outputDigests?: readonly string[];
+  effectDigests?: readonly string[];
+  dependencyDigest?: string;
+  toolchainDigest?: string;
+  environmentDigest?: string;
+  policyVersion?: string;
+  targetId?: string;
+  actor?: ActorRef;
+  capabilityGrantId?: string;
+  exitCode?: number;
+  stdoutDigest?: string;
+  stderrDigest?: string;
 };
 
 export type DisclosurePolicyRef = {
@@ -235,6 +277,11 @@ export type Evidence = {
   invalidators: readonly string[];
   owner: string;
   residualRiskId?: string;
+  sourceSpaceSnapshots?: Readonly<Record<string, string>>;
+  actionContractDigest?: string;
+  verifierContractDigest?: string;
+  targetId?: string;
+  workspaceId?: string;
 };
 
 export type Artifact = {
@@ -243,6 +290,12 @@ export type Artifact = {
   type: string;
   digest: string;
   projectRevisionId: string;
+  changeRevisionId?: string;
+  runId?: string;
+  actionId?: string;
+  outputPath?: string;
+  provenanceDigest?: string;
+  disclosure?: DisclosurePolicyRef;
 };
 
 export type ReleaseStatus = "draft" | "ready" | "promoted" | "recalled";
@@ -257,6 +310,10 @@ export type Release = {
   stateAssumptions: readonly string[];
   policyVersion: string;
   status: ReleaseStatus;
+  name?: string;
+  changeRevisionId?: string;
+  provenanceDigest?: string;
+  receipt?: string;
 };
 
 export type TargetState = "configured" | "healthy" | "degraded" | "unknown";

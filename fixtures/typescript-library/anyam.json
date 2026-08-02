@@ -1,0 +1,59 @@
+{
+  "schema": "anyam.project/v1",
+  "id": "project:typescript-library",
+  "name": "Anyam TypeScript Library Reference",
+  "referenceType": "typescript-library",
+  "sourceSpaceIds": ["typescript-library-source"],
+  "source": {
+    "root": ".",
+    "provenance": "reference-fixture"
+  },
+  "modules": [
+    {
+      "id": "module:library",
+      "root": ".",
+      "dependencies": [],
+      "actions": [
+        {
+          "id": "action:check",
+          "command": "node -e \"require('fs').accessSync('src/index.ts')\"",
+          "inputs": ["anyam.json", "package.json", "src/**/*.ts"],
+          "outputs": [],
+          "network": [],
+          "resources": {}
+        },
+        {
+          "id": "action:build",
+          "command": "node -e \"const fs=require('fs');fs.mkdirSync('dist',{recursive:true});fs.copyFileSync('src/index.ts','dist/library.archive')\"",
+          "inputs": ["anyam.json", "package.json", "src/**/*.ts"],
+          "outputs": ["dist/library.archive"],
+          "network": [],
+          "resources": {}
+        }
+      ],
+      "artifactTypes": ["package.archive"]
+    }
+  ],
+  "verifiers": [
+    {
+      "id": "verifier:library-check",
+      "actionId": "action:check",
+      "disclosure": "full",
+      "requiredFor": ["release"]
+    },
+    {
+      "id": "verifier:library-build",
+      "actionId": "action:build",
+      "disclosure": "full",
+      "requiredFor": ["release"]
+    }
+  ],
+  "targets": [
+    {
+      "id": "target:library",
+      "adapter": "generic.release-assets",
+      "accepts": ["package.archive"],
+      "requiredCapabilities": []
+    }
+  ]
+}

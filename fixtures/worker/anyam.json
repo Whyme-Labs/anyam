@@ -1,0 +1,59 @@
+{
+  "schema": "anyam.project/v1",
+  "id": "project:worker",
+  "name": "Anyam Worker Reference",
+  "referenceType": "cloudflare-worker",
+  "sourceSpaceIds": ["worker-source"],
+  "source": {
+    "root": ".",
+    "provenance": "reference-fixture"
+  },
+  "modules": [
+    {
+      "id": "module:worker",
+      "root": ".",
+      "dependencies": [],
+      "actions": [
+        {
+          "id": "action:check",
+          "command": "node -e \"require('fs').accessSync('src/index.ts')\"",
+          "inputs": ["anyam.json", "wrangler.jsonc", "src/**/*.ts"],
+          "outputs": [],
+          "network": [],
+          "resources": {}
+        },
+        {
+          "id": "action:build",
+          "command": "node -e \"const fs=require('fs');fs.mkdirSync('dist',{recursive:true});fs.copyFileSync('src/index.ts','dist/worker.bundle')\"",
+          "inputs": ["anyam.json", "wrangler.jsonc", "src/**/*.ts"],
+          "outputs": ["dist/worker.bundle"],
+          "network": [],
+          "resources": {}
+        }
+      ],
+      "artifactTypes": ["worker.bundle"]
+    }
+  ],
+  "verifiers": [
+    {
+      "id": "verifier:worker-check",
+      "actionId": "action:check",
+      "disclosure": "full",
+      "requiredFor": ["release"]
+    },
+    {
+      "id": "verifier:worker-build",
+      "actionId": "action:build",
+      "disclosure": "full",
+      "requiredFor": ["release"]
+    }
+  ],
+  "targets": [
+    {
+      "id": "target:worker",
+      "adapter": "cloudflare.worker",
+      "accepts": ["worker.bundle"],
+      "requiredCapabilities": []
+    }
+  ]
+}

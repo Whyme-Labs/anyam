@@ -28,6 +28,18 @@ _Avoid_: Hosted customer account, shared admin token
 A Hosting Mode in which Anyam operates the control plane and selected execution or application Targets in its own qualified Cloudflare account. The customer retains Project Content ownership, policy authority, export rights, and mode-transition rights.
 _Avoid_: Anyam-owned source, proprietary product tier
 
+**Bootstrap**:
+The idempotent state transition that creates or connects a Realm, enrolls its first owner and recovery path, and establishes the minimum Project/Export authority without activating unreviewed source or production Targets.
+_Avoid_: Installer finished, default admin
+
+**Import Operation**:
+A staged, provider-bound operation that preflights, quarantines, verifies, and activates Git/source and selected metadata into a Project. An Import Operation has an idempotency key, checkpoint, disclosure decision, and explicit incomplete/blocked state.
+_Avoid_: Git clone, one-click copy
+
+**Recovery Checkpoint**:
+An owner-visible verified boundary in Bootstrap, Import, migration, or Promotion state from which an operation can resume or safely roll back. A checkpoint records partial effects and never implies that the whole operation succeeded.
+_Avoid_: Best-effort retry, hidden progress
+
 **Organization**:
 A group of principals, teams, and projects governed together inside a Realm.
 _Avoid_: Realm, tenant

@@ -233,3 +233,19 @@ _Avoid_: Audit Event, destructive history rewrite
 **Context Manifest**:
 A revision-addressed record of the project context, constraints, tools, policies, and concurrent work supplied to an agent.
 _Avoid_: Prompt
+
+**Project Manifest**:
+A versioned semantic contract for a Project's modules, dependencies, Actions, declared inputs and outputs, Artifact types, Verifiers, and Target adapter declarations. A Manifest may be derived from disclosed conventions, explicit Project configuration, or both; it describes mechanics and relationships but never grants authority or claims universal buildability.
+_Avoid_: Mandatory YAML, CI workflow file when referring to the normalized Project contract
+
+**Action**:
+A portable declaration that transforms exact source and declared inputs into named outputs using a command or implementation reference, network destinations, and resource requirements. Local or remote execution selects a runner without changing the normalized Action contract.
+_Avoid_: Runner job when referring to the declared operation; Check when referring to the recorded Run
+
+**Verifier**:
+A declared assertion producer bound to an Action or Run, with a disclosure policy and required-for declaration. A Verifier defines the Evidence contract; its result is established only by an exact Run and is subject to Evidence freshness and policy.
+_Avoid_: Green check, unsupported build claim
+
+**Target Adapter**:
+An extension that declares a Target's accepted Artifact types and required capabilities or checks, then performs provider-specific mechanics while Anyam retains Release, Promotion, provenance, policy, disclosure, and audit authority.
+_Avoid_: Deployment script, environment-specific kernel logic

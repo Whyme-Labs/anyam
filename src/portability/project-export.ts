@@ -14,6 +14,7 @@ import {
   type ProjectExportLineage,
   type ProjectRevision,
   type RepositoryExport,
+  type RepositoryMirror,
   type Release,
   type SourceSpace,
   type Target,
@@ -67,6 +68,8 @@ export type ProjectExportInput = {
   artifacts?: readonly Artifact[];
   releases?: readonly Release[];
   targets?: readonly Target[];
+  mirrors?: readonly RepositoryMirror[];
+  mirrorOperationIds?: readonly string[];
   policies?: readonly string[];
   auditEventIds?: readonly string[];
   exportId?: string;
@@ -530,6 +533,8 @@ export class LocalProjectExporter {
         artifacts: [...(input.artifacts ?? [])],
         releases: [...(input.releases ?? [])],
         targets: [...(input.targets ?? [])],
+        ...(input.mirrors ? { mirrors: input.mirrors.map((mirror) => ({ ...mirror, refMappings: mirror.refMappings.map((mapping) => ({ ...mapping })), canonicalRefs: mirror.canonicalRefs.map((ref) => ({ ...ref })), remoteRefs: mirror.remoteRefs.map((ref) => ({ ...ref })), pendingInboundChangeIds: [...mirror.pendingInboundChangeIds] })) } : {}),
+        ...(input.mirrorOperationIds ? { mirrorOperationIds: [...input.mirrorOperationIds] } : {}),
         capabilityGrants: [],
         extensions: [],
         policies: [...(input.policies ?? [])],

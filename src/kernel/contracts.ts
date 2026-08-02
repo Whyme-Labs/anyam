@@ -45,6 +45,9 @@ export const CONTRACT_VERSIONS = {
   publicationChange: "anyam.publication-change/v1",
   sealedVerifier: "anyam.sealed-verifier/v1",
   disclosure: "anyam.disclosure/v1",
+  mirror: "anyam.mirror/v1",
+  mirrorOperation: "anyam.mirror-operation/v1",
+  mirrorCheckpoint: "anyam.mirror-checkpoint/v1",
 } as const;
 
 export type SourceSpaceClassification = "public" | "internal" | "restricted" | "result-only";
@@ -163,6 +166,20 @@ export type Change = {
   revertsChangeRevisionId?: string;
   /** The Actor that authored the stable Change, when the caller can disclose it. */
   author?: ActorRef;
+  /** Provenance for a Change created from an external Repository Mirror. */
+  origin?: ChangeOrigin;
+};
+
+export type ChangeOrigin = {
+  kind: "local" | "mirror";
+  source: string;
+  mirrorId?: string;
+  remoteRepository?: string;
+  remoteRef?: string;
+  remoteCommit?: string;
+  remoteAuthor?: { name: string; email?: string };
+  disclosure: DisclosureClassification;
+  receipt: string;
 };
 
 export type ChangeRevisionKind = "implementation" | "rebase" | "conflict-resolution" | "handoff" | "revert";
@@ -463,6 +480,8 @@ export type ProjectExport = {
   artifacts: readonly Artifact[];
   releases: readonly Release[];
   targets: readonly Target[];
+  mirrors?: readonly RepositoryMirror[];
+  mirrorOperationIds?: readonly string[];
   capabilityGrants: readonly CapabilityGrant[];
   extensions: readonly ExtensionManifest[];
   policies: readonly string[];
@@ -503,6 +522,68 @@ export type RepositoryExport = {
     state: "empty" | "complete" | "incomplete" | "unavailable";
     objects: readonly LargeObjectRef[];
   };
+};
+
+export type MirrorDirection = "bidirectional";
+export type MirrorState = "healthy" | "lagging" | "divergent" | "force-pushed" | "blocked" | "credential-failed" | "disabled";
+export type MirrorRefMapping = { localRef: string; remoteRef: string };
+
+export type RepositoryMirror = {
+  protocol: typeof CONTRACT_VERSIONS.mirror;
+  id: string;
+  projectId: string;
+  sourceSpaceId: string;
+  provider: string;
+  remoteRepository: string;
+  direction: MirrorDirection;
+  refMappings: readonly MirrorRefMapping[];
+  disclosure: DisclosureClassification;
+  state: MirrorState;
+  canonicalProjectRevisionId: string;
+  /** Projected remote ref names and OIDs from the last accepted sync boundary. */
+  canonicalRefs: readonly GitRef[];
+  remoteGeneration: string;
+  remoteRefs: readonly GitRef[];
+  pendingInboundChangeIds: readonly string[];
+  lastOperationId?: string;
+  lastOriginOperationId?: string;
+  checkpointId?: string;
+  createdAt: string;
+  updatedAt: string;
+  receipt: string;
+};
+
+export type MirrorOperation = {
+  protocol: typeof CONTRACT_VERSIONS.mirrorOperation;
+  id: string;
+  mirrorId: string;
+  kind: "sync" | "outbound" | "inbound" | "reconcile";
+  state: "started" | "succeeded" | "failed" | "blocked" | "degraded";
+  canonicalProjectRevisionId: string;
+  expectedRemoteGeneration: string;
+  actualRemoteGeneration?: string;
+  actor?: ActorRef;
+  inboundChangeIds: readonly string[];
+  checkpointId: string;
+  errorCode?: string;
+  createdAt: string;
+  completedAt?: string;
+  receipt: string;
+};
+
+export type MirrorCheckpoint = {
+  protocol: typeof CONTRACT_VERSIONS.mirrorCheckpoint;
+  id: string;
+  mirrorId: string;
+  operationId: string;
+  state: "preflight" | "remote-inspected" | "inbound-proposals" | "outbound-applied" | "blocked" | "completed";
+  canonicalProjectRevisionId: string;
+  canonicalRefs: readonly GitRef[];
+  remoteGeneration: string;
+  remoteRefs: readonly GitRef[];
+  completedInboundChangeIds: readonly string[];
+  recoveryAction: string;
+  receipt: string;
 };
 
 export type ProjectExportLineage = {

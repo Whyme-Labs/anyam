@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { createProject, type Project, type SourceSpace } from "../src/kernel/contracts.ts";
+import { createProject, type Project, type RepositoryMirror, type SourceSpace } from "../src/kernel/contracts.ts";
 import { LocalGitRepositoryDriver } from "../src/portability/local-git.ts";
 import {
   LocalProjectExporter,
@@ -179,6 +179,26 @@ test("Project Export includes Git bundles, lineage, and recovery metadata and re
     assert.equal(commit.status, "succeeded");
     const exporter = new LocalProjectExporter(driver);
     const destination = join(root, "export");
+    const mirror: RepositoryMirror = {
+      protocol: "anyam.mirror/v1",
+      id: "mirror:github-round-trip",
+      projectId: project.id,
+      sourceSpaceId: sourceSpace.id,
+      provider: "github",
+      remoteRepository: "acme/round-trip",
+      direction: "bidirectional",
+      refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }],
+      disclosure: "public",
+      state: "healthy",
+      canonicalProjectRevisionId: "project-revision:initial",
+      canonicalRefs: [{ name: "refs/heads/main", oid: "initial" }],
+      remoteGeneration: "remote:g1",
+      remoteRefs: [{ name: "refs/heads/main", oid: "initial" }],
+      pendingInboundChangeIds: [],
+      createdAt: "2026-08-03T00:00:00.000Z",
+      updatedAt: "2026-08-03T00:00:00.000Z",
+      receipt: "fixture=mirror-export",
+    };
     const exported = await exporter.exportProject({
       project,
       sourceSpaces: [sourceSpace],
@@ -187,6 +207,8 @@ test("Project Export includes Git bundles, lineage, and recovery metadata and re
       projectRevisions: [{ protocol: "anyam.kernel/v1", id: "project-revision:initial", projectId: project.id, sourceSpaceSnapshots: { [sourceSpace.id]: commit.status === "succeeded" ? commit.value.commitId : "unknown" } }],
       policies: ["policy:local"],
       auditEventIds: ["event:exported"],
+      mirrors: [mirror],
+      mirrorOperationIds: ["mirror-operation:one"],
       idempotencyKey: "export-round-trip",
     });
     assert.equal(exported.status, "succeeded");
@@ -197,6 +219,8 @@ test("Project Export includes Git bundles, lineage, and recovery metadata and re
     assert.equal(manifest.repositories[0]?.sourceSpaceId, sourceSpace.id);
     assert.equal(manifest.lineage[0]?.projectRevisionId, "project-revision:initial");
     assert.equal(manifest.recovery.state, "verified");
+    assert.equal(manifest.mirrors?.[0]?.id, mirror.id);
+    assert.deepEqual(manifest.mirrorOperationIds, ["mirror-operation:one"]);
     assert.equal(manifest.integrity.credentialFree, true);
     assert.equal(manifest.integrity.manifestDigest, projectExportManifestDigest(manifest));
     const serialized = JSON.stringify(manifest);

@@ -69,8 +69,16 @@ The Realm-owned Smart HTTP boundary that gives clients stable Git URLs, anonymou
 _Avoid_: Cloudflare Artifacts remote, public mirror
 
 **Repository Mirror**:
-An external Git repository synchronized bidirectionally with an Anyam Source Space for permitted refs and history. Remote commits enter Anyam as proposed Changes; only Landing advances the canonical Project Revision, after which accepted refs may propagate outward.
+An external Git repository synchronized bidirectionally with one Anyam Source Space through an explicit ref mapping and Disclosure policy. Outbound state is a verified Project Revision projection; remote commits enter Anyam as proposed Changes with remote provenance; only Landing advances the canonical Project Revision, after which accepted refs may propagate outward. A Mirror never becomes a second canonical authority.
 _Avoid_: Second canonical repository, last-writer-wins synchronization
+
+**Mirror Operation**:
+An immutable, idempotent attempt to inspect, project, propose, reconcile, or recover a Repository Mirror. It records the expected remote generation, actual provider receipt, origin operation, inbound Change IDs, outcome, and policy-safe recovery action.
+_Avoid_: Provider webhook, hidden background retry
+
+**Mirror Checkpoint**:
+An owner-visible verified boundary in a Mirror Operation containing the canonical Project Revision, permitted remote refs, remote generation, completed inbound Change IDs, and recovery action. A checkpoint makes partial synchronization resumable but never implies that canonical state advanced.
+_Avoid_: Last-seen cursor, successful sync flag
 
 **Federation**:
 An explicit, capability-scoped exchange between independently operated Realms that preserves local authority, disclosure policy, lineage, revocation, and abuse controls. Federation is later than Git-compatible mirroring and never creates shared canonical authority.

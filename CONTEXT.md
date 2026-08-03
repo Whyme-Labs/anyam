@@ -81,7 +81,7 @@ An owner-visible verified boundary in a Mirror Operation containing the canonica
 _Avoid_: Last-seen cursor, successful sync flag
 
 **Federation**:
-An explicit, capability-scoped exchange between independently operated Realms that preserves local authority, disclosure policy, lineage, revocation, and abuse controls. Federation is later than Git-compatible mirroring and never creates shared canonical authority.
+An explicit, capability-scoped exchange between independently operated Realms that preserves local authority, disclosure policy, lineage, revocation, and abuse controls. P3/public beta does not require Federation: Realm-local membership plus an approved upstream identity provider is sufficient, and cross-Realm authority is denied unless a later Federation adapter establishes an explicit trust relationship. Federation is later than Git-compatible mirroring and never creates shared canonical authority.
 _Avoid_: Multi-primary mirror, implicit cross-Realm trust
 
 **Source Space**:

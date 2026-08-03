@@ -46,6 +46,7 @@ export const CONTRACT_VERSIONS = {
   capability: "anyam.capability/v1",
   realm: "anyam.realm/v1",
   principal: "anyam.principal/v1",
+  agent: "anyam.agent/v1",
   actor: "anyam.actor/v1",
   session: "anyam.session/v1",
   task: "anyam.task/v1",

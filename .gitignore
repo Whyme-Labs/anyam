@@ -1,3 +1,6 @@
 node_modules/
 dist/
+.wrangler/
+apps/realm-worker/wrangler.jsonc
+apps/realm-worker/.dev.vars*
 .DS_Store

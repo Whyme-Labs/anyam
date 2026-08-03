@@ -3,18 +3,22 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/create-anyam"],
+  "workspaces": ["packages/create-anyam", "apps/realm-worker"],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "tsx --test \"test/**/*.test.ts\"",
     "harness": "tsx src/harness/cli.ts",
     "build": "npm run build --workspace=create-anyam",
     "verify:package": "npm run build && node scripts/package-entrypoint-smoke.mjs",
+    "build:realm": "npm run build --workspace=@anyam/realm-worker",
+    "check:realm": "npm run check && npm run build:realm",
     "check": "npm run typecheck && npm test"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@cloudflare/workers-types": "5.20260801.1",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "wrangler": "4.118.0"
   }
 }

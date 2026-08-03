@@ -12,6 +12,7 @@ export * from "./execution/local.ts";
 export * from "./execution/runner.ts";
 export * from "./identity/realm.ts";
 export * from "./installation/customer-realm.ts";
+export * from "./installation/customer-realm-control.ts";
 export * from "./disclosure/hybrid.ts";
 export * from "./delivery/promotion.ts";
 export * from "./delivery/release-publication.ts";

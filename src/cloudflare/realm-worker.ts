@@ -34,6 +34,13 @@ export const CUSTOMER_REALM_REQUIRED_BINDINGS: readonly CustomerRealmWorkerBindi
  */
 export type CustomerRealmWorkerBinding = object;
 
+/** Structural route contract keeps the Worker bundle independent of the
+ * Node-backed installation kernel. The customer coordinator supplies this
+ * route only after its authentication and provider adapters are qualified. */
+export type CustomerRealmWorkerControlRoute = {
+  handle(request: Request): Promise<Response>;
+};
+
 export type CustomerRealmWorkerEnv = {
   readonly ANYAM_HOSTING_MODE?: string | undefined;
   readonly ANYAM_INSTALLATION_ID?: string | undefined;
@@ -183,8 +190,12 @@ export function customerRealmWorkerHealth(env: CustomerRealmWorkerEnv): Customer
   return healthFromConfiguration(inspectCustomerRealmWorkerConfiguration(env));
 }
 
-export async function handleCustomerRealmRequest(request: Request, env: CustomerRealmWorkerEnv): Promise<Response> {
+export async function handleCustomerRealmRequest(request: Request, env: CustomerRealmWorkerEnv, controlRoute?: CustomerRealmWorkerControlRoute): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname.startsWith("/api/install")) {
+    if (!controlRoute) return jsonResponse({ code: "not_found", recoveryAction: "The customer installation control adapter is not configured in this Worker; use the customer-operated CLI or bind a qualified control coordinator." }, 404);
+    return controlRoute.handle(request);
+  }
   if (request.method !== "GET") return jsonResponse({ code: "method_not_allowed", recoveryAction: "Use GET for the credential-free foundation surfaces." }, 405);
   if (url.pathname !== "/health" && url.pathname !== "/.well-known/anyam-realm") return jsonResponse({ code: "not_found", recoveryAction: "Use /health or /.well-known/anyam-realm for the foundation surface." }, 404);
 

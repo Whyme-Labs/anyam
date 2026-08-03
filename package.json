@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test \"test/**/*.test.ts\"",
     "harness": "tsx src/harness/cli.ts",
+    "prototype:onboarding": "tsx prototype/public-beta-onboarding.ts --scenario all",
     "build": "npm run build --workspace=create-anyam",
     "verify:package": "npm run build && node scripts/package-entrypoint-smoke.mjs",
     "build:realm": "npm run build --workspace=@anyam/realm-worker",

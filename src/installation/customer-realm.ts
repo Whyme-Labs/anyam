@@ -268,6 +268,12 @@ export type CustomerRealmProjectImporter = {
 export type CustomerRealmInstallationStore = {
   load(installationId: string): Promise<CustomerRealmInstallationState | undefined>;
   save(state: CustomerRealmInstallationState): Promise<void>;
+  /**
+   * Persist a state transition only when the store still has the expected
+   * checkpoint digest. Implementations may omit this method while the
+   * installation remains compatible with the original save-only boundary.
+   */
+  saveIfCurrent?(state: CustomerRealmInstallationState, expectedStateDigest?: string): Promise<void>;
 };
 
 export class CustomerRealmInstallationError extends Error {
@@ -305,6 +311,15 @@ export class InMemoryCustomerRealmInstallationStore implements CustomerRealmInst
   }
 
   async save(state: CustomerRealmInstallationState): Promise<void> {
+    this.states.set(state.installationId, clone(state));
+  }
+
+  async saveIfCurrent(state: CustomerRealmInstallationState, expectedStateDigest?: string): Promise<void> {
+    const current = this.states.get(state.installationId);
+    const actualStateDigest = current?.checkpoint.stateDigest;
+    if (actualStateDigest !== expectedStateDigest) {
+      throw new Error(`stale customer Realm installation state: expected=${expectedStateDigest ?? "absent"}; actual=${actualStateDigest ?? "absent"}`);
+    }
     this.states.set(state.installationId, clone(state));
   }
 }
@@ -457,8 +472,16 @@ function validateSourceSpaces(project: Project, sourceSpaces: readonly SourceSpa
   return problems;
 }
 
+export function customerRealmRecoveryBundleDigest(bundle: Omit<CustomerRealmRecoveryBundle, "integrity"> | CustomerRealmRecoveryBundle): string {
+  const withoutIntegrity = "integrity" in bundle ? (() => {
+    const { integrity: _integrity, ...rest } = bundle;
+    return rest;
+  })() : bundle;
+  return digest(withoutIntegrity);
+}
+
 function recoveryBundleDigest(bundle: Omit<CustomerRealmRecoveryBundle, "integrity">): string {
-  return digest(bundle);
+  return customerRealmRecoveryBundleDigest(bundle);
 }
 
 export function verifyCustomerRealmRecoveryBundle(bundle: CustomerRealmRecoveryBundle): CustomerRealmRecoveryVerification {
@@ -521,9 +544,12 @@ export class CustomerRealmInstallation {
   private identity: RealmIdentityPolicy | undefined;
   private readonly now: () => Date;
 
-  constructor(private readonly input: { installationId: string; cloudflare: CustomerRealmCloudflareAdapter; importer: CustomerRealmProjectImporter; store?: CustomerRealmInstallationStore; now?: () => Date; realmId?: string; state?: CustomerRealmInstallationState }) {
+  private persistedState: boolean;
+
+  constructor(private readonly input: { installationId: string; cloudflare: CustomerRealmCloudflareAdapter; importer: CustomerRealmProjectImporter; store?: CustomerRealmInstallationStore; now?: () => Date; realmId?: string; state?: CustomerRealmInstallationState; persistedState?: boolean }) {
     this.now = input.now ?? (() => new Date());
     this.state = clone(input.state ?? initialState(input.installationId, this.now));
+    this.persistedState = input.persistedState ?? input.state !== undefined;
     if (this.state.realmSnapshot && this.state.realmId) {
       this.identity = new RealmIdentityPolicy({ realmId: this.state.realmId, now: this.now });
       this.identity.restoreOperationalSnapshot(this.state.realmSnapshot);
@@ -532,7 +558,7 @@ export class CustomerRealmInstallation {
 
   static async open(input: Omit<NonNullable<ConstructorParameters<typeof CustomerRealmInstallation>[0]>, "state">): Promise<CustomerRealmInstallation> {
     const state = await input.store?.load(input.installationId);
-    return new CustomerRealmInstallation({ ...input, ...(state ? { state } : {}) });
+    return new CustomerRealmInstallation({ ...input, ...(state ? { state, persistedState: true } : { persistedState: false }) });
   }
 
   get snapshot(): CustomerRealmInstallationState {
@@ -796,7 +822,13 @@ export class CustomerRealmInstallation {
     };
     const pendingCommands = nextWithoutCheckpoint.pendingCommands;
     const checkpoint = checkpointFor(nextWithoutCheckpoint, this.state.checkpoint, [eventType], patch.degraded?.partialEffects ?? patch.import?.partialEffects ?? [], pendingCommands.filter((command) => command.status === "pending" || command.status === "degraded" || command.status === "blocked").map((command) => command.commandId));
-    this.state = { ...nextWithoutCheckpoint, checkpoint };
-    await this.input.store?.save(this.snapshot);
+    const nextState: CustomerRealmInstallationState = { ...nextWithoutCheckpoint, checkpoint };
+    if (this.input.store?.saveIfCurrent) {
+      await this.input.store.saveIfCurrent(nextState, this.persistedState ? this.state.checkpoint.stateDigest : undefined);
+    } else {
+      await this.input.store?.save(nextState);
+    }
+    this.state = nextState;
+    this.persistedState = true;
   }
 }

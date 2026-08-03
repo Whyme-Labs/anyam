@@ -35,7 +35,7 @@ provider receipt before publication.
 
 The prototype intentionally keeps the following boundaries visible:
 
-- installation and owner recovery precede Project creation;
+- installation checkpoint recovery and owner recovery precede Project creation;
 - public contribution enters a destination-Realm quarantine, never private
   Source Spaces;
 - a named tripwire denial includes the limit, configured value, request, and

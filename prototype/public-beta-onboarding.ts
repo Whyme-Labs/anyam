@@ -130,6 +130,19 @@ class OnboardingPrototype {
     this.record("install", "customer", "completed", "Customer account control is recorded; the Realm is ready for owner claim. No credential material was stored.");
   }
 
+  recover(): void {
+    if (this.state.phase !== "owner-claim" || !this.state.recovery.exportReady) {
+      this.record("recover", "customer", "blocked", "Recovery requires an exported installation checkpoint before owner claim; no state was activated.");
+      return;
+    }
+    this.record("recover", "customer", "completed", "A simulated restart reopened the same owner-claim checkpoint; credentials were not restored and no partial Project was activated.", {
+      id: "receipt:fixture-recovery-reopen-v1",
+      measurement: "synthetic restart/reopen fixture; one checkpoint replay observed",
+      observed: 1,
+      launchDefault: false,
+    });
+  }
+
   claimOwner(): void {
     if (this.state.phase !== "owner-claim") {
       this.record("owner-claim", "customer", "blocked", "Owner claim is unavailable until the installation reaches owner-claim; resume the installation checkpoint.");
@@ -279,6 +292,7 @@ function runHappy(): void {
   const prototype = new OnboardingPrototype();
   prototype.run([
     () => prototype.install(),
+    () => prototype.recover(),
     () => prototype.claimOwner(),
     () => prototype.inviteTeam(),
     () => prototype.createProject(),
@@ -293,6 +307,7 @@ function runAbuse(): void {
   const prototype = new OnboardingPrototype();
   prototype.run([
     () => prototype.install(),
+    () => prototype.recover(),
     () => prototype.claimOwner(),
     () => prototype.createProject(),
     () => prototype.openPublicIntake(),

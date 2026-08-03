@@ -1,0 +1,56 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-p3-cohort-20260803",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "ANYAM_HOSTING_MODE": "customer-operated",
+    "ANYAM_INSTALLATION_ID": "anyam-p3-cohort-20260803",
+    "ANYAM_PROTOCOL_VERSION": "anyam.customer-realm-worker/v1",
+    "ANYAM_BUILD_REVISION": "6e9bca5119b3e6f80f3c8085ebc5a686adb42af2"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REALM_COORDINATOR",
+        "class_name": "AnyamRealmCoordinator"
+      }
+    ]
+  },
+  "exports": {
+    "AnyamRealmCoordinator": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "d1_databases": [
+    {
+      "binding": "ANYAM_METADATA_DB",
+      "database_name": "anyam-p3-cohort-20260803-metadata",
+      "database_id": "ef94b85a-c8e8-424b-afaa-cd08a085a4f8"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "ANYAM_EXPORTS",
+      "bucket_name": "anyam-p3-cohort-20260803-exports",
+      "preview_bucket_name": "anyam-p3-cohort-20260803-exports-preview"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "ANYAM_EVENTS",
+        "queue": "anyam-p3-cohort-20260803-events"
+      }
+    ]
+  },
+  "workflows": [
+    {
+      "binding": "ANYAM_WORKFLOW",
+      "name": "anyam-p3-cohort-20260803-workflow",
+      "class_name": "AnyamRealmWorkflow"
+    }
+  ]
+}

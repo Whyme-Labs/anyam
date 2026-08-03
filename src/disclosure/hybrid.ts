@@ -788,12 +788,18 @@ export async function runSealedVerifier(input: {
     projectViewId: input.publicProjection.projectionRevisionId,
     receipt: `appeal-policy=${contract.appealPolicy}; created-at=${now()}`,
   };
+  const disclosedVerifierId = input.audience === "public"
+    ? digest({ domain: "public-sealed-verifier", contractDigest: contract.contractDigest, projection: input.publicProjection.projectionRevisionId })
+    : contract.id;
+  const disclosedContractDigest = input.audience === "public"
+    ? digest({ domain: "public-sealed-contract", contractDigest: contract.contractDigest, projection: input.publicProjection.projectionRevisionId })
+    : contract.contractDigest;
   return {
     protocol: CONTRACT_VERSIONS.sealedVerifier,
     version: "v1",
     id: opaqueId("sealed-result"),
     runId,
-    verifierId: contract.id,
+    verifierId: disclosedVerifierId,
     audience: input.audience,
     status: privateResult.status,
     disclosure: contract.disclosure,
@@ -804,11 +810,11 @@ export async function runSealedVerifier(input: {
       id: evidenceId,
       outcome,
       disclosure: input.audience,
-      verifierId: contract.id,
+      verifierId: disclosedVerifierId,
       projectViewId: input.publicProjection.projectionRevisionId,
     },
     appeal,
-    contractDigest: contract.contractDigest,
+    contractDigest: disclosedContractDigest,
     receipt: `sealed-run=${runId}; projection=${input.publicProjection.projectionRevisionId}; private-inputs=not-disclosed`,
   };
 }

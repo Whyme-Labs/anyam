@@ -69,7 +69,10 @@ export type CustomerRealmResources = {
 
 export type CustomerRealmOwner = {
   principalId: string;
-  passkeyCredentialId: string;
+  authenticationMethod: "passkey" | "oidc";
+  passkeyCredentialId?: string;
+  oidcIssuer?: string;
+  oidcSubject?: string;
   recoveryEnrollmentId: string;
   recoveryMethod: "external-recovery-codes" | "hardware-key" | "enterprise-oidc";
   recoveryDigest?: string;
@@ -107,7 +110,7 @@ export type CustomerRealmImport = {
 export type CustomerRealmPendingCommand = {
   protocol: typeof CONTRACT_VERSIONS.command;
   commandId: string;
-  operation: "account.inspect" | "realm.provision" | "project.import" | "realm.recover";
+  operation: "account.inspect" | "realm.provision" | "project.import" | "realm.recover" | "deployment.readiness";
   operationId: string;
   idempotencyKey: string;
   expectedStateDigest: string;
@@ -141,6 +144,17 @@ export type CustomerRealmDegradedState = {
   receipt: string;
 };
 
+export type CustomerRealmDeploymentReadiness = {
+  operationId: string;
+  status: "ready" | "retryable" | "blocked";
+  providerOperationId?: string;
+  errorCode?: string;
+  receipt: string;
+  recoveryAction: string;
+  /** The phase to resume after a transient readiness failure. */
+  resumePhase?: CustomerRealmInstallationPhase;
+};
+
 export type CustomerRealmAuditEvent = {
   protocol: typeof CONTRACT_VERSIONS.audit;
   id: string;
@@ -171,6 +185,7 @@ export type CustomerRealmInstallationState = {
   owner?: CustomerRealmOwner;
   project?: CustomerRealmProject;
   import?: CustomerRealmImport;
+  deploymentReadiness?: CustomerRealmDeploymentReadiness;
   realmSnapshot?: RealmRecoverySnapshot | undefined;
   pendingCommands: readonly CustomerRealmPendingCommand[];
   checkpoint: CustomerRealmCheckpoint;
@@ -255,9 +270,24 @@ export type CustomerRealmImportReceipt = {
 };
 
 export type CustomerRealmCloudflareAdapter = {
-  inspectAccount(input: { accountId: string; operationId: string }): Promise<CustomerRealmProviderResult<CustomerRealmAccountInspection>>;
-  provisionRealm(input: { accountId: string; installationId: string; operationId: string; idempotencyKey: string; requestedResourceTypes: readonly string[] }): Promise<CustomerRealmProviderResult<CustomerRealmProvisionReceipt>>;
-  inspectProvision(input: { accountId: string; installationId: string; operationId: string; resourceIds: readonly string[] }): Promise<CustomerRealmProviderResult<CustomerRealmProvisionReceipt>>;
+  inspectAccount(input: { accountId: string; operationId: string; authorization?: CustomerRealmProviderAuthorization }): Promise<CustomerRealmProviderResult<CustomerRealmAccountInspection>>;
+  provisionRealm(input: { accountId: string; installationId: string; operationId: string; idempotencyKey: string; requestedResourceTypes: readonly string[]; authorization?: CustomerRealmProviderAuthorization }): Promise<CustomerRealmProviderResult<CustomerRealmProvisionReceipt>>;
+  inspectProvision(input: { accountId: string; installationId: string; operationId: string; resourceIds: readonly string[]; authorization?: CustomerRealmProviderAuthorization }): Promise<CustomerRealmProviderResult<CustomerRealmProvisionReceipt>>;
+};
+
+/**
+ * A customer provider session is deliberately represented by a receipt and a
+ * digest, never by the provider bearer credential. The adapter may hold the
+ * actual credential in memory or in the provider's own credential broker while
+ * an operation is running; Anyam state never receives it.
+ */
+export type CustomerRealmProviderAuthorization = {
+  provider: "cloudflare";
+  accountId: string;
+  audience: "cloudflare-api";
+  authorizationDigest: string;
+  expiresAt: string;
+  receipt: string;
 };
 
 export type CustomerRealmProjectImporter = {
@@ -569,7 +599,7 @@ export class CustomerRealmInstallation {
     return this.identity;
   }
 
-  async install(input: { accountId: string; requestedResourceTypes: readonly string[]; ownerConfirmed: boolean; operationId?: string; idempotencyKey?: string }): Promise<CustomerRealmInstallationState> {
+  async install(input: { accountId: string; requestedResourceTypes: readonly string[]; ownerConfirmed: boolean; operationId?: string; idempotencyKey?: string; providerAuthorization?: CustomerRealmProviderAuthorization }): Promise<CustomerRealmInstallationState> {
     this.requirePhase(["new"], "install");
     if (!input.ownerConfirmed) throw new CustomerRealmInstallationError({ code: "ownership_required", message: "Customer-operated installation requires explicit confirmation that the account, billing, source, metadata, artifacts, secrets, and recovery material remain customer-owned.", recoveryAction: "confirm customer account ownership before provisioning", receipt: "ownerConfirmed=true required" });
     if (input.requestedResourceTypes.length === 0) throw new CustomerRealmInstallationError({ code: "invalid_input", message: "Customer-operated installation requires an explicit resource plan.", recoveryAction: "choose the Cloudflare bindings the customer account will own, then retry", receipt: "requestedResourceTypes must not be empty" });
@@ -579,7 +609,7 @@ export class CustomerRealmInstallation {
     const realmProvisionCommand: CustomerRealmPendingCommand = { protocol: CONTRACT_VERSIONS.command, commandId: opaqueId("command"), operation: "realm.provision", operationId, idempotencyKey: `${idempotencyKey}:provision`, expectedStateDigest: this.state.checkpoint.stateDigest, inputDigest: digest({ accountId: input.accountId, requestedResourceTypes: input.requestedResourceTypes, operation: "realm.provision" }), status: "pending", recoveryAction: "inspect or resume the same customer-owned provisioning operation", receipt: `account=${input.accountId}; resources=${input.requestedResourceTypes.join(",")}; provisioning=pending` };
     const plannedResources: CustomerRealmResources = { owner: "customer", state: "provisioning", resourceIds: [], requestedResourceTypes: [...input.requestedResourceTypes], receipt: `account=${input.accountId}; resources=planned; credentials=none` };
     await this.transition("account-verifying", "account.verification.started", { operationId, details: { accountId: input.accountId, ownership: "customer", credentialsStored: false } }, { accountId: input.accountId, resources: plannedResources, pendingCommands: [accountCommand, realmProvisionCommand] });
-    const inspection = await this.input.cloudflare.inspectAccount({ accountId: input.accountId, operationId });
+    const inspection = await this.input.cloudflare.inspectAccount({ accountId: input.accountId, operationId, ...(input.providerAuthorization ? { authorization: input.providerAuthorization } : {}) });
     if (inspection.status !== "succeeded") return this.recordProviderFailure("account.inspect", inspection);
     if (inspection.value.accountId !== input.accountId || inspection.value.owner !== "customer" || inspection.value.billingOwner !== "customer" || !inspection.value.controlVerified) return this.recordProviderFailure("account.inspect", failure("cloudflare.account_ownership_unverified", "unknown", input.accountId, operationId, false, [], "use an account the customer controls and rerun account verification", inspection.value.receipt));
     const account: CustomerAccountOwnership = { accountId: input.accountId, owner: "customer", billingOwner: "customer", sourceOwner: "customer", metadataOwner: "customer", artifactOwner: "customer", secretOwner: "customer", recoveryOwner: "customer", controlVerified: true, credentialsStored: false, verifiedAt: nowIso(this.now) };
@@ -588,7 +618,7 @@ export class CustomerRealmInstallation {
     await this.transition("provisioning", "realm.provisioning.started", { operationId, details: { requestedResourceTypes: input.requestedResourceTypes } }, { resources: { ...plannedResources, state: "provisioning" }, pendingCommands: accountVerifiedCommands, degraded: undefined });
     const provisionCommand = this.state.pendingCommands.find((command) => command.operation === "realm.provision" && command.operationId === operationId);
     if (!provisionCommand) throw new CustomerRealmInstallationError({ code: "recovery_invalid", message: "Provisioning command was not persisted before the provider call.", recoveryAction: "restore the installation checkpoint and retry with the same operation", receipt: `operation=${operationId}` });
-    const provision = await this.input.cloudflare.provisionRealm({ accountId: input.accountId, installationId: this.state.installationId, operationId, idempotencyKey: provisionCommand.idempotencyKey, requestedResourceTypes: input.requestedResourceTypes });
+    const provision = await this.input.cloudflare.provisionRealm({ accountId: input.accountId, installationId: this.state.installationId, operationId, idempotencyKey: provisionCommand.idempotencyKey, requestedResourceTypes: input.requestedResourceTypes, ...(input.providerAuthorization ? { authorization: input.providerAuthorization } : {}) });
     if (provision.status !== "succeeded") return this.recordProviderFailure("realm.provision", provision);
     return this.finishProvisioning(input.accountId, input.requestedResourceTypes, provision.value, operationId);
   }
@@ -596,14 +626,51 @@ export class CustomerRealmInstallation {
   async enrollOwner(input: { displayName: string; passkeyCredentialId: string; passkeyVerified: boolean; recovery: { method: CustomerRealmOwner["recoveryMethod"]; enrollmentReceipt: string; materialDigest?: string }; principalId?: string }): Promise<CustomerRealmInstallationState> {
     this.requirePhase(["realm-ready"], "owner.enroll");
     if (!input.passkeyVerified || !input.passkeyCredentialId.trim()) throw new CustomerRealmInstallationError({ code: "invalid_input", message: "The first Realm owner must complete a verified passkey enrollment; no default administrator was created.", recoveryAction: "complete passkey enrollment through the customer-controlled Realm origin and retry", receipt: "passkeyVerified=true and credential ID required" });
+    return this.enrollVerifiedOwner({
+      displayName: input.displayName,
+      ...(input.principalId ? { principalId: input.principalId } : {}),
+      authentication: { method: "passkey", credentialId: input.passkeyCredentialId, verificationReceipt: "legacy-local-passkey-fixture" },
+      recovery: input.recovery,
+    });
+  }
+
+  /**
+   * Enroll an owner only after an external authentication adapter has verified
+   * the passkey assertion or OIDC result. The verification proof itself is not
+   * accepted here and therefore cannot be persisted accidentally.
+   */
+  async enrollVerifiedOwner(input: {
+    displayName: string;
+    authentication:
+      | { method: "passkey"; credentialId: string; verificationReceipt: string }
+      | { method: "oidc"; issuer: string; subject: string; clientId: string; verificationReceipt: string };
+    recovery: { method: CustomerRealmOwner["recoveryMethod"]; enrollmentReceipt: string; materialDigest?: string };
+    principalId?: string;
+  }): Promise<CustomerRealmInstallationState> {
+    this.requirePhase(["realm-ready"], "owner.enroll");
+    if (!input.displayName.trim()) throw new CustomerRealmInstallationError({ code: "invalid_input", message: "The first Realm owner requires a non-empty display name.", recoveryAction: "provide the display name returned by the verified identity adapter and retry", receipt: "owner.displayName must not be empty" });
+    if (!input.authentication.verificationReceipt.trim()) throw new CustomerRealmInstallationError({ code: "invalid_input", message: "Owner authentication requires an external adapter verification receipt.", recoveryAction: "complete passkey or OIDC verification through the customer-controlled adapter and retry", receipt: "owner authentication verification receipt required" });
     if (!input.recovery.enrollmentReceipt.trim()) throw new CustomerRealmInstallationError({ code: "invalid_input", message: "Recovery enrollment requires an owner-visible external receipt; recovery material is never stored in the installation.", recoveryAction: "enroll recovery codes, a hardware key, or the approved enterprise identity path and provide its receipt", receipt: "recovery enrollment receipt required" });
     if (!this.identity || !this.state.realmId) throw new CustomerRealmInstallationError({ code: "blocked", message: "Realm identity policy is not available after provisioning.", recoveryAction: "resume or restore the verified provisioning checkpoint", receipt: "realm policy missing" });
+    const authentication = input.authentication;
     const principal = this.identity.createPrincipal(input.principalId ? { id: input.principalId, displayName: input.displayName } : { displayName: input.displayName });
-    this.identity.registerPasskey({ principalId: principal.id, credentialId: input.passkeyCredentialId });
+    if (authentication.method === "passkey") {
+      if (!authentication.credentialId.trim()) throw new CustomerRealmInstallationError({ code: "invalid_input", message: "The verified passkey adapter returned no credential identity; no owner was enrolled.", recoveryAction: "return the credential ID associated with the verified WebAuthn registration and retry", receipt: "passkey credential ID required" });
+      this.identity.registerPasskey({ principalId: principal.id, credentialId: authentication.credentialId });
+    } else {
+      if (!authentication.issuer.trim() || !authentication.subject.trim() || !authentication.clientId.trim()) throw new CustomerRealmInstallationError({ code: "invalid_input", message: "The verified OIDC adapter returned incomplete issuer, subject, or client identity; no owner was enrolled.", recoveryAction: "return the verified OIDC issuer, subject, and client identity and retry", receipt: "OIDC issuer, subject, and clientId required" });
+      const existingProvider = Object.values(this.identity.snapshot().oidcProviders).find((provider) => provider.issuer === authentication.issuer && provider.status === "active");
+      if (!existingProvider) this.identity.registerOidcProvider({ issuer: authentication.issuer, clientId: authentication.clientId });
+      this.identity.linkOidcIdentity({ principalId: principal.id, issuer: authentication.issuer, subject: authentication.subject });
+    }
     this.identity.addRelationship({ principalId: principal.id, kind: "organization-member", subjectId: principal.id, role: "owner", resource: { realmId: this.state.realmId } });
+    const ownerIdentity = authentication.method === "passkey"
+      ? { passkeyCredentialId: authentication.credentialId }
+      : { oidcIssuer: authentication.issuer, oidcSubject: authentication.subject };
     const owner: CustomerRealmOwner = {
       principalId: principal.id,
-      passkeyCredentialId: input.passkeyCredentialId,
+      authenticationMethod: authentication.method,
+      ...ownerIdentity,
       recoveryEnrollmentId: opaqueId("recovery-enrollment"),
       recoveryMethod: input.recovery.method,
       ...(input.recovery.materialDigest ? { recoveryDigest: input.recovery.materialDigest } : {}),
@@ -611,7 +678,7 @@ export class CustomerRealmInstallation {
       materialStoredInInstallation: false,
       enrolledAt: nowIso(this.now),
     };
-    await this.transition("owner-ready", "realm.owner.enrolled", { principalId: principal.id, details: { passkeyCredentialId: input.passkeyCredentialId, recoveryEnrollmentId: owner.recoveryEnrollmentId, recoveryMethod: owner.recoveryMethod, materialStoredInInstallation: false } }, { owner });
+    await this.transition("owner-ready", "realm.owner.enrolled", { principalId: principal.id, details: { authenticationMethod: owner.authenticationMethod, verificationReceipt: authentication.verificationReceipt, recoveryEnrollmentId: owner.recoveryEnrollmentId, recoveryMethod: owner.recoveryMethod, materialStoredInInstallation: false } }, { owner });
     return this.snapshot;
   }
 
@@ -639,7 +706,64 @@ export class CustomerRealmInstallation {
     return this.finishImport(result.value, result.operationId);
   }
 
-  async recover(): Promise<CustomerRealmInstallationState> {
+  /**
+   * Persist provider deployment readiness as an explicit command/checkpoint.
+   * A transient propagation failure is observable and retryable; it is never
+   * converted into a false ready result or a silent retry.
+   */
+  async recordDeploymentReadiness(input: { operationId: string; status: CustomerRealmDeploymentReadiness["status"]; receipt: string; recoveryAction: string; providerOperationId?: string; errorCode?: string }): Promise<CustomerRealmInstallationState> {
+    this.requirePhase(["account-ready", "provisioning", "realm-ready", "owner-ready", "project-ready", "importing", "imported", "active", "degraded"], "deployment.readiness");
+    if (!input.operationId.trim() || !input.receipt.trim() || !input.recoveryAction.trim()) throw new CustomerRealmInstallationError({ code: "invalid_input", message: "Deployment readiness requires an operation identity, provider receipt, and recovery action.", recoveryAction: "return the provider's explicit readiness receipt and retry", receipt: "operationId, receipt, and recoveryAction required" });
+    const previous = this.state.deploymentReadiness;
+    const existing = this.state.pendingCommands.find((command) => command.operation === "deployment.readiness" && command.operationId === input.operationId);
+    const command: CustomerRealmPendingCommand = existing ?? {
+      protocol: CONTRACT_VERSIONS.command,
+      commandId: opaqueId("command"),
+      operation: "deployment.readiness",
+      operationId: input.operationId,
+      idempotencyKey: input.operationId,
+      expectedStateDigest: this.state.checkpoint.stateDigest,
+      inputDigest: digest({ operation: "deployment.readiness", operationId: input.operationId }),
+      status: "pending",
+      recoveryAction: input.recoveryAction,
+      receipt: input.receipt,
+    };
+    const commandStatus: CustomerRealmOperationStatus = input.status === "ready" ? "succeeded" : input.status === "retryable" ? "degraded" : "blocked";
+    const completedCommand: CustomerRealmPendingCommand = { ...command, status: commandStatus, ...(input.providerOperationId ? { providerOperationId: input.providerOperationId } : {}), recoveryAction: input.recoveryAction, receipt: input.receipt };
+    const pendingCommands = existing
+      ? this.state.pendingCommands.map((candidate) => candidate.commandId === existing.commandId ? completedCommand : candidate)
+      : [...this.state.pendingCommands, completedCommand];
+    const resumePhase = previous?.resumePhase ?? (this.state.phase === "degraded" ? undefined : this.state.phase);
+    const readiness: CustomerRealmDeploymentReadiness = {
+      operationId: input.operationId,
+      status: input.status,
+      ...(input.providerOperationId ? { providerOperationId: input.providerOperationId } : {}),
+      ...(input.errorCode ? { errorCode: input.errorCode } : {}),
+      receipt: input.receipt,
+      recoveryAction: input.recoveryAction,
+      ...(resumePhase ? { resumePhase } : {}),
+    };
+    if (input.status === "ready") {
+      const nextPhase = previous?.resumePhase ?? (this.state.phase === "degraded" ? "realm-ready" : this.state.phase);
+      await this.transition(nextPhase, "deployment.readiness.verified", { operationId: input.operationId, details: { status: "ready", providerOperationId: input.providerOperationId, receipt: input.receipt } }, { pendingCommands, deploymentReadiness: readiness, degraded: undefined });
+      return this.snapshot;
+    }
+    const degraded: CustomerRealmDegradedState = {
+      kind: input.status === "retryable" ? "provider-outage" : "unknown",
+      operation: "deployment.readiness",
+      dependency: "customer-cloudflare",
+      reason: input.errorCode ?? "provider deployment readiness is not verified",
+      checkpointId: this.state.checkpoint.checkpointId,
+      partialEffects: [],
+      retryable: input.status === "retryable",
+      safeRecoveryAction: input.recoveryAction,
+      receipt: input.receipt,
+    };
+    await this.transition(input.status === "retryable" ? "degraded" : "blocked", `deployment.readiness.${input.status}`, { operationId: input.operationId, checkpointId: this.state.checkpoint.checkpointId, details: { status: input.status, errorCode: input.errorCode, receipt: input.receipt } }, { pendingCommands, deploymentReadiness: readiness, degraded });
+    return this.snapshot;
+  }
+
+  async recover(input: { providerAuthorization?: CustomerRealmProviderAuthorization } = {}): Promise<CustomerRealmInstallationState> {
     this.requirePhase(["degraded", "blocked"], "recovery.resume");
     const degraded = this.state.degraded;
     if (!degraded) throw new CustomerRealmInstallationError({ code: "recovery_invalid", message: "Installation is marked degraded without a recovery record.", recoveryAction: "restore from a verified customer recovery bundle", receipt: "degraded state missing" });
@@ -648,7 +772,7 @@ export class CustomerRealmInstallation {
       const accountId = this.state.accountId;
       const accountCommand = this.state.pendingCommands.find((command) => command.operation === "account.inspect" && (command.status === "pending" || command.status === "degraded" || command.status === "blocked"));
       if (!accountId || !accountCommand) throw new CustomerRealmInstallationError({ code: "recovery_invalid", message: "Account verification recovery has no durable account identity or command.", recoveryAction: "restore the account verification checkpoint and retry the same operation", receipt: "accountId and account.inspect command required" });
-      const inspection = await this.input.cloudflare.inspectAccount({ accountId, operationId: accountCommand.operationId });
+      const inspection = await this.input.cloudflare.inspectAccount({ accountId, operationId: accountCommand.operationId, ...(input.providerAuthorization ? { authorization: input.providerAuthorization } : {}) });
       if (inspection.status !== "succeeded") return this.recordProviderFailure("account.inspect", inspection);
       if (inspection.value.accountId !== accountId || inspection.value.owner !== "customer" || inspection.value.billingOwner !== "customer" || !inspection.value.controlVerified) return this.recordProviderFailure("account.inspect", failure("cloudflare.account_ownership_unverified", "unknown", accountId, accountCommand.operationId, false, [], "use an account the customer controls and rerun account verification", inspection.value.receipt));
       const account: CustomerAccountOwnership = { accountId, owner: "customer", billingOwner: "customer", sourceOwner: "customer", metadataOwner: "customer", artifactOwner: "customer", secretOwner: "customer", recoveryOwner: "customer", controlVerified: true, credentialsStored: false, verifiedAt: nowIso(this.now) };
@@ -658,7 +782,7 @@ export class CustomerRealmInstallation {
       const provisionCommand = this.state.pendingCommands.find((command) => command.operation === "realm.provision" && (command.status === "pending" || command.status === "degraded" || command.status === "blocked"));
       if (!resources || !provisionCommand) throw new CustomerRealmInstallationError({ code: "recovery_invalid", message: "Account verification recovered but the provisioning plan is missing.", recoveryAction: "restore the provisioning checkpoint before continuing", receipt: "resources and realm.provision command required" });
       await this.transition("provisioning", "realm.provisioning.recovery_started", { operationId: provisionCommand.operationId, checkpointId: degraded.checkpointId, details: { accountId, requestedResourceTypes: resources.requestedResourceTypes } }, { resources: { ...resources, state: "provisioning" }, degraded: undefined });
-      const provision = await this.input.cloudflare.provisionRealm({ accountId, installationId: this.state.installationId, operationId: provisionCommand.operationId, idempotencyKey: provisionCommand.idempotencyKey, requestedResourceTypes: resources.requestedResourceTypes });
+      const provision = await this.input.cloudflare.provisionRealm({ accountId, installationId: this.state.installationId, operationId: provisionCommand.operationId, idempotencyKey: provisionCommand.idempotencyKey, requestedResourceTypes: resources.requestedResourceTypes, ...(input.providerAuthorization ? { authorization: input.providerAuthorization } : {}) });
       if (provision.status !== "succeeded") return this.recordProviderFailure("realm.provision", provision);
       return this.finishProvisioning(accountId, resources.requestedResourceTypes, provision.value, provision.operationId);
     }
@@ -670,14 +794,17 @@ export class CustomerRealmInstallation {
       if (result.status !== "succeeded") return this.recordProviderFailure("project.import", result);
       return this.finishImport(result.value, result.operationId);
     }
+    if (degraded.operation === "deployment.readiness") {
+      throw new CustomerRealmInstallationError({ code: "blocked", message: "Deployment readiness recovery requires a fresh provider readiness probe; the previous provider receipt was not reused as authority.", recoveryAction: "rerun the customer provider readiness command with a fresh authorization and record its new receipt", receipt: degraded.receipt, checkpointId: degraded.checkpointId });
+    }
     if (degraded.operation === "realm.provision") {
       const account = this.requireAccount();
       const resources = this.state.resources;
       const operation = this.state.pendingCommands.find((command) => command.operation === "realm.provision" && (command.status === "pending" || command.status === "degraded" || command.status === "blocked"));
       if (!resources || !operation) throw new CustomerRealmInstallationError({ code: "recovery_invalid", message: "Realm provisioning recovery has no durable resource plan or command.", recoveryAction: "restore the installation checkpoint and inspect the customer account", receipt: "provisioning resource plan or command missing" });
       const inspected = resources.resourceIds.length === 0
-        ? await this.input.cloudflare.provisionRealm({ accountId: account.accountId, installationId: this.state.installationId, operationId: operation.operationId, idempotencyKey: operation.idempotencyKey, requestedResourceTypes: resources.requestedResourceTypes })
-        : await this.input.cloudflare.inspectProvision({ accountId: account.accountId, installationId: this.state.installationId, operationId: operation.operationId, resourceIds: resources.resourceIds });
+        ? await this.input.cloudflare.provisionRealm({ accountId: account.accountId, installationId: this.state.installationId, operationId: operation.operationId, idempotencyKey: operation.idempotencyKey, requestedResourceTypes: resources.requestedResourceTypes, ...(input.providerAuthorization ? { authorization: input.providerAuthorization } : {}) })
+        : await this.input.cloudflare.inspectProvision({ accountId: account.accountId, installationId: this.state.installationId, operationId: operation.operationId, resourceIds: resources.resourceIds, ...(input.providerAuthorization ? { authorization: input.providerAuthorization } : {}) });
       if (inspected.status !== "succeeded") return this.recordProviderFailure("realm.provision", inspected);
       return this.finishProvisioning(account.accountId, resources.requestedResourceTypes, inspected.value, operation.operationId);
     }
@@ -728,13 +855,13 @@ export class CustomerRealmInstallation {
     return this.snapshot;
   }
 
-  async activateRecovery(input: { ownerPrincipalId: string; recoveryReceipt: string }): Promise<CustomerRealmInstallationState> {
+  async activateRecovery(input: { ownerPrincipalId: string; recoveryReceipt: string; providerAuthorization?: CustomerRealmProviderAuthorization }): Promise<CustomerRealmInstallationState> {
     this.requirePhase(["recovery-pending"], "recovery.activate");
     if (!input.recoveryReceipt.trim() || input.ownerPrincipalId !== this.state.owner?.principalId) throw new CustomerRealmInstallationError({ code: "ownership_required", message: "Recovery activation requires the enrolled Realm owner and a fresh external recovery receipt.", recoveryAction: "authenticate the recorded owner through the customer-controlled recovery path and retry", receipt: "owner principal and recovery receipt mismatch" });
     const account = this.requireAccount();
     const resources = this.state.resources;
     if (!resources) throw new CustomerRealmInstallationError({ code: "recovery_invalid", message: "Recovery activation has no customer resource record to reconcile.", recoveryAction: "restore a bundle containing the customer resource receipt", receipt: "resources missing" });
-    const inspected = await this.input.cloudflare.inspectProvision({ accountId: account.accountId, installationId: this.state.installationId, operationId: `recover:${this.state.checkpoint.checkpointId}`, resourceIds: resources.resourceIds });
+    const inspected = await this.input.cloudflare.inspectProvision({ accountId: account.accountId, installationId: this.state.installationId, operationId: `recover:${this.state.checkpoint.checkpointId}`, resourceIds: resources.resourceIds, ...(input.providerAuthorization ? { authorization: input.providerAuthorization } : {}) });
     if (inspected.status !== "succeeded") return this.recordProviderFailure("realm.recover", inspected);
     if (!this.identity) throw new CustomerRealmInstallationError({ code: "recovery_invalid", message: "Recovery activation has no Realm policy state.", recoveryAction: "restore the Realm snapshot into the quarantined installation", receipt: "identity policy missing" });
     await this.transition(this.state.project?.state === "imported" ? "active" : this.state.project ? "project-ready" : "owner-ready", "recovery.activated", { principalId: input.ownerPrincipalId, checkpointId: this.state.checkpoint.checkpointId, details: { recoveryReceipt: input.recoveryReceipt, credentialsRestored: false, resourcesVerified: true } }, { resources: { ...resources, state: "verified" }, degraded: undefined, realmSnapshot: this.identity.getRecoverySnapshot() });

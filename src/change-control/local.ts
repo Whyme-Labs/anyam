@@ -625,6 +625,13 @@ export class LocalChangeCoordinator {
     changeId: string;
     workspaceId?: string;
     declaredEffects: readonly string[];
+    /**
+     * A driver may import an external commit into the Change Workspace and
+     * report the resulting Source Space snapshots explicitly. When omitted,
+     * the Workspace baseline snapshots are used for compatibility with local
+     * edits and existing callers.
+     */
+    sourceSpaceSnapshots?: Readonly<Record<string, string>>;
     conflictIds?: readonly string[];
     kind?: ChangeRevisionKind;
     actor?: ActorRef;
@@ -699,8 +706,27 @@ export class LocalChangeCoordinator {
     }
 
     const priorRevision = change.latestRevisionId ? this.revisions.get(change.latestRevisionId) : undefined;
+    const mountedSourceSpaceIds = workspace.mounts.map((mount) => mount.sourceSpaceId);
+    const requestedSnapshots = input.sourceSpaceSnapshots;
+    if (requestedSnapshots) {
+      const requestedIds = Object.keys(requestedSnapshots).sort();
+      const mountedIds = [...mountedSourceSpaceIds].sort();
+      if (
+        requestedIds.length !== mountedIds.length
+        || requestedIds.some((sourceSpaceId, index) => sourceSpaceId !== mountedIds[index])
+        || Object.values(requestedSnapshots).some((snapshotId) => snapshotId.trim().length === 0)
+      ) {
+        failure({
+          code: "workspace-source-not-authorized",
+          message: "Change Revision snapshot updates must name exactly the Source Spaces materialized in the Workspace.",
+          affectedObject: change.id,
+          recoveryAction: "import the external result into the authorized Workspace Source Spaces and retry with one non-empty snapshot per mount",
+          receipt: `change=${change.id}; rule=revision-snapshot-subset-of-workspace-view; requested=${requestedIds.length}; mounted=${mountedIds.length}`,
+        });
+      }
+    }
     const sourceSpaceSnapshots = Object.fromEntries(
-      workspace.mounts.map((mount) => [mount.sourceSpaceId, mount.snapshotId]),
+      workspace.mounts.map((mount) => [mount.sourceSpaceId, requestedSnapshots?.[mount.sourceSpaceId] ?? mount.snapshotId]),
     ) as Readonly<Record<string, string>>;
     const revision: ChangeRevision = {
       protocol: CONTRACT_VERSIONS.change,

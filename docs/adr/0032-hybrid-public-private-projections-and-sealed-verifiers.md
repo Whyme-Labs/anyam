@@ -76,6 +76,25 @@ compatibility verifier and return only an approved result projection.
     distribution but retains the published lineage and cannot erase existing
     clones, mirrors, or previously disclosed history.
 
+### External public contributions
+
+17. A public clone is an input to an Anyam Change, never a canonical write
+    path. The contribution adapter records the external commit as public
+    origin metadata, imports its resulting public Source Space snapshot into
+    an authorized Change Workspace, and publishes an immutable Change Revision
+    before review or Landing.
+18. A Change Revision may report explicit resulting Source Space snapshots only
+    for the Source Spaces materialized in its Workspace. Extra, missing, empty,
+    or restricted snapshot entries fail closed with an actionable receipt; a
+    public contributor cannot smuggle a private Source Space into a public
+    Change through an imported commit.
+19. The public contribution path may Land a public snapshot while preserving
+    the private canonical snapshot unchanged. Landing remains the only
+    canonical mutation and is compare-and-swap guarded.
+20. Public Sealed Verifier results use projection-bound opaque verifier and
+    contract identities. Private contract IDs or provider metadata must not
+    become a public side channel merely because the result status is safe.
+
 ## Consequences
 
 - A public contributor can use ordinary Git against a safe public repository.

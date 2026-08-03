@@ -1,0 +1,56 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-realm",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "ANYAM_HOSTING_MODE": "customer-operated",
+    "ANYAM_INSTALLATION_ID": "replace-with-installation-id",
+    "ANYAM_PROTOCOL_VERSION": "anyam.customer-realm-worker/v1",
+    "ANYAM_BUILD_REVISION": "replace-with-source-revision"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REALM_COORDINATOR",
+        "class_name": "AnyamRealmCoordinator"
+      }
+    ]
+  },
+  "exports": {
+    "AnyamRealmCoordinator": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "d1_databases": [
+    {
+      "binding": "ANYAM_METADATA_DB",
+      "database_name": "replace-with-customer-anyam-metadata",
+      "database_id": "replace-with-customer-d1-id"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "ANYAM_EXPORTS",
+      "bucket_name": "replace-with-customer-anyam-exports",
+      "preview_bucket_name": "replace-with-customer-anyam-exports-preview"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "ANYAM_EVENTS",
+        "queue": "replace-with-customer-anyam-events"
+      }
+    ]
+  },
+  "workflows": [
+    {
+      "binding": "ANYAM_WORKFLOW",
+      "name": "anyam-realm-foundation",
+      "class_name": "AnyamRealmWorkflow"
+    }
+  ]
+}

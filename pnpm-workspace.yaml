@@ -1,2 +1,3 @@
 packages:
   - packages/create-anyam
+  - apps/realm-worker

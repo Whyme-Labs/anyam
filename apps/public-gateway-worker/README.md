@@ -61,3 +61,21 @@ The export is stored in the customer-owned Durable Object and is verified by a
 content digest before compaction. A restarted coordinator can load the export,
 retain accepted contribution IDs, and reject both same-payload idempotency
 replays and changed-payload request-ID replays after compaction.
+
+## Exact replay archive after the local tripwire
+
+For a high-volume Project, bind the optional customer-owned R2 bucket
+`PUBLIC_GATEWAY_REPLAY_ARCHIVE`. When the measured local tombstone tripwire
+would be exceeded, the coordinator writes one immutable exact replay object per
+request before clearing those local tombstones. The archive object is addressed
+by the Project and request identity, read back, and content-digest verified.
+The coordinator remains authoritative for accepted lineage and never treats an
+archive object as Landing or Change authority.
+
+After restart, archived request identities are checked before any new intake is
+accepted. An archive read or write failure is fail-closed and names the
+recovery action; an already-written immutable object can be retried safely.
+The archive's `bytes` receipt is the measured serialized object representation,
+not a claim about R2 billing or a universal provider quota. Provider usage,
+latency, and cost must be remeasured for each customer workload before setting
+the archive tripwire.

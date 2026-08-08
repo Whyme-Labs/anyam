@@ -5,6 +5,7 @@ import {
   CONTRACT_VERSIONS,
   PublicGatewayCoordinator,
   PUBLIC_GATEWAY_LEDGER_PROTOCOL,
+  PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL,
   applyPublicGatewayEdgeLimit,
   parsePublicGatewayProviderOutcome,
   type PublicGatewayState,
@@ -12,6 +13,10 @@ import {
   type PublicGatewayStore,
   type PublicIntakePolicy,
 } from "../src/index.ts";
+import {
+  CloudflarePublicGatewayReplayArchive,
+  type PublicGatewayReplayArchiveBucket,
+} from "../src/cloudflare/public-gateway-replay-archive.ts";
 
 function policy(mode: PublicIntakePolicy["mode"] = "rate-limited"): PublicIntakePolicy {
   return {
@@ -55,6 +60,37 @@ class MemoryStore implements PublicGatewayStore {
   async loadLedgerExport(exportId: string): Promise<PublicGatewayLedgerExport | undefined> {
     const bundle = this.exports.get(exportId);
     return bundle ? structuredClone(bundle) : undefined;
+  }
+}
+
+class MemoryR2Bucket implements PublicGatewayReplayArchiveBucket {
+  readonly objects = new Map<string, string>();
+
+  async put(key: string, value: string): Promise<void> {
+    this.objects.set(key, value);
+  }
+
+  async get(key: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer> } | null> {
+    const value = this.objects.get(key);
+    if (value === undefined) return null;
+    return { arrayBuffer: async () => new TextEncoder().encode(value).buffer };
+  }
+
+  setRaw(key: string, value: unknown): void {
+    this.objects.set(key, JSON.stringify(value));
+  }
+}
+
+class ReplayArchiveStore extends MemoryStore {
+  readonly bucket = new MemoryR2Bucket();
+  readonly archive = new CloudflarePublicGatewayReplayArchive(this.bucket, "project:video-player");
+
+  async archiveReplayTombstone(tombstone: Parameters<NonNullable<PublicGatewayStore["archiveReplayTombstone"]>>[0]): Promise<Awaited<ReturnType<NonNullable<PublicGatewayStore["archiveReplayTombstone"]>>>> {
+    return this.archive.put(tombstone);
+  }
+
+  async loadReplayTombstone(requestId: string): Promise<Awaited<ReturnType<NonNullable<PublicGatewayStore["loadReplayTombstone"]>>>> {
+    return this.archive.get(requestId);
   }
 }
 
@@ -231,6 +267,70 @@ test("ledger compaction rejects stale exports and exposes a measured budget fail
   await assert.rejects(
     () => coordinator.compactLedger({ actorId: "principal:gateway-owner", exportId: fresh.exportId, policy: retentionPolicy({ requestRecordLimit: 1 }), receipt: "receipt:ledger-compact:budget" }),
     (error: unknown) => error instanceof Error && error.name === "PublicGatewayError" && error.message.includes("budget=public-gateway-request-records") && error.message.includes("limit=1") && error.message.includes("asked=2") && error.message.includes("receipt:ledger-retention:request-records"),
+  );
+});
+
+test("customer-owned replay archive is immutable, digest-verified, and idempotent", async () => {
+  const bucket = new MemoryR2Bucket();
+  const archive = new CloudflarePublicGatewayReplayArchive(bucket, "project:video-player");
+  const tombstone = {
+    requestId: "request:archive-1",
+    payloadDigest: "sha256:archive-1",
+    contributionId: "contribution:archive-1",
+    originalStatus: "denied" as const,
+    recordedAt: "2026-08-08T00:00:00.000Z",
+    compactedAt: "2026-08-08T00:00:02.000Z",
+    exportDigest: "sha256:export-1",
+    receipt: "ledger=archive-fixture; exact=true",
+  };
+  const first = await archive.put(tombstone);
+  assert.equal(first.protocol, PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL);
+  assert.equal(first.idempotent, false);
+  assert.equal(first.bytes > 0, true);
+  const replay = await archive.put({ ...tombstone, exportDigest: "sha256:retry-export", receipt: "ledger=archive-retry" });
+  assert.equal(replay.idempotent, true);
+  assert.equal(replay.digest, first.digest);
+  assert.deepEqual(await archive.get(tombstone.requestId), tombstone);
+
+  const stored = JSON.parse(new TextDecoder().decode(await (await bucket.get(first.key))!.arrayBuffer())) as Record<string, unknown>;
+  bucket.setRaw(first.key, { ...stored, tombstone: { ...(stored.tombstone as Record<string, unknown>), payloadDigest: "sha256:tampered" } });
+  await assert.rejects(
+    () => archive.get(tombstone.requestId),
+    (error: unknown) => error instanceof Error && error.name === "PublicGatewayReplayArchiveError" && error.message.includes("digest"),
+  );
+});
+
+test("Public Gateway archives exact tombstones beyond the local tripwire and fails closed when the archive is unavailable", async () => {
+  const store = new ReplayArchiveStore();
+  let now = new Date("2026-08-08T00:00:00.000Z");
+  const gatewayClock = () => now;
+  const coordinator = new PublicGatewayCoordinator(policy(), store, gatewayClock);
+  const first = await coordinator.submit({ requestId: "request:archive-denied-1", actorId: "actor:anonymous", contributionId: "contribution:archive-denied-1", payloadDigest: "sha256:archive-denied-1" });
+  const second = await coordinator.submit({ requestId: "request:archive-denied-2", actorId: "actor:anonymous", contributionId: "contribution:archive-denied-2", payloadDigest: "sha256:archive-denied-2" });
+  assert.equal(first.status, "denied");
+  assert.equal(second.status, "denied");
+  now = new Date("2026-08-08T00:00:02.000Z");
+  const exported = await coordinator.exportLedger({ actorId: "principal:gateway-owner", exportId: "ledger-export:archive-fixture", receipt: "receipt:archive-export" });
+  const compacted = await coordinator.compactLedger({ actorId: "principal:gateway-owner", exportId: exported.exportId, policy: retentionPolicy({ requestTombstoneLimit: 1 }), receipt: "receipt:archive-compact" });
+  assert.equal(compacted.after.requestTombstones, 0);
+  assert.equal(compacted.compacted.requestRecords, 2);
+  assert.match(compacted.recoveryCheckpoint, /ledger-archived/);
+  assert.equal((await coordinator.snapshot()).ledger.archivedTombstoneCount, 2);
+
+  const restarted = new PublicGatewayCoordinator(policy(), store, gatewayClock);
+  const same = await restarted.submit({ requestId: first.decision.requestId, actorId: "actor:anonymous", contributionId: "contribution:archive-denied-1", payloadDigest: "sha256:archive-denied-1" });
+  assert.equal(same.idempotent, true);
+  assert.match(same.decision.receipt, /compacted=true/);
+  const changed = await restarted.submit({ requestId: first.decision.requestId, actorId: "actor:anonymous", contributionId: "contribution:archive-other", payloadDigest: "sha256:archive-other" });
+  assert.equal(changed.idempotent, false);
+  assert.match(changed.decision.receipt, /replay=true/);
+
+  const unavailable = new ReplayArchiveStore();
+  unavailable.loadReplayTombstone = async () => { throw new Error("simulated archive outage"); };
+  const unavailableCoordinator = new PublicGatewayCoordinator(policy(), unavailable, gatewayClock);
+  await assert.rejects(
+    () => unavailableCoordinator.submit({ requestId: "request:missing-archive", actorId: "actor:anonymous", contributionId: "contribution:missing-archive", payloadDigest: "sha256:missing-archive" }),
+    (error: unknown) => error instanceof Error && error.name === "PublicGatewayError" && error.message.includes("replay archive") && error.message.includes("not materialized"),
   );
 });
 

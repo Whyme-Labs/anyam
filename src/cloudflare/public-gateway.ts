@@ -9,6 +9,7 @@ import { CONTRACT_VERSIONS } from "../kernel/contracts.ts";
 
 export const PUBLIC_GATEWAY_PROTOCOL = CONTRACT_VERSIONS.publicGateway;
 export const PUBLIC_GATEWAY_LEDGER_PROTOCOL = CONTRACT_VERSIONS.publicGatewayLedger;
+export const PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL = CONTRACT_VERSIONS.publicGatewayReplayArchive;
 
 export type PublicGatewayStatus = "closed" | "open" | "suspended";
 
@@ -47,6 +48,14 @@ export type PublicGatewayLedgerMetadata = {
   generation: number;
   requestTombstones: readonly PublicGatewayRequestTombstone[];
   auditCompactedCount: number;
+  archivedTombstoneCount: number;
+  lastArchive?: {
+    protocol: typeof PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL;
+    exportDigest: string;
+    archivedCount: number;
+    createdAt: string;
+    receipt: string;
+  };
   lastExport?: {
     exportId: string;
     digest: string;
@@ -56,6 +65,16 @@ export type PublicGatewayLedgerMetadata = {
     auditEventCount: number;
     receipt: string;
   };
+};
+
+export type PublicGatewayReplayArchiveReceipt = {
+  protocol: typeof PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL;
+  requestId: string;
+  digest: string;
+  bytes: number;
+  key: string;
+  idempotent: boolean;
+  receipt: string;
 };
 
 export type PublicGatewayState = {
@@ -114,6 +133,8 @@ export type PublicGatewayStore = {
   save(state: PublicGatewayState): Promise<void>;
   saveLedgerExport?(bundle: PublicGatewayLedgerExport): Promise<void>;
   loadLedgerExport?(exportId: string): Promise<PublicGatewayLedgerExport | undefined>;
+  archiveReplayTombstone?(tombstone: PublicGatewayRequestTombstone): Promise<PublicGatewayReplayArchiveReceipt>;
+  loadReplayTombstone?(requestId: string): Promise<PublicGatewayRequestTombstone | undefined>;
 };
 
 export type PublicGatewayClock = () => Date;
@@ -312,6 +333,7 @@ function defaultLedgerMetadata(): PublicGatewayLedgerMetadata {
     generation: 0,
     requestTombstones: [],
     auditCompactedCount: 0,
+    archivedTombstoneCount: 0,
   };
 }
 
@@ -326,6 +348,7 @@ function normalizeState(state: PublicGatewayState): PublicGatewayState {
       ...ledger,
       requestTombstones: ledger.requestTombstones ?? [],
       auditCompactedCount: ledger.auditCompactedCount ?? 0,
+      archivedTombstoneCount: ledger.archivedTombstoneCount ?? 0,
     },
   });
 }
@@ -521,7 +544,19 @@ export class PublicGatewayCoordinator {
     required(input.payloadDigest, "payloadDigest");
     const state = await this.snapshot();
     const existing = findRecord(state, input.requestId);
-    const tombstone = existing ? undefined : findTombstone(state, input.requestId);
+    let tombstone = existing ? undefined : findTombstone(state, input.requestId);
+    if (!existing && !tombstone && this.store.loadReplayTombstone) {
+      try {
+        tombstone = await this.store.loadReplayTombstone(input.requestId);
+      } catch (error) {
+        throw new PublicGatewayError({
+          code: "provider-unavailable",
+          message: "The Public Gateway replay archive could not be verified; the request was not materialized.",
+          recoveryAction: "restore the customer-owned replay archive or retry after its provider recovers; no new request identity was accepted",
+          receipt: `replayArchive=lookup-failed; request=${input.requestId}; materialized=false; cause=${error instanceof Error ? error.name : "unknown"}`,
+        });
+      }
+    }
     if (existing && existing.payloadDigest !== input.payloadDigest) {
       const replay = decision({
         id: `public-gateway-decision:replay:${state.requests + 1}`,
@@ -884,8 +919,24 @@ export class PublicGatewayCoordinator {
       receipt: `ledger=${PUBLIC_GATEWAY_LEDGER_PROTOCOL}; retentionClass=${record.retryable ? "retryable-window" : "terminal-denial"}; requestId=${record.requestId}; export=${bundle.digest}; replayIndex=retained`,
     }));
     const tombstones = [...state.ledger.requestTombstones, ...newTombstones];
+    let retainedTombstones = tombstones;
+    let archivedTombstones: PublicGatewayReplayArchiveReceipt[] = [];
     if (tombstones.length > retention.requestTombstoneLimit.value) {
-      budgetFailure("public-gateway-request-tombstones", retention.requestTombstoneLimit, tombstones.length, retention.requestTombstoneLimit.receipt, "retain the exported ledger and raise or remeasure the replay-index tripwire before accepting more public intake");
+      if (!this.store.archiveReplayTombstone || !this.store.loadReplayTombstone) {
+        budgetFailure("public-gateway-request-tombstones", retention.requestTombstoneLimit, tombstones.length, retention.requestTombstoneLimit.receipt, "bind a customer-owned exact replay archive or raise/remeasure the local replay-index tripwire before accepting more public intake");
+      }
+      try {
+        archivedTombstones = [];
+        for (const tombstone of tombstones) archivedTombstones.push(await this.store.archiveReplayTombstone(tombstone));
+      } catch (error) {
+        throw new PublicGatewayError({
+          code: "provider-unavailable",
+          message: "The Public Gateway replay archive could not durably store every exact tombstone; no coordinator state was compacted.",
+          recoveryAction: "retry export-before-compaction after the customer-owned replay archive recovers; already-written immutable objects are safe to replay",
+          receipt: `replayArchive=write-failed; exportId=${input.exportId}; tombstones=${tombstones.length}; materialized=false; cause=${error instanceof Error ? error.name : "unknown"}`,
+        });
+      }
+      retainedTombstones = [];
     }
     if (retained.length > retention.requestRecordLimit.value) {
       budgetFailure("public-gateway-request-records", retention.requestRecordLimit, retained.length, retention.requestRecordLimit.receipt, "retain the exported ledger and remeasure the detailed-record tripwire; accepted or pending lineage is never deleted");
@@ -905,11 +956,21 @@ export class PublicGatewayCoordinator {
       ...state,
       requestRecords: retained,
       audit,
-      recoveryCheckpoint: `checkpoint:public-gateway:ledger-compacted:${state.ledger.generation + 1}`,
+      recoveryCheckpoint: `checkpoint:public-gateway:${archivedTombstones.length > 0 ? "ledger-archived" : "ledger-compacted"}:${state.ledger.generation + 1}`,
       ledger: {
         ...state.ledger,
-        requestTombstones: tombstones,
+        requestTombstones: retainedTombstones,
         auditCompactedCount: compactedAuditEvents,
+        archivedTombstoneCount: state.ledger.archivedTombstoneCount + archivedTombstones.length,
+        ...(archivedTombstones.length > 0 ? {
+          lastArchive: {
+            protocol: PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL,
+            exportDigest: bundle.digest,
+            archivedCount: archivedTombstones.length,
+            createdAt: compactedAt,
+            receipt: `replayArchive=${PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL}; export=${bundle.digest}; archived=${archivedTombstones.length}; exact=true; providerAuthority=false`,
+          },
+        } : {}),
       },
     }, {
       action: "ledger-compact",
@@ -924,10 +985,10 @@ export class PublicGatewayCoordinator {
       exportId: input.exportId,
       exportDigest: bundle.digest,
       before: { requestRecords: state.requestRecords.length, requestTombstones: state.ledger.requestTombstones.length, auditEvents: state.audit.length },
-      after: { requestRecords: retained.length, requestTombstones: tombstones.length, auditEvents: next.audit.length },
+      after: { requestRecords: retained.length, requestTombstones: retainedTombstones.length, auditEvents: next.audit.length },
       compacted: { requestRecords: eligible.length, auditEvents: submitAudit.length - retainedSubmitAudit.length },
       recoveryCheckpoint: next.recoveryCheckpoint,
-      receipt: `ledger=${PUBLIC_GATEWAY_LEDGER_PROTOCOL}; export=${bundle.digest}; compactedAt=${compactedAt}; acceptedLineage=preserved; replayIndex=retained; canonicalProjectMutation=false`,
+      receipt: `ledger=${PUBLIC_GATEWAY_LEDGER_PROTOCOL}; export=${bundle.digest}; compactedAt=${compactedAt}; acceptedLineage=preserved; replayIndex=${archivedTombstones.length > 0 ? "archived-exact" : "retained"}; archived=${archivedTombstones.length}; canonicalProjectMutation=false`,
     };
   }
 

@@ -4,6 +4,7 @@ import { DurableObject } from "cloudflare:workers";
 
 import {
   PublicGatewayCoordinator,
+  PublicGatewayError,
   PUBLIC_GATEWAY_PROTOCOL,
   applyPublicGatewayEdgeLimit,
   parsePublicGatewayLedgerRetentionPolicy,
@@ -12,6 +13,7 @@ import {
   type PublicGatewayStore,
   type PublicGatewayLedgerExport,
 } from "../../../src/cloudflare/public-gateway.ts";
+import { CloudflarePublicGatewayReplayArchive } from "../../../src/cloudflare/public-gateway-replay-archive.ts";
 import {
   createPublicGatewayAbuseProvider,
   type PublicGatewayAbuseMode,
@@ -25,6 +27,7 @@ import {
 
 export interface Env {
   PUBLIC_GATEWAY_COORDINATOR: DurableObjectNamespace;
+  PUBLIC_GATEWAY_REPLAY_ARCHIVE?: R2Bucket;
   PUBLIC_EDGE_RATE_LIMITER?: RateLimit;
   PUBLIC_PROJECT_ID: string;
   PUBLIC_SOURCE_SPACE_ID: string;
@@ -309,6 +312,11 @@ export class PublicGatewayCoordinatorDO extends DurableObject<Env> {
       saveLedgerExport: async (bundle) => await this.ctx.storage.put(`ledger-export:${bundle.exportId}`, bundle),
       loadLedgerExport: async (exportId) => await this.ctx.storage.get<PublicGatewayLedgerExport>(`ledger-export:${exportId}`),
     };
+    if (env.PUBLIC_GATEWAY_REPLAY_ARCHIVE) {
+      const archive = new CloudflarePublicGatewayReplayArchive(env.PUBLIC_GATEWAY_REPLAY_ARCHIVE, configured.policy.projectId);
+      store.archiveReplayTombstone = async (tombstone) => await archive.put(tombstone);
+      store.loadReplayTombstone = async (requestId) => await archive.get(requestId);
+    }
     const coordinator = new PublicGatewayCoordinator(configured.policy, store);
     const url = new URL(request.url);
     try {
@@ -332,6 +340,10 @@ export class PublicGatewayCoordinatorDO extends DurableObject<Env> {
       }
       return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "not_found", recoveryAction: "use the documented coordinator operation", receipt: `path=${url.pathname}; operation=not-found` }, 404);
     } catch (error) {
+      if (error instanceof PublicGatewayError) {
+        const status = error.code === "provider-unavailable" ? 503 : error.code === "budget-exceeded" ? 409 : 422;
+        return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, ...error.toJSON() }, status);
+      }
       const message = error instanceof Error ? error.message : "public gateway coordinator failed";
       return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "coordinator_failed", message, recoveryAction: "inspect the customer Recovery Checkpoint and retry the same operation identity", receipt: `path=${url.pathname}; stateTransition=unknown` }, 422);
     }

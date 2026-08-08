@@ -2,6 +2,18 @@
   "name": "create-anyam",
   "version": "0.0.0",
   "description": "Package-manager-neutral TypeScript scaffolding and local Anyam CLI",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wms2537/anyam.git",
+    "directory": "packages/create-anyam"
+  },
+  "bugs": {
+    "url": "https://github.com/wms2537/anyam/issues"
+  },
+  "homepage": "https://github.com/wms2537/anyam/tree/main/packages/create-anyam#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "bin": {
     "create-anyam": "dist/create-anyam.js",

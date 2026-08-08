@@ -54,7 +54,25 @@ export type PublicGatewayClock = () => Date;
 
 export type PublicGatewayProviderOutcome =
   | { status: "ready"; receipt: string }
-  | { status: "timeout"; receipt: string };
+  | { status: "timeout"; receipt: string }
+  | { status: "abuse"; outcome: "challenge" | "denied" | "unavailable"; retryable: boolean; receipt: string };
+
+export function parsePublicGatewayProviderOutcome(value: unknown): PublicGatewayProviderOutcome | undefined {
+  if (value === "timeout") return { status: "timeout", receipt: "provider=fixture-driver; timeout=simulated; retryable=true" };
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.status !== "abuse") return undefined;
+  if (candidate.outcome !== "challenge" && candidate.outcome !== "denied" && candidate.outcome !== "unavailable") {
+    return { status: "abuse", outcome: "denied", retryable: false, receipt: "provider=invalid; outcome=not-recognized; failClosed=true" };
+  }
+  if (typeof candidate.retryable !== "boolean") {
+    return { status: "abuse", outcome: "denied", retryable: false, receipt: "provider=invalid; retryable=not-boolean; failClosed=true" };
+  }
+  if (typeof candidate.receipt !== "string" || candidate.receipt.trim().length === 0) {
+    return { status: "abuse", outcome: "denied", retryable: false, receipt: "provider=invalid; receipt=missing; failClosed=true" };
+  }
+  return { status: "abuse", outcome: candidate.outcome, retryable: candidate.retryable, receipt: candidate.receipt };
+}
 
 export type PublicGatewaySubmitInput = {
   requestId: string;
@@ -65,9 +83,9 @@ export type PublicGatewaySubmitInput = {
 };
 
 export type PublicGatewayResult =
-  | { status: "accepted"; decision: PublicIntakeDecision; idempotent: boolean; providerReceipt?: string }
-  | { status: "denied"; decision: PublicIntakeDecision; idempotent: boolean; providerReceipt?: string }
-  | { status: "approval_required"; decision: PublicIntakeDecision; idempotent: boolean; providerReceipt?: string };
+  | { status: "accepted"; decision: PublicIntakeDecision; idempotent: boolean; providerReceipt?: string; providerOutcome?: string }
+  | { status: "denied"; decision: PublicIntakeDecision; idempotent: boolean; providerReceipt?: string; providerOutcome?: string }
+  | { status: "approval_required"; decision: PublicIntakeDecision; idempotent: boolean; providerReceipt?: string; providerOutcome?: string };
 
 export type PublicGatewayAdminActor = {
   id: string;
@@ -302,6 +320,38 @@ export class PublicGatewayCoordinator {
 
     const requested = state.requests + 1;
     const provider = input.provider ?? { status: "ready" as const, receipt: "provider=customer-gateway; outcome=ready" };
+    if (provider.status === "abuse") {
+      const denied = decision({
+        id: `public-gateway-decision:abuse:${requested}`,
+        requestId: input.requestId,
+        actorId: input.actorId,
+        status: "denied",
+        disposition: "not-materialized",
+        requested,
+        consumed: state.accepted,
+        nextAction: provider.outcome === "challenge"
+          ? "complete a fresh provider challenge and retry the same request identity with the same envelope"
+          : provider.outcome === "unavailable"
+            ? "retry with a fresh provider token after the customer-owned provider recovers"
+            : "inspect the provider abuse decision and use the owner-approved recovery path",
+        receipt: `policy=${this.policy.id}; request=${input.requestId}; providerOutcome=${provider.outcome}; provider=${provider.receipt}; materialized=false; landingAuthority=false`,
+      }, this.policy);
+      const next = this.withAudit({
+        ...state,
+        requests: requested,
+        denied: state.denied + 1,
+        recoveryCheckpoint: `checkpoint:public-gateway:abuse:${provider.outcome}:${requested}`,
+        requestRecords: [...state.requestRecords, this.record(input, denied, provider.retryable)],
+      }, {
+        action: "submit",
+        actorId: input.actorId,
+        requestId: input.requestId,
+        outcome: "denied",
+        receipt: denied.receipt,
+      });
+      await this.store.save(next);
+      return { status: "denied", decision: denied, idempotent: false, providerReceipt: provider.receipt, providerOutcome: provider.outcome };
+    }
     if (provider.status === "timeout") {
       const unavailable = decision({
         id: `public-gateway-decision:provider-timeout:${requested}`,

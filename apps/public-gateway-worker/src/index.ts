@@ -6,9 +6,15 @@ import {
   PublicGatewayCoordinator,
   PUBLIC_GATEWAY_PROTOCOL,
   applyPublicGatewayEdgeLimit,
+  parsePublicGatewayProviderOutcome,
   type PublicGatewayState,
   type PublicGatewayStore,
 } from "../../../src/cloudflare/public-gateway.ts";
+import {
+  createPublicGatewayAbuseProvider,
+  type PublicGatewayAbuseMode,
+  type PublicGatewayAbuseProvider,
+} from "../../../src/cloudflare/public-gateway-abuse.ts";
 import {
   CONTRACT_VERSIONS,
   type PublicIntakeMeasuredLimit,
@@ -35,6 +41,12 @@ export interface Env {
   PUBLIC_INTAKE_LIMIT_MEASURED_AT: string;
   PUBLIC_INTAKE_LIMIT_METHOD: string;
   PUBLIC_ENABLE_FIXTURE_FAILURES: string;
+  PUBLIC_ABUSE_MODE?: PublicGatewayAbuseMode;
+  PUBLIC_TURNSTILE_SECRET_KEY?: string;
+  PUBLIC_TURNSTILE_EXPECTED_ACTION?: string;
+  PUBLIC_TURNSTILE_EXPECTED_HOSTNAME?: string;
+  PUBLIC_TURNSTILE_VERIFY_TIMEOUT_MS?: string;
+  PUBLIC_TURNSTILE_VERIFY_TIMEOUT_RECEIPT?: string;
   UPSTREAM_GIT_BASE: string;
   ADMIN_TOKEN: string;
 }
@@ -79,7 +91,29 @@ function measuredLimit(input: {
   };
 }
 
-function configuration(env: Env): { policy: PublicIntakePolicy; edgeLimit: PublicIntakeMeasuredLimit } {
+function abuseConfiguration(env: Env): { mode: PublicGatewayAbuseMode; provider: PublicGatewayAbuseProvider; providerName: string; timeoutMs?: number; timeoutReceipt?: string } {
+  const mode = env.PUBLIC_ABUSE_MODE ?? "edge-only";
+  if (mode !== "edge-only" && mode !== "turnstile-required") throw new PublicGatewayConfigurationError(["PUBLIC_ABUSE_MODE"]);
+  if (mode === "edge-only") return { mode, provider: createPublicGatewayAbuseProvider({ mode }), providerName: "none" };
+  const secretKey = required(env.PUBLIC_TURNSTILE_SECRET_KEY, "PUBLIC_TURNSTILE_SECRET_KEY");
+  const timeoutMs = positiveInteger(env.PUBLIC_TURNSTILE_VERIFY_TIMEOUT_MS, "PUBLIC_TURNSTILE_VERIFY_TIMEOUT_MS");
+  const timeoutReceipt = required(env.PUBLIC_TURNSTILE_VERIFY_TIMEOUT_RECEIPT, "PUBLIC_TURNSTILE_VERIFY_TIMEOUT_RECEIPT");
+  return {
+    mode,
+    provider: createPublicGatewayAbuseProvider({ mode, turnstile: {
+      secretKey,
+      timeoutMs,
+      timeoutReceipt,
+      ...(env.PUBLIC_TURNSTILE_EXPECTED_ACTION ? { expectedAction: env.PUBLIC_TURNSTILE_EXPECTED_ACTION } : {}),
+      ...(env.PUBLIC_TURNSTILE_EXPECTED_HOSTNAME ? { expectedHostname: env.PUBLIC_TURNSTILE_EXPECTED_HOSTNAME } : {}),
+    } }),
+    providerName: "cloudflare-turnstile",
+    timeoutMs,
+    timeoutReceipt,
+  };
+}
+
+function configuration(env: Env): { policy: PublicIntakePolicy; edgeLimit: PublicIntakeMeasuredLimit; abuse: ReturnType<typeof abuseConfiguration> } {
   const projectId = required(env.PUBLIC_PROJECT_ID, "PUBLIC_PROJECT_ID");
   const sourceSpaceId = required(env.PUBLIC_SOURCE_SPACE_ID, "PUBLIC_SOURCE_SPACE_ID");
   const edgeLimit = measuredLimit({
@@ -104,6 +138,7 @@ function configuration(env: Env): { policy: PublicIntakePolicy; edgeLimit: Publi
   if (env.PUBLIC_INTAKE_MODE !== "rate-limited" && env.PUBLIC_INTAKE_MODE !== "approval-only") {
     throw new PublicGatewayConfigurationError(["PUBLIC_INTAKE_MODE"]);
   }
+  const abuse = abuseConfiguration(env);
   if (env.PUBLIC_INTAKE_MODE === "rate-limited") {
     const logicalLimit = measuredLimit({
       value: env.PUBLIC_INTAKE_LIMIT,
@@ -113,9 +148,9 @@ function configuration(env: Env): { policy: PublicIntakePolicy; edgeLimit: Publi
       receipt: env.PUBLIC_INTAKE_LIMIT_RECEIPT,
       names: { value: "PUBLIC_INTAKE_LIMIT", unit: "PUBLIC_INTAKE_LIMIT_UNIT", measuredAt: "PUBLIC_INTAKE_LIMIT_MEASURED_AT", method: "PUBLIC_INTAKE_LIMIT_METHOD", receipt: "PUBLIC_INTAKE_LIMIT_RECEIPT" },
     });
-    return { policy: { ...base, configuredLimit: logicalLimit }, edgeLimit };
+    return { policy: { ...base, configuredLimit: logicalLimit }, edgeLimit, abuse };
   }
-  return { policy: base, edgeLimit };
+  return { policy: base, edgeLimit, abuse };
 }
 
 function json(value: unknown, status = 200, headers?: HeadersInit): Response {
@@ -136,6 +171,14 @@ function contributionId(body: JsonObject): string {
   if (typeof value !== "string" || value.trim().length === 0) throw new Error("contributionId is required");
   return value;
 }
+
+function optionalToken(body: JsonObject): string | undefined {
+  const value = body.turnstileToken;
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new Error("turnstileToken must be a string when provided");
+  return value;
+}
+
 
 function envelope(body: JsonObject): JsonObject {
   const value = body.envelope;
@@ -278,7 +321,7 @@ export class PublicGatewayCoordinatorDO extends DurableObject<Env> {
           contributionId: String(body.contributionId ?? ""),
           payloadDigest: String(body.payloadDigest ?? ""),
         };
-        const provider = body.provider === "timeout" ? { status: "timeout" as const, receipt: "provider=fixture-driver; timeout=simulated; retryable=true" } : undefined;
+        const provider = parsePublicGatewayProviderOutcome(body.provider);
         return json(await coordinator.submit({ ...input, ...(provider ? { provider } : {}) }));
       }
       return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "not_found", recoveryAction: "use the documented coordinator operation", receipt: `path=${url.pathname}; operation=not-found` }, 404);
@@ -302,7 +345,7 @@ export default {
     if (url.pathname === "/health" && request.method === "GET") {
       const stateResponse = await coordinatorRequest(env, "/state", { method: "GET" });
       const state = stateResponse.ok ? await stateResponse.json<PublicGatewayState>() : undefined;
-      return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, intakeProtocol: CONTRACT_VERSIONS.publicIntake, status: state?.status ?? "closed", projectId: env.PUBLIC_PROJECT_ID, publicSourceSpaceId: env.PUBLIC_SOURCE_SPACE_ID, snapshotId: required(env.PUBLIC_SNAPSHOT_ID, "PUBLIC_SNAPSHOT_ID"), contentDigest: required(env.PUBLIC_CONTENT_DIGEST, "PUBLIC_CONTENT_DIGEST"), publicProjection: true, privateSourceSpace: "not-discoverable", landingAuthority: false, edgeLimiter: { provider: "cloudflare-workers-rate-limit", configuredLimit: configured.edgeLimit, logicalLedgerAuthoritative: false }, recoveryAction: state?.recoveryCheckpoint ?? "owner must explicitly open Public Intake", receipt: `gateway=${PUBLIC_GATEWAY_PROTOCOL}; customerOperated=true; policy=${configured.policy.receipt}; providerUrl=not-disclosed` });
+      return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, intakeProtocol: CONTRACT_VERSIONS.publicIntake, status: state?.status ?? "closed", projectId: env.PUBLIC_PROJECT_ID, publicSourceSpaceId: env.PUBLIC_SOURCE_SPACE_ID, snapshotId: required(env.PUBLIC_SNAPSHOT_ID, "PUBLIC_SNAPSHOT_ID"), contentDigest: required(env.PUBLIC_CONTENT_DIGEST, "PUBLIC_CONTENT_DIGEST"), publicProjection: true, privateSourceSpace: "not-discoverable", landingAuthority: false, edgeLimiter: { provider: "cloudflare-workers-rate-limit", configuredLimit: configured.edgeLimit, logicalLedgerAuthoritative: false }, abuseControl: { mode: configured.abuse.mode, provider: configured.abuse.providerName, failOpen: false, timeoutMs: configured.abuse.timeoutMs, timeoutReceipt: configured.abuse.timeoutReceipt }, recoveryAction: state?.recoveryCheckpoint ?? "owner must explicitly open Public Intake", receipt: `gateway=${PUBLIC_GATEWAY_PROTOCOL}; customerOperated=true; policy=${configured.policy.receipt}; providerUrl=not-disclosed` });
     }
     if (url.pathname === "/public/source-manifest" && request.method === "GET") return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, projectId: env.PUBLIC_PROJECT_ID, publicSourceSpaceId: env.PUBLIC_SOURCE_SPACE_ID, snapshotId: required(env.PUBLIC_SNAPSHOT_ID, "PUBLIC_SNAPSHOT_ID"), contentDigest: required(env.PUBLIC_CONTENT_DIGEST, "PUBLIC_CONTENT_DIGEST"), privateSourceSpaces: "not-discoverable", landingAuthority: false, gitUrl: `${url.origin}/projects/public/source.git` });
     if (url.pathname.startsWith("/projects/public/source.git/")) return publicGit(request, env);
@@ -312,16 +355,22 @@ export default {
         body = await bodyObject(request);
         const envelopeValue = envelope(body);
         const id = requestId(body);
+        const contribution = contributionId(body);
         const edgeKey = `public-contribution:${env.PUBLIC_PROJECT_ID}:${request.headers.get("cf-connecting-ip") ?? "unknown-client"}`;
         if (!env.PUBLIC_EDGE_RATE_LIMITER) return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "edge_limiter_unconfigured", recoveryAction: "bind the customer-owned Cloudflare Rate Limiting namespace before opening public intake", receipt: "edgeLimiter=missing; materialized=false" }, 503);
         const edge = await applyPublicGatewayEdgeLimit({ limiter: env.PUBLIC_EDGE_RATE_LIMITER, key: edgeKey, configuredLimit: configured.edgeLimit, requestId: id });
         if (edge.status === "denied") return json(edge, 429);
-        const contribution = contributionId(body);
+        const token = optionalToken(body);
+        const clientIp = request.headers.get("cf-connecting-ip");
+        const abuse = await configured.abuse.provider.evaluate({ requestId: id, ...(token ? { token } : {}), ...(clientIp ? { clientIp } : {}) });
         const payloadDigest = await digest({ requestId: id, contributionId: contribution, envelope: envelopeValue });
         const provider = env.PUBLIC_ENABLE_FIXTURE_FAILURES === "true" && request.headers.get("x-anyam-fixture-provider") === "timeout" ? "timeout" : undefined;
-        const response = await coordinatorRequest(env, "/submit", { method: "POST", body: JSON.stringify({ requestId: id, actorId: "anonymous", contributionId: contribution, payloadDigest, ...(provider ? { provider } : {}) }), headers: { "content-type": "application/json" } });
+        const providerOutcome = abuse.outcome === "allowed" ? undefined : { status: "abuse" as const, outcome: abuse.outcome, retryable: abuse.retryable, receipt: abuse.receipt };
+        const providerInput = providerOutcome ?? (provider ? { status: "timeout" as const, receipt: "provider=fixture-driver; timeout=simulated; retryable=true" } : undefined);
+        const response = await coordinatorRequest(env, "/submit", { method: "POST", body: JSON.stringify({ requestId: id, actorId: "anonymous", contributionId: contribution, payloadDigest, ...(providerInput ? { provider: providerInput } : {}) }), headers: { "content-type": "application/json" } });
         const responseBody = await response.json<JsonObject>();
-        return json({ ...responseBody, edge }, response.status);
+        const abuseStatus = abuse.outcome === "unavailable" ? 503 : abuse.outcome === "challenge" || abuse.outcome === "denied" ? 403 : response.status;
+        return json({ ...responseBody, edge, abuse: { ...abuse, receipt: abuse.receipt } }, abuseStatus);
       } catch (error) {
         const message = error instanceof Error ? error.message : "public contribution request failed";
         return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "invalid_request", message, recoveryAction: "provide requestId, contributionId, and a JSON envelope, then retry without exposing private Source Space data", receipt: "publicContribution=not-materialized" }, 422);

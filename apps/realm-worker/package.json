@@ -8,6 +8,7 @@
     "build": "npm run typecheck && node ../../node_modules/wrangler/bin/wrangler.js deploy --dry-run --config wrangler.example.jsonc --outdir=dist"
   },
   "dependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.10.2"
+    "@cloudflare/workers-oauth-provider": "^0.10.2",
+    "@simplewebauthn/server": "^13.3.2"
   }
 }

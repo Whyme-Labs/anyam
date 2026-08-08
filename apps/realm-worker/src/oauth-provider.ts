@@ -11,6 +11,10 @@ import {
   handleCustomerRealmRequest,
   type CustomerRealmWorkerEnv,
 } from "../../../src/cloudflare/realm-worker.ts";
+import {
+  anyamPasskeyOwnerAuthorization,
+  handleAnyamRealmOwnerRequest,
+} from "./passkey-owner.ts";
 
 export const ANYAM_REALM_OAUTH_PROTOCOL = "anyam.realm-oauth/v1" as const;
 export const ANYAM_REALM_OAUTH_RESOURCE_PATH = "/mcp" as const;
@@ -32,6 +36,8 @@ export type AnyamRealmOAuthProps = {
 
 export type AnyamRealmOAuthEnv = CustomerRealmWorkerEnv & {
   OAUTH_KV: KVNamespace;
+  ANYAM_METADATA_DB: D1Database;
+  ANYAM_OWNER_BOOTSTRAP_TOKEN?: string;
   OAUTH_PROVIDER?: OAuthHelpers;
 };
 
@@ -181,15 +187,12 @@ export class AnyamRealmOAuthQualificationHandler extends WorkerEntrypoint<AnyamR
 
 export function createAnyamRealmOAuthProvider(
   options: AnyamRealmOAuthProviderOptions,
-  ownerAuthorization: AnyamRealmOAuthAuthorizationAdapter = async () => ({
-    status: "blocked",
-    code: "owner_authentication_unconfigured",
-    recoveryAction: "Bind the customer-controlled WebAuthn or OIDC adapter before completing OAuth authorization.",
-    receipt: "ownerAuth=adapter-required; credentialMaterialStored=false",
-  }),
+  ownerAuthorization: AnyamRealmOAuthAuthorizationAdapter = anyamPasskeyOwnerAuthorization,
 ): OAuthProvider<AnyamRealmOAuthEnv> {
   const defaultHandler = {
     async fetch(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
+      const ownerResponse = await handleAnyamRealmOwnerRequest(request, env);
+      if (ownerResponse) return ownerResponse;
       const url = new URL(request.url);
       if (url.pathname === "/authorize") return authorizeRequest(request, env, ownerAuthorization);
       return handleCustomerRealmRequest(request, env);

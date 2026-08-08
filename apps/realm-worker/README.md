@@ -32,9 +32,13 @@ Cloudflare account and is not a deployment receipt.
 3. Replace every `replace-with-customer-*` value and the installation/build
    variables with customer-owned values. Do not put API tokens, passkeys,
    refresh tokens, or secret values in this file.
-4. Authenticate Wrangler using the customer's own Cloudflare account and run
+4. Set the one-time first-owner bootstrap secret with
+   `npx wrangler secret put ANYAM_OWNER_BOOTSTRAP_TOKEN --config wrangler.jsonc`.
+   The secret is held by the customer Worker and is never written to source,
+   D1, KV, logs, or an Anyam receipt.
+5. Authenticate Wrangler using the customer's own Cloudflare account and run
    `npx wrangler deploy --config wrangler.jsonc`.
-5. Check `GET /health`. A `ready` response proves only that the configured
+6. Check `GET /health`. A `ready` response proves only that the configured
    foundation bindings and customer-owned mode variables are present. It does
    not prove account ownership, owner authentication, Git, Artifacts, durable
    persistence, or Worker Promotion.
@@ -60,3 +64,28 @@ Realm and Project coordinators remain the source of authority above them.
 
 Configured bindings are reported by name only. The health response never
 returns binding values or credentials.
+
+## Owner passkey qualification surface
+
+The Worker exposes a customer-owned WebAuthn adapter boundary:
+
+| Route | Purpose |
+| --- | --- |
+| `POST /api/owner/passkey/register/options` | First-owner registration challenge; requires the bootstrap secret header |
+| `POST /api/owner/passkey/register/verify` | Verifies the browser registration response and creates the qualification owner record; binding this verified result into the portable Anyam identity kernel remains the next boundary |
+| `POST /api/owner/passkey/auth/options` | Authentication challenge for an enrolled owner |
+| `POST /api/owner/passkey/auth/verify` | Verifies the assertion and issues an opaque host-only owner session |
+| `POST /api/owner/session/revoke` | Revokes the current opaque owner session and expires its cookie |
+| `GET /owner/claim` | Returns the browser ceremony contract |
+| `GET /owner/login` | Returns the browser authentication contract |
+
+The current qualification surface returns JSON ceremony contracts; a polished
+browser UI remains a separate experience-layer task. The server-side verifier
+uses `@simplewebauthn/server`, stores only public credential material and the
+counter in customer D1, and stores short-lived challenges/session handles in
+customer KV. It never stores a passkey private key or bootstrap secret.
+
+This is deliberately an adapter qualification, not a claim that the edge D1
+owner row is already the complete Anyam identity kernel. The live receipt must
+keep `ownerRecord=verified` and `kernelMembership=adapter-bound-next` distinct
+until the Worker calls the durable Realm identity/control authority.

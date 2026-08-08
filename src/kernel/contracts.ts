@@ -72,6 +72,7 @@ export const CONTRACT_VERSIONS = {
   mirror: "anyam.mirror/v1",
   mirrorOperation: "anyam.mirror-operation/v1",
   mirrorCheckpoint: "anyam.mirror-checkpoint/v1",
+  publicIntake: "anyam.public-intake/v1",
 } as const;
 
 export type SourceSpaceClassification = "public" | "internal" | "restricted" | "result-only";

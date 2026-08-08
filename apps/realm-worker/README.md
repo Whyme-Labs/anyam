@@ -76,12 +76,12 @@ The Worker exposes a customer-owned WebAuthn adapter boundary:
 | `POST /api/owner/passkey/auth/options` | Authentication challenge for an enrolled owner |
 | `POST /api/owner/passkey/auth/verify` | Verifies the assertion and issues an opaque host-only owner session |
 | `POST /api/owner/session/revoke` | Revokes the current opaque owner session and expires its cookie |
-| `GET /owner/claim` | Returns the browser ceremony contract |
-| `GET /owner/login` | Returns the browser authentication contract |
+| `GET /owner/claim` | Serves the browser first-owner WebAuthn ceremony (use `?format=json` for the machine contract) |
+| `GET /owner/login` | Serves the browser authentication ceremony (use `?format=json` for the machine contract) |
 
-The current qualification surface returns JSON ceremony contracts; a polished
-browser UI remains a separate experience-layer task. The server-side verifier
-uses `@simplewebauthn/server`, stores only public credential material and the
+The qualification surface now includes a minimal browser ceremony and retains
+the JSON contract for automation. The server-side verifier uses
+`@simplewebauthn/server`, stores only public credential material and the
 counter in customer D1, and stores short-lived challenges/session handles in
 customer KV. It never stores a passkey private key or bootstrap secret.
 

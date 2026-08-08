@@ -111,6 +111,99 @@ function expiredSessionCookie(): string {
   return `${COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax`;
 }
 
+function ownerPage(mode: "claim" | "login"): Response {
+  const claim = mode === "claim";
+  const title = claim ? "Claim Anyam Realm" : "Sign in to Anyam Realm";
+  const heading = claim ? "Claim this Realm" : "Sign in to this Realm";
+  const bootstrapField = claim ? `
+      <label>One-time bootstrap secret
+        <input id="bootstrap" type="password" autocomplete="off" spellcheck="false" required>
+      </label>
+      <p class="hint">The secret is kept in memory for this ceremony only. It is never placed in the URL or stored by this page.</p>` : "";
+  const script = String.raw`
+    const mode = ${JSON.stringify(mode)};
+    const result = document.getElementById("result");
+    const button = document.getElementById("continue");
+    const status = (message) => { result.textContent = message; };
+    const decode = (value) => {
+      const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+      const binary = atob(padded);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+      return bytes;
+    };
+    const encode = (value) => {
+      const bytes = new Uint8Array(value);
+      let binary = "";
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+    };
+    const creationOptions = (options) => {
+      if (PublicKeyCredential.parseCreationOptionsFromJSON) return PublicKeyCredential.parseCreationOptionsFromJSON(options);
+      return {
+        ...options,
+        challenge: decode(options.challenge),
+        user: { ...options.user, id: decode(options.user.id) },
+        excludeCredentials: (options.excludeCredentials ?? []).map((credential) => ({ ...credential, id: decode(credential.id) })),
+      };
+    };
+    const requestOptions = (options) => {
+      if (PublicKeyCredential.parseRequestOptionsFromJSON) return PublicKeyCredential.parseRequestOptionsFromJSON(options);
+      return {
+        ...options,
+        challenge: decode(options.challenge),
+        allowCredentials: (options.allowCredentials ?? []).map((credential) => ({ ...credential, id: decode(credential.id) })),
+      };
+    };
+    const responseJSON = (credential) => {
+      if (credential.toJSON) return credential.toJSON();
+      const response = credential.response;
+      const output = { id: credential.id, rawId: encode(credential.rawId), type: credential.type, response: { clientDataJSON: encode(response.clientDataJSON) } };
+      if ("attestationObject" in response) output.response.attestationObject = encode(response.attestationObject);
+      if ("authenticatorData" in response) output.response.authenticatorData = encode(response.authenticatorData);
+      if ("signature" in response) output.response.signature = encode(response.signature);
+      if ("userHandle" in response && response.userHandle) output.response.userHandle = encode(response.userHandle);
+      return output;
+    };
+    const call = async (path, body, bootstrap) => {
+      const headers = { "content-type": "application/json" };
+      if (bootstrap) headers["x-anyam-owner-bootstrap-token"] = bootstrap;
+      const response = await fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
+      const payload = await response.json().catch(() => ({ code: "invalid_json_response" }));
+      if (!response.ok) throw new Error(payload.recoveryAction ? payload.code + ": " + payload.recoveryAction : payload.code ?? "request_failed");
+      return payload;
+    };
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        if (!window.PublicKeyCredential || !navigator.credentials) throw new Error("webauthn_unavailable: use a browser with WebAuthn support");
+        const bootstrap = mode === "claim" ? document.getElementById("bootstrap").value : undefined;
+        if (mode === "claim" && !bootstrap) throw new Error("owner_bootstrap_required: enter the one-time bootstrap secret");
+        const displayName = mode === "claim" ? (document.getElementById("displayName").value.trim() || "Anyam Realm owner") : undefined;
+        const options = await call(mode === "claim" ? "/api/owner/passkey/register/options" : "/api/owner/passkey/auth/options", mode === "claim" ? { displayName } : {}, bootstrap);
+        const credential = mode === "claim"
+          ? await navigator.credentials.create({ publicKey: creationOptions(options.options) })
+          : await navigator.credentials.get({ publicKey: requestOptions(options.options) });
+        if (!credential) throw new Error("webauthn_cancelled: no credential returned");
+        const verified = await call(mode === "claim" ? "/api/owner/passkey/register/verify" : "/api/owner/passkey/auth/verify", { challengeId: options.challengeId, response: responseJSON(credential) }, bootstrap);
+        status(JSON.stringify(verified, null, 2));
+        button.textContent = mode === "claim" ? "Realm claimed" : "Signed in";
+      } catch (error) {
+        status(error instanceof Error ? error.message : "owner_authentication_failed");
+        button.disabled = false;
+      }
+    });
+  `;
+  const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
+<style>body{font:16px system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1rem;color:#17202a}main{border:1px solid #d6dbe1;border-radius:12px;padding:2rem}label{display:grid;gap:.4rem;margin:1rem 0}input{font:inherit;padding:.65rem;border:1px solid #9aa5b1;border-radius:6px}button{font:inherit;padding:.7rem 1rem;border:0;border-radius:6px;background:#14532d;color:white;cursor:pointer}button:disabled{opacity:.6;cursor:wait}.hint{font-size:.9rem;color:#52606d}pre{white-space:pre-wrap;background:#f4f6f8;padding:1rem;border-radius:6px;min-height:2rem}</style></head>
+<body><main><h1>${heading}</h1><p>Anyam verifies this Realm-bound passkey in the customer-owned Worker.</p>
+${claim ? `<label>Display name<input id="displayName" autocomplete="name" value="Anyam Realm owner"></label>` : ""}${bootstrapField}
+<button id="continue" type="button">${claim ? "Create owner passkey" : "Use passkey"}</button><pre id="result" aria-live="polite"></pre></main>
+<script>${script.replaceAll("</script>", "<\\/script>")}</script></body></html>`;
+  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'" } });
+}
+
 async function ownerBootstrapTokenMatches(request: Request, env: AnyamRealmOAuthEnv): Promise<boolean> {
   const expected = env.ANYAM_OWNER_BOOTSTRAP_TOKEN?.trim();
   const presented = request.headers.get(OWNER_BOOTSTRAP_HEADER)?.trim();
@@ -320,6 +413,8 @@ export const anyamPasskeyOwnerAuthorization: AnyamRealmOAuthAuthorizationAdapter
 export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamRealmOAuthEnv): Promise<Response | undefined> {
   const url = new URL(request.url);
   try {
+    if (url.pathname === "/owner/claim" && request.method === "GET" && url.searchParams.get("format") !== "json") return ownerPage("claim");
+    if (url.pathname === "/owner/login" && request.method === "GET" && url.searchParams.get("format") !== "json") return ownerPage("login");
     if ((url.pathname === "/owner/claim" || url.pathname === "/owner/login") && request.method === "GET") {
       return json({
         protocol: ANYAM_PASSKEY_OWNER_PROTOCOL,
@@ -330,7 +425,7 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
         authenticationOptions: "/api/owner/passkey/auth/options",
         authenticationVerify: "/api/owner/passkey/auth/verify",
         recoveryAction: url.pathname === "/owner/claim" ? "Send the customer-owned bootstrap secret in the request header for the first-owner registration ceremony." : "Complete passkey authentication and retry the protected operation.",
-        receipt: `${ANYAM_PASSKEY_SIZING_RECEIPT}; browserUI=not-yet-rendered; ownerKernelMembership=adapter-bound-next; credentialMaterialStored=false`,
+        receipt: `${ANYAM_PASSKEY_SIZING_RECEIPT}; browserUI=qualification-minimal; ownerKernelMembership=adapter-bound-next; credentialMaterialStored=false`,
       });
     }
     if (url.pathname === "/api/owner/passkey/register/options" && request.method === "POST") return await registrationOptions(request, env);

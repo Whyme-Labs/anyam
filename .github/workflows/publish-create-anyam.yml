@@ -1,0 +1,49 @@
+name: Publish create-anyam
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "create-anyam-v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-create-anyam-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify and publish create-anyam
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    steps:
+      - name: Check out the exact release
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Use the npm trusted-publishing client
+        run: npm install --global npm@11.15.0
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run repository checks
+        run: npm run check
+
+      - name: Qualify package entrypoints
+        run: npm run verify:package
+
+      - name: Build the publishable workspace
+        run: npm run build --workspace=create-anyam
+
+      - name: Publish through npm trusted publishing
+        run: npm publish --workspace=create-anyam --access public

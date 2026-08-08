@@ -95,3 +95,58 @@ From the Anyam checkout, `npm run verify:package` qualifies the packed package
 through the npm-exec, npx, pnpm, and Bun offline lanes. Literal `npm create
 anyam`, `pnpm create anyam`, and `bun create anyam` registry resolution is a
 release qualification after this package is published.
+
+## Owner-controlled npm release
+
+The intended package identity is the unscoped public package `create-anyam`,
+owned by the logged-in npm publisher. Confirm that identity and enable account
+2FA before the first live publish; a package name and version are immutable
+once published.
+
+### First-time npm account setup
+
+Configure a new second factor from the npm website, not by trying to enroll a
+new TOTP secret through the CLI:
+
+1. Sign in at <https://www.npmjs.com/> as the package owner.
+2. Open the profile menu, choose **Account**, then **Enable 2FA**.
+3. Select a supported security-key/WebAuthn method such as macOS Touch ID,
+   Windows Hello, Face ID, or a physical security key.
+4. Save the recovery codes in a password manager separate from the security
+   key.
+
+The registry no longer accepts the old CLI TOTP-enrollment request; it returns
+`E404 Adding a new TOTP 2FA is no longer supported`. Do not treat that error as
+a package or publisher failure.
+
+The repository includes a tag- or manually-triggered GitHub Actions workflow at
+`.github/workflows/publish-create-anyam.yml`. Configure npm Trusted Publishing
+for:
+
+```text
+Provider:       GitHub Actions
+Owner:          wms2537
+Repository:     anyam
+Workflow:       publish-create-anyam.yml
+Environment:    npm-publish
+Action:         npm publish
+```
+
+The workflow uses OIDC and does not read an npm token. Keep the GitHub
+environment protected and restrict package publishing to the trusted publisher;
+do not add `NODE_AUTH_TOKEN` to this workflow. The first package creation and
+the npm Trusted Publisher setting are owner actions on npmjs.com. npm's trust
+configuration requires the package to exist and account 2FA to be enabled. After
+the first owner-approved publish, the equivalent CLI setup is:
+
+```bash
+npx --yes npm@11.15.0 trust github create-anyam \
+  --repository wms2537/anyam \
+  --file publish-create-anyam.yml \
+  --environment npm-publish \
+  --allow-publish
+```
+
+If staged publishing is chosen instead, change the workflow to `npm stage
+publish`, configure `--allow-stage-publish`, and keep final approval as a
+separate maintainer 2FA action. Do not silently mix the two modes.

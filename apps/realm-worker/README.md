@@ -94,8 +94,11 @@ The Worker exposes a customer-owned WebAuthn adapter boundary:
 | `POST /api/owner/passkey/auth/options` | Authentication challenge for an enrolled owner |
 | `POST /api/owner/passkey/auth/verify` | Verifies the assertion and issues an opaque host-only owner session |
 | `POST /api/owner/session/revoke` | Revokes the current opaque owner session and expires its cookie |
-| `POST /api/owner/qualification/delegate` | Owner-session-protected qualification exchange for an isolated agent Workspace and Git/MCP credentials |
+| `POST /api/owner/qualification/delegate` | Owner-session-protected qualification delegation for an isolated agent Workspace; credentials are not issued implicitly |
+| `POST /api/owner/qualification/credentials` | Explicitly exchanges the exact delegated agent Session/Task/Grant for short-lived Git and/or MCP credentials |
 | `POST /api/owner/qualification/revoke` | Revokes the qualification agent, delegated Sessions, Tasks, Grants, credentials, and Workspace task |
+| `POST /api/owner/qualification/recovery/export` | Exports the current credential-free identity snapshot for the disposable recovery drill |
+| `POST /api/owner/qualification/recovery/restore` | Restores that snapshot quarantined, revokes authority, and clears the host session until passkey re-activation |
 | `GET /owner/claim` | Serves the browser first-owner WebAuthn ceremony (use `?format=json` for the machine contract) |
 | `GET /owner/login` | Serves the browser authentication ceremony (use `?format=json` for the machine contract) |
 
@@ -111,7 +114,12 @@ evidence distinct: `ownerRecord=verified` describes the WebAuthn/D1 adapter,
 while `kernelMembership=verified` describes the durable Realm identity
 transition. Authentication creates a kernel session first and then an opaque
 host-only session; OAuth authorization revalidates the kernel session before
-granting the provider's authorization request. The qualification exchange
-returns Git and MCP credential values once; the durable snapshot stores only
-credential digests. It is a disposable proof surface, not yet the production
-Git Smart HTTP gateway or the complete agent API.
+granting the provider's authorization request. Delegation and credential
+exchange are separate operations: delegation names the exact child
+Session/Task/Grant and available credential classes; explicit exchange returns
+Git and/or MCP token values once. The durable snapshot stores only credential
+digests. The recovery drill exports a credential-free snapshot, restores it
+with all Sessions and Grants revoked, and requires a fresh passkey
+authentication before the Realm returns to active status. This is a disposable
+proof surface, not yet the production Git Smart HTTP gateway or the complete
+agent API.

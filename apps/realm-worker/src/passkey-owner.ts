@@ -327,7 +327,9 @@ async function ownerKernelSession(request: Request, env: AnyamRealmOAuthEnv): Pr
   }
 }
 
-async function qualificationRequest(request: Request, env: AnyamRealmOAuthEnv, operation: "delegate" | "revoke"): Promise<Response> {
+type QualificationOperation = "delegate" | "credentials" | "revoke" | "recovery/export" | "recovery/restore";
+
+async function qualificationRequest(request: Request, env: AnyamRealmOAuthEnv, operation: QualificationOperation): Promise<Response> {
   const ownerState = await ownerKernelSession(request, env);
   if (ownerState instanceof Response) return ownerState;
   let body: Record<string, unknown>;
@@ -338,7 +340,13 @@ async function qualificationRequest(request: Request, env: AnyamRealmOAuthEnv, o
   }
   try {
     const coordinator = await realmCoordinatorRequest(env, `/identity/qualification/${operation}`, { ...body, humanSessionId: ownerState.session.kernelSessionId });
-    return json({ ...coordinator, receipt: `${typeof coordinator.receipt === "string" ? coordinator.receipt : `qualification=${operation}`}; ownerSession=validated` });
+    const responseBody = { ...coordinator, receipt: `${typeof coordinator.receipt === "string" ? coordinator.receipt : `qualification=${operation}`}; ownerSession=validated` };
+    if (operation === "recovery/restore") {
+      const sessionId = parseCookies(request)[COOKIE_NAME];
+      if (sessionId) await env.OAUTH_KV.delete(`${SESSION_PREFIX}${decodeURIComponent(sessionId)}`);
+      return json(responseBody, 200, { "set-cookie": expiredSessionCookie() });
+    }
+    return json(responseBody);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
     return json({ code: `qualification_${operation}_failed`, recoveryAction: "Retry after checking the durable Realm coordinator; no partial credential or authority transition is accepted.", receipt: `qualification=${operation}; operation=failed; detail=${detail}` }, 503);
@@ -528,6 +536,11 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
         registrationVerify: "/api/owner/passkey/register/verify",
         authenticationOptions: "/api/owner/passkey/auth/options",
         authenticationVerify: "/api/owner/passkey/auth/verify",
+        qualificationDelegate: "/api/owner/qualification/delegate",
+        qualificationCredentials: "/api/owner/qualification/credentials",
+        qualificationRevoke: "/api/owner/qualification/revoke",
+        recoveryExport: "/api/owner/qualification/recovery/export",
+        recoveryRestore: "/api/owner/qualification/recovery/restore",
         recoveryAction: url.pathname === "/owner/claim" ? "Send the customer-owned bootstrap secret in the request header for the first-owner registration ceremony." : "Complete passkey authentication and retry the protected operation.",
         receipt: `${ANYAM_PASSKEY_SIZING_RECEIPT}; browserUI=qualification-minimal; ownerKernelMembership=verified-at-coordinator; credentialMaterialStored=false`,
       });
@@ -538,7 +551,10 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
     if (url.pathname === "/api/owner/passkey/auth/verify" && request.method === "POST") return await authenticationVerify(request, env);
     if (url.pathname === "/api/owner/session/revoke" && request.method === "POST") return await revokeSession(request, env);
     if (url.pathname === "/api/owner/qualification/delegate" && request.method === "POST") return await qualificationRequest(request, env, "delegate");
+    if (url.pathname === "/api/owner/qualification/credentials" && request.method === "POST") return await qualificationRequest(request, env, "credentials");
     if (url.pathname === "/api/owner/qualification/revoke" && request.method === "POST") return await qualificationRequest(request, env, "revoke");
+    if (url.pathname === "/api/owner/qualification/recovery/export" && request.method === "POST") return await qualificationRequest(request, env, "recovery/export");
+    if (url.pathname === "/api/owner/qualification/recovery/restore" && request.method === "POST") return await qualificationRequest(request, env, "recovery/restore");
   } catch (error) {
     const code = error instanceof Error ? error.message : "owner_authentication_failed";
     return json({ code, recoveryAction: "Retry the same ceremony with a fresh challenge; no credential or session was returned.", receipt: `ownerAuth=passkey; exception=${code}; credentialMaterialStored=false` }, 422);

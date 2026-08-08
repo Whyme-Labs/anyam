@@ -10,6 +10,7 @@ import { handleAnyamRealmOwnerRequest } from "./passkey-owner.ts";
 export type Env = AnyamRealmOAuthEnv;
 
 const REALM_IDENTITY_SNAPSHOT_KEY = "anyam/realm-identity/snapshot/v1";
+const REALM_RECOVERY_STATUS_KEY = "anyam/realm-identity/recovery-status/v1";
 const REALM_COORDINATOR_PROTOCOL = "anyam.realm-coordinator/v1" as const;
 const REALM_QUALIFICATION_PROJECT_ID = "project:realm-qualification";
 const REALM_QUALIFICATION_SOURCE_SPACE_ID = "source:realm-qualification";
@@ -19,6 +20,7 @@ const REALM_QUALIFICATION_AGENT_ID = "agent:realm-qualification";
 const REALM_QUALIFICATION_AGENT_CLIENT_ID = "client:agent:realm-qualification";
 const REALM_QUALIFICATION_CREDENTIAL_CLASSES: readonly CredentialClass[] = ["git", "mcp"];
 const REALM_QUALIFICATION_ACTIONS = ["source.read", "workspace.write", "change.publish_revision", "run.invoke", "agent.delegate"] as const;
+type RealmRecoveryStatus = "active" | "recovery-pending";
 
 type CoordinatorRequestBody = Record<string, unknown>;
 
@@ -47,6 +49,23 @@ function coordinatorString(body: CoordinatorRequestBody, key: string): string {
 function coordinatorOptionalString(body: CoordinatorRequestBody, key: string, fallback: string): string {
   const value = body[key];
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
+}
+
+function qualificationCredentialClasses(body: CoordinatorRequestBody): readonly CredentialClass[] {
+  const requested = body.credentialClasses;
+  if (requested === undefined) return [...REALM_QUALIFICATION_CREDENTIAL_CLASSES];
+  if (!Array.isArray(requested) || requested.length === 0 || requested.some((value) => typeof value !== "string" || !REALM_QUALIFICATION_CREDENTIAL_CLASSES.includes(value as CredentialClass))) {
+    throw new RealmIdentityError({ code: "qualification.credential_classes_invalid", message: "The qualification exchange accepts only the explicitly supported Git and MCP credential classes.", recoveryAction: "request one or both of the git and mcp credential classes", receipt: "credentialClasses=git,mcp-only" });
+  }
+  return [...new Set(requested as CredentialClass[])];
+}
+
+function recoverySnapshot(body: CoordinatorRequestBody): RealmRecoverySnapshot {
+  const value = body.snapshot;
+  if (value === null || typeof value !== "object" || Array.isArray(value) || (value as Record<string, unknown>).credentialFree !== true || Object.prototype.hasOwnProperty.call(value, "credentials")) {
+    throw new RealmIdentityError({ code: "recovery.snapshot_invalid", message: "Recovery restore requires a credential-free Realm snapshot produced by this coordinator.", recoveryAction: "export a fresh credential-free snapshot and submit it without credential fields", receipt: "recoverySnapshot=credential-free-required" });
+  }
+  return value as RealmRecoverySnapshot;
 }
 
 function identitySummary(identity: RealmIdentityPolicy): Record<string, unknown> {
@@ -83,11 +102,14 @@ function coordinatorError(error: unknown): Response {
 export class AnyamRealmCoordinator extends DurableObject<Env> {
   private readonly initialized: Promise<void>;
   private identity: RealmIdentityPolicy | undefined;
+  private recoveryStatus: RealmRecoveryStatus = "active";
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.initialized = ctx.blockConcurrencyWhile(async () => {
       const snapshot = await ctx.storage.get<RealmRecoverySnapshot>(REALM_IDENTITY_SNAPSHOT_KEY);
+      const storedRecoveryStatus = await ctx.storage.get<RealmRecoveryStatus>(REALM_RECOVERY_STATUS_KEY);
+      this.recoveryStatus = storedRecoveryStatus === "recovery-pending" ? storedRecoveryStatus : "active";
       const realmId = snapshot?.realm.id ?? `realm:${env.ANYAM_INSTALLATION_ID ?? "unconfigured"}`;
       this.identity = new RealmIdentityPolicy({
         realmId,
@@ -104,17 +126,20 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
 
   private async persistIdentity(): Promise<void> {
     await this.ctx.storage.put(REALM_IDENTITY_SNAPSHOT_KEY, this.requireIdentity().getRecoverySnapshot());
+    await this.ctx.storage.put(REALM_RECOVERY_STATUS_KEY, this.recoveryStatus);
   }
 
   private async transitionIdentity<T>(operation: (identity: RealmIdentityPolicy) => Promise<T> | T): Promise<T> {
     const identity = this.requireIdentity();
     const before = identity.getRecoverySnapshot();
+    const beforeRecoveryStatus = this.recoveryStatus;
     try {
       const result = await operation(identity);
       await this.persistIdentity();
       return result;
     } catch (error) {
       identity.restoreOperationalSnapshot(before);
+      this.recoveryStatus = beforeRecoveryStatus;
       throw error;
     }
   }
@@ -128,6 +153,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
           protocol: REALM_COORDINATOR_PROTOCOL,
           status: "ready",
           identity: identitySummary(this.requireIdentity()),
+          recoveryStatus: this.recoveryStatus,
           receipt: "authority=realm-coordinator; persistence=durable-object-storage; credentialFree=true",
         });
       }
@@ -161,6 +187,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         const challenge = coordinatorString(body, "challenge");
         return await this.transitionIdentity((next) => {
           const session = next.authenticatePasskey({ credentialId, relyingPartyId, challenge, verified: body.verified === true, clientId: typeof body.clientId === "string" ? body.clientId : "client:anyam-web" });
+          this.recoveryStatus = "active";
           return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "session-issued", session, identity: identitySummary(next), receipt: "kernelMembership=verified; session=durable; authentication=passkey" });
         });
       }
@@ -216,8 +243,30 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
           const childTask = finalState.tasks[childTaskId];
           const childGrant = finalState.grants[childGrantId];
           if (!childSession || !childTask || !childGrant) throw new RealmIdentityError({ code: "qualification.delegation_missing", message: "The qualification delegation did not produce a complete Session, Task, and Grant chain.", recoveryAction: "reset the disposable Realm and retry the bounded delegation operation", receipt: "principal-actor-session-task-grant chain incomplete" });
-          const credentials = REALM_QUALIFICATION_CREDENTIAL_CLASSES.map((credentialClass) => next.issueCredential({ class: credentialClass, principalId: humanSession.principalId, actorId: childSession.actorId, clientId: childSession.clientId, sessionId: childSession.id, taskId: childTask.id, grantId: childGrant.id, resource }));
-          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: delegationStatus, agent, session: childSession, task: childTask, grant: childGrant, credentials: credentials.map((credential) => ({ id: credential.id, class: credential.class, audience: CREDENTIAL_AUDIENCES[credential.class], token: credential.token, expiresAt: credential.expiresAt })), identity: identitySummary(next), receipt: `kernelMembership=verified; delegation=${delegationStatus}; workspace=${REALM_QUALIFICATION_WORKSPACE_ID}; credentials=git,mcp; canonicalWrite=false; credentialMaterialStored=false` });
+          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: delegationStatus, agent, session: childSession, task: childTask, grant: childGrant, credentialClasses: [...REALM_QUALIFICATION_CREDENTIAL_CLASSES], credentialExchangePath: "/api/owner/qualification/credentials", identity: identitySummary(next), receipt: `kernelMembership=verified; delegation=${delegationStatus}; workspace=${REALM_QUALIFICATION_WORKSPACE_ID}; credentials=not-issued; exchange=explicit; canonicalWrite=false; credentialMaterialStored=false` });
+        });
+      }
+
+      if (url.pathname === "/identity/qualification/credentials") {
+        const humanSessionId = coordinatorString(body, "humanSessionId");
+        const agentId = coordinatorString(body, "agentId");
+        const agentSessionId = coordinatorString(body, "agentSessionId");
+        const taskId = coordinatorString(body, "taskId");
+        const grantId = coordinatorString(body, "grantId");
+        const classes = qualificationCredentialClasses(body);
+        return await this.transitionIdentity((next) => {
+          const humanSession = next.validateSession(humanSessionId);
+          const agent = next.getAgent(agentId);
+          const agentSession = next.validateSession(agentSessionId);
+          const state = next.getRecoverySnapshot();
+          const task = state.tasks[taskId];
+          const grant = state.grants[grantId];
+          if (!agent || agent.principalId !== humanSession.principalId || agent.status !== "active" || agentSession.actorKind !== "agent" || agentSession.agentId !== agentId || agentSession.principalId !== humanSession.principalId || agentSession.delegatedBySessionId !== humanSession.id || !task || task.status !== "active" || task.sessionId !== agentSession.id || task.agentId !== agentId || task.workspaceId !== REALM_QUALIFICATION_WORKSPACE_ID || task.changeId !== REALM_QUALIFICATION_CHANGE_ID || !grant || grant.status !== "active" || grant.agentId !== agentId || grant.sessionId !== agentSession.id || grant.taskId !== task.id || grant.resource.workspaceId !== REALM_QUALIFICATION_WORKSPACE_ID || grant.resource.changeId !== REALM_QUALIFICATION_CHANGE_ID) {
+            throw new RealmIdentityError({ code: "qualification.credential_exchange_denied", message: "Credential exchange requires the active owner Session and the exact delegated agent Session, Task, and Grant for the isolated qualification Workspace.", recoveryAction: "delegate the qualification agent first and submit its exact Session, Task, and Grant identifiers", receipt: "credentialExchange=delegated-chain-required" });
+          }
+          const resource = { realmId: state.realm.id, projectId: REALM_QUALIFICATION_PROJECT_ID, sourceSpaceId: REALM_QUALIFICATION_SOURCE_SPACE_ID, workspaceId: REALM_QUALIFICATION_WORKSPACE_ID, changeId: REALM_QUALIFICATION_CHANGE_ID };
+          const credentials = classes.map((credentialClass) => next.issueCredential({ class: credentialClass, principalId: humanSession.principalId, actorId: agentSession.actorId, clientId: agentSession.clientId, sessionId: agentSession.id, taskId: task.id, grantId: grant.id, resource }));
+          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "credentials-issued", agentId, agentSessionId, taskId, grantId, workspaceId: REALM_QUALIFICATION_WORKSPACE_ID, credentials: credentials.map((credential) => ({ id: credential.id, class: credential.class, audience: CREDENTIAL_AUDIENCES[credential.class], token: credential.token, expiresAt: credential.expiresAt })), identity: identitySummary(next), receipt: `kernelMembership=verified; credentialExchange=delegated-agent; classes=${classes.join(",")}; workspace=${REALM_QUALIFICATION_WORKSPACE_ID}; canonicalWrite=false; credentialMaterialStored=false` });
         });
       }
 
@@ -248,6 +297,24 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         return await this.transitionIdentity((next) => {
           const revoked = next.revokeSession(sessionId);
           return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "session-revoked", ...revoked, identity: identitySummary(next), receipt: "kernelMembership=verified; session=revoked; delegatedAuthority=closed" });
+        });
+      }
+
+      if (url.pathname === "/identity/qualification/recovery/export") {
+        const humanSessionId = coordinatorString(body, "humanSessionId");
+        const humanSession = identity.validateSession(humanSessionId);
+        const snapshot = identity.getRecoverySnapshot();
+        return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "recovery-exported", recoveryStatus: this.recoveryStatus, ownerPrincipalId: humanSession.principalId, snapshot, receipt: "recovery=exported; credentialFree=true; authority=not-restored" });
+      }
+
+      if (url.pathname === "/identity/qualification/recovery/restore") {
+        const humanSessionId = coordinatorString(body, "humanSessionId");
+        const snapshot = recoverySnapshot(body);
+        return await this.transitionIdentity((next) => {
+          const humanSession = next.validateSession(humanSessionId);
+          next.restoreRecoverySnapshot(snapshot);
+          this.recoveryStatus = "recovery-pending";
+          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "recovery-pending", recoveryStatus: this.recoveryStatus, ownerPrincipalId: humanSession.principalId, identity: identitySummary(next), receipt: "recovery=restored; credentialFree=true; sessions=revoked; grants=revoked; credentials=not-restored; ownerReactivation=passkey-required" });
         });
       }
 

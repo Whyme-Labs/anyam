@@ -6,9 +6,11 @@ import {
   PublicGatewayCoordinator,
   PUBLIC_GATEWAY_PROTOCOL,
   applyPublicGatewayEdgeLimit,
+  parsePublicGatewayLedgerRetentionPolicy,
   parsePublicGatewayProviderOutcome,
   type PublicGatewayState,
   type PublicGatewayStore,
+  type PublicGatewayLedgerExport,
 } from "../../../src/cloudflare/public-gateway.ts";
 import {
   createPublicGatewayAbuseProvider,
@@ -264,10 +266,10 @@ async function publicGit(request: Request, env: Env): Promise<Response> {
   return new Response(response.body, { status: response.status, headers: responseHeaders });
 }
 
-async function handleAdmin(request: Request, env: Env, action: "state" | "open" | "suspend" | "reopen" | "cleanup"): Promise<Response> {
+async function handleAdmin(request: Request, env: Env, action: "state" | "open" | "suspend" | "reopen" | "cleanup" | "ledger-export" | "ledger-compact"): Promise<Response> {
   if (!adminAuthorized(request, env)) return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the customer Realm owner or moderator; no public gateway mutation was performed", receipt: "adminAuthorization=missing-or-invalid; mutation=false" }, 401);
   const body = request.method === "POST" ? await bodyObject(request) : {};
-  const path = action === "state" ? "/state" : `/admin/${action}`;
+  const path = action === "state" ? "/state" : action === "ledger-export" ? "/ledger/export" : action === "ledger-compact" ? "/ledger/compact" : `/admin/${action}`;
   const coordinatorInit: RequestInit = { method: action === "state" ? "GET" : "POST", headers: { "content-type": "application/json" } };
   if (action !== "state") {
     // The qualification adapter has one owner-scoped secret. Do not let a
@@ -304,6 +306,8 @@ export class PublicGatewayCoordinatorDO extends DurableObject<Env> {
     const store: PublicGatewayStore = {
       load: async () => await this.ctx.storage.get<PublicGatewayState>("state"),
       save: async (state) => await this.ctx.storage.put("state", state),
+      saveLedgerExport: async (bundle) => await this.ctx.storage.put(`ledger-export:${bundle.exportId}`, bundle),
+      loadLedgerExport: async (exportId) => await this.ctx.storage.get<PublicGatewayLedgerExport>(`ledger-export:${exportId}`),
     };
     const coordinator = new PublicGatewayCoordinator(configured.policy, store);
     const url = new URL(request.url);
@@ -314,6 +318,8 @@ export class PublicGatewayCoordinatorDO extends DurableObject<Env> {
       if (url.pathname === "/admin/suspend" && request.method === "POST") return json(await coordinator.suspend({ id: String(body.actorId ?? ""), role: body.role === "moderator" ? "moderator" : "owner" }, String(body.reason ?? ""), String(body.receipt ?? "")));
       if (url.pathname === "/admin/reopen" && request.method === "POST") return json(await coordinator.reopen({ id: String(body.actorId ?? ""), role: body.role === "moderator" ? "moderator" : "owner" }, String(body.reviewReceipt ?? "")));
       if (url.pathname === "/admin/cleanup" && request.method === "POST") return json(await coordinator.cleanup({ id: String(body.actorId ?? ""), role: body.role === "moderator" ? "moderator" : "owner" }, String(body.cleanupReceipt ?? "")));
+      if (url.pathname === "/ledger/export" && request.method === "POST") return json(await coordinator.exportLedger({ actorId: String(body.actorId ?? ""), exportId: String(body.exportId ?? ""), receipt: String(body.receipt ?? "") }));
+      if (url.pathname === "/ledger/compact" && request.method === "POST") return json(await coordinator.compactLedger({ actorId: String(body.actorId ?? ""), exportId: String(body.exportId ?? ""), policy: parsePublicGatewayLedgerRetentionPolicy(body.policy), receipt: String(body.receipt ?? "") }));
       if (url.pathname === "/submit" && request.method === "POST") {
         const input = {
           requestId: String(body.requestId ?? ""),
@@ -381,6 +387,8 @@ export default {
     if (url.pathname === "/admin/suspend" && request.method === "POST") return handleAdmin(request, env, "suspend");
     if (url.pathname === "/admin/reopen" && request.method === "POST") return handleAdmin(request, env, "reopen");
     if (url.pathname === "/admin/cleanup" && request.method === "POST") return handleAdmin(request, env, "cleanup");
+    if (url.pathname === "/admin/ledger/export" && request.method === "POST") return handleAdmin(request, env, "ledger-export");
+    if (url.pathname === "/admin/ledger/compact" && request.method === "POST") return handleAdmin(request, env, "ledger-compact");
     if (request.method !== "GET") return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "method_not_allowed", recoveryAction: "use the public read or contribution-envelope routes", receipt: "canonicalWrite=false" }, 405);
     return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "not_found", recoveryAction: "use /health, /public/source-manifest, /projects/public/source.git, or /public/contributions", receipt: "path=not-found; privateMetadata=not-disclosed" }, 404);
   },

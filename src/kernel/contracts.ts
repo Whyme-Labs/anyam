@@ -75,6 +75,7 @@ export const CONTRACT_VERSIONS = {
   publicIntake: "anyam.public-intake/v1",
   publicGateway: "anyam.public-gateway/v1",
   publicGatewayAbuse: "anyam.public-gateway-abuse/v1",
+  publicGatewayLedger: "anyam.public-gateway-ledger/v1",
 } as const;
 
 export type SourceSpaceClassification = "public" | "internal" | "restricted" | "result-only";

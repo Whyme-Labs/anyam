@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f5f7fb" />
+    <title>Anyam — Control plane prototype</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #152033;
+        --muted: #68758a;
+        --line: #dbe2ec;
+        --line-strong: #c4cfdd;
+        --paper: #ffffff;
+        --wash: #f5f7fb;
+        --blue: #2b5df5;
+        --blue-wash: #edf2ff;
+        --green: #16825d;
+        --green-wash: #eaf8f2;
+        --amber: #a56416;
+        --amber-wash: #fff6e7;
+        --shadow: 0 16px 45px rgba(35, 54, 82, 0.08);
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-width: 320px;
+        color: var(--ink);
+        background: var(--wash);
+        font: 14px/1.5 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      button, input { font: inherit; }
+      button { cursor: pointer; }
+      button:focus-visible, input:focus-visible { outline: 3px solid rgba(43, 93, 245, 0.28); outline-offset: 2px; }
+
+      .app { min-height: 100vh; display: grid; grid-template-rows: 64px 1fr; }
+      .topbar {
+        display: flex; align-items: center; justify-content: space-between; gap: 24px;
+        padding: 0 28px; background: var(--paper); border-bottom: 1px solid var(--line);
+      }
+      .brand { display: flex; align-items: center; gap: 12px; font-weight: 800; letter-spacing: -0.03em; font-size: 18px; }
+      .brand-mark { width: 28px; height: 28px; display: grid; place-items: center; color: white; background: var(--blue); border-radius: 9px; font-weight: 900; }
+      .top-actions { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+      .prototype-badge { padding: 5px 9px; border: 1px solid #b8c8ff; border-radius: 999px; color: var(--blue); background: var(--blue-wash); font-size: 12px; font-weight: 700; }
+      .avatar { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; color: #1940a9; background: #dce6ff; font-weight: 800; }
+
+      .shell { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 0; }
+      aside { padding: 24px 14px; background: #fbfcfe; border-right: 1px solid var(--line); }
+      .realm-name { padding: 8px 12px 20px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; }
+      .realm-name strong { display: block; margin-top: 5px; color: var(--ink); font-size: 15px; letter-spacing: -0.01em; text-transform: none; }
+      .nav-label { padding: 14px 12px 6px; color: #8b97a9; font-size: 11px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; }
+      .nav-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; color: #536176; background: transparent; border: 0; border-radius: 8px; text-align: left; }
+      .nav-item:hover { background: #f0f4fa; color: var(--ink); }
+      .nav-item.active { color: var(--blue); background: var(--blue-wash); font-weight: 700; }
+      .nav-icon { width: 18px; color: currentColor; text-align: center; font-size: 13px; }
+      .project-chip { margin: 28px 8px 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); }
+      .project-chip small { display: block; color: var(--muted); font-size: 11px; }
+      .project-chip strong { display: block; margin: 3px 0 11px; font-size: 13px; }
+      .project-chip .status { display: flex; align-items: center; gap: 6px; color: var(--green); font-size: 12px; font-weight: 700; }
+      .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+      main { min-width: 0; padding: 40px clamp(24px, 5vw, 74px) 110px; }
+      .main-inner { max-width: 1180px; margin: 0 auto; }
+      .eyebrow { margin: 0 0 8px; color: var(--blue); font-size: 12px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; }
+      h1 { max-width: 730px; margin: 0; font-size: clamp(27px, 4vw, 41px); line-height: 1.08; letter-spacing: -0.045em; }
+      .intro { max-width: 720px; margin: 13px 0 30px; color: var(--muted); font-size: 16px; }
+
+      .role-switch { display: inline-flex; align-items: center; gap: 3px; padding: 4px; margin-bottom: 28px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); }
+      .role-switch button { padding: 7px 12px; color: var(--muted); background: transparent; border: 0; border-radius: 7px; font-size: 12px; font-weight: 700; }
+      .role-switch button.active { color: var(--ink); background: #eef2f8; box-shadow: 0 1px 3px rgba(35, 54, 82, 0.1); }
+
+      .progress { display: grid; grid-template-columns: repeat(6, 1fr); gap: 7px; margin-bottom: 32px; }
+      .progress-step { min-width: 0; padding: 0; color: #9aa6b7; background: transparent; border: 0; text-align: left; }
+      .progress-step .line { height: 4px; margin-bottom: 9px; border-radius: 20px; background: #dfe6f0; }
+      .progress-step.done .line, .progress-step.active .line { background: var(--blue); }
+      .progress-step.active { color: var(--ink); font-weight: 800; }
+      .progress-step.done { color: var(--muted); }
+      .progress-step span { display: block; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+
+      .workspace-grid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; align-items: start; gap: 24px; }
+      .card { background: var(--paper); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }
+      .primary-card { padding: clamp(20px, 3vw, 32px); }
+      .card-head { display: flex; align-items: start; justify-content: space-between; gap: 18px; margin-bottom: 24px; }
+      .card-head h2 { margin: 0; font-size: 20px; letter-spacing: -0.025em; }
+      .card-head p { margin: 5px 0 0; color: var(--muted); }
+      .step-count { flex: 0 0 auto; padding: 5px 9px; color: var(--muted); background: #f2f5f9; border-radius: 7px; font-size: 11px; font-weight: 800; }
+
+      .option-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+      .option { min-height: 106px; padding: 16px; color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 11px; text-align: left; transition: 140ms ease; }
+      .option:hover { border-color: #9fb4ff; transform: translateY(-1px); box-shadow: 0 8px 22px rgba(35, 54, 82, 0.08); }
+      .option.selected { border-color: var(--blue); background: var(--blue-wash); box-shadow: inset 0 0 0 1px var(--blue); }
+      .option-icon { width: 30px; height: 30px; display: grid; place-items: center; margin-bottom: 10px; color: var(--blue); background: #dfe7ff; border-radius: 8px; font-weight: 900; }
+      .option strong { display: block; font-size: 13px; }
+      .option span { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.4; }
+      .form-row { display: grid; gap: 7px; margin: 16px 0; }
+      label { color: #526075; font-size: 12px; font-weight: 800; }
+      input { width: 100%; padding: 11px 12px; color: var(--ink); background: #fbfcfe; border: 1px solid var(--line-strong); border-radius: 8px; }
+      input::placeholder { color: #a0aaba; }
+      .inline-note { display: flex; gap: 9px; align-items: start; padding: 12px; margin: 15px 0; color: #526075; background: #f7f9fc; border: 1px solid #e2e8f0; border-radius: 9px; font-size: 12px; }
+      .inline-note .note-mark { flex: 0 0 auto; color: var(--blue); font-weight: 900; }
+      .action-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 24px; margin-top: 24px; border-top: 1px solid var(--line); }
+      .button-row { display: flex; flex-wrap: wrap; gap: 9px; }
+      .button { padding: 10px 14px; border: 1px solid var(--line-strong); border-radius: 8px; color: var(--ink); background: var(--paper); font-weight: 800; }
+      .button:hover { border-color: #91a5cf; background: #f7f9ff; }
+      .button.primary { color: #fff; background: var(--blue); border-color: var(--blue); }
+      .button.primary:hover { background: #1c49d5; }
+      .button.ghost { color: var(--muted); border-color: transparent; background: transparent; }
+      .button[disabled] { cursor: not-allowed; opacity: 0.45; }
+
+      .trust-card { padding: 20px; box-shadow: none; }
+      .trust-card h3 { margin: 0 0 5px; font-size: 14px; }
+      .trust-card > p { margin: 0 0 18px; color: var(--muted); font-size: 12px; }
+      .trust-list { display: grid; gap: 13px; margin: 0; padding: 0; list-style: none; }
+      .trust-list li { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 8px; color: #526075; font-size: 12px; }
+      .trust-list b { color: var(--green); }
+      .trust-list .deny { color: var(--amber); }
+      .event-card { padding: 17px 20px; margin-top: 16px; box-shadow: none; }
+      .event-card h3 { margin: 0 0 13px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+      .event { display: grid; grid-template-columns: 8px minmax(0, 1fr); gap: 9px; margin-bottom: 12px; color: var(--muted); font-size: 12px; }
+      .event:last-child { margin-bottom: 0; }
+      .event .event-dot { width: 7px; height: 7px; margin-top: 6px; border-radius: 50%; background: #9eabc0; }
+      .event.done .event-dot { background: var(--green); }
+      .event strong { display: block; color: var(--ink); font-size: 12px; }
+
+      .summary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; margin: 22px 0; }
+      .summary-stat { padding: 13px; background: #f8faff; border: 1px solid #e0e7f3; border-radius: 9px; }
+      .summary-stat small { display: block; color: var(--muted); font-size: 11px; }
+      .summary-stat strong { display: block; margin-top: 4px; font-size: 13px; }
+      .check-list { display: grid; gap: 9px; margin: 20px 0; }
+      .check { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
+      .check .check-label { display: flex; align-items: center; gap: 8px; }
+      .check .check-mark { color: var(--green); font-weight: 900; }
+      .check .check-state { color: var(--muted); }
+      .release-banner { padding: 15px; margin: 20px 0; color: #155b44; background: var(--green-wash); border: 1px solid #b9e8d3; border-radius: 9px; }
+      .release-banner strong { display: block; margin-bottom: 4px; }
+
+      .footer { position: fixed; right: 0; bottom: 0; left: 236px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 30px; background: rgba(255, 255, 255, 0.94); border-top: 1px solid var(--line); backdrop-filter: blur(12px); }
+      .footer-copy { color: var(--muted); font-size: 12px; }
+      .footer-copy strong { color: var(--ink); }
+
+      @media (max-width: 920px) {
+        .shell { grid-template-columns: 72px minmax(0, 1fr); }
+        aside { padding: 18px 10px; }
+        .realm-name, .nav-label, .nav-item span:not(.nav-icon), .project-chip { display: none; }
+        .nav-item { justify-content: center; padding: 12px; }
+        .workspace-grid { grid-template-columns: 1fr; }
+        .footer { left: 72px; }
+      }
+      @media (max-width: 620px) {
+        .topbar { padding: 0 16px; }
+        .top-actions .prototype-badge { display: none; }
+        main { padding: 26px 16px 120px; }
+        .progress { gap: 3px; }
+        .progress-step span { font-size: 9px; }
+        .option-grid, .summary-grid { grid-template-columns: 1fr; }
+        .action-row, .footer { align-items: stretch; flex-direction: column; }
+        .footer { padding: 10px 16px; }
+        .footer .button-row { width: 100%; justify-content: space-between; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app" id="app"></div>
+    <script>
+      const steps = [
+        { id: "realm", label: "Realm" },
+        { id: "project", label: "Project" },
+        { id: "delivery", label: "Source & target" },
+        { id: "agent", label: "Agent" },
+        { id: "change", label: "Change" },
+        { id: "release", label: "Release" },
+      ];
+
+      const state = {
+        step: 0,
+        role: "technical",
+        realm: "customer-operated",
+        project: "blank",
+        source: "private",
+        target: "worker",
+        agent: "codex",
+        events: [],
+      };
+
+      const copy = {
+        technical: {
+          eyebrow: "Customer-operated Realm · technical path",
+          intro: "Connect the ownership boundary, then move one ordinary Git project through source, agent, Change, Release, and Deployment.",
+          realmTitle: "Claim a Realm you control",
+          realmText: "Anyam owns the project contract. Your Cloudflare account owns the runtime resources and recovery authority.",
+        },
+        assisted: {
+          eyebrow: "Customer-operated Realm · agent-assisted path",
+          intro: "Tell Anyam what you want to build. The agent can prepare each step, while you approve ownership, source visibility, and deployment effects.",
+          realmTitle: "Connect the place your project belongs",
+          realmText: "An agent can guide setup, but it cannot claim your Realm, reveal private source, or promote production for you.",
+        },
+      };
+
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[character]));
+      }
+
+      function option(id, icon, title, description, selected) {
+        return `<button class="option ${selected ? "selected" : ""}" data-choice="${id}"><span class="option-icon">${icon}</span><strong>${title}</strong><span>${description}</span></button>`;
+      }
+
+      function trustCard() {
+        const roleText = state.role === "technical" ? "You see the exact project boundary." : "The agent translates this boundary into plain language.";
+        return `<aside class="right-rail">
+          <section class="card trust-card">
+            <h3>Trust boundary</h3>
+            <p>${roleText}</p>
+            <ul class="trust-list">
+              <li><b>✓</b><span>Anyam records Changes, Releases, and evidence.</span></li>
+              <li><b>✓</b><span>Your Realm retains source and runtime ownership.</span></li>
+              <li><b>✓</b><span>Agents write only to an isolated Workspace.</span></li>
+              <li><b class="deny">×</b><span>Agents cannot write canonical source or production.</span></li>
+            </ul>
+          </section>
+          <section class="card event-card">
+            <h3>Activity</h3>
+            ${state.events.length ? state.events.map((event) => `<div class="event done"><span class="event-dot"></span><div><strong>${escapeHtml(event.title)}</strong>${escapeHtml(event.detail)}</div></div>`).join("") : `<div class="event"><span class="event-dot"></span><div><strong>Nothing committed yet</strong>Actions will appear here as you move through the prototype.</div></div>`}
+          </section>
+        </aside>`;
+      }
+
+      function stepContent() {
+        const active = steps[state.step].id;
+        const role = copy[state.role];
+        if (active === "realm") return `<div class="card-head"><div><h2>${role.realmTitle}</h2><p>${role.realmText}</p></div><span class="step-count">01 / 06</span></div>
+          <div class="form-row"><label for="realm-url">Realm URL</label><input id="realm-url" value="https://realm.customer.example" aria-label="Realm URL" /></div>
+          <div class="inline-note"><span class="note-mark">◎</span><span>Claiming ownership creates the first Realm principal. No default password is created; authentication stays with your chosen identity provider.</span></div>
+          <div class="option-grid">${option("customer-operated", "⌂", "Customer-operated", "Your Cloudflare account owns the control-plane resources.", true)}${option("managed", "↗", "Connect later", "Use a prepared Realm and claim it after the project exists.", false)}</div>`;
+        if (active === "project") return `<div class="card-head"><div><h2>Start the Project</h2><p>${state.role === "technical" ? "Keep repository mechanics familiar; Anyam adds the project and delivery context around them." : "Choose a starting point. The agent can fill in the manifest after the first intent."}</p></div><span class="step-count">02 / 06</span></div>
+          <div class="option-grid">${option("blank", "+", "Start blank", "Create a Project and its first Source Space.", state.project === "blank")}${option("git", "↙", "Import Git", "Bring an existing repository without losing its remote history.", state.project === "git")}${option("local", "▣", "Connect local folder", "Keep editing locally and let Anyam create the first Change.", state.project === "local")}${option("agent", "✦", "Describe the result", "Let an agent propose the first Project Manifest.", state.project === "agent")}</div>
+          <div class="form-row"><label for="project-name">Project name</label><input id="project-name" placeholder="atlas" value="atlas" /></div>`;
+        if (active === "delivery") return `<div class="card-head"><div><h2>Choose source and delivery boundaries</h2><p>Visibility and Target are independent. They can change later through an explicit policy-controlled Change.</p></div><span class="step-count">03 / 06</span></div>
+          <label>Source Space</label><div class="option-grid" style="margin-top:8px">${option("public", "◌", "Public source", "Everyone can clone the public projection.", state.source === "public")}${option("private", "●", "Private source", "Only Realm members can read the source.", state.source === "private")}</div>
+          <div style="height:18px"></div><label>First Target</label><div class="option-grid" style="margin-top:8px">${option("worker", "⌁", "Cloudflare Worker", "Preview, health check, then promote an immutable Release.", state.target === "worker")}${option("release", "↓", "Release assets", "Publish a typed CLI or library Artifact without rebuilding it.", state.target === "release")}</div>
+          <div class="inline-note"><span class="note-mark">↔</span><span>One Project can later contain a public Source Space, private commercial core, and separate Targets. Anyam does not require a single repository visibility switch.</span></div>`;
+        if (active === "agent") return `<div class="card-head"><div><h2>Connect a coding agent</h2><p>Pick the tool you already use. Anyam supplies the Workspace, Context Manifest, checks, and promotion boundary.</p></div><span class="step-count">04 / 06</span></div>
+          <div class="option-grid">${option("codex", "C", "Codex", "Local or hosted agent through CLI and MCP.", state.agent === "codex")}${option("claude", "A", "Claude Code", "Local agent with the same Change contract.", state.agent === "claude")}${option("cursor", "↗", "Cursor", "Open the Change Workspace in your editor.", state.agent === "cursor")}${option("local", "⌘", "Work manually", "Use Git and the Anyam CLI without an agent.", state.agent === "local")}</div>
+          <div class="summary-grid"><div class="summary-stat"><small>Workspace</small><strong>isolated / W-82</strong></div><div class="summary-stat"><small>Can write</small><strong>Change Workspace</strong></div><div class="summary-stat"><small>Cannot write</small><strong>canonical source</strong></div></div>`;
+        if (active === "change") return `<div class="card-head"><div><h2>Review the Change</h2><p>Review source and running behavior together. This is where a technical user or agent sees the complete impact.</p></div><span class="step-count">05 / 06</span></div>
+          <div class="release-banner" style="color:#294798;background:#eff3ff;border-color:#c8d5ff"><strong>CHG-142 · Add organization roles and invitations</strong>Revision 3 · Preview is ready · ${escapeHtml(state.agent === "local" ? "manual contributor" : state.agent)}</div>
+          <div class="summary-grid"><div class="summary-stat"><small>Source</small><strong>12 files · +248 / −31</strong></div><div class="summary-stat"><small>Preview</small><strong>atlas-r3.preview</strong></div><div class="summary-stat"><small>Effects</small><strong>API + D1 schema</strong></div></div>
+          <div class="check-list"><div class="check"><span class="check-label"><span class="check-mark">✓</span>Unit and type checks</span><span class="check-state">passed</span></div><div class="check"><span class="check-label"><span class="check-mark">✓</span>Browser smoke flow</span><span class="check-state">passed</span></div><div class="check"><span class="check-label"><span class="check-mark">✓</span>Migration forward / rollback</span><span class="check-state">passed</span></div><div class="check"><span class="check-label"><span class="check-mark">✓</span>Source visibility review</span><span class="check-state">owner required</span></div></div>
+          <div class="inline-note"><span class="note-mark">!</span><span>The Change is ready for an owner review because it changes a public API and a database schema. The agent can explain the evidence; it cannot approve itself.</span></div>`;
+        return `<div class="card-head"><div><h2>Release and Deployment</h2><p>Landing source and promoting a Release are separate state transitions.</p></div><span class="step-count">06 / 06</span></div>
+          <div class="release-banner"><strong>Release rel-2026.08.08.3 is verified</strong>Built from Project Revision 47ca9f · Artifact digest sha256:631f… · all required Evidence is current.</div>
+          <div class="summary-grid"><div class="summary-stat"><small>Canonical source</small><strong>47ca9f · landed</strong></div><div class="summary-stat"><small>Target</small><strong>${state.target === "worker" ? "staging Worker" : "release assets"}</strong></div><div class="summary-stat"><small>Production</small><strong>Release 16 serving</strong></div></div>
+          <div class="check-list"><div class="check"><span class="check-label"><span class="check-mark">✓</span>Artifact is immutable</span><span class="check-state">verified</span></div><div class="check"><span class="check-label"><span class="check-mark">✓</span>Target health check</span><span class="check-state">ready</span></div><div class="check"><span class="check-label"><span class="check-mark">✓</span>Rollback path</span><span class="check-state">Release 16</span></div></div>
+          <div class="inline-note"><span class="note-mark">→</span><span>Promote the same verified Artifact. If the health check fails, the previous known-good Release keeps serving and the failure remains visible.</span></div>`;
+      }
+
+      function render() {
+        const role = copy[state.role];
+        const active = steps[state.step].id;
+        document.querySelector("#app").innerHTML = `<header class="topbar"><div class="brand"><span class="brand-mark">A</span><span>anyam</span></div><div class="top-actions"><span class="prototype-badge">THROWAWAY PROTOTYPE</span><span>Wei Meng</span><span class="avatar">WM</span></div></header>
+          <div class="shell"><aside><div class="realm-name">Realm<strong>acme / customer</strong></div><div class="nav-label">Setup</div><button class="nav-item active"><span class="nav-icon">⌂</span><span>Control plane</span></button><button class="nav-item"><span class="nav-icon">◇</span><span>Projects</span></button><button class="nav-item"><span class="nav-icon">◈</span><span>Access</span></button><div class="nav-label">Build loop</div><button class="nav-item"><span class="nav-icon">◌</span><span>Changes</span></button><button class="nav-item"><span class="nav-icon">↗</span><span>Preview</span></button><button class="nav-item"><span class="nav-icon">▣</span><span>Releases</span></button><div class="nav-label">Operations</div><button class="nav-item"><span class="nav-icon">◎</span><span>Deployments</span></button><button class="nav-item"><span class="nav-icon">⚙</span><span>Settings</span></button><div class="project-chip"><small>Current project</small><strong>atlas / customer portal</strong><span class="status"><span class="dot"></span> customer-operated</span></div></aside>
+          <main><div class="main-inner"><p class="eyebrow">${role.eyebrow}</p><h1>From ownership to a verified deployment.</h1><p class="intro">${role.intro}</p><div class="role-switch" aria-label="Prototype role"><button data-role="technical" class="${state.role === "technical" ? "active" : ""}">Technical</button><button data-role="assisted" class="${state.role === "assisted" ? "active" : ""}">Agent-assisted</button></div>
+          <div class="progress" aria-label="Setup progress">${steps.map((step, index) => `<button class="progress-step ${index === state.step ? "active" : index < state.step ? "done" : ""}" data-step="${index}"><span class="line"></span><span>${step.label}</span></button>`).join("")}</div>
+          <div class="workspace-grid"><section class="card primary-card">${stepContent()}<div class="action-row"><button class="button ghost" data-action="back" ${state.step === 0 ? "disabled" : ""}>Back</button><div class="button-row"><button class="button" data-action="reset">Reset</button><button class="button primary" data-action="next">${state.step === steps.length - 1 ? "Promote release" : state.role === "assisted" ? "Let agent prepare this" : "Continue"}</button></div></div></section>${trustCard()}</div></div></main></div>
+          <footer class="footer"><div class="footer-copy"><strong>Prototype question:</strong> does this sequence make the ownership and delivery boundary obvious?</div><div class="button-row"><button class="button ghost" data-action="reset">Start over</button><button class="button primary" data-action="next">${state.step === steps.length - 1 ? "Promote release" : "Next"}</button></div></footer>`;
+
+        document.querySelectorAll("[data-role]").forEach((button) => button.addEventListener("click", () => { state.role = button.dataset.role; render(); }));
+        document.querySelectorAll("[data-step]").forEach((button) => button.addEventListener("click", () => { state.step = Number(button.dataset.step); render(); }));
+        document.querySelectorAll("[data-choice]").forEach((button) => button.addEventListener("click", () => {
+          const choice = button.dataset.choice;
+          if (["customer-operated", "managed"].includes(choice)) state.realm = choice;
+          if (["blank", "git", "local", "agent"].includes(choice)) state.project = choice;
+          if (["public", "private"].includes(choice)) state.source = choice;
+          if (["worker", "release"].includes(choice)) state.target = choice;
+          if (["codex", "claude", "cursor", "local"].includes(choice)) state.agent = choice;
+          render();
+        }));
+        document.querySelectorAll("[data-action='next']").forEach((button) => button.addEventListener("click", () => {
+          if (state.step < steps.length - 1) {
+            state.events.push({ title: steps[state.step].label + " configured", detail: " · ready for the next boundary" });
+            state.step += 1;
+          } else {
+            state.events.push({ title: "Promotion requested", detail: " · health check and policy gate are visible" });
+          }
+          render();
+        }));
+        document.querySelectorAll("[data-action='back']").forEach((button) => button.addEventListener("click", () => { if (state.step > 0) state.step -= 1; render(); }));
+        document.querySelectorAll("[data-action='reset']").forEach((button) => button.addEventListener("click", () => { state.step = 0; state.events = []; render(); }));
+      }
+
+      render();
+    </script>
+  </body>
+</html>

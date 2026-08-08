@@ -1,0 +1,57 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-realm-auth-20260808",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "ANYAM_HOSTING_MODE": "customer-operated",
+    "ANYAM_INSTALLATION_ID": "realm-auth-qualification-20260808",
+    "ANYAM_PROTOCOL_VERSION": "anyam.customer-realm-worker/v1",
+    "ANYAM_BUILD_REVISION": "realm-auth-qualification-20260808"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REALM_COORDINATOR",
+        "class_name": "AnyamRealmCoordinator"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "realm-auth-qualification-20260808-initial",
+      "new_sqlite_classes": ["AnyamRealmCoordinator"]
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "ANYAM_METADATA_DB",
+      "database_name": "anyam-realm-auth-20260808-metadata",
+      "database_id": "c884c0fd-4ddd-44e1-8095-65f22713fffd"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "ANYAM_EXPORTS",
+      "bucket_name": "anyam-realm-auth-20260808-exports",
+      "preview_bucket_name": "anyam-realm-auth-20260808-exports-preview"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "ANYAM_EVENTS",
+        "queue": "anyam-realm-auth-20260808-events"
+      }
+    ]
+  },
+  "workflows": [
+    {
+      "binding": "ANYAM_WORKFLOW",
+      "name": "anyam-realm-auth-20260808-workflow",
+      "class_name": "AnyamRealmWorkflow"
+    }
+  ]
+}

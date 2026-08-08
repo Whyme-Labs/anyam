@@ -4,9 +4,11 @@ import test from "node:test";
 import {
   CONTRACT_VERSIONS,
   PublicGatewayCoordinator,
+  PUBLIC_GATEWAY_LEDGER_PROTOCOL,
   applyPublicGatewayEdgeLimit,
   parsePublicGatewayProviderOutcome,
   type PublicGatewayState,
+  type PublicGatewayLedgerExport,
   type PublicGatewayStore,
   type PublicIntakePolicy,
 } from "../src/index.ts";
@@ -36,6 +38,7 @@ function policy(mode: PublicIntakePolicy["mode"] = "rate-limited"): PublicIntake
 
 class MemoryStore implements PublicGatewayStore {
   value: PublicGatewayState | undefined;
+  exports = new Map<string, PublicGatewayLedgerExport>();
 
   async load(): Promise<PublicGatewayState | undefined> {
     return this.value ? structuredClone(this.value) : undefined;
@@ -43,6 +46,15 @@ class MemoryStore implements PublicGatewayStore {
 
   async save(state: PublicGatewayState): Promise<void> {
     this.value = structuredClone(state);
+  }
+
+  async saveLedgerExport(bundle: PublicGatewayLedgerExport): Promise<void> {
+    this.exports.set(bundle.exportId, structuredClone(bundle));
+  }
+
+  async loadLedgerExport(exportId: string): Promise<PublicGatewayLedgerExport | undefined> {
+    const bundle = this.exports.get(exportId);
+    return bundle ? structuredClone(bundle) : undefined;
   }
 }
 
@@ -135,6 +147,91 @@ test("provider challenge is ledgered as a retryable denial and never materialize
   assert.equal(snapshot.accepted, 1);
   assert.deepEqual(snapshot.preservedContributionIds, ["contribution:challenge"]);
   assert.match(snapshot.recoveryCheckpoint, /abuse:challenge/);
+});
+
+function retentionPolicy(overrides: Partial<Record<"requestRecordLimit" | "requestTombstoneLimit" | "auditEventLimit" | "retryableRetentionMs" | "terminalDenialRetentionMs", number>> = {}) {
+  const measured = (name: string, value: number, unit: string) => ({
+    value,
+    unit,
+    measuredAt: "2026-08-08T00:00:00.000Z",
+    method: `controlled-ledger-retention-fixture:${name}`,
+    receipt: `receipt:ledger-retention:${name}`,
+  });
+  return {
+    protocol: PUBLIC_GATEWAY_LEDGER_PROTOCOL,
+    requestRecordLimit: measured("request-records", overrides.requestRecordLimit ?? 4, "detailed-request-records"),
+    requestTombstoneLimit: measured("request-tombstones", overrides.requestTombstoneLimit ?? 4, "exact-replay-tombstones"),
+    auditEventLimit: measured("audit-events", overrides.auditEventLimit ?? 8, "audit-events"),
+    retryableRetentionMs: measured("retryable-age", overrides.retryableRetentionMs ?? 1000, "milliseconds"),
+    terminalDenialRetentionMs: measured("terminal-age", overrides.terminalDenialRetentionMs ?? 1000, "milliseconds"),
+    receipt: "receipt:ledger-retention-policy-fixture",
+  } as const;
+}
+
+test("ledger export survives restart and compaction retains exact replay tombstones and accepted lineage", async () => {
+  const store = new MemoryStore();
+  let now = new Date("2026-08-08T00:00:00.000Z");
+  const gatewayClock = () => now;
+  const coordinator = new PublicGatewayCoordinator(policy(), store, gatewayClock);
+
+  const closed = await coordinator.submit({ requestId: "request:compact-terminal", actorId: "actor:anonymous", contributionId: "contribution:compact-terminal", payloadDigest: "sha256:terminal" });
+  assert.equal(closed.status, "denied");
+  await coordinator.open({ id: "principal:gateway-owner", role: "owner" }, "receipt:open");
+  const retryable = await coordinator.submit({ requestId: "request:compact-retryable", actorId: "actor:anonymous", contributionId: "contribution:compact-retryable", payloadDigest: "sha256:retryable", provider: { status: "timeout", receipt: "provider=fixture; timeout=true; retryable=true" } });
+  assert.equal(retryable.status, "denied");
+  const accepted = await coordinator.submit({ requestId: "request:compact-accepted", actorId: "actor:anonymous", contributionId: "contribution:compact-accepted", payloadDigest: "sha256:accepted" });
+  assert.equal(accepted.status, "accepted");
+
+  now = new Date("2026-08-08T00:00:02.000Z");
+  const exported = await coordinator.exportLedger({ actorId: "principal:gateway-owner", exportId: "ledger-export:restart-fixture", receipt: "receipt:ledger-export:restart-fixture" });
+  assert.equal(exported.protocol, PUBLIC_GATEWAY_LEDGER_PROTOCOL);
+  assert.equal(store.exports.has(exported.exportId), true);
+  assert.match(exported.digest, /^sha256:[0-9a-f]{64}$/);
+
+  const compacted = await coordinator.compactLedger({ actorId: "principal:gateway-owner", exportId: exported.exportId, policy: retentionPolicy(), receipt: "receipt:ledger-compact:restart-fixture" });
+  assert.equal(compacted.status, "compacted");
+  assert.equal(compacted.compacted.requestRecords, 2);
+  assert.equal(compacted.after.requestRecords, 1);
+  assert.equal(compacted.after.requestTombstones, 2);
+  assert.match(compacted.receipt, /acceptedLineage=preserved/);
+
+  const restarted = new PublicGatewayCoordinator(policy(), store, gatewayClock);
+  const snapshot = await restarted.snapshot();
+  assert.deepEqual(snapshot.preservedContributionIds, ["contribution:compact-accepted"]);
+  assert.equal(snapshot.requestRecords.length, 1);
+  assert.equal(snapshot.ledger.requestTombstones.length, 2);
+  assert.equal(snapshot.ledger.lastExport?.digest, exported.digest);
+
+  const compactedReplay = await restarted.submit({ requestId: "request:compact-terminal", actorId: "actor:anonymous", contributionId: "contribution:compact-terminal", payloadDigest: "sha256:terminal" });
+  assert.equal(compactedReplay.status, "denied");
+  assert.equal(compactedReplay.idempotent, true);
+  assert.match(compactedReplay.decision.receipt, /compacted=true/);
+
+  const replayWithChangedPayload = await restarted.submit({ requestId: "request:compact-terminal", actorId: "actor:anonymous", contributionId: "contribution:other", payloadDigest: "sha256:other" });
+  assert.equal(replayWithChangedPayload.status, "denied");
+  assert.equal(replayWithChangedPayload.idempotent, false);
+  assert.match(replayWithChangedPayload.decision.receipt, /replay=true/);
+});
+
+test("ledger compaction rejects stale exports and exposes a measured budget failure", async () => {
+  const store = new MemoryStore();
+  const coordinator = new PublicGatewayCoordinator(policy(), store, clock);
+  await coordinator.open({ id: "principal:gateway-owner", role: "owner" }, "receipt:open");
+  const first = await coordinator.submit({ requestId: "request:budget-1", actorId: "actor:anonymous", contributionId: "contribution:budget-1", payloadDigest: "sha256:budget-1" });
+  assert.equal(first.status, "accepted");
+  const exported = await coordinator.exportLedger({ actorId: "principal:gateway-owner", exportId: "ledger-export:stale-fixture", receipt: "receipt:ledger-export:stale-fixture" });
+  const changed = await coordinator.submit({ requestId: "request:budget-2", actorId: "actor:anonymous", contributionId: "contribution:budget-2", payloadDigest: "sha256:budget-2" });
+  assert.equal(changed.status, "accepted");
+  await assert.rejects(
+    () => coordinator.compactLedger({ actorId: "principal:gateway-owner", exportId: exported.exportId, policy: retentionPolicy(), receipt: "receipt:ledger-compact:stale" }),
+    (error: unknown) => error instanceof Error && error.name === "PublicGatewayError" && error.message.includes("stale"),
+  );
+
+  const fresh = await coordinator.exportLedger({ actorId: "principal:gateway-owner", exportId: "ledger-export:budget-fixture", receipt: "receipt:ledger-export:budget-fixture" });
+  await assert.rejects(
+    () => coordinator.compactLedger({ actorId: "principal:gateway-owner", exportId: fresh.exportId, policy: retentionPolicy({ requestRecordLimit: 1 }), receipt: "receipt:ledger-compact:budget" }),
+    (error: unknown) => error instanceof Error && error.name === "PublicGatewayError" && error.message.includes("budget=public-gateway-request-records") && error.message.includes("limit=1") && error.message.includes("asked=2") && error.message.includes("receipt:ledger-retention:request-records"),
+  );
 });
 
 test("Worker provider payload parsing preserves abuse decisions instead of dropping them", () => {

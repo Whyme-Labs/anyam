@@ -5,6 +5,7 @@ import {
   CONTRACT_VERSIONS,
   PublicGatewayCoordinator,
   applyPublicGatewayEdgeLimit,
+  parsePublicGatewayProviderOutcome,
   type PublicGatewayState,
   type PublicGatewayStore,
   type PublicIntakePolicy,
@@ -104,6 +105,44 @@ test("provider timeout is retryable with the same idempotency key and preserves 
   assert.equal(snapshot.requestRecords.length, 2);
   assert.equal(snapshot.requestRecords[0]?.retryable, true);
   assert.match(snapshot.recoveryCheckpoint, /provider-timeout/);
+});
+
+test("provider challenge is ledgered as a retryable denial and never materializes a contribution", async () => {
+  const store = new MemoryStore();
+  const coordinator = new PublicGatewayCoordinator(policy(), store, clock);
+  await coordinator.open({ id: "principal:gateway-owner", role: "owner" }, "receipt:open");
+
+  const challenged = await coordinator.submit({
+    requestId: "request:challenge",
+    actorId: "actor:anonymous",
+    contributionId: "contribution:challenge",
+    payloadDigest: "sha256:challenge",
+    provider: { status: "abuse", outcome: "challenge", retryable: true, receipt: "provider=cloudflare-turnstile; validation=failed; rawProviderError=not-disclosed" },
+  });
+  assert.equal(challenged.status, "denied");
+  assert.equal(challenged.providerOutcome, "challenge");
+  assert.match(challenged.decision.receipt, /materialized=false/);
+
+  const recovered = await coordinator.submit({
+    requestId: "request:challenge",
+    actorId: "actor:anonymous",
+    contributionId: "contribution:challenge",
+    payloadDigest: "sha256:challenge",
+  });
+  assert.equal(recovered.status, "accepted");
+  assert.equal(recovered.idempotent, false);
+  const snapshot = await coordinator.snapshot();
+  assert.equal(snapshot.accepted, 1);
+  assert.deepEqual(snapshot.preservedContributionIds, ["contribution:challenge"]);
+  assert.match(snapshot.recoveryCheckpoint, /abuse:challenge/);
+});
+
+test("Worker provider payload parsing preserves abuse decisions instead of dropping them", () => {
+  const parsed = parsePublicGatewayProviderOutcome({ status: "abuse", outcome: "challenge", retryable: true, receipt: "provider=cloudflare-turnstile; materialized=false" });
+  assert.deepEqual(parsed, { status: "abuse", outcome: "challenge", retryable: true, receipt: "provider=cloudflare-turnstile; materialized=false" });
+  assert.deepEqual(parsePublicGatewayProviderOutcome({ status: "abuse", outcome: "challenge", retryable: true, receipt: "" }), { status: "abuse", outcome: "denied", retryable: false, receipt: "provider=invalid; receipt=missing; failClosed=true" });
+  assert.deepEqual(parsePublicGatewayProviderOutcome({ status: "abuse", outcome: "unexpected", retryable: true, receipt: "provider=bad" }), { status: "abuse", outcome: "denied", retryable: false, receipt: "provider=invalid; outcome=not-recognized; failClosed=true" });
+  assert.deepEqual(parsePublicGatewayProviderOutcome("timeout"), { status: "timeout", receipt: "provider=fixture-driver; timeout=simulated; retryable=true" });
 });
 
 test("suspension, review reopen, approval-only intake, and cleanup preserve accepted lineage", async () => {

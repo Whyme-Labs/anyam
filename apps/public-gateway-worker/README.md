@@ -12,6 +12,9 @@ contribution boundary. It is deliberately narrower than a complete Git forge:
   and cleanup are recorded in the customer Realm;
 - the Cloudflare Worker Rate Limiting binding is an outer coarse abuse tripwire;
   the Durable Object ledger remains authoritative for logical intake decisions.
+- optional Turnstile server-side validation is a fail-closed, result-only
+  contribution gate; it never grants canonical write or private Source Space
+  access and never places the provider secret in a response or ledger record.
 
 The example config intentionally contains placeholders. Replace them with
 customer-owned values and a measured receipt before deploying. Do not add a
@@ -25,3 +28,10 @@ The example `ADMIN_TOKEN` is an owner-only qualification secret. The Worker
 does not trust caller-provided actor or role fields. A production Realm should
 replace this adapter boundary with the Realm's authenticated capability check
 before delegating moderator roles or broader administration.
+
+Set `PUBLIC_ABUSE_MODE=turnstile-required` only after measuring a provider
+timeout tripwire and storing the Turnstile secret as a customer-owned secret
+binding. The contribution JSON must then include `turnstileToken`; missing,
+expired, replayed, mismatched, malformed, or provider-unavailable validation is
+rejected or challenged without materialization. Public Git clone/fetch remains
+independent of this contribution gate.

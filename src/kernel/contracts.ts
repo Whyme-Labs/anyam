@@ -74,6 +74,7 @@ export const CONTRACT_VERSIONS = {
   mirrorCheckpoint: "anyam.mirror-checkpoint/v1",
   publicIntake: "anyam.public-intake/v1",
   publicGateway: "anyam.public-gateway/v1",
+  publicGatewayAbuse: "anyam.public-gateway-abuse/v1",
 } as const;
 
 export type SourceSpaceClassification = "public" | "internal" | "restricted" | "result-only";

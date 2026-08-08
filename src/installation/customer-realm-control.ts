@@ -143,7 +143,7 @@ function requiredString(value: unknown, field: string): string {
   return value;
 }
 
-function providerAuthorization(value: unknown, accountId: string): CustomerRealmProviderAuthorization | undefined {
+function providerAuthorization(value: unknown, accountId: string, now = new Date()): CustomerRealmProviderAuthorization | undefined {
   if (value === undefined) return undefined;
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new CustomerRealmControlError({ code: "invalid_request", message: "providerAuthorization must be a receipt-only object.", recoveryAction: "provide the customer provider session digest and receipt, never a provider token", receipt: "providerAuthorization=object-required" });
   const candidate = value as Record<string, unknown>;
@@ -158,7 +158,7 @@ function providerAuthorization(value: unknown, accountId: string): CustomerRealm
   if (authorization.accountId !== accountId) throw new CustomerRealmControlError({ code: "forbidden", message: "Provider authorization is not for the requested customer account.", recoveryAction: "authorize the same customer account named by the installation command", receipt: "provider-account-match=false" });
   if (!/^sha256:[0-9a-f]{64}$/.test(authorization.authorizationDigest)) throw new CustomerRealmControlError({ code: "invalid_request", message: "Provider authorization digest is not an immutable SHA-256 receipt.", recoveryAction: "record the provider credential digest without sending the credential to Anyam", receipt: "authorizationDigest=sha256:64-lowercase-hex required" });
   if (!Number.isFinite(Date.parse(authorization.expiresAt))) throw new CustomerRealmControlError({ code: "invalid_request", message: "Provider authorization expiry is not a valid timestamp.", recoveryAction: "renew the customer provider session and retry", receipt: "providerAuthorization.expiresAt=timestamp required" });
-  if (Date.parse(authorization.expiresAt) <= Date.now()) throw new CustomerRealmControlError({ code: "unauthorized", message: "Provider authorization has expired; no customer provider operation was attempted.", recoveryAction: "renew the customer provider session and retry the same command identity", receipt: "providerAuthorization=expired; credentialStoredByAnyam=false" });
+  if (Date.parse(authorization.expiresAt) <= now.getTime()) throw new CustomerRealmControlError({ code: "unauthorized", message: "Provider authorization has expired; no customer provider operation was attempted.", recoveryAction: "renew the customer provider session and retry the same command identity", receipt: "providerAuthorization=expired; credentialStoredByAnyam=false" });
   if (Object.keys(candidate).some((key) => /token|password|secret|credential/i.test(key))) throw new CustomerRealmControlError({ code: "invalid_request", message: "Provider authorization contains credential material; no provider credential was accepted.", recoveryAction: "send only the provider authorization digest and receipt", receipt: "credential-material=reject" });
   return authorization;
 }
@@ -209,7 +209,7 @@ export class CustomerRealmControlPlane {
     requireCapability("installation.install", input.authorization);
     const installationId = requiredString(input.installationId, "installationId");
     const accountId = requiredString(input.accountId, "accountId");
-    const authorization = providerAuthorization(input.providerAuthorization, accountId);
+    const authorization = providerAuthorization(input.providerAuthorization, accountId, this.input.now?.() ?? new Date());
     if (!authorization) throw new CustomerRealmControlError({ code: "unauthorized", message: "Customer-operated installation requires a provider authorization receipt; no provider mutation was attempted.", recoveryAction: "authorize the customer Cloudflare account through the provider adapter and retry", receipt: "providerAuthorization=required; credentialStoredByAnyam=false" });
     const installation = await this.open(installationId);
     const state = await installation.install({ accountId, requestedResourceTypes: [...input.requestedResourceTypes], ownerConfirmed: input.ownerConfirmed, ...(input.operationId ? { operationId: input.operationId } : {}), ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}), ...(authorization ? { providerAuthorization: authorization } : {}) });
@@ -244,7 +244,7 @@ export class CustomerRealmControlPlane {
     const installation = await this.open(installationId);
     const state = installation.snapshot;
     if (!state.account) throw new CustomerRealmControlError({ code: "invalid_request", message: "Deployment readiness requires a verified customer account.", recoveryAction: "run the customer-operated install command first", receipt: "account=missing" });
-    const authorization = providerAuthorization(input.providerAuthorization, state.account.accountId);
+    const authorization = providerAuthorization(input.providerAuthorization, state.account.accountId, this.input.now?.() ?? new Date());
     if (!authorization) throw new CustomerRealmControlError({ code: "unauthorized", message: "Deployment readiness requires a fresh customer provider authorization receipt.", recoveryAction: "renew the customer Cloudflare provider session and retry the same operation identity", receipt: "providerAuthorization=required; credentialStoredByAnyam=false" });
     const result = await this.input.readiness.inspect({ installationId, accountId: state.account.accountId, operationId, ...(authorization ? { authorization } : {}) });
     const recorded = await installation.recordDeploymentReadiness(result);
@@ -257,7 +257,7 @@ export class CustomerRealmControlPlane {
     const installationId = requiredString(input.installationId, "installationId");
     const installation = await this.open(installationId);
     const state = installation.snapshot;
-    const authorization = providerAuthorization(input.providerAuthorization, state.account?.accountId ?? "");
+    const authorization = providerAuthorization(input.providerAuthorization, state.account?.accountId ?? "", this.input.now?.() ?? new Date());
     if (state.account && !authorization) throw new CustomerRealmControlError({ code: "unauthorized", message: "Recovery requires a fresh customer provider authorization receipt.", recoveryAction: "renew the customer Cloudflare provider session and retry recovery", receipt: "providerAuthorization=required; credentialStoredByAnyam=false" });
     const recovered = await installation.recover(authorization ? { providerAuthorization: authorization } : {});
     return this.result("installation.recover", recovered, recovered.phase === "degraded" ? "retryable" : recovered.phase === "blocked" ? "blocked" : "succeeded", recovered.degraded?.safeRecoveryAction ?? "Inspect the recovered checkpoint and continue owner activation.", `installation=${installationId}; phase=${recovered.phase}; checkpoint=${recovered.checkpoint.checkpointId}; providerCredentialStored=false`);
@@ -268,7 +268,7 @@ export class CustomerRealmControlPlane {
     const installationId = requiredString(input.installationId, "installationId");
     const installation = await this.open(installationId);
     const state = installation.snapshot;
-    const authorization = providerAuthorization(input.providerAuthorization, state.account?.accountId ?? "");
+    const authorization = providerAuthorization(input.providerAuthorization, state.account?.accountId ?? "", this.input.now?.() ?? new Date());
     if (state.account && !authorization) throw new CustomerRealmControlError({ code: "unauthorized", message: "Recovery activation requires a fresh customer provider authorization receipt.", recoveryAction: "renew the customer Cloudflare provider session and retry activation", receipt: "providerAuthorization=required; credentialStoredByAnyam=false" });
     const active = await installation.activateRecovery({ ownerPrincipalId: requiredString(input.ownerPrincipalId, "ownerPrincipalId"), recoveryReceipt: requiredString(input.recoveryReceipt, "recoveryReceipt"), ...(authorization ? { providerAuthorization: authorization } : {}) });
     return this.result("installation.recovery-activate", active, active.phase === "degraded" ? "retryable" : active.phase === "blocked" ? "blocked" : "succeeded", active.degraded?.safeRecoveryAction ?? "No recovery action is currently required.", `installation=${installationId}; phase=${active.phase}; freshExternalActivation=true; providerCredentialStored=false`);

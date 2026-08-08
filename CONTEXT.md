@@ -84,6 +84,10 @@ _Avoid_: Last-seen cursor, successful sync flag
 An explicit, capability-scoped exchange between independently operated Realms that preserves local authority, disclosure policy, lineage, revocation, and abuse controls. P3/public beta does not require Federation: Realm-local membership plus an approved upstream identity provider is sufficient, and cross-Realm authority is denied unless a later Federation adapter establishes an explicit trust relationship. Federation is later than Git-compatible mirroring and never creates shared canonical authority.
 _Avoid_: Multi-primary mirror, implicit cross-Realm trust
 
+**Public Intake**:
+The destination-Realm boundary for anonymous or public contribution requests. Public Intake is closed until an owner explicitly opens it; accepted requests become quarantined Change inputs and never receive direct Landing or private Source Space authority. Rate-limited mode requires a measured limit and receipt; approval-only mode avoids inventing a quota. Suspension stops new materialization without deleting accepted Changes, canonical lineage, recovery state, or audit history.
+_Avoid_: Public push, anonymous canonical write
+
 **Source Space**:
 An independently versioned source and object-graph boundary with its own visibility, access, licensing, and model-processing policy. Every Snapshot belongs to one Source Space, and inaccessible source is neither reachable nor discoverable through another Source Space.
 _Avoid_: Private folder, hidden branch

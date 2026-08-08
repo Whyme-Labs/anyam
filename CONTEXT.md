@@ -68,6 +68,14 @@ _Avoid_: Project repository abstraction, authorization service
 The Realm-owned Smart HTTP boundary that gives clients stable Git URLs, anonymous public reads, short-lived credential exchange, policy enforcement, audit, and provider migration without exposing Repository Driver credentials or endpoints.
 _Avoid_: Cloudflare Artifacts remote, public mirror
 
+**Public Git Gateway**:
+A Git Gateway projection for one disclosed public Source Space. It permits
+anonymous `clone`/`fetch`/`git-upload-pack` reads through a customer-owned
+stable URL, rejects anonymous `git-receive-pack`, and sends contribution
+envelopes through Public Intake. Its edge abuse control is advisory; the
+Durable Object Public Intake ledger remains authoritative.
+_Avoid_: Public push, provider URL, edge quota ledger
+
 **Repository Mirror**:
 An external Git repository synchronized bidirectionally with one Anyam Source Space through an explicit ref mapping and Disclosure policy. Outbound state is a verified Project Revision projection; remote commits enter Anyam as proposed Changes with remote provenance; only Landing advances the canonical Project Revision, after which accepted refs may propagate outward. A Mirror never becomes a second canonical authority.
 _Avoid_: Second canonical repository, last-writer-wins synchronization

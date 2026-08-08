@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/create-anyam", "apps/realm-worker"],
+  "workspaces": ["packages/create-anyam", "apps/realm-worker", "apps/public-gateway-worker"],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "tsx --test \"test/**/*.test.ts\"",

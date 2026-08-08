@@ -779,6 +779,15 @@ export class RealmIdentityPolicy {
     return session;
   }
 
+  /**
+   * Validate one opaque session handle at the durable Realm boundary without
+   * exposing the mutable internal state object. This is intentionally the
+   * same chain/epoch check used by task and grant issuance.
+   */
+  validateSession(sessionId: string): RealmSession {
+    return clone(this.requireSession(sessionId));
+  }
+
   private grantChainIsActive(grant: RealmCapabilityGrant, seen = new Set<string>()): boolean {
     if (seen.has(grant.id)) return false;
     seen.add(grant.id);

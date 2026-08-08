@@ -3,13 +3,15 @@
 This package is the first deployable edge slice for a customer-operated Anyam
 Realm. It exposes credential-free health and bootstrap metadata plus the
 official Cloudflare Workers OAuth Provider boundary for an MCP resource. The
-qualification Worker deliberately leaves the owner-authentication adapter
-blocked: it does not yet authenticate a principal, issue an Anyam Capability
+qualification Worker now verifies and durably enrolls a first owner through a
+customer-controlled passkey adapter. It does not yet issue an Anyam Capability
 Grant, transfer Git objects, perform Landing, or mutate a Target.
 
 Cloudflare Access Managed OAuth is optional. The Worker owns the OAuth/MCP
 protocol surface; Anyam owns the Realm identity, consent, capability policy,
-and owner-authentication adapter.
+and owner-authentication adapter. See [ADR 0048](../../docs/adr/0048-native-workers-oauth-and-optional-access.md)
+for the boundary and the conditions under which Access may be added at the
+perimeter.
 
 ## Local qualification
 
@@ -23,6 +25,18 @@ The command runs the repository checks and Wrangler's local dry-run bundle
 qualification using `wrangler.example.jsonc`. It does not contact a customer
 Cloudflare account and is not a deployment receipt.
 
+To exercise the browser owner ceremony or OAuth/MCP routes locally, use a
+secure local origin because the OAuth provider rejects non-HTTPS issuer
+metadata:
+
+```bash
+npx wrangler dev --local-protocol https --config wrangler.passkey-qualification.jsonc
+```
+
+The credential-free `/health` and owner ceremony routes also remain available
+over ordinary `http://localhost` during local development. This is a local
+transport convenience only; it does not weaken the deployed HTTPS contract.
+
 ## Customer deployment
 
 1. Create or choose the customer's Cloudflare resources for the Realm's
@@ -32,6 +46,9 @@ Cloudflare account and is not a deployment receipt.
 3. Replace every `replace-with-customer-*` value and the installation/build
    variables with customer-owned values. Do not put API tokens, passkeys,
    refresh tokens, or secret values in this file.
+   Set `ANYAM_REALM_RP_ID` to the exact hostname that serves the owner
+   passkey ceremony (for example, `source.customer.example`; do not include a
+   scheme or port). The hostname must remain stable for that Realm.
 4. Set the one-time first-owner bootstrap secret with
    `npx wrangler secret put ANYAM_OWNER_BOOTSTRAP_TOKEN --config wrangler.jsonc`.
    The secret is held by the customer Worker and is never written to source,
@@ -61,6 +78,7 @@ Realm and Project coordinators remain the source of authority above them.
 | `ANYAM_HOSTING_MODE` | Must be `customer-operated` | Realm policy |
 | `ANYAM_INSTALLATION_ID` | Non-secret installation identity | Installation state |
 | `ANYAM_PROTOCOL_VERSION` | Must match the Worker protocol | Contract compatibility |
+| `ANYAM_REALM_RP_ID` | Exact hostname used for WebAuthn ceremonies; no scheme or port | Realm identity policy |
 
 Configured bindings are reported by name only. The health response never
 returns binding values or credentials.
@@ -72,10 +90,12 @@ The Worker exposes a customer-owned WebAuthn adapter boundary:
 | Route | Purpose |
 | --- | --- |
 | `POST /api/owner/passkey/register/options` | First-owner registration challenge; requires the bootstrap secret header |
-| `POST /api/owner/passkey/register/verify` | Verifies the browser registration response and creates the qualification owner record; binding this verified result into the portable Anyam identity kernel remains the next boundary |
+| `POST /api/owner/passkey/register/verify` | Verifies the browser registration response, enrolls durable Realm membership, and writes the D1 owner projection |
 | `POST /api/owner/passkey/auth/options` | Authentication challenge for an enrolled owner |
 | `POST /api/owner/passkey/auth/verify` | Verifies the assertion and issues an opaque host-only owner session |
 | `POST /api/owner/session/revoke` | Revokes the current opaque owner session and expires its cookie |
+| `POST /api/owner/qualification/delegate` | Owner-session-protected qualification exchange for an isolated agent Workspace and Git/MCP credentials |
+| `POST /api/owner/qualification/revoke` | Revokes the qualification agent, delegated Sessions, Tasks, Grants, credentials, and Workspace task |
 | `GET /owner/claim` | Serves the browser first-owner WebAuthn ceremony (use `?format=json` for the machine contract) |
 | `GET /owner/login` | Serves the browser authentication ceremony (use `?format=json` for the machine contract) |
 
@@ -85,7 +105,13 @@ the JSON contract for automation. The server-side verifier uses
 counter in customer D1, and stores short-lived challenges/session handles in
 customer KV. It never stores a passkey private key or bootstrap secret.
 
-This is deliberately an adapter qualification, not a claim that the edge D1
-owner row is already the complete Anyam identity kernel. The live receipt must
-keep `ownerRecord=verified` and `kernelMembership=adapter-bound-next` distinct
-until the Worker calls the durable Realm identity/control authority.
+The verified owner is enrolled through the customer Realm Durable Object before
+the D1 projection is written. The live receipt keeps provider and kernel
+evidence distinct: `ownerRecord=verified` describes the WebAuthn/D1 adapter,
+while `kernelMembership=verified` describes the durable Realm identity
+transition. Authentication creates a kernel session first and then an opaque
+host-only session; OAuth authorization revalidates the kernel session before
+granting the provider's authorization request. The qualification exchange
+returns Git and MCP credential values once; the durable snapshot stores only
+credential digests. It is a disposable proof surface, not yet the production
+Git Smart HTTP gateway or the complete agent API.

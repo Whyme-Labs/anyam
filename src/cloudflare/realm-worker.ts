@@ -18,7 +18,7 @@ export type CustomerRealmWorkerBindingName =
   | "ANYAM_EVENTS"
   | "ANYAM_WORKFLOW";
 
-export type CustomerRealmWorkerConfigurationKey = CustomerRealmWorkerBindingName | "ANYAM_HOSTING_MODE" | "ANYAM_INSTALLATION_ID" | "ANYAM_PROTOCOL_VERSION";
+export type CustomerRealmWorkerConfigurationKey = CustomerRealmWorkerBindingName | "ANYAM_HOSTING_MODE" | "ANYAM_INSTALLATION_ID" | "ANYAM_PROTOCOL_VERSION" | "ANYAM_REALM_RP_ID";
 
 export const CUSTOMER_REALM_REQUIRED_BINDINGS: readonly CustomerRealmWorkerBindingName[] = [
   "REALM_COORDINATOR",
@@ -47,6 +47,7 @@ export type CustomerRealmWorkerEnv = {
   readonly ANYAM_HOSTING_MODE?: string | undefined;
   readonly ANYAM_INSTALLATION_ID?: string | undefined;
   readonly ANYAM_PROTOCOL_VERSION?: string | undefined;
+  readonly ANYAM_REALM_RP_ID?: string | undefined;
   readonly ANYAM_BUILD_REVISION?: string | undefined;
   readonly REALM_COORDINATOR?: CustomerRealmWorkerBinding | undefined;
   readonly OAUTH_KV?: CustomerRealmWorkerBinding | undefined;

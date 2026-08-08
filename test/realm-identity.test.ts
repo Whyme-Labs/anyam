@@ -106,6 +106,7 @@ test("authenticates through passkey and OIDC while retaining Realm-local identit
   assert.equal(Object.keys(snapshot.oidcIdentities).length, 1);
   assert.equal(Object.keys(snapshot.sessions).length, 2);
   assert.equal(snapshot.sessions[passkeySession.id]?.authorizationEpoch, realm.realm.authorizationEpoch);
+  assert.deepEqual(realm.validateSession(passkeySession.id), passkeySession);
 });
 
 test("intersects role, Source Space policy, task grant, client/session state, and explicit denies", () => {
@@ -217,6 +218,7 @@ test("issues separate audience credentials and revokes each path independently",
   assert.equal(realm.validateCredential(git.token, { class: "git" }).valid, true);
   realm.revokeSession(brokerSession.id);
   assert.equal(validationCode(realm.validateCredential(git.token)), "credential.revoked");
+  assert.throws(() => realm.validateSession(brokerSession.id), (error: unknown) => error instanceof RealmIdentityError && error.code === "session.inactive");
   assert.notEqual(validationCode(realm.validateCredential(git.token)), "credential.audience_mismatch");
   assert.notEqual(passkeySession.id, brokerSession.id);
 });

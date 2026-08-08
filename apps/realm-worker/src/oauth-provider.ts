@@ -38,6 +38,7 @@ export type AnyamRealmOAuthEnv = CustomerRealmWorkerEnv & {
   OAUTH_KV: KVNamespace;
   ANYAM_METADATA_DB: D1Database;
   ANYAM_OWNER_BOOTSTRAP_TOKEN?: string;
+  ANYAM_REALM_RP_ID?: string;
   OAUTH_PROVIDER?: OAuthHelpers;
 };
 

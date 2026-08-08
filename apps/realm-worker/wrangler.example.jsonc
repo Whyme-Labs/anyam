@@ -8,6 +8,7 @@
     "ANYAM_HOSTING_MODE": "customer-operated",
     "ANYAM_INSTALLATION_ID": "replace-with-installation-id",
     "ANYAM_PROTOCOL_VERSION": "anyam.customer-realm-worker/v1",
+    "ANYAM_REALM_RP_ID": "replace-with-authentication-hostname",
     "ANYAM_BUILD_REVISION": "replace-with-source-revision"
   },
   "kv_namespaces": [

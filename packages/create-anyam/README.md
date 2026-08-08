@@ -103,6 +103,22 @@ owned by the logged-in npm publisher. Confirm that identity and enable account
 2FA before the first live publish; a package name and version are immutable
 once published.
 
+### First-time npm account setup
+
+Configure a new second factor from the npm website, not by trying to enroll a
+new TOTP secret through the CLI:
+
+1. Sign in at <https://www.npmjs.com/> as the package owner.
+2. Open the profile menu, choose **Account**, then **Enable 2FA**.
+3. Select a supported security-key/WebAuthn method such as macOS Touch ID,
+   Windows Hello, Face ID, or a physical security key.
+4. Save the recovery codes in a password manager separate from the security
+   key.
+
+The registry no longer accepts the old CLI TOTP-enrollment request; it returns
+`E404 Adding a new TOTP 2FA is no longer supported`. Do not treat that error as
+a package or publisher failure.
+
 The repository includes a tag- or manually-triggered GitHub Actions workflow at
 `.github/workflows/publish-create-anyam.yml`. Configure npm Trusted Publishing
 for:

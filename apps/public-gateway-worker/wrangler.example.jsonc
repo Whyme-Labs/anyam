@@ -1,0 +1,52 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-public-gateway-example",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "PUBLIC_PROJECT_ID": "project:replace-with-public-project",
+    "PUBLIC_SOURCE_SPACE_ID": "source:replace-with-public-space",
+    "PUBLIC_SNAPSHOT_ID": "snapshot:replace-with-public-snapshot",
+    "PUBLIC_CONTENT_DIGEST": "sha256:replace-with-public-snapshot-digest",
+    "PUBLIC_POLICY_RECEIPT": "receipt:replace-with-policy-measurement",
+    "PUBLIC_EDGE_LIMIT": "replace-with-measured-edge-limit",
+    "PUBLIC_EDGE_LIMIT_UNIT": "public-gateway-edge-requests",
+    "PUBLIC_EDGE_LIMIT_RECEIPT": "receipt:replace-with-edge-tripwire-measurement",
+    "PUBLIC_EDGE_LIMIT_MEASURED_AT": "replace-with-measurement-timestamp",
+    "PUBLIC_EDGE_LIMIT_METHOD": "replace-with-measurement-method",
+    "PUBLIC_INTAKE_MODE": "approval-only",
+    "PUBLIC_INTAKE_LIMIT_UNIT": "public-contribution-requests",
+    "PUBLIC_INTAKE_LIMIT_RECEIPT": "receipt:replace-with-logical-tripwire-measurement",
+    "PUBLIC_INTAKE_LIMIT_MEASURED_AT": "replace-with-measurement-timestamp",
+    "PUBLIC_INTAKE_LIMIT_METHOD": "replace-with-measurement-method",
+    "PUBLIC_ENABLE_FIXTURE_FAILURES": "false",
+    "UPSTREAM_GIT_BASE": "https://github.com/replace-with-public-driver/repository.git"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PUBLIC_GATEWAY_COORDINATOR",
+        "class_name": "PublicGatewayCoordinatorDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PublicGatewayCoordinatorDO"]
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "PUBLIC_EDGE_RATE_LIMITER",
+      // Qualification placeholder only. Replace with a customer-owned namespace
+      // and a measured tripwire before opening public intake.
+      "namespace_id": "90000001",
+        "simple": {
+          "limit": 1,
+          "period": 10
+        }
+    }
+  ]
+}

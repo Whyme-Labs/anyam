@@ -15,6 +15,7 @@ export * from "./installation/customer-realm.ts";
 export * from "./installation/customer-realm-control.ts";
 export * from "./disclosure/hybrid.ts";
 export * from "./disclosure/public-intake.ts";
+export * from "./cloudflare/public-gateway.ts";
 export * from "./delivery/promotion.ts";
 export * from "./delivery/release-publication.ts";
 export * from "./qualification/stages.ts";

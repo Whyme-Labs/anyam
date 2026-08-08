@@ -17,6 +17,7 @@ function configuredEnv(overrides: Partial<CustomerRealmWorkerEnv> = {}): Custome
     ANYAM_PROTOCOL_VERSION: "anyam.customer-realm-worker/v1",
     ANYAM_BUILD_REVISION: "commit:test",
     REALM_COORDINATOR: {},
+    OAUTH_KV: {},
     ANYAM_METADATA_DB: {},
     ANYAM_EXPORTS: {},
     ANYAM_EVENTS: {},
@@ -76,6 +77,7 @@ test("health fails closed and lists missing mode/input without minting authority
   assert.equal(body.status, "blocked");
   assert.equal(body.credentialFree, true);
   assert.deepEqual(body.missingConfiguration, [
+    "OAUTH_KV",
     "ANYAM_METADATA_DB",
     "ANYAM_EXPORTS",
     "ANYAM_EVENTS",

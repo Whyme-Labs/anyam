@@ -3,7 +3,7 @@
   "name": "anyam-realm-auth-20260808",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-27",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "workers_dev": true,
   "vars": {
     "ANYAM_HOSTING_MODE": "customer-operated",
@@ -11,6 +11,12 @@
     "ANYAM_PROTOCOL_VERSION": "anyam.customer-realm-worker/v1",
     "ANYAM_BUILD_REVISION": "realm-auth-qualification-20260808"
   },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "90d9fcecdfad411fa81c13d2e7976fd2"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {

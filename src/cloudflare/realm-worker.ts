@@ -12,6 +12,7 @@ export const CUSTOMER_REALM_HOSTING_MODE = "customer-operated" as const;
 
 export type CustomerRealmWorkerBindingName =
   | "REALM_COORDINATOR"
+  | "OAUTH_KV"
   | "ANYAM_METADATA_DB"
   | "ANYAM_EXPORTS"
   | "ANYAM_EVENTS"
@@ -21,6 +22,7 @@ export type CustomerRealmWorkerConfigurationKey = CustomerRealmWorkerBindingName
 
 export const CUSTOMER_REALM_REQUIRED_BINDINGS: readonly CustomerRealmWorkerBindingName[] = [
   "REALM_COORDINATOR",
+  "OAUTH_KV",
   "ANYAM_METADATA_DB",
   "ANYAM_EXPORTS",
   "ANYAM_EVENTS",
@@ -47,6 +49,7 @@ export type CustomerRealmWorkerEnv = {
   readonly ANYAM_PROTOCOL_VERSION?: string | undefined;
   readonly ANYAM_BUILD_REVISION?: string | undefined;
   readonly REALM_COORDINATOR?: CustomerRealmWorkerBinding | undefined;
+  readonly OAUTH_KV?: CustomerRealmWorkerBinding | undefined;
   readonly ANYAM_METADATA_DB?: CustomerRealmWorkerBinding | undefined;
   readonly ANYAM_EXPORTS?: CustomerRealmWorkerBinding | undefined;
   readonly ANYAM_EVENTS?: CustomerRealmWorkerBinding | undefined;

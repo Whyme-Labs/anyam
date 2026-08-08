@@ -3,13 +3,19 @@
   "name": "anyam-realm",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-27",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "vars": {
     "ANYAM_HOSTING_MODE": "customer-operated",
     "ANYAM_INSTALLATION_ID": "replace-with-installation-id",
     "ANYAM_PROTOCOL_VERSION": "anyam.customer-realm-worker/v1",
     "ANYAM_BUILD_REVISION": "replace-with-source-revision"
   },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "replace-with-customer-oauth-kv-id"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {

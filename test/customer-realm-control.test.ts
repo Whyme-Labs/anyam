@@ -61,6 +61,7 @@ function env(): CustomerRealmWorkerEnv {
     ANYAM_INSTALLATION_ID: "installation:control",
     ANYAM_PROTOCOL_VERSION: "anyam.customer-realm-worker/v1",
     REALM_COORDINATOR: {},
+    OAUTH_KV: {},
     ANYAM_METADATA_DB: {},
     ANYAM_EXPORTS: {},
     ANYAM_EVENTS: {},

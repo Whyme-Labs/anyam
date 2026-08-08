@@ -2,12 +2,9 @@
 
 import { DurableObject, WorkflowEntrypoint } from "cloudflare:workers";
 
-import {
-  handleCustomerRealmRequest,
-  type CustomerRealmWorkerEnv,
-} from "../../../src/cloudflare/realm-worker.ts";
+import { createAnyamRealmOAuthProvider, type AnyamRealmOAuthEnv } from "./oauth-provider.ts";
 
-export type Env = CustomerRealmWorkerEnv;
+export type Env = AnyamRealmOAuthEnv;
 
 /**
  * The coordinator is exported so Wrangler can provision the SQLite-backed
@@ -46,7 +43,12 @@ export class AnyamRealmWorkflow extends WorkflowEntrypoint<Env, { readonly opera
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    return handleCustomerRealmRequest(request, env);
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const origin = new URL(request.url).origin;
+    const oauthProvider = createAnyamRealmOAuthProvider({
+      resource: `${origin}/mcp`,
+      issuer: origin,
+    });
+    return oauthProvider.fetch(request, env, ctx);
   },
 };

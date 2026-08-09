@@ -8,11 +8,14 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test \"test/**/*.test.ts\"",
     "harness": "tsx src/harness/cli.ts",
+    "qualification:external-runner": "tsx scripts/qualify-external-runner.ts",
+    "typecheck:qualification-worker": "tsc -p apps/runner-qualification/tsconfig.json --noEmit",
+    "build:qualification-worker": "npm run typecheck:qualification-worker && wrangler deploy --dry-run --config apps/runner-qualification/wrangler.qualification.jsonc --outdir=dist/qualification-worker",
     "build": "npm run build --workspace=create-anyam",
     "verify:package": "npm run build && node scripts/package-entrypoint-smoke.mjs",
     "build:realm": "npm run build --workspace=@anyam/realm-worker",
     "check:realm": "npm run check && npm run build:realm",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm run typecheck:qualification-worker && npm test"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

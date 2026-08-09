@@ -1,0 +1,32 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-p3-14-live-20260809-coordinator",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "COHORT_ID": "anyam-p3-14-live-20260809",
+    "PROTOCOL_VERSION": "anyam.external-runner-qualification/v1"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "COORDINATOR",
+        "class_name": "QualificationCoordinator"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "qualification-v1",
+      "new_sqlite_classes": ["QualificationCoordinator"]
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "OUTPUTS",
+      "bucket_name": "anyam-p3-14-live-20260809-outputs"
+    }
+  ]
+}

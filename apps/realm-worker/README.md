@@ -105,6 +105,7 @@ The Worker exposes a customer-owned WebAuthn adapter boundary:
 | `POST /api/owner/qualification/recovery/restore` | Restores that snapshot quarantined, revokes authority, and clears the host session until passkey re-activation |
 | `GET /owner/claim` | Serves the browser first-owner WebAuthn ceremony (use `?format=json` for the machine contract) |
 | `GET /owner/login` | Serves the browser authentication ceremony (use `?format=json` for the machine contract) |
+| `GET /owner/qualification` | Same-origin owner-session qualification controls; credential values are redacted and recovery state remains in page memory |
 
 The qualification surface now includes a minimal browser ceremony and retains
 the JSON contract for automation. The server-side verifier uses

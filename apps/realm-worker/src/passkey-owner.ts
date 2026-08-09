@@ -224,7 +224,70 @@ function ownerPage(mode: "claim" | "login"): Response {
 <body><main><h1>${heading}</h1><p>Anyam verifies this Realm-bound passkey in the customer-owned Worker.</p>
 ${claim ? `<label>Display name<input id="displayName" autocomplete="name" value="Anyam Realm owner"></label>` : ""}${bootstrapField}
 <button id="continue" type="button">${claim ? "Create owner passkey" : "Use passkey"}</button><pre id="result" aria-live="polite"></pre></main>
-<script>${script.replaceAll("</script>", "<\\/script>")}</script></body></html>`;
+  <script>${script.replaceAll("</script>", "<\\/script>")}</script></body></html>`;
+  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'" } });
+}
+
+function qualificationPage(): Response {
+  const script = String.raw`
+    const result = document.getElementById("result");
+    const state = { delegation: undefined, recovery: undefined };
+    const show = (value) => { result.textContent = JSON.stringify(value, null, 2); };
+    const summary = (value) => {
+      if (!value || typeof value !== "object") return value;
+      const output = {};
+      for (const key of ["protocol", "status", "receipt", "agentId", "agentSessionId", "taskId", "grantId", "workspaceId", "recoveryStatus", "ownerPrincipalId", "identity", "credentialClasses"]) if (key in value) output[key] = value[key];
+      if (Array.isArray(value.credentials)) output.credentials = value.credentials.map((credential) => ({ id: credential.id, class: credential.class, audience: credential.audience, expiresAt: credential.expiresAt, token: "[redacted]" }));
+      if (value.snapshot && typeof value.snapshot === "object") output.snapshot = { credentialFree: value.snapshot.credentialFree, realmId: value.snapshot.realm?.id, principalCount: Object.keys(value.snapshot.principals ?? {}).length, sessionCount: Object.keys(value.snapshot.sessions ?? {}).length, grantCount: Object.keys(value.snapshot.grants ?? {}).length };
+      return output;
+    };
+    const call = async (path, body = {}) => {
+      const response = await fetch(path, { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const payload = await response.json().catch(() => ({ code: "invalid_json_response" }));
+      if (!response.ok) throw payload;
+      return payload;
+    };
+    const run = async (operation) => {
+      try {
+        if (operation === "delegate") {
+          state.delegation = await call("/api/owner/qualification/delegate", { agentName: "Anyam qualification agent", runtime: "qualification-browser", modelProvider: "qualification-model" });
+          show(summary(state.delegation));
+          return;
+        }
+        if (operation === "credentials") {
+          if (!state.delegation?.agent || !state.delegation.session || !state.delegation.task || !state.delegation.grant) throw { code: "qualification_delegate_required", recoveryAction: "Run delegation first in this page." };
+          const value = await call("/api/owner/qualification/credentials", { agentId: state.delegation.agent.id, agentSessionId: state.delegation.session.id, taskId: state.delegation.task.id, grantId: state.delegation.grant.id, credentialClasses: ["git", "mcp"] });
+          show(summary(value));
+          return;
+        }
+        if (operation === "revoke") {
+          const value = await call("/api/owner/qualification/revoke", { agentId: state.delegation?.agent?.id });
+          show(summary(value));
+          return;
+        }
+        if (operation === "export") {
+          state.recovery = await call("/api/owner/qualification/recovery/export");
+          show(summary(state.recovery));
+          return;
+        }
+        if (operation === "restore") {
+          if (!state.recovery?.snapshot) throw { code: "qualification_recovery_export_required", recoveryAction: "Export a fresh recovery snapshot first." };
+          const value = await call("/api/owner/qualification/recovery/restore", { snapshot: state.recovery.snapshot });
+          show(summary(value));
+          return;
+        }
+      } catch (error) {
+        show(error);
+      }
+    };
+    for (const button of document.querySelectorAll("button[data-operation]")) button.addEventListener("click", () => run(button.dataset.operation));
+  `;
+  const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Anyam Realm qualification</title>
+<style>body{font:16px system-ui,sans-serif;max-width:54rem;margin:3rem auto;padding:0 1rem;color:#17202a}main{border:1px solid #d6dbe1;border-radius:12px;padding:2rem}button{font:inherit;margin:.25rem;padding:.65rem .8rem;border:0;border-radius:6px;background:#14532d;color:white;cursor:pointer}p{color:#52606d}pre{white-space:pre-wrap;background:#f4f6f8;padding:1rem;border-radius:6px;min-height:8rem}</style></head>
+<body><main><h1>Realm qualification</h1><p>These controls use the current opaque owner session. Credential values are never displayed; recovery remains in memory for this page only.</p>
+<div><button type="button" data-operation="delegate">Delegate agent</button><button type="button" data-operation="credentials">Issue Git + MCP credentials</button><button type="button" data-operation="revoke">Revoke delegated agent</button><button type="button" data-operation="export">Export recovery snapshot</button><button type="button" data-operation="restore">Restore recovery snapshot</button></div>
+<pre id="result" aria-live="polite"></pre></main><script>${script.replaceAll("</script>", "<\\/script>")}</script></body></html>`;
   return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'" } });
 }
 
@@ -527,6 +590,7 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
   try {
     if (url.pathname === "/owner/claim" && request.method === "GET" && url.searchParams.get("format") !== "json") return ownerPage("claim");
     if (url.pathname === "/owner/login" && request.method === "GET" && url.searchParams.get("format") !== "json") return ownerPage("login");
+    if (url.pathname === "/owner/qualification" && request.method === "GET") return qualificationPage();
     if ((url.pathname === "/owner/claim" || url.pathname === "/owner/login") && request.method === "GET") {
       return json({
         protocol: ANYAM_PASSKEY_OWNER_PROTOCOL,

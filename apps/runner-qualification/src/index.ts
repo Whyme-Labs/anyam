@@ -143,6 +143,16 @@ function safePath(value: string): string {
   return normalized;
 }
 
+function decodeJobId(value: string): string {
+  try {
+    const decoded = decodeURIComponent(value);
+    if (!decoded) throw new Error("job id must not be empty");
+    return decoded;
+  } catch {
+    throw new Error("job id path segment is not valid URL encoding");
+  }
+}
+
 function bearer(request: Request): string {
   const value = request.headers.get("authorization");
   if (!value?.startsWith("Bearer ")) throw new Error("Bearer credential required");
@@ -192,8 +202,15 @@ class QualificationCoordinator extends DurableObject<Env> {
 
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const jobId = url.pathname.split("/")[2];
-    if (!jobId) return json({ code: "job_id_required", recoveryAction: "include a job id in the qualification route" }, 422);
+    const encodedJobId = url.pathname.split("/")[2];
+    if (!encodedJobId) return json({ code: "job_id_required", recoveryAction: "include a job id in the qualification route" }, 422);
+    let jobId: string;
+    try {
+      jobId = decodeJobId(encodedJobId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "job id path segment is invalid";
+      return json({ code: "invalid_job_id", message, recoveryAction: "use the URL-encoded job id emitted by the qualification Runner" }, 422);
+    }
     try {
       if (request.method === "GET" && url.pathname.endsWith("/status")) {
         const record = await this.read(jobId);
@@ -330,8 +347,14 @@ export default {
     }
     const match = url.pathname.match(/^\/jobs\/([^/]+)(\/.*)?$/);
     if (!match) return json({ protocol: "anyam.external-runner-qualification/v1", code: "not_found", recoveryAction: "use GET /health or the documented /jobs/:jobId routes", receipt: "path=not-found" }, 404);
-    const jobId = match[1];
-    if (!jobId) return json({ code: "job_id_required", recoveryAction: "include a job id" }, 422);
+    const encodedJobId = match[1];
+    if (!encodedJobId) return json({ code: "job_id_required", recoveryAction: "include a job id" }, 422);
+    let jobId: string;
+    try {
+      jobId = decodeJobId(encodedJobId);
+    } catch {
+      return json({ code: "invalid_job_id", recoveryAction: "use a URL-encoded job id in the qualification route" }, 422);
+    }
     return routeToCoordinator(env, jobId, request);
   },
 };

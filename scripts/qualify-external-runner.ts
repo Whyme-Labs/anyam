@@ -12,6 +12,12 @@ type PulledMessage = {
   id: string;
   attempts: number;
   lease_id: string;
+  metadata?: unknown;
+};
+
+type DecodedPulledMessage = Omit<PulledMessage, "body"> & {
+  body: Json;
+  bodyEncoding: "object" | "json-text" | "base64-json";
 };
 
 function required(name: string): string {
@@ -52,6 +58,29 @@ function numberEnv(name: string): number {
 function jsonObject(value: unknown, label: string): Json {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} was not a JSON object`);
   return value as Json;
+}
+
+function decodeQueueMessageBody(value: unknown): { body: Json; encoding: DecodedPulledMessage["bodyEncoding"] } {
+  if (value && typeof value === "object" && !Array.isArray(value)) return { body: value as Json, encoding: "object" };
+  if (typeof value !== "string") throw new Error("Queue message body was not a JSON object or encoded JSON string");
+
+  try {
+    return { body: jsonObject(JSON.parse(value), "Queue message body"), encoding: "json-text" };
+  } catch {
+    // Cloudflare's HTTP pull consumer returns JSON-content messages as RFC 4648
+    // base64 text. Decode at this boundary so the rest of the qualification
+    // protocol works with the original structured job envelope.
+    for (const encoding of ["base64", "base64url"] as const) {
+      try {
+        const decoded = Buffer.from(value, encoding).toString("utf8");
+        return { body: jsonObject(JSON.parse(decoded), "Queue message body"), encoding: "base64-json" };
+      } catch {
+        // Try the other supported base64 spelling before reporting the shape error.
+      }
+    }
+  }
+
+  throw new Error("Queue message body was not a JSON object or encoded JSON string");
 }
 
 async function requestJson(url: string, init: RequestInit, label: string): Promise<Json> {
@@ -126,14 +155,19 @@ async function main(): Promise<void> {
   const pulledResponse = await requestJson(`${queueUrl}/messages/pull`, {
     method: "POST",
     headers: { authorization: `Bearer ${queueToken}`, "content-type": "application/json" },
-    body: JSON.stringify({ visibility_timeout_ms: visibilityTimeoutMs, batch_size: 1 }),
+    body: JSON.stringify({ visibility_timeout_ms: visibilityTimeoutMs, batch_size: 10 }),
   }, "Queue pull");
   const result = jsonObject(pulledResponse.result, "Queue pull result");
   const messages = result.messages;
   if (!Array.isArray(messages)) throw new Error("Queue pull returned no messages array");
-  const pulled = messages.map((value) => jsonObject(value, "Queue message") as unknown as PulledMessage).find((value) => value.id && jsonObject(value.body, "Queue message body").jobId === jobId);
+  const decodedMessages = messages.map((value): DecodedPulledMessage => {
+    const message = jsonObject(value, "Queue message") as unknown as PulledMessage;
+    const decoded = decodeQueueMessageBody(message.body);
+    return { ...message, body: decoded.body, bodyEncoding: decoded.encoding };
+  });
+  const pulled = decodedMessages.find((value) => value.id && value.body.jobId === jobId);
   if (!pulled) throw new Error(`Queue pull did not return the expected job ${jobId}; leave the queue message for redelivery and inspect the cohort before retrying`);
-  const pulledBody = jsonObject(pulled.body, "Queue message body");
+  const pulledBody = pulled.body;
 
   const claimResponse = await requestJson(`${coordinatorJobUrl}/claim`, {
     method: "POST",
@@ -209,7 +243,7 @@ async function main(): Promise<void> {
     jobId,
     attemptId,
     runnerId,
-    queue: { messageId: pulled.id, messageIdDigest: digest(pulled.id), attempts: pulled.attempts, leaseId: "[redacted]", leaseIdDigest: digest(pulled.lease_id), ack: jsonObject(ackResponse.result ?? ackResponse, "Queue acknowledgement result") },
+    queue: { messageId: pulled.id, messageIdDigest: digest(pulled.id), attempts: pulled.attempts, batchSize: 10, bodyEncoding: pulled.bodyEncoding, leaseId: "[redacted]", leaseIdDigest: digest(pulled.lease_id), ack: jsonObject(ackResponse.result ?? ackResponse, "Queue acknowledgement result") },
     input: { actionId, inputManifestDigest, sourceSnapshotDigest, queueBodyJobId: pulledBody.jobId },
     output: { path: artifactPath, digest: artifactDigest, readBackDigest, bytes: artifactBytes.byteLength, coordinatorStored: storedOutput },
     coordinator: { status: resultStatus.status, resultDigest: completeResponse.resultDigest, receipt: completeResponse.receipt },

@@ -6,7 +6,7 @@ Issue: [#131 Run a live external Runner and generic Target qualification cohort]
 
 Protocol: `anyam.external-runner-qualification/v1`
 
-Status: **core live path passed; full acceptance matrix remains bounded by the unexercised negative/recovery probes listed below**
+Status: **core live path passed; disposable resources deleted; full acceptance matrix remains bounded by the unexercised negative/recovery probes listed below**
 
 ## Decision boundary
 
@@ -131,7 +131,7 @@ budget was added from them.
 | R2 upload, read-back, and independent digest verification | Declared digest equals direct read-back digest | **passed** |
 | Unchanged generic Target publication | GitHub asset digest and downloaded digest match; duplicate upload rejected | **passed** |
 | Provider failure/retry behavior | Duplicate asset tripwire observed; no provider outage/retry probe | **partially qualified** |
-| Cleanup inventory and deletion | Exact inventory recorded here; deletion follows receipt capture | **pending at capture** |
+| Cleanup inventory and deletion | Exact object inventory reached zero; Worker, Queue, R2 bucket, and GitHub Target were deleted and verified absent | **passed** |
 
 ## Failure history and fixes
 
@@ -161,16 +161,23 @@ silent retry or a false qualification.
 - GitHub Release is one generic Target adapter. Package, model, dataset,
   firmware, and other Targets still require their own provider receipts.
 
-## Cleanup
+## Cleanup receipt
 
-The following exact disposable resources are scheduled for deletion after this
-receipt is committed and the release metadata is independently verified:
+The exact disposable resources were deleted after this receipt was captured and
+the release metadata was independently verified. The two scoped R2 objects
+left by failed attempts and the successful run object were all enumerated and
+deleted:
 
 ```text
-Queue anyam-p3-14-live-20260809-events
-R2 bucket anyam-p3-14-live-20260809-outputs
-Worker anyam-p3-14-live-20260809-coordinator
-GitHub repository wms2537/anyam-p3-14-live-20260809-target
+outputs/job:live-10c6ba26-3c8c-4834-95eb-7f7f4022b593/artifact/anyam-live-runner.txt
+outputs/job:live-d621f805-c9ff-4f07-8ed6-c476e042179e/artifact/anyam-live-runner.txt
+outputs/job:live-f36906f3-7068-409f-8fc2-7751142eb1af/artifact/anyam-live-runner.txt
+
+post-delete R2 objectCount=0
+Worker health HTTP=404 (error code 1042)
+Queue absent from account list
+R2 bucket absent after deletion
+GitHub Target repository absent (GraphQL not found)
 ```
 
 No canonical repository, production Target, user-owned project, or credential

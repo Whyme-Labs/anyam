@@ -30,9 +30,13 @@ secure local origin because the OAuth provider rejects non-HTTPS issuer
 metadata:
 
 ```bash
-npx wrangler dev --local-protocol https --config wrangler.passkey-qualification.jsonc
+npx wrangler dev --local-protocol https \
+  --var ANYAM_REALM_RP_ID:localhost \
+  --config wrangler.passkey-qualification.jsonc
 ```
 
+The `--var` override is required because the checked-in qualification config
+uses the deployed `workers.dev` hostname as its WebAuthn relying-party ID.
 The credential-free `/health` and owner ceremony routes also remain available
 over ordinary `http://localhost` during local development. This is a local
 transport convenience only; it does not weaken the deployed HTTPS contract.

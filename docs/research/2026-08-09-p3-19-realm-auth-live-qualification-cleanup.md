@@ -2,7 +2,7 @@
 
 **Issue:** [Provision a live Realm authentication qualification surface](https://github.com/wms2537/anyam/issues/130)
 
-**Status:** inventory and exact cleanup procedure recorded; deletion is deferred until the authenticated owner lifecycle has produced its receipts.
+**Status:** inventory and exact cleanup procedure recorded; authenticated owner lifecycle is complete; deletion remains deferred until the owner explicitly approves the listed destructive targets.
 
 **Captured:** 2026-08-09 (Asia/Kuala_Lumpur)
 
@@ -114,8 +114,9 @@ claiming zero retention.
 
 ## Current gap
 
-The cleanup procedure is documented and the resource inventory is measured, but
-execution remains intentionally deferred. The owner passkey ceremony still
-needs explicit browser approval before the authenticated delegation,
-credential exchange, revocation, recovery, re-activation, and final cleanup
-receipts can be recorded.
+The authenticated owner lifecycle is complete: delegation, explicit Git/MCP
+credential exchange, revocation, recovery export/restore, and fresh passkey
+reactivation receipts are recorded on issue #130. Cleanup execution remains
+intentionally deferred until the owner explicitly approves deletion of the
+exact disposable Worker, secret, workflow, queue, D1 database, R2 buckets, and
+OAuth KV namespace listed above.

@@ -2,7 +2,7 @@
 
 **Issue:** [Provision a live Realm authentication qualification surface](https://github.com/wms2537/anyam/issues/130)
 
-**Status:** inventory and exact cleanup procedure recorded; authenticated owner lifecycle is complete; deletion remains deferred until the owner explicitly approves the listed destructive targets.
+**Status:** authenticated owner lifecycle and exact disposable-resource cleanup are complete; post-cleanup absence was verified account-scoped.
 
 **Captured:** 2026-08-09 (Asia/Kuala_Lumpur)
 
@@ -112,11 +112,35 @@ resources. The remaining risk is Cloudflare-side deletion propagation and any
 provider-retained audit metadata; record those as residual risk rather than
 claiming zero retention.
 
+### Recorded execution
+
+The owner approved cleanup on 2026-08-09 (Asia/Kuala_Lumpur). The literal
+targets above were deleted in the documented order. The final account-scoped
+receipt is:
+
+```text
+account=1e0170aaabc90ecf5f466128d1f0466a
+worker=absent (deployments API returned Cloudflare code 10007)
+d1=absent (exact database name and UUID absent)
+r2.exports=absent
+r2.exports-preview=absent
+queue=absent
+workflow=absent
+oauthKv=absent (exact namespace ID absent)
+secret=absent-or-worker-unreachable (secret list reports Worker not found)
+health=404 (worker hostname no longer serves the qualification surface)
+credentialMaterialStored=false (from lifecycle receipts; no token value recorded)
+```
+
+Current Wrangler rejects the older combined positional-name plus
+`--namespace-id` KV deletion syntax as two selectors. Cleanup used the exact
+namespace ID selector alone, so the deletion target remained unambiguous.
+
 ## Current gap
 
-The authenticated owner lifecycle is complete: delegation, explicit Git/MCP
-credential exchange, revocation, recovery export/restore, and fresh passkey
-reactivation receipts are recorded on issue #130. Cleanup execution remains
-intentionally deferred until the owner explicitly approves deletion of the
-exact disposable Worker, secret, workflow, queue, D1 database, R2 buckets, and
-OAuth KV namespace listed above.
+The authenticated owner lifecycle and cleanup are complete: delegation,
+explicit Git/MCP credential exchange, revocation, recovery export/restore,
+fresh passkey reactivation, exact deletion, and account-scoped absence
+verification receipts are recorded on issue #130. Residual risk is limited to
+Cloudflare-side propagation and provider-retained audit metadata; no claim of
+zero retention is made.

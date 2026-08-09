@@ -11,6 +11,7 @@ import {
   handleCustomerRealmRequest,
   type CustomerRealmWorkerEnv,
 } from "../../../src/cloudflare/realm-worker.ts";
+import { toOAuthSubject } from "../../../src/identity/oauth-subject.ts";
 import {
   anyamPasskeyOwnerAuthorization,
   handleAnyamRealmOwnerRequest,
@@ -150,7 +151,10 @@ async function authorizeRequest(request: Request, env: AnyamRealmOAuthEnv, adapt
 
   const completed = await env.OAUTH_PROVIDER!.completeAuthorization({
     request: oauthRequest,
-    userId: decision.userId,
+    // Anyam principal IDs are colon-delimited. The provider's authorization
+    // code envelope also uses `:`, so keep the canonical ID in encrypted props
+    // and use an unambiguous wire subject for the provider grant.
+    userId: toOAuthSubject(decision.userId),
     metadata: { clientName: client.clientName, realmId: decision.realmId },
     scope: grantedScopes,
     props: {

@@ -201,17 +201,17 @@ async function main(): Promise<void> {
     receipt: "synthetic-input; canonicalWrite=false; outputDisclosure=project",
   };
 
-  await requestJson(`${queueUrl}/messages`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${queueToken}`, "content-type": "application/json" },
-    body: JSON.stringify({ body: jobMessage, content_type: "json" }),
-  }, "Queue push");
-
   await requestJson(`${coordinatorJobUrl}/bind`, {
     method: "POST",
     headers: { authorization: `Bearer ${controlToken}`, "content-type": "application/json" },
     body: JSON.stringify({ inputManifestDigest, sourceSnapshotDigest, projectViewId, outputRoot, outputPaths, disclosure: outputDisclosure }),
   }, "Owner manifest bind");
+
+  await requestJson(`${queueUrl}/messages`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${queueToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ body: jobMessage, content_type: "json" }),
+  }, "Queue push");
 
   const pulledResponse = await requestJson(`${queueUrl}/messages/pull`, {
     method: "POST",
@@ -325,8 +325,8 @@ async function main(): Promise<void> {
     const controlManifest = { inputManifestDigest: controlInputManifestDigest, sourceSnapshotDigest: controlSourceSnapshotDigest, projectViewId, outputRoot: controlOutputRoot, outputPaths: controlOutputPaths, disclosure: outputDisclosure };
     const controlJobMessage = { protocol: "anyam.external-runner-qualification/v1", jobId: controlJobId, attemptId: controlAttemptId, runnerId: controlRunnerId, actionId, inputManifestDigest: controlInputManifestDigest, sourceSnapshotDigest: controlSourceSnapshotDigest, outputRoot: controlOutputRoot, projectViewId, outputPaths: controlOutputPaths, disclosure: outputDisclosure, ...(retryOf ? { retryOf } : {}), leaseExpiresAt, receipt: `synthetic-${label}; canonicalWrite=false; outputDisclosure=project` };
     const controlJobUrl = `${coordinatorUrl}/jobs/${encodeURIComponent(controlJobId)}`;
-    await pushQueue(queueUrl, queueToken, controlJobMessage, `${label} Queue push`);
     await requestJson(`${controlJobUrl}/bind`, { method: "POST", headers: { authorization: `Bearer ${controlToken}`, "content-type": "application/json" }, body: JSON.stringify(controlManifest) }, `${label} owner manifest bind`);
+    await pushQueue(queueUrl, queueToken, controlJobMessage, `${label} Queue push`);
     const controlPulled = await pullQueue(queueUrl, queueToken, visibilityTimeoutMs, controlJobId, `${label} Queue pull`);
     const controlClaim = await requestJson(`${controlJobUrl}/claim`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ attemptId: controlAttemptId, runnerId: controlRunnerId, actionId, ...controlManifest, leaseExpiresAt, publicKey: controlPublicKey, challenge: controlChallenge, signature: controlSignature }) }, `${label} Runner claim`);
     const controlCredential = requiredString(jsonObject(controlClaim.credential, `${label} claim credential`), "token");

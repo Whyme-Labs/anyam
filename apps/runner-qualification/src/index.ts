@@ -54,7 +54,7 @@ export interface Env {
   OUTPUTS: R2Bucket;
   COHORT_ID: string;
   PROTOCOL_VERSION: string;
-  CONTROL_TOKEN?: string;
+  QUALIFICATION_CONTROL_TOKEN?: string;
   REQUIRE_MANIFEST_BINDING?: string;
   MAX_OUTPUT_DISCLOSURE?: Disclosure;
 }
@@ -227,7 +227,7 @@ class QualificationCoordinator extends DurableObject<Env> {
   }
 
   private async controlAuthorized(request: Request): Promise<void> {
-    const configured = this.env.CONTROL_TOKEN?.trim();
+    const configured = this.env.QUALIFICATION_CONTROL_TOKEN?.trim();
     const value = request.headers.get("authorization");
     if (!configured || !value?.startsWith("Bearer ") || !(await constantTimeEqual(value.slice("Bearer ".length).trim(), configured))) {
       throw new Error("qualification control credential is invalid or unavailable");

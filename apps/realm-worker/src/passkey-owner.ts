@@ -95,7 +95,10 @@ async function realmCoordinatorRequest(env: AnyamRealmOAuthEnv, path: string, bo
   const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
   if (!response.ok) {
     const code = typeof payload.code === "string" ? payload.code : "realm_coordinator_rejected";
-    throw new Error(`realm_coordinator_${code}`);
+    const message = typeof payload.message === "string" ? payload.message : "coordinator rejected the request";
+    const recoveryAction = typeof payload.recoveryAction === "string" ? payload.recoveryAction : "inspect the coordinator receipt and retry the same operation only when safe";
+    const receipt = typeof payload.receipt === "string" ? payload.receipt : "receipt=not-returned";
+    throw new Error(`realm_coordinator_${code}; message=${message}; recoveryAction=${recoveryAction}; ${receipt}`);
   }
   return payload;
 }

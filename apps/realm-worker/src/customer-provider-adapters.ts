@@ -110,7 +110,13 @@ export function createCloudflareCustomerProviderAdapters(bindings: CloudflareCus
       await bindings.metadata.exec("CREATE TABLE IF NOT EXISTS anyam_provider_qualification (resource_key TEXT PRIMARY KEY, operation_id TEXT NOT NULL, provider_operation_id TEXT NOT NULL, output_digest TEXT NOT NULL, created_at TEXT NOT NULL)");
       await bindings.metadata.exec("CREATE TABLE IF NOT EXISTS anyam_provider_qualification_failures (failure_key TEXT PRIMARY KEY, created_at TEXT NOT NULL)");
       await bindings.metadata.prepare("DELETE FROM anyam_provider_qualification WHERE resource_key = ?1").bind(input.resourceKey).run();
-      await bindings.metadata.prepare("DELETE FROM anyam_provider_qualification_failures WHERE failure_key LIKE ?1").bind(`${input.surface}:${input.operationId}:%`).run();
+      // D1 can reject a bound LIKE/GLOB pattern as "too complex" even when
+      // the pattern is a short operation identity. Delete the finite set of
+      // failure keys this fixture can create by exact key instead. This is
+      // idempotent and keeps cleanup scoped to this surface and operation.
+      for (const failureMode of ["provider-outage", "authorization-revoked", "timeout", "duplicate-delivery", "partial-mutation"] as const) {
+        await bindings.metadata.prepare("DELETE FROM anyam_provider_qualification_failures WHERE failure_key = ?1").bind(`${input.surface}:${input.operationId}:${failureMode}`).run();
+      }
       const remaining = await bindings.metadata.prepare("SELECT resource_key AS resourceKey FROM anyam_provider_qualification WHERE resource_key = ?1").bind(input.resourceKey).all<{ resourceKey: string }>();
       return cleanupReceipt({ surface: "d1", operationId: input.operationId, deletedResourceKeys: [input.resourceKey], remainingResourceKeys: remaining.results.map((row) => row.resourceKey), recoveryAction: remaining.results.length === 0 ? "No recovery action is currently required." : "The D1 qualification row remains; inspect the exact resource key before deleting the disposable database." });
     },

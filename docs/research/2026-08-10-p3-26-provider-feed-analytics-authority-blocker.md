@@ -46,6 +46,12 @@ Workers Metrics and R2 Operations queries were sent to the Cloudflare GraphQL en
 
 The current Wrangler OAuth scope receipt contains account/resource write scopes and Workers Tail access, but no `Account Analytics Read` scope.
 
+### Temporary token verification
+
+An owner supplied a temporary token for the named account. It was used only in memory for the bounded read-only probes and was not written to the repository, shell output, or receipt. Cloudflare returned HTTP `401` with error `1000` (`Invalid API Token`) from `/user/tokens/verify`; the Workers and R2 GraphQL probes consequently returned `not authorized for that account`.
+
+The supplied token must not be reused. Revoke it and create a fresh account-scoped token before retrying. This result is an authentication observation, not a provider outage or an Anyam reliability result.
+
 ## Required recovery action
 
 Create a temporary account-scoped API token with **Account Analytics Read** only, set it in the local qualification environment without committing or printing it, and rerun the bounded observation window. Cloudflare documents this permission in the [API token permission reference](https://developers.cloudflare.com/fundamentals/api/reference/permissions/).

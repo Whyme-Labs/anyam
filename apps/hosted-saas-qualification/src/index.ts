@@ -44,9 +44,13 @@ function requiredString(body: JsonObject, field: string): string {
   return value.trim();
 }
 
-function authorized(request: Request, env: Env): boolean {
+function bootstrapAuthorized(request: Request, env: Env): boolean {
   const bootstrap = env.ANYAM_HOSTED_BOOTSTRAP_TOKEN?.trim();
   return Boolean(bootstrap && request.headers.get("authorization") === `Bearer ${bootstrap}`);
+}
+
+function coordinatorAuthorized(request: Request, env: Env): boolean {
+  return request.headers.get("x-anyam-owner-validated") === "true" || bootstrapAuthorized(request, env);
 }
 
 function hostForRoute(segment: string): string {
@@ -101,7 +105,7 @@ export class HostedSaaSCoordinatorDO extends DurableObject<Env> {
   }
 
   private async registerRealm(request: Request): Promise<Response> {
-    if (!authorized(request, this.env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before registering a Realm", receipt: "ownerAuthorization=missing; realm=not-created" }, 401);
+    if (!coordinatorAuthorized(request, this.env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before registering a Realm", receipt: "ownerAuthorization=missing; realm=not-created" }, 401);
     const body = await bodyObject(request);
     const realm = this.store.registerRealm({ realmId: requiredString(body, "realmId"), host: requiredString(body, "host"), ...(typeof body.policyVersion === "string" ? { policyVersion: body.policyVersion } : {}) });
     const token = this.store.issueCredential({ realmId: realm.realmId, principalId: requiredString(body, "principalId") });
@@ -110,7 +114,7 @@ export class HostedSaaSCoordinatorDO extends DurableObject<Env> {
   }
 
   private async revokeRealm(request: Request): Promise<Response> {
-    if (!authorized(request, this.env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before revoking a Realm", receipt: "ownerAuthorization=missing; revocation=not-applied" }, 401);
+    if (!coordinatorAuthorized(request, this.env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before revoking a Realm", receipt: "ownerAuthorization=missing; revocation=not-applied" }, 401);
     const body = await bodyObject(request);
     const realmId = requiredString(body, "realmId");
     this.store.revokeRealm(realmId);
@@ -119,7 +123,7 @@ export class HostedSaaSCoordinatorDO extends DurableObject<Env> {
   }
 
   private async issueCredential(request: Request): Promise<Response> {
-    if (!authorized(request, this.env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before issuing a replacement credential", receipt: "ownerAuthorization=missing; credential=not-issued" }, 401);
+    if (!coordinatorAuthorized(request, this.env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before issuing a replacement credential", receipt: "ownerAuthorization=missing; credential=not-issued" }, 401);
     const body = await bodyObject(request);
     const realmId = requiredString(body, "realmId");
     const token = this.store.issueCredential({ realmId, principalId: requiredString(body, "principalId") });
@@ -127,14 +131,14 @@ export class HostedSaaSCoordinatorDO extends DurableObject<Env> {
   }
 
   private async cleanup(request: Request): Promise<Response> {
-    if (!authorized(request, this.env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before cleanup", receipt: "ownerAuthorization=missing; cleanup=not-applied" }, 401);
+    if (!coordinatorAuthorized(request, this.env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before cleanup", receipt: "ownerAuthorization=missing; cleanup=not-applied" }, 401);
     const cleanupReceipt = this.store.cleanup();
     await this.persist();
     return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, status: "cleaned", ...cleanupReceipt });
   }
 
   private state(request: Request): Response {
-    if (!authorized(request, this.env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before reading qualification state", receipt: "ownerAuthorization=missing; state=not-disclosed" }, 401);
+    if (!coordinatorAuthorized(request, this.env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before reading qualification state", receipt: "ownerAuthorization=missing; state=not-disclosed" }, 401);
     const snapshot = this.store.snapshot();
     return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, status: "ready", credentialFree: snapshot.credentialFree, realms: snapshot.realms.map((realm) => ({ realmId: realm.realmId, host: realm.host, policyVersion: realm.policyVersion, authorizationEpoch: realm.authorizationEpoch })), observations: snapshot.queue.length + snapshot.events.length + snapshot.logs.length, sourceProtocol: HOSTED_SAAS_ISOLATION_PROTOCOL, receipt: "state=owner-visible; credentialMaterialStored=false" });
   }
@@ -154,6 +158,13 @@ export default {
     if (url.pathname === "/health" && request.method === "GET") {
       const mode = env.ANYAM_HOSTED_SAAS_MODE ?? "hosted-saas";
       return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, status: mode === "hosted-saas" ? "ready" : "blocked", hostingMode: mode, sharedCoordinator: true, buildRevision: env.ANYAM_BUILD_REVISION, credentialMaterialStored: false, canonicalWrite: false, receipt: `hostingMode=${mode}; coordinator=shared; sourceProtocol=${HOSTED_SAAS_ISOLATION_PROTOCOL}` }, mode === "hosted-saas" ? 200 : 503);
+    }
+    if (url.pathname.startsWith("/admin/")) {
+      if (!bootstrapAuthorized(request, env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before invoking an admin operation", receipt: "ownerAuthorization=missing; operation=not-forwarded" }, 401);
+      const headers = new Headers(request.headers);
+      headers.delete("authorization");
+      headers.set("x-anyam-owner-validated", "true");
+      return coordinatorStub(env).fetch(new Request(request, { headers }));
     }
     return coordinatorStub(env).fetch(request);
   },

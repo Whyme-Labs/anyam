@@ -9,6 +9,7 @@
     "test": "tsx --test \"test/**/*.test.ts\"",
     "harness": "tsx src/harness/cli.ts",
     "qualification:external-runner": "tsx scripts/qualify-external-runner.ts",
+    "qualification:provider-feed": "tsx scripts/qualify-provider-feed.ts",
     "qualification:hosted-saas": "tsx scripts/qualify-hosted-saas.ts",
     "typecheck:qualification-worker": "tsc -p apps/runner-qualification/tsconfig.json --noEmit",
     "typecheck:hosted-saas": "tsc -p apps/hosted-saas-qualification/tsconfig.json --noEmit",

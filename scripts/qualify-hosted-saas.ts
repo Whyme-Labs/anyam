@@ -132,7 +132,7 @@ async function run(): Promise<void> {
   assert.equal(JSON.stringify(stateBeforeCleanup).includes(a.token), false);
   assert.equal(JSON.stringify(stateBeforeCleanup).includes(replacement), false);
 
-  cleanupResult = await admin("/admin/cleanup");
+  cleanupResult = await admin("/admin/cleanup", {});
   assert.equal(cleanupResult.status, "cleaned");
   const stateAfterCleanup = await admin("/admin/state");
   assert.deepEqual(stateAfterCleanup.realms, []);
@@ -146,7 +146,7 @@ try {
 } catch (error) {
   let cleanupError: string | undefined;
   try {
-    cleanupResult = await admin("/admin/cleanup");
+    cleanupResult = await admin("/admin/cleanup", {});
   } catch (cleanupFailure) {
     cleanupError = cleanupFailure instanceof Error ? cleanupFailure.message : "cleanup failed";
   }

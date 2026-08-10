@@ -231,7 +231,11 @@ ${claim ? `<label>Display name<input id="displayName" autocomplete="name" value=
 function qualificationPage(): Response {
   const script = String.raw`
     const result = document.getElementById("result");
-    const state = { delegation: undefined, recovery: undefined };
+    const providerResult = document.getElementById("providerResult");
+    const providerSurface = document.getElementById("providerSurface");
+    const providerFailureMode = document.getElementById("providerFailureMode");
+    const providerOperationId = document.getElementById("providerOperationId");
+    const state = { delegation: undefined, recovery: undefined, providerRecovery: undefined };
     const show = (value) => { result.textContent = JSON.stringify(value, null, 2); };
     const summary = (value) => {
       if (!value || typeof value !== "object") return value;
@@ -246,6 +250,62 @@ function qualificationPage(): Response {
       const payload = await response.json().catch(() => ({ code: "invalid_json_response" }));
       if (!response.ok) throw payload;
       return payload;
+    };
+    const showProvider = (value) => { providerResult.textContent = JSON.stringify(value, null, 2); };
+    const providerDigest = async (value) => {
+      const bytes = new TextEncoder().encode(value);
+      const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+      return "sha256:" + Array.from(hash, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    };
+    const ensureProviderOperationId = () => {
+      if (!providerOperationId.value.trim()) providerOperationId.value = "qualification-" + crypto.randomUUID();
+      return providerOperationId.value.trim();
+    };
+    const providerRun = async () => {
+      const operationId = ensureProviderOperationId();
+      const surface = providerSurface.value;
+      const failureMode = providerFailureMode.value;
+      return call("/api/owner/qualification/provider-operation", {
+        operationId,
+        idempotencyKey: "idempotency:" + operationId,
+        surface,
+        failureMode,
+        payloadDigest: await providerDigest("anyam.p3-24.customer-provider/" + surface + "/" + operationId),
+      });
+    };
+    const providerRunAction = async (operation) => {
+      try {
+        if (operation === "new") {
+          providerOperationId.value = "qualification-" + crypto.randomUUID();
+          showProvider({ status: "ready", operationId: providerOperationId.value, receipt: "new-operation-identity; provider-mutation=not-started" });
+          return;
+        }
+        if (operation === "run") {
+          showProvider(await providerRun());
+          return;
+        }
+        const operationId = ensureProviderOperationId();
+        if (operation === "resume") {
+          showProvider(await call("/api/owner/qualification/provider-operation/resume", { operationId }));
+          return;
+        }
+        if (operation === "cleanup") {
+          showProvider(await call("/api/owner/qualification/provider-operation/cleanup", { operationId }));
+          return;
+        }
+        if (operation === "export") {
+          state.providerRecovery = await call("/api/owner/qualification/provider-recovery/export");
+          showProvider(state.providerRecovery);
+          return;
+        }
+        if (operation === "restore") {
+          if (!state.providerRecovery?.bundle) throw { code: "provider_recovery_export_required", recoveryAction: "Export the provider-operation Recovery bundle first in this page." };
+          showProvider(await call("/api/owner/qualification/provider-recovery/restore", { bundle: state.providerRecovery.bundle }));
+          return;
+        }
+      } catch (error) {
+        showProvider(error);
+      }
     };
     const run = async (operation) => {
       try {
@@ -281,13 +341,22 @@ function qualificationPage(): Response {
       }
     };
     for (const button of document.querySelectorAll("button[data-operation]")) button.addEventListener("click", () => run(button.dataset.operation));
+    for (const button of document.querySelectorAll("button[data-provider-operation]")) button.addEventListener("click", () => providerRunAction(button.dataset.providerOperation));
   `;
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Anyam Realm qualification</title>
 <style>body{font:16px system-ui,sans-serif;max-width:54rem;margin:3rem auto;padding:0 1rem;color:#17202a}main{border:1px solid #d6dbe1;border-radius:12px;padding:2rem}button{font:inherit;margin:.25rem;padding:.65rem .8rem;border:0;border-radius:6px;background:#14532d;color:white;cursor:pointer}p{color:#52606d}pre{white-space:pre-wrap;background:#f4f6f8;padding:1rem;border-radius:6px;min-height:8rem}</style></head>
 <body><main><h1>Realm qualification</h1><p>These controls use the current opaque owner session. Credential values are never displayed; recovery remains in memory for this page only.</p>
 <div><button type="button" data-operation="delegate">Delegate agent</button><button type="button" data-operation="credentials">Issue Git + MCP credentials</button><button type="button" data-operation="revoke">Revoke delegated agent</button><button type="button" data-operation="export">Export recovery snapshot</button><button type="button" data-operation="restore">Restore recovery snapshot</button></div>
-<pre id="result" aria-live="polite"></pre></main><script>${script.replaceAll("</script>", "<\\/script>")}</script></body></html>`;
+<pre id="result" aria-live="polite"></pre>
+<hr>
+<h2>Customer-provider qualification</h2>
+<p>These owner-only controls exercise the named disposable D1, R2, Queue, Workflow, and Worker adapters. They never return provider credentials or canonical-write authority.</p>
+<label>Surface<select id="providerSurface"><option value="d1">D1</option><option value="r2">R2</option><option value="queue">Queue</option><option value="workflow">Workflow</option><option value="worker">Worker</option></select></label>
+<label>Failure mode<select id="providerFailureMode"><option value="none">none</option><option value="provider-outage">provider-outage</option><option value="authorization-revoked">authorization-revoked</option><option value="timeout">timeout</option><option value="duplicate-delivery">duplicate-delivery</option><option value="partial-mutation">partial-mutation</option></select></label>
+<label>Operation identity<input id="providerOperationId" autocomplete="off" placeholder="Generated when Run operation is clicked"></label>
+<div><button type="button" data-provider-operation="new">New operation identity</button><button type="button" data-provider-operation="run">Run operation</button><button type="button" data-provider-operation="resume">Resume exact operation</button><button type="button" data-provider-operation="cleanup">Cleanup exact operation</button><button type="button" data-provider-operation="export">Export provider recovery</button><button type="button" data-provider-operation="restore">Restore provider recovery</button></div>
+<pre id="providerResult" aria-live="polite"></pre></main><script>${script.replaceAll("</script>", "<\\/script>")}</script></body></html>`;
   return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'" } });
 }
 

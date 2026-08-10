@@ -169,6 +169,7 @@ export type CustomerProviderOperationStore = {
   get(operationId: string): Promise<CustomerProviderOperationRecord | undefined>;
   put(record: CustomerProviderOperationRecord, expectedStateDigest?: string): Promise<void>;
   list(): Promise<readonly CustomerProviderOperationRecord[]>;
+  restore(records: readonly CustomerProviderOperationRecord[]): Promise<void>;
 };
 
 export type CustomerProviderDurableObjectStorage = {
@@ -391,6 +392,37 @@ export class CustomerProviderDurableObjectOperationStore implements CustomerProv
     const records = await this.storage.list<CustomerProviderOperationRecord>({ prefix: this.prefix });
     return [...records.values()].map(clone);
   }
+
+  async restore(records: readonly CustomerProviderOperationRecord[]): Promise<void> {
+    const current = await this.list();
+    const currentById = new Map(current.map((record) => [record.operationId, record]));
+    const incomingById = new Map(records.map((record) => [record.operationId, record]));
+    const unexpected = current.find((record) => !incomingById.has(record.operationId));
+    if (unexpected) {
+      throw new CustomerProviderOperationError({
+        code: "stale-state",
+        message: "The durable provider-operation store contains a record outside the Recovery bundle; restore was not applied.",
+        recoveryAction: "export a fresh exact Recovery bundle from the authoritative coordinator and retry restore",
+        receipt: `operation=${unexpected.operationId}; recovery=stale; overwritten=false`,
+      });
+    }
+    for (const record of records) {
+      const existing = currentById.get(record.operationId);
+      if (existing && digest(existing) !== digest(record)) {
+        throw new CustomerProviderOperationError({
+          code: "stale-state",
+          message: "The durable provider-operation store differs from the Recovery bundle; restore was not applied.",
+          recoveryAction: "export a fresh exact Recovery bundle from the authoritative coordinator and retry restore",
+          receipt: `operation=${record.operationId}; recovery=stale; overwritten=false`,
+        });
+      }
+    }
+    await this.storage.transaction(async (transaction) => {
+      for (const record of records) {
+        if (!currentById.has(record.operationId)) await transaction.put(this.key(record.operationId), clone(record));
+      }
+    });
+  }
 }
 
 export class CustomerProviderQualificationCoordinator {
@@ -527,12 +559,7 @@ export class CustomerProviderQualificationCoordinator {
         receipt: `realm=${this.input.realmId}; installation=${this.input.installationId}; authority=resumed=false`,
       });
     }
-    const store = this.input.store;
-    if (store instanceof InMemoryCustomerProviderOperationStore) {
-      await store.restore(bundle.records);
-      return;
-    }
-    for (const record of bundle.records) await store.put(clone(record));
+    await this.input.store.restore(bundle.records);
   }
 
   private async require(operationId: string): Promise<CustomerProviderOperationRecord> {

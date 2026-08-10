@@ -159,7 +159,12 @@ export function createCloudflareCustomerProviderAdapters(bindings: CloudflareCus
     execute: async (input) => {
       const injected = await claimInjectedFailure(bindings, input);
       if (injected && ["provider-outage", "authorization-revoked", "timeout"].includes(input.failureMode)) return observationFailure(input.surface, input.operationId, input.failureMode);
-      const providerOperationId = `workflow:${input.operationId}`;
+      // Workflow instance IDs are provider identifiers, not Anyam operation
+      // IDs. Cloudflare accepts a restricted identifier alphabet here; the
+      // colon form used by our human-readable provider IDs is rejected before
+      // an instance is created. Keep the operation identity in the value while
+      // using a provider-safe ID.
+      const providerOperationId = `workflow-${input.operationId}`;
       const outputDigest = await digest({ surface: input.surface, operationId: input.operationId, payloadDigest: input.payloadDigest });
       try {
         await bindings.workflow.create({ id: providerOperationId, params: { protocol: "anyam.customer-provider-operation/v1", realmId: input.realmId, installationId: input.installationId, operationId: input.operationId, providerOperationId, expectedStateDigest: input.expectedStateDigest, payloadDigest: input.payloadDigest, outputDigest } });
@@ -184,12 +189,12 @@ export function createCloudflareCustomerProviderAdapters(bindings: CloudflareCus
     },
     cleanup: async (input) => {
       try {
-        await bindings.workflow.get(input.providerOperationId ?? `workflow:${input.operationId}`).then((instance) => instance.terminate({ rollback: true }));
+        await bindings.workflow.get(input.providerOperationId ?? `workflow-${input.operationId}`).then((instance) => instance.terminate({ rollback: true }));
       } catch {
         // A complete or already-terminated instance is reconciled by the
         // post-cleanup status check rather than treated as a new mutation.
       }
-      return cleanupReceipt({ surface: "workflow", operationId: input.operationId, deletedResourceKeys: [input.providerOperationId ?? `workflow:${input.operationId}`] });
+      return cleanupReceipt({ surface: "workflow", operationId: input.operationId, deletedResourceKeys: [input.providerOperationId ?? `workflow-${input.operationId}`] });
     },
   };
 

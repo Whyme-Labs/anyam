@@ -61,6 +61,11 @@ function assertNoDisclosure(body: JsonObject, values: readonly string[]): void {
   for (const value of [...values, "queue", "event", "log", "cache", "timing", "correlation"]) assert.equal(serialized.includes(value), false, `negative response disclosed ${value}`);
 }
 
+function assertNoRawValues(body: JsonObject, values: readonly string[]): void {
+  const serialized = JSON.stringify(body);
+  for (const value of values) assert.equal(serialized.includes(value), false, `response disclosed raw credential material`);
+}
+
 async function register(input: typeof realmA): Promise<RealmFixture> {
   const body = await admin("/admin/register-realm", { realmId: input.realmId, host: input.host, principalId: `${input.realmId}:owner` });
   assert.equal(body.status, "registered");
@@ -144,7 +149,7 @@ async function run(): Promise<void> {
 
   const recoveryExport = await admin("/admin/recovery-export");
   assert.equal(recoveryExport.credentialFree, true);
-  assertNoDisclosure(recoveryExport, [a.token, b.token, replacement]);
+  assertNoRawValues(recoveryExport, [a.token, b.token, replacement]);
   const snapshot = recoveryExport.snapshot;
   assert.ok(snapshot !== null && typeof snapshot === "object" && !Array.isArray(snapshot));
   const restored = await admin("/admin/recovery-restore", { snapshot: snapshot as JsonObject });

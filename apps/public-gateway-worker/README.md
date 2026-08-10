@@ -49,13 +49,15 @@ POST /admin/ledger/compact
 ```
 
 The retention policy must measure and name every boundary: detailed request
-records, exact replay tombstones, audit events, retryable-denial age, and
-terminal-denial age. Accepted and pending records are never eligible for
-compaction. Denied records may become compact replay tombstones only after the
-export is persisted and the measured age boundary is reached. If a healthy
-lineage or exact replay index would exceed its tripwire, compaction fails with
-the budget name, limit, ask, receipt, and recovery action; intake is not made
-lossy to satisfy a limit.
+records, exact replay tombstones, audit events, retryable-denial age,
+terminal-denial age, retryable replay window, and terminal-denial replay
+window. Accepted and pending records are never eligible for compaction. Denied
+records may become compact replay tombstones only after the export is persisted
+and the measured age boundary is reached. The replay-defense clock starts when
+the exact tombstone is materialized, so local retention cannot silently consume
+the provider protection window. If a healthy lineage or exact replay index
+would exceed its tripwire, compaction fails with the budget name, limit, ask,
+receipt, and recovery action; intake is not made lossy to satisfy a limit.
 
 The export is stored in the customer-owned Durable Object and is verified by a
 content digest before compaction. A restarted coordinator can load the export,
@@ -79,3 +81,27 @@ The archive's `bytes` receipt is the measured serialized object representation,
 not a claim about R2 billing or a universal provider quota. Provider usage,
 latency, and cost must be remeasured for each customer workload before setting
 the archive tripwire.
+
+## Owner-authorized replay archive deletion
+
+Replay archive cleanup is a separate destructive maintenance operation, not a
+provider lifecycle side effect:
+
+```text
+POST /admin/ledger/replay-archive/delete-expired
+```
+
+It requires the latest digest-verified coordinator export, an owner-authorized
+maintenance receipt, and an explicit `legalHold=clear` receipt. Only
+terminal-denial objects with `retryable=false` and an expired
+`replayDefenseUntil` are eligible. Retryable objects and legacy objects
+without a measured expiry are protected; accepted/pending lineage, audit, and
+recovery state are never in the deletion scope. Each provider deletion is
+digest-checked and reports `deleted` or idempotent `already-absent`. A
+provider or integrity failure stops the operation and names the recovery
+action.
+
+The operation records the export digest, requested/deleted/already-absent
+counts, protected-object counts, owner/hold receipts, and a Recovery
+Checkpoint in the Durable Object ledger. This is a customer policy boundary,
+not a universal retention duration or legal-hold implementation.

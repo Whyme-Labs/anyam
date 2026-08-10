@@ -76,6 +76,15 @@ class MemoryR2Bucket implements PublicGatewayReplayArchiveBucket {
     return { arrayBuffer: async () => new TextEncoder().encode(value).buffer };
   }
 
+  async delete(key: string): Promise<void> {
+    this.objects.delete(key);
+  }
+
+  async list(options?: { prefix?: string; cursor?: string }): Promise<{ objects: readonly { key: string }[]; truncated: boolean; cursor?: string }> {
+    const keys = [...this.objects.keys()].filter((key) => !options?.prefix || key.startsWith(options.prefix));
+    return { objects: keys.map((key) => ({ key })), truncated: false };
+  }
+
   setRaw(key: string, value: unknown): void {
     this.objects.set(key, JSON.stringify(value));
   }
@@ -91,6 +100,14 @@ class ReplayArchiveStore extends MemoryStore {
 
   async loadReplayTombstone(requestId: string): Promise<Awaited<ReturnType<NonNullable<PublicGatewayStore["loadReplayTombstone"]>>>> {
     return this.archive.get(requestId);
+  }
+
+  async listReplayTombstones(): Promise<Awaited<ReturnType<NonNullable<PublicGatewayStore["listReplayTombstones"]>>>> {
+    return this.archive.list();
+  }
+
+  async deleteReplayTombstone(input: Parameters<NonNullable<PublicGatewayStore["deleteReplayTombstone"]>>[0]): Promise<Awaited<ReturnType<NonNullable<PublicGatewayStore["deleteReplayTombstone"]>>>> {
+    return this.archive.delete(input.requestId, input.expectedDigest);
   }
 }
 
@@ -185,7 +202,7 @@ test("provider challenge is ledgered as a retryable denial and never materialize
   assert.match(snapshot.recoveryCheckpoint, /abuse:challenge/);
 });
 
-function retentionPolicy(overrides: Partial<Record<"requestRecordLimit" | "requestTombstoneLimit" | "auditEventLimit" | "retryableRetentionMs" | "terminalDenialRetentionMs", number>> = {}) {
+function retentionPolicy(overrides: Partial<Record<"requestRecordLimit" | "requestTombstoneLimit" | "auditEventLimit" | "retryableRetentionMs" | "terminalDenialRetentionMs" | "retryableReplayWindowMs" | "terminalDenialReplayWindowMs", number>> = {}) {
   const measured = (name: string, value: number, unit: string) => ({
     value,
     unit,
@@ -200,6 +217,8 @@ function retentionPolicy(overrides: Partial<Record<"requestRecordLimit" | "reque
     auditEventLimit: measured("audit-events", overrides.auditEventLimit ?? 8, "audit-events"),
     retryableRetentionMs: measured("retryable-age", overrides.retryableRetentionMs ?? 1000, "milliseconds"),
     terminalDenialRetentionMs: measured("terminal-age", overrides.terminalDenialRetentionMs ?? 1000, "milliseconds"),
+    retryableReplayWindowMs: measured("retryable-replay-window", overrides.retryableReplayWindowMs ?? 5000, "milliseconds"),
+    terminalDenialReplayWindowMs: measured("terminal-replay-window", overrides.terminalDenialReplayWindowMs ?? 1000, "milliseconds"),
     receipt: "receipt:ledger-retention-policy-fixture",
   } as const;
 }
@@ -332,6 +351,87 @@ test("Public Gateway archives exact tombstones beyond the local tripwire and fai
     () => unavailableCoordinator.submit({ requestId: "request:missing-archive", actorId: "actor:anonymous", contributionId: "contribution:missing-archive", payloadDigest: "sha256:missing-archive" }),
     (error: unknown) => error instanceof Error && error.name === "PublicGatewayError" && error.message.includes("replay archive") && error.message.includes("not materialized"),
   );
+});
+
+test("owner-authorized replay archive deletion protects retryable and legacy objects", async () => {
+  const store = new ReplayArchiveStore();
+  let now = new Date("2026-08-08T00:00:00.000Z");
+  const gatewayClock = () => now;
+  const coordinator = new PublicGatewayCoordinator(policy(), store, gatewayClock);
+  const terminal = await coordinator.submit({ requestId: "request:delete-terminal", actorId: "actor:anonymous", contributionId: "contribution:delete-terminal", payloadDigest: "sha256:delete-terminal" });
+  await coordinator.open({ id: "principal:gateway-owner", role: "owner" }, "receipt:open");
+  const retryable = await coordinator.submit({ requestId: "request:delete-retryable", actorId: "actor:anonymous", contributionId: "contribution:delete-retryable", payloadDigest: "sha256:delete-retryable", provider: { status: "timeout", receipt: "provider=fixture; timeout=true; retryable=true" } });
+  assert.equal(terminal.status, "denied");
+  assert.equal(retryable.status, "denied");
+
+  now = new Date("2026-08-08T00:00:02.000Z");
+  const exported = await coordinator.exportLedger({ actorId: "principal:gateway-owner", exportId: "ledger-export:delete-fixture", receipt: "receipt:delete-export" });
+  await coordinator.compactLedger({ actorId: "principal:gateway-owner", exportId: exported.exportId, policy: retentionPolicy({ requestTombstoneLimit: 1, retryableReplayWindowMs: 5000, terminalDenialReplayWindowMs: 1000 }), receipt: "receipt:delete-compact" });
+
+  now = new Date("2026-08-08T00:00:03.000Z");
+  await assert.rejects(
+    () => coordinator.deleteExpiredReplayArchive({
+      actor: { id: "principal:gateway-owner", role: "owner" },
+      exportId: exported.exportId,
+      legalHold: "active",
+      authorizationReceipt: "ownerAuthorization=fixture",
+      holdReceipt: "legalHold=active; receipt=fixture",
+      receipt: "receipt:delete-hold-blocked",
+    }),
+    (error: unknown) => error instanceof Error && error.name === "PublicGatewayError" && error.message.includes("legal or recovery hold"),
+  );
+  const deleted = await coordinator.deleteExpiredReplayArchive({
+    actor: { id: "principal:gateway-owner", role: "owner" },
+    exportId: exported.exportId,
+    legalHold: "clear",
+    authorizationReceipt: "ownerAuthorization=fixture",
+    holdReceipt: "legalHold=clear; receipt=fixture",
+    receipt: "receipt:delete-terminal-expired",
+  });
+  assert.equal(deleted.status, "deleted");
+  assert.equal(deleted.requested, 1);
+  assert.equal(deleted.deleted, 1);
+  assert.equal(deleted.protectedRetryable, 1);
+  assert.equal(deleted.protectedUnexpired, 0);
+  assert.equal(deleted.protectedLegacy, 0);
+  assert.equal((await store.archive.list()).length, 1);
+  assert.equal((await coordinator.snapshot()).ledger.replayArchiveDeletedCount, 1);
+
+  await assert.rejects(
+    () => coordinator.deleteExpiredReplayArchive({
+      actor: { id: "principal:gateway-moderator", role: "moderator" },
+      exportId: exported.exportId,
+      legalHold: "clear",
+      authorizationReceipt: "moderator=fixture",
+      holdReceipt: "legalHold=clear; receipt=fixture",
+      receipt: "receipt:delete-moderator-denied",
+    }),
+    (error: unknown) => error instanceof Error && error.name === "PublicGatewayError" && error.message.includes("owner-authorized"),
+  );
+
+  await store.archive.put({
+    requestId: "request:delete-legacy",
+    payloadDigest: "sha256:delete-legacy",
+    contributionId: "contribution:delete-legacy",
+    originalStatus: "denied",
+    recordedAt: "2026-08-08T00:00:00.000Z",
+    compactedAt: "2026-08-08T00:00:02.000Z",
+    exportDigest: exported.digest,
+    receipt: "ledger=legacy-fixture",
+  });
+  const protectedResult = await coordinator.deleteExpiredReplayArchive({
+    actor: { id: "principal:gateway-owner", role: "owner" },
+    exportId: exported.exportId,
+    legalHold: "clear",
+    authorizationReceipt: "ownerAuthorization=fixture",
+    holdReceipt: "legalHold=clear; receipt=fixture",
+    receipt: "receipt:delete-protected-only",
+  });
+  assert.equal(protectedResult.status, "nothing-eligible");
+  assert.equal(protectedResult.requested, 0);
+  assert.equal(protectedResult.protectedRetryable, 1);
+  assert.equal(protectedResult.protectedLegacy, 1);
+  assert.equal((await store.archive.list()).length, 2);
 });
 
 test("Worker provider payload parsing preserves abuse decisions instead of dropping them", () => {

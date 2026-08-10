@@ -269,10 +269,10 @@ async function publicGit(request: Request, env: Env): Promise<Response> {
   return new Response(response.body, { status: response.status, headers: responseHeaders });
 }
 
-async function handleAdmin(request: Request, env: Env, action: "state" | "open" | "suspend" | "reopen" | "cleanup" | "ledger-export" | "ledger-compact"): Promise<Response> {
+async function handleAdmin(request: Request, env: Env, action: "state" | "open" | "suspend" | "reopen" | "cleanup" | "ledger-export" | "ledger-compact" | "replay-archive-delete"): Promise<Response> {
   if (!adminAuthorized(request, env)) return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the customer Realm owner or moderator; no public gateway mutation was performed", receipt: "adminAuthorization=missing-or-invalid; mutation=false" }, 401);
   const body = request.method === "POST" ? await bodyObject(request) : {};
-  const path = action === "state" ? "/state" : action === "ledger-export" ? "/ledger/export" : action === "ledger-compact" ? "/ledger/compact" : `/admin/${action}`;
+  const path = action === "state" ? "/state" : action === "ledger-export" ? "/ledger/export" : action === "ledger-compact" ? "/ledger/compact" : action === "replay-archive-delete" ? "/ledger/replay-archive/delete-expired" : `/admin/${action}`;
   const coordinatorInit: RequestInit = { method: action === "state" ? "GET" : "POST", headers: { "content-type": "application/json" } };
   if (action !== "state") {
     // The qualification adapter has one owner-scoped secret. Do not let a
@@ -316,6 +316,8 @@ export class PublicGatewayCoordinatorDO extends DurableObject<Env> {
       const archive = new CloudflarePublicGatewayReplayArchive(env.PUBLIC_GATEWAY_REPLAY_ARCHIVE, configured.policy.projectId);
       store.archiveReplayTombstone = async (tombstone) => await archive.put(tombstone);
       store.loadReplayTombstone = async (requestId) => await archive.get(requestId);
+      store.listReplayTombstones = async () => await archive.list();
+      store.deleteReplayTombstone = async (input) => await archive.delete(input.requestId, input.expectedDigest);
     }
     const coordinator = new PublicGatewayCoordinator(configured.policy, store);
     const url = new URL(request.url);
@@ -328,6 +330,7 @@ export class PublicGatewayCoordinatorDO extends DurableObject<Env> {
       if (url.pathname === "/admin/cleanup" && request.method === "POST") return json(await coordinator.cleanup({ id: String(body.actorId ?? ""), role: body.role === "moderator" ? "moderator" : "owner" }, String(body.cleanupReceipt ?? "")));
       if (url.pathname === "/ledger/export" && request.method === "POST") return json(await coordinator.exportLedger({ actorId: String(body.actorId ?? ""), exportId: String(body.exportId ?? ""), receipt: String(body.receipt ?? "") }));
       if (url.pathname === "/ledger/compact" && request.method === "POST") return json(await coordinator.compactLedger({ actorId: String(body.actorId ?? ""), exportId: String(body.exportId ?? ""), policy: parsePublicGatewayLedgerRetentionPolicy(body.policy), receipt: String(body.receipt ?? "") }));
+      if (url.pathname === "/ledger/replay-archive/delete-expired" && request.method === "POST") return json(await coordinator.deleteExpiredReplayArchive({ actor: { id: String(body.actorId ?? ""), role: body.role === "moderator" ? "moderator" : "owner" }, exportId: String(body.exportId ?? ""), legalHold: body.legalHold === "clear" ? "clear" : "active", authorizationReceipt: String(body.authorizationReceipt ?? ""), holdReceipt: String(body.holdReceipt ?? ""), receipt: String(body.receipt ?? "") }));
       if (url.pathname === "/submit" && request.method === "POST") {
         const input = {
           requestId: String(body.requestId ?? ""),
@@ -401,6 +404,7 @@ export default {
     if (url.pathname === "/admin/cleanup" && request.method === "POST") return handleAdmin(request, env, "cleanup");
     if (url.pathname === "/admin/ledger/export" && request.method === "POST") return handleAdmin(request, env, "ledger-export");
     if (url.pathname === "/admin/ledger/compact" && request.method === "POST") return handleAdmin(request, env, "ledger-compact");
+    if (url.pathname === "/admin/ledger/replay-archive/delete-expired" && request.method === "POST") return handleAdmin(request, env, "replay-archive-delete");
     if (request.method !== "GET") return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "method_not_allowed", recoveryAction: "use the public read or contribution-envelope routes", receipt: "canonicalWrite=false" }, 405);
     return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "not_found", recoveryAction: "use /health, /public/source-manifest, /projects/public/source.git, or /public/contributions", receipt: "path=not-found; privateMetadata=not-disclosed" }, 404);
   },

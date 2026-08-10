@@ -24,7 +24,7 @@ export type PublicGatewayRequestRecord = {
 
 export type PublicGatewayAuditEvent = {
   id: string;
-  action: "open" | "submit" | "suspend" | "reopen" | "cleanup" | "ledger-export" | "ledger-compact";
+  action: "open" | "submit" | "suspend" | "reopen" | "cleanup" | "ledger-export" | "ledger-compact" | "replay-archive-delete";
   actorId: string;
   requestId?: string;
   outcome: "accepted" | "denied" | "approval_required" | "completed";
@@ -37,8 +37,12 @@ export type PublicGatewayRequestTombstone = {
   payloadDigest: string;
   contributionId: string;
   originalStatus: PublicIntakeDecision["status"];
+  /** Whether the denied record was still retryable when compacted. */
+  retryable?: boolean;
   recordedAt: string;
   compactedAt: string;
+  /** Fixed at compaction from the receipt-backed replay-defense policy. */
+  replayDefenseUntil?: string;
   exportDigest: string;
   receipt: string;
 };
@@ -49,6 +53,7 @@ export type PublicGatewayLedgerMetadata = {
   requestTombstones: readonly PublicGatewayRequestTombstone[];
   auditCompactedCount: number;
   archivedTombstoneCount: number;
+  replayArchiveDeletedCount: number;
   lastArchive?: {
     protocol: typeof PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL;
     exportDigest: string;
@@ -65,6 +70,18 @@ export type PublicGatewayLedgerMetadata = {
     auditEventCount: number;
     receipt: string;
   };
+  lastArchiveDeletion?: {
+    exportId: string;
+    exportDigest: string;
+    requested: number;
+    deleted: number;
+    alreadyAbsent: number;
+    protectedRetryable: number;
+    protectedUnexpired: number;
+    protectedLegacy: number;
+    createdAt: string;
+    receipt: string;
+  };
 };
 
 export type PublicGatewayReplayArchiveReceipt = {
@@ -74,6 +91,22 @@ export type PublicGatewayReplayArchiveReceipt = {
   bytes: number;
   key: string;
   idempotent: boolean;
+  receipt: string;
+};
+
+export type PublicGatewayReplayArchiveCandidate = {
+  requestId: string;
+  key: string;
+  digest: string;
+  bytes: number;
+  tombstone: PublicGatewayRequestTombstone;
+};
+
+export type PublicGatewayReplayArchiveDeletionReceipt = {
+  requestId: string;
+  key: string;
+  digest: string;
+  status: "deleted" | "already-absent";
   receipt: string;
 };
 
@@ -100,6 +133,8 @@ export type PublicGatewayLedgerRetentionPolicy = {
   auditEventLimit: PublicIntakeMeasuredLimit;
   retryableRetentionMs: PublicIntakeMeasuredLimit;
   terminalDenialRetentionMs: PublicIntakeMeasuredLimit;
+  retryableReplayWindowMs: PublicIntakeMeasuredLimit;
+  terminalDenialReplayWindowMs: PublicIntakeMeasuredLimit;
   receipt: string;
 };
 
@@ -128,6 +163,21 @@ export type PublicGatewayLedgerCompactionResult = {
   receipt: string;
 };
 
+export type PublicGatewayReplayArchiveDeletionResult = {
+  protocol: typeof PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL;
+  status: "deleted" | "nothing-eligible";
+  exportId: string;
+  exportDigest: string;
+  requested: number;
+  deleted: number;
+  alreadyAbsent: number;
+  protectedRetryable: number;
+  protectedUnexpired: number;
+  protectedLegacy: number;
+  recoveryCheckpoint: string;
+  receipt: string;
+};
+
 export type PublicGatewayStore = {
   load(): Promise<PublicGatewayState | undefined>;
   save(state: PublicGatewayState): Promise<void>;
@@ -135,6 +185,8 @@ export type PublicGatewayStore = {
   loadLedgerExport?(exportId: string): Promise<PublicGatewayLedgerExport | undefined>;
   archiveReplayTombstone?(tombstone: PublicGatewayRequestTombstone): Promise<PublicGatewayReplayArchiveReceipt>;
   loadReplayTombstone?(requestId: string): Promise<PublicGatewayRequestTombstone | undefined>;
+  listReplayTombstones?(): Promise<readonly PublicGatewayReplayArchiveCandidate[]>;
+  deleteReplayTombstone?(input: { requestId: string; expectedDigest: string }): Promise<PublicGatewayReplayArchiveDeletionReceipt>;
 };
 
 export type PublicGatewayClock = () => Date;
@@ -284,7 +336,7 @@ export function parsePublicGatewayLedgerRetentionPolicy(value: unknown): PublicG
     throw new PublicGatewayError({
       code: "invalid-request",
       message: "Public Gateway ledger retention requires a measured policy object.",
-      recoveryAction: "provide request-record, replay-tombstone, audit, retryable-age, and terminal-denial-age receipts",
+      recoveryAction: "provide request-record, replay-tombstone, audit, retryable-age, terminal-denial-age, retryable-replay-window, and terminal-denial-replay-window receipts",
       receipt: "ledgerRetention=missing",
     });
   }
@@ -308,12 +360,14 @@ export function parsePublicGatewayLedgerRetentionPolicy(value: unknown): PublicG
   }
   const retryableRetentionMs = measuredLimit(candidate.retryableRetentionMs, "retryableRetentionMs");
   const terminalDenialRetentionMs = measuredLimit(candidate.terminalDenialRetentionMs, "terminalDenialRetentionMs");
-  if (retryableRetentionMs.unit !== "milliseconds" || terminalDenialRetentionMs.unit !== "milliseconds") {
+  const retryableReplayWindowMs = measuredLimit(candidate.retryableReplayWindowMs, "retryableReplayWindowMs");
+  const terminalDenialReplayWindowMs = measuredLimit(candidate.terminalDenialReplayWindowMs, "terminalDenialReplayWindowMs");
+  if ([retryableRetentionMs, terminalDenialRetentionMs, retryableReplayWindowMs, terminalDenialReplayWindowMs].some((limit) => limit.unit !== "milliseconds")) {
     throw new PublicGatewayError({
       code: "invalid-request",
-      message: "Ledger age retention limits must use milliseconds as their unit.",
-      recoveryAction: "remeasure retryableRetentionMs and terminalDenialRetentionMs with unit=milliseconds",
-      receipt: `retryableUnit=${retryableRetentionMs.unit}; terminalDenialUnit=${terminalDenialRetentionMs.unit}; expectedUnit=milliseconds`,
+      message: "Ledger age and replay-defense limits must use milliseconds as their unit.",
+      recoveryAction: "remeasure retryableRetentionMs, terminalDenialRetentionMs, retryableReplayWindowMs, and terminalDenialReplayWindowMs with unit=milliseconds",
+      receipt: `retryableUnit=${retryableRetentionMs.unit}; terminalDenialUnit=${terminalDenialRetentionMs.unit}; retryableReplayUnit=${retryableReplayWindowMs.unit}; terminalReplayUnit=${terminalDenialReplayWindowMs.unit}; expectedUnit=milliseconds`,
     });
   }
   return {
@@ -323,6 +377,8 @@ export function parsePublicGatewayLedgerRetentionPolicy(value: unknown): PublicG
     auditEventLimit: measuredLimit(candidate.auditEventLimit, "auditEventLimit"),
     retryableRetentionMs,
     terminalDenialRetentionMs,
+    retryableReplayWindowMs,
+    terminalDenialReplayWindowMs,
     receipt,
   };
 }
@@ -334,6 +390,7 @@ function defaultLedgerMetadata(): PublicGatewayLedgerMetadata {
     requestTombstones: [],
     auditCompactedCount: 0,
     archivedTombstoneCount: 0,
+    replayArchiveDeletedCount: 0,
   };
 }
 
@@ -349,6 +406,7 @@ function normalizeState(state: PublicGatewayState): PublicGatewayState {
       requestTombstones: ledger.requestTombstones ?? [],
       auditCompactedCount: ledger.auditCompactedCount ?? 0,
       archivedTombstoneCount: ledger.archivedTombstoneCount ?? 0,
+      replayArchiveDeletedCount: ledger.replayArchiveDeletedCount ?? 0,
     },
   });
 }
@@ -908,16 +966,44 @@ export class PublicGatewayCoordinator {
       (compactable ? eligible : retained).push(record);
     }
 
-    const newTombstones = eligible.map((record): PublicGatewayRequestTombstone => ({
-      requestId: record.requestId,
-      payloadDigest: record.payloadDigest,
-      contributionId: record.contributionId,
-      originalStatus: record.decision.status,
-      recordedAt: record.recordedAt,
-      compactedAt: now.toISOString(),
-      exportDigest: bundle.digest,
-      receipt: `ledger=${PUBLIC_GATEWAY_LEDGER_PROTOCOL}; retentionClass=${record.retryable ? "retryable-window" : "terminal-denial"}; requestId=${record.requestId}; export=${bundle.digest}; replayIndex=retained`,
-    }));
+    const newTombstones = eligible.map((record): PublicGatewayRequestTombstone => {
+      const replayWindowMs = record.retryable ? retention.retryableReplayWindowMs.value : retention.terminalDenialReplayWindowMs.value;
+      // The replay-defense clock starts when the exact tombstone is
+      // materialized, not when the request first arrived. This prevents a
+      // long local-retention period from silently consuming the archive's
+      // protection window before the provider projection exists.
+      const replayDefenseUntilMs = nowMs + replayWindowMs;
+      if (!Number.isFinite(replayDefenseUntilMs)) {
+        throw new PublicGatewayError({
+          code: "invalid-state",
+          message: "Public Gateway compaction could not derive a replay-defense expiry for a denied record.",
+          recoveryAction: "retain the exported ledger and repair the measured replay-window or record timestamp through a reviewed migration",
+          receipt: `requestId=${record.requestId}; replayDefenseUntil=invalid; replayIndex=not-written`,
+        });
+      }
+      const replayDefenseUntilDate = new Date(replayDefenseUntilMs);
+      if (!Number.isFinite(replayDefenseUntilDate.getTime())) {
+        throw new PublicGatewayError({
+          code: "invalid-state",
+          message: "Public Gateway compaction produced an unrepresentable replay-defense expiry.",
+          recoveryAction: "retain the exported ledger and remeasure the replay window or repair the record timestamp through a reviewed migration",
+          receipt: `requestId=${record.requestId}; replayDefenseUntil=unrepresentable; replayIndex=not-written`,
+        });
+      }
+      const replayDefenseUntil = replayDefenseUntilDate.toISOString();
+      return {
+        requestId: record.requestId,
+        payloadDigest: record.payloadDigest,
+        contributionId: record.contributionId,
+        originalStatus: record.decision.status,
+        retryable: record.retryable,
+        recordedAt: record.recordedAt,
+        compactedAt: now.toISOString(),
+        replayDefenseUntil,
+        exportDigest: bundle.digest,
+        receipt: `ledger=${PUBLIC_GATEWAY_LEDGER_PROTOCOL}; retentionClass=${record.retryable ? "retryable-window" : "terminal-denial"}; requestId=${record.requestId}; export=${bundle.digest}; replayDefenseUntil=${replayDefenseUntil}; replayIndex=retained`,
+      };
+    });
     const tombstones = [...state.ledger.requestTombstones, ...newTombstones];
     let retainedTombstones = tombstones;
     let archivedTombstones: PublicGatewayReplayArchiveReceipt[] = [];
@@ -989,6 +1075,186 @@ export class PublicGatewayCoordinator {
       compacted: { requestRecords: eligible.length, auditEvents: submitAudit.length - retainedSubmitAudit.length },
       recoveryCheckpoint: next.recoveryCheckpoint,
       receipt: `ledger=${PUBLIC_GATEWAY_LEDGER_PROTOCOL}; export=${bundle.digest}; compactedAt=${compactedAt}; acceptedLineage=preserved; replayIndex=${archivedTombstones.length > 0 ? "archived-exact" : "retained"}; archived=${archivedTombstones.length}; canonicalProjectMutation=false`,
+    };
+  }
+
+  /**
+   * Owner-authorized maintenance operation for the explicit retention policy.
+   * It never deletes accepted/pending lineage or audit/recovery state. Only
+   * terminal-denial replay objects with a recorded, expired replay-defense
+   * boundary are eligible; retryable or legacy objects remain protected.
+   */
+  async deleteExpiredReplayArchive(input: {
+    actor: PublicGatewayAdminActor;
+    exportId: string;
+    legalHold: "clear" | "active";
+    authorizationReceipt: string;
+    holdReceipt: string;
+    receipt: string;
+  }): Promise<PublicGatewayReplayArchiveDeletionResult> {
+    required(input.actor.id, "actor.id");
+    required(input.exportId, "exportId");
+    required(input.authorizationReceipt, "authorizationReceipt");
+    required(input.holdReceipt, "holdReceipt");
+    required(input.receipt, "receipt");
+    if (input.actor.role !== "owner") {
+      throw new PublicGatewayError({
+        code: "invalid-state",
+        message: "Replay archive deletion requires an owner-authorized maintenance operation.",
+        recoveryAction: "authenticate the customer-owned Realm owner and retry with an owner-scoped archive-maintenance capability",
+        receipt: `actor=${input.actor.id}; role=${input.actor.role}; replayArchiveDeletion=denied; mutation=false`,
+      });
+    }
+    if (input.legalHold !== "clear") {
+      throw new PublicGatewayError({
+        code: "invalid-state",
+        message: "Replay archive deletion is blocked while a legal or recovery hold is active.",
+        recoveryAction: "clear the applicable hold through the customer governance process, create a fresh verified export, then retry",
+        receipt: `exportId=${input.exportId}; legalHold=${input.legalHold}; deleted=0; mutation=false`,
+      });
+    }
+    if (!this.store.loadLedgerExport || !this.store.listReplayTombstones || !this.store.deleteReplayTombstone) {
+      throw new PublicGatewayError({
+        code: "provider-unavailable",
+        message: "The customer-owned replay archive does not expose the maintenance operations required for safe deletion.",
+        recoveryAction: "bind owner-only list and digest-checked delete operations, then retry without changing the export identity",
+        receipt: `exportId=${input.exportId}; replayArchiveMaintenance=missing; deleted=0`,
+      });
+    }
+    const state = await this.snapshot();
+    const lastExport = state.ledger.lastExport;
+    if (!lastExport || lastExport.exportId !== input.exportId) {
+      throw new PublicGatewayError({
+        code: "invalid-state",
+        message: "Replay archive deletion requires the latest verified coordinator export.",
+        recoveryAction: "export the current coordinator ledger, verify its digest, and retry with that exportId",
+        receipt: `exportId=${input.exportId}; latestExport=${lastExport?.exportId ?? "missing"}; deleted=0`,
+      });
+    }
+    const bundle = await this.store.loadLedgerExport(input.exportId);
+    if (!bundle) {
+      throw new PublicGatewayError({
+        code: "provider-unavailable",
+        message: "The verified coordinator export required for replay archive deletion is unavailable.",
+        recoveryAction: "restore the customer-owned export object and retry the same owner-authorized operation",
+        receipt: `exportId=${input.exportId}; exportFound=false; deleted=0`,
+      });
+    }
+    const { digest: recordedDigest, ...unsignedBundle } = bundle;
+    const calculatedDigest = await digest(unsignedBundle);
+    if (recordedDigest !== calculatedDigest || recordedDigest !== lastExport.digest) {
+      throw new PublicGatewayError({
+        code: "invalid-state",
+        message: "The coordinator export for replay archive deletion failed digest verification.",
+        recoveryAction: "restore a verified export and retry without deleting any archive object",
+        receipt: `exportId=${input.exportId}; recordedDigest=${recordedDigest}; calculatedDigest=${calculatedDigest}; expectedDigest=${lastExport.digest}; deleted=0`,
+      });
+    }
+
+    let candidates: readonly PublicGatewayReplayArchiveCandidate[];
+    try {
+      candidates = await this.store.listReplayTombstones();
+    } catch (error) {
+      throw new PublicGatewayError({
+        code: "provider-unavailable",
+        message: "The replay archive could not be enumerated for owner-authorized deletion.",
+        recoveryAction: "restore the customer-owned replay archive and retry the same export-bound deletion operation",
+        receipt: `exportId=${input.exportId}; archiveList=false; deleted=0; cause=${error instanceof Error ? error.name : "unknown"}`,
+      });
+    }
+
+    const nowMs = this.now().getTime();
+    const eligible: PublicGatewayReplayArchiveCandidate[] = [];
+    let protectedRetryable = 0;
+    let protectedUnexpired = 0;
+    let protectedLegacy = 0;
+    for (const candidate of candidates) {
+      const tombstone = candidate.tombstone;
+      if (tombstone.originalStatus !== "denied") {
+        throw new PublicGatewayError({
+          code: "invalid-state",
+          message: "The replay archive contains a non-denial object in the deletion scope.",
+          recoveryAction: "quarantine the object, restore a verified terminal-denial projection, and retry without deleting archive data",
+          receipt: `exportId=${input.exportId}; requestId=${candidate.requestId}; originalStatus=${tombstone.originalStatus}; deleted=0`,
+        });
+      }
+      if (tombstone.retryable === undefined || !tombstone.replayDefenseUntil) {
+        protectedLegacy += 1;
+        continue;
+      }
+      if (tombstone.retryable) {
+        protectedRetryable += 1;
+        continue;
+      }
+      const replayDefenseUntilMs = Date.parse(tombstone.replayDefenseUntil);
+      if (!Number.isFinite(replayDefenseUntilMs)) {
+        protectedLegacy += 1;
+      } else if (nowMs < replayDefenseUntilMs) {
+        protectedUnexpired += 1;
+      } else {
+        eligible.push(candidate);
+      }
+    }
+
+    let deleted = 0;
+    let alreadyAbsent = 0;
+    try {
+      for (const candidate of eligible) {
+        const result = await this.store.deleteReplayTombstone({ requestId: candidate.requestId, expectedDigest: candidate.digest });
+        if (result.status === "deleted") deleted += 1;
+        else alreadyAbsent += 1;
+      }
+    } catch (error) {
+      throw new PublicGatewayError({
+        code: "provider-unavailable",
+        message: "Replay archive deletion stopped after a provider or integrity failure; remaining objects are retained for retry.",
+        recoveryAction: "inspect the owner-visible deletion receipt, restore the archive if needed, and retry the same export-bound operation; already-deleted objects are idempotent",
+        receipt: `exportId=${input.exportId}; requested=${eligible.length}; deleted=${deleted}; alreadyAbsent=${alreadyAbsent}; protectedRetryable=${protectedRetryable}; protectedUnexpired=${protectedUnexpired}; protectedLegacy=${protectedLegacy}; mutation=partial; cause=${error instanceof Error ? error.name : "unknown"}`,
+      });
+    }
+
+    const createdAt = this.now().toISOString();
+    const status = eligible.length === 0 ? "nothing-eligible" : "deleted";
+    const deletionReceipt = `replayArchive=${PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL}; exportId=${input.exportId}; exportDigest=${bundle.digest}; requested=${eligible.length}; deleted=${deleted}; alreadyAbsent=${alreadyAbsent}; protectedRetryable=${protectedRetryable}; protectedUnexpired=${protectedUnexpired}; protectedLegacy=${protectedLegacy}; legalHold=clear; lineagePreserved=true; auditPreserved=true; ownerAuthorization=${input.authorizationReceipt}; hold=${input.holdReceipt}; ${input.receipt}`;
+    const next = this.withAudit({
+      ...state,
+      recoveryCheckpoint: `checkpoint:public-gateway:replay-archive-delete:${state.ledger.generation + 1}`,
+      ledger: {
+        ...state.ledger,
+        replayArchiveDeletedCount: state.ledger.replayArchiveDeletedCount + deleted + alreadyAbsent,
+        lastArchiveDeletion: {
+          exportId: input.exportId,
+          exportDigest: bundle.digest,
+          requested: eligible.length,
+          deleted,
+          alreadyAbsent,
+          protectedRetryable,
+          protectedUnexpired,
+          protectedLegacy,
+          createdAt,
+          receipt: deletionReceipt,
+        },
+      },
+    }, {
+      action: "replay-archive-delete",
+      actorId: input.actor.id,
+      outcome: "completed",
+      receipt: deletionReceipt,
+    });
+    await this.saveState(next);
+    return {
+      protocol: PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL,
+      status,
+      exportId: input.exportId,
+      exportDigest: bundle.digest,
+      requested: eligible.length,
+      deleted,
+      alreadyAbsent,
+      protectedRetryable,
+      protectedUnexpired,
+      protectedLegacy,
+      recoveryCheckpoint: next.recoveryCheckpoint,
+      receipt: deletionReceipt,
     };
   }
 

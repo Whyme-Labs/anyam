@@ -1,11 +1,14 @@
 import {
   PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL,
+  type PublicGatewayReplayArchiveCandidate,
+  type PublicGatewayReplayArchiveDeletionReceipt,
   type PublicGatewayReplayArchiveReceipt,
   type PublicGatewayRequestTombstone,
 } from "./public-gateway.ts";
 
 export type PublicGatewayReplayArchiveObject = {
   protocol: typeof PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL;
+  projectId?: string;
   requestId: string;
   tombstone: PublicGatewayRequestTombstone;
   digest: string;
@@ -16,6 +19,8 @@ export type PublicGatewayReplayArchiveObject = {
 export type PublicGatewayReplayArchiveBucket = {
   put(key: string, value: string, options?: { customMetadata?: Record<string, string> }): Promise<unknown>;
   get(key: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer> } | null>;
+  delete(key: string): Promise<void>;
+  list(options?: { prefix?: string; cursor?: string }): Promise<{ objects: readonly { key: string }[]; truncated: boolean; cursor?: string }>;
 };
 
 export class PublicGatewayReplayArchiveError extends Error {
@@ -99,6 +104,7 @@ export class CloudflarePublicGatewayReplayArchive {
     const key = await publicGatewayReplayArchiveKey(this.projectId, tombstone.requestId);
     const unsigned: Omit<PublicGatewayReplayArchiveObject, "digest"> = {
       protocol: PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL,
+      projectId: this.projectId,
       requestId: tombstone.requestId,
       tombstone: clone(tombstone),
       bytes: 0,
@@ -157,6 +163,60 @@ export class CloudflarePublicGatewayReplayArchive {
     const parsed = await this.readObject(key, object);
     if (parsed.requestId !== requestId || parsed.tombstone.requestId !== requestId) throw invalidStoredObject("The replay archive object does not match the requested request identity.", `key=${key}; requestId=${requestId}; storedRequestId=${parsed.requestId}; replay=false`);
     return clone(parsed.tombstone);
+  }
+
+  async list(): Promise<readonly PublicGatewayReplayArchiveCandidate[]> {
+    const candidates: PublicGatewayReplayArchiveCandidate[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.bucket.list({ prefix: "anyam/public-gateway/replay-index/v1/", ...(cursor ? { cursor } : {}) });
+      for (const listed of page.objects) {
+        const object = await this.bucket.get(listed.key);
+        if (!object) continue;
+        const parsed = await this.readObject(listed.key, object);
+        // The key includes the project identity. This lets a pre-projectId
+        // legacy object be classified by the coordinator without exposing or
+        // deleting an object belonging to another project in a shared bucket.
+        const expectedKey = await publicGatewayReplayArchiveKey(this.projectId, parsed.requestId);
+        if (listed.key !== expectedKey) continue;
+        candidates.push({ requestId: parsed.requestId, key: listed.key, digest: parsed.digest, bytes: parsed.bytes, tombstone: clone(parsed.tombstone) });
+      }
+      if (!page.truncated) break;
+      if (!page.cursor) {
+        throw new PublicGatewayReplayArchiveError({
+          code: "unavailable",
+          message: "The replay archive returned a truncated listing without a continuation cursor.",
+          recoveryAction: "restore the provider listing contract and retry owner-authorized maintenance without deleting archive data",
+          receipt: "archiveList=truncated; cursor=missing; mutation=false",
+        });
+      }
+      cursor = page.cursor;
+    } while (true);
+    return candidates;
+  }
+
+  async delete(requestId: string, expectedDigest: string): Promise<PublicGatewayReplayArchiveDeletionReceipt> {
+    required(requestId, "requestId");
+    required(expectedDigest, "expectedDigest");
+    const key = await publicGatewayReplayArchiveKey(this.projectId, requestId);
+    const object = await this.bucket.get(key);
+    if (!object) {
+      return { requestId, key, digest: expectedDigest, status: "already-absent", receipt: `replayArchive=${PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL}; requestId=${requestId}; expectedDigest=${expectedDigest}; status=already-absent` };
+    }
+    const parsed = await this.readObject(key, object);
+    if (parsed.projectId !== this.projectId || parsed.requestId !== requestId || parsed.digest !== expectedDigest) {
+      throw invalidStoredObject("The replay archive object does not match the deletion precondition.", `key=${key}; requestId=${requestId}; expectedDigest=${expectedDigest}; actualDigest=${parsed.digest}; immutable=false; deletion=false`);
+    }
+    await this.bucket.delete(key);
+    if (await this.bucket.get(key)) {
+      throw new PublicGatewayReplayArchiveError({
+        code: "unavailable",
+        message: "The replay archive object remained readable after deletion.",
+        recoveryAction: "retry the same digest-checked deletion after the customer-owned provider recovers",
+        receipt: `key=${key}; requestId=${requestId}; expectedDigest=${expectedDigest}; deleted=false`,
+      });
+    }
+    return { requestId, key, digest: expectedDigest, status: "deleted", receipt: `replayArchive=${PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL}; requestId=${requestId}; digest=${expectedDigest}; status=deleted; readBackAbsent=true` };
   }
 
   private async readObject(key: string, object: { arrayBuffer(): Promise<ArrayBuffer> }): Promise<PublicGatewayReplayArchiveObject> {

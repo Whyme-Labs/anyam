@@ -1,11 +1,22 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import { DurableObject, WorkflowEntrypoint } from "cloudflare:workers";
+import { DurableObject, WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 
 import { handleCustomerRealmRequest } from "../../../src/cloudflare/realm-worker.ts";
+import {
+  CUSTOMER_PROVIDER_OPERATION_PROTOCOL,
+  CustomerProviderDurableObjectOperationStore,
+  CustomerProviderOperationError,
+  CustomerProviderQualificationCoordinator,
+  type CustomerProviderFailureMode,
+  type CustomerProviderOwnerAuthorization,
+  type CustomerProviderSurface,
+  type CustomerProviderRecoveryBundle,
+} from "../../../src/cloudflare/customer-provider-operation.ts";
 import { CREDENTIAL_AUDIENCES, RealmIdentityError, RealmIdentityPolicy, type CredentialClass, type RealmRecoverySnapshot } from "../../../src/identity/realm.ts";
 import { createAnyamRealmOAuthProvider, type AnyamRealmOAuthEnv } from "./oauth-provider.ts";
 import { handleAnyamRealmOwnerRequest } from "./passkey-owner.ts";
+import { createCloudflareCustomerProviderAdapters } from "./customer-provider-adapters.ts";
 
 export type Env = AnyamRealmOAuthEnv;
 
@@ -21,6 +32,8 @@ const REALM_QUALIFICATION_AGENT_CLIENT_ID = "client:agent:realm-qualification";
 const REALM_QUALIFICATION_CREDENTIAL_CLASSES: readonly CredentialClass[] = ["git", "mcp"];
 const REALM_QUALIFICATION_ACTIONS = ["source.read", "workspace.write", "change.publish_revision", "run.invoke", "agent.delegate"] as const;
 type RealmRecoveryStatus = "active" | "recovery-pending";
+const CUSTOMER_PROVIDER_SURFACES: readonly CustomerProviderSurface[] = ["d1", "r2", "queue", "workflow", "worker"];
+const CUSTOMER_PROVIDER_FAILURE_MODES: readonly CustomerProviderFailureMode[] = ["none", "provider-outage", "authorization-revoked", "timeout", "duplicate-delivery", "partial-mutation", "stale-callback"];
 
 type CoordinatorRequestBody = Record<string, unknown>;
 
@@ -49,6 +62,45 @@ function coordinatorString(body: CoordinatorRequestBody, key: string): string {
 function coordinatorOptionalString(body: CoordinatorRequestBody, key: string, fallback: string): string {
   const value = body[key];
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
+}
+
+function providerSurface(body: CoordinatorRequestBody): CustomerProviderSurface {
+  const value = coordinatorString(body, "surface");
+  if (!CUSTOMER_PROVIDER_SURFACES.includes(value as CustomerProviderSurface)) {
+    throw new CustomerProviderOperationError({
+      code: "invalid-request",
+      message: `surface must be one of ${CUSTOMER_PROVIDER_SURFACES.join(", ")}.`,
+      recoveryAction: "choose one bounded customer-provider surface and retry without changing the operation identity",
+      receipt: `surface=${value}; allowed=${CUSTOMER_PROVIDER_SURFACES.join(",")}; operation=not-created`,
+    });
+  }
+  return value as CustomerProviderSurface;
+}
+
+function providerFailureMode(body: CoordinatorRequestBody): CustomerProviderFailureMode {
+  const value = typeof body.failureMode === "string" && body.failureMode.trim().length > 0 ? body.failureMode.trim() : "none";
+  if (!CUSTOMER_PROVIDER_FAILURE_MODES.includes(value as CustomerProviderFailureMode)) {
+    throw new CustomerProviderOperationError({
+      code: "invalid-request",
+      message: `failureMode must be one of ${CUSTOMER_PROVIDER_FAILURE_MODES.join(", ")}.`,
+      recoveryAction: "choose one named qualification failure mode or omit failureMode for a healthy operation",
+      receipt: `failureMode=${value}; allowed=${CUSTOMER_PROVIDER_FAILURE_MODES.join(",")}; operation=not-created`,
+    });
+  }
+  return value as CustomerProviderFailureMode;
+}
+
+function providerBundle(body: CoordinatorRequestBody): CustomerProviderRecoveryBundle {
+  const value = body.bundle;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new CustomerProviderOperationError({
+      code: "recovery-invalid",
+      message: "Provider recovery restore requires the exact credential-free bundle returned by the coordinator.",
+      recoveryAction: "export a fresh provider recovery bundle and submit it unchanged",
+      receipt: "providerRecovery=bundle-required; authority=not-restored",
+    });
+  }
+  return value as CustomerProviderRecoveryBundle;
 }
 
 function qualificationCredentialClasses(body: CoordinatorRequestBody): readonly CredentialClass[] {
@@ -85,6 +137,10 @@ function identitySummary(identity: RealmIdentityPolicy): Record<string, unknown>
 }
 
 function coordinatorError(error: unknown): Response {
+  if (error instanceof CustomerProviderOperationError) {
+    const status = error.code === "not-found" ? 404 : error.code === "idempotency-conflict" || error.code === "stale-state" ? 409 : error.code === "unauthorized" ? 403 : 422;
+    return coordinatorJson({ protocol: CUSTOMER_PROVIDER_OPERATION_PROTOCOL, ...error.toJSON() }, status);
+  }
   if (error instanceof RealmIdentityError) {
     const status = error.code.endsWith(".exists") ? 409 : error.code.includes("not_found") ? 404 : 422;
     return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, code: error.code, recoveryAction: error.recoveryAction, receipt: error.receipt ?? "realm-identity=operation-failed" }, status);
@@ -142,6 +198,77 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       this.recoveryStatus = beforeRecoveryStatus;
       throw error;
     }
+  }
+
+  private providerCoordinator(): CustomerProviderQualificationCoordinator {
+    const snapshot = this.requireIdentity().getRecoverySnapshot();
+    const installationId = this.env.ANYAM_INSTALLATION_ID?.trim() || "unconfigured";
+    return new CustomerProviderQualificationCoordinator({
+      realmId: snapshot.realm.id,
+      installationId,
+      store: new CustomerProviderDurableObjectOperationStore(
+        this.ctx.storage as unknown as import("../../../src/cloudflare/customer-provider-operation.ts").CustomerProviderDurableObjectStorage,
+        snapshot.realm.id,
+        installationId,
+      ),
+      adapters: createCloudflareCustomerProviderAdapters({
+        metadata: this.env.ANYAM_METADATA_DB,
+        exports: this.env.ANYAM_EXPORTS,
+        events: this.env.ANYAM_EVENTS,
+        workflow: this.env.ANYAM_WORKFLOW,
+        ...(this.env.ANYAM_PROVIDER_WORKER ? { worker: this.env.ANYAM_PROVIDER_WORKER } : {}),
+        ...(this.env.ANYAM_PROVIDER_WORKER_URL ? { workerUrl: this.env.ANYAM_PROVIDER_WORKER_URL } : {}),
+      }),
+    });
+  }
+
+  private providerOwnerAuthorization(humanSessionId: string): CustomerProviderOwnerAuthorization {
+    const identity = this.requireIdentity();
+    const session = identity.validateSession(humanSessionId);
+    const snapshot = identity.getRecoverySnapshot();
+    const isOwner = Object.values(snapshot.relationships).some((relationship) => relationship.principalId === session.principalId && relationship.role === "owner" && relationship.status === "active");
+    if (!isOwner) {
+      throw new RealmIdentityError({
+        code: "qualification.provider_owner_denied",
+        message: "The bounded customer-provider operation is owner-only.",
+        recoveryAction: "authenticate an active Realm owner session before invoking the provider qualification fixture",
+        receipt: `principal=${session.principalId}; owner=false; providerOperation=not-created`,
+      });
+    }
+    return {
+      realmId: snapshot.realm.id,
+      principalId: session.principalId,
+      sessionId: session.id,
+      capability: "provider.qualification",
+      authorizationEpoch: String(snapshot.realm.authorizationEpoch),
+      receipt: `owner=verified; realm=${snapshot.realm.id}; session=${session.id}; capability=provider.qualification; credentialMaterialStored=false`,
+    };
+  }
+
+  private providerInput(body: CoordinatorRequestBody, authorization: CustomerProviderOwnerAuthorization): {
+    realmId: string;
+    installationId: string;
+    operationId: string;
+    idempotencyKey: string;
+    surface: CustomerProviderSurface;
+    failureMode: CustomerProviderFailureMode;
+    payloadDigest: string;
+    resourceKey?: string;
+    authorization: CustomerProviderOwnerAuthorization;
+  } {
+    const snapshot = this.requireIdentity().getRecoverySnapshot();
+    const resourceKey = typeof body.resourceKey === "string" && body.resourceKey.trim().length > 0 ? body.resourceKey.trim() : undefined;
+    return {
+      realmId: snapshot.realm.id,
+      installationId: this.env.ANYAM_INSTALLATION_ID?.trim() || "unconfigured",
+      operationId: coordinatorString(body, "operationId"),
+      idempotencyKey: coordinatorString(body, "idempotencyKey"),
+      surface: providerSurface(body),
+      failureMode: providerFailureMode(body),
+      payloadDigest: coordinatorString(body, "payloadDigest"),
+      ...(resourceKey ? { resourceKey } : {}),
+      authorization,
+    };
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -286,6 +413,88 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         });
       }
 
+      if (url.pathname === "/identity/qualification/provider-operation") {
+        const authorization = this.providerOwnerAuthorization(coordinatorString(body, "humanSessionId"));
+        const record = await this.providerCoordinator().run(this.providerInput(body, authorization));
+        return coordinatorJson({ protocol: CUSTOMER_PROVIDER_OPERATION_PROTOCOL, status: record.state, operation: record, receipt: `${record.receipt}; ownerSession=validated` });
+      }
+
+      if (url.pathname === "/identity/qualification/provider-operation/resume") {
+        const authorization = this.providerOwnerAuthorization(coordinatorString(body, "humanSessionId"));
+        const operationId = coordinatorString(body, "operationId");
+        const record = await this.providerCoordinator().resume(operationId, authorization);
+        return coordinatorJson({ protocol: CUSTOMER_PROVIDER_OPERATION_PROTOCOL, status: record.state, operation: record, receipt: `${record.receipt}; ownerSession=validated; recovery=resume` });
+      }
+
+      if (url.pathname === "/identity/qualification/provider-operation/callback") {
+        const authorization = this.providerOwnerAuthorization(coordinatorString(body, "humanSessionId"));
+        const operationId = coordinatorString(body, "operationId");
+        const providerOperationId = coordinatorString(body, "providerOperationId");
+        const expectedStateDigest = coordinatorString(body, "expectedStateDigest");
+        const receipt = coordinatorString(body, "receipt");
+        const outputDigest = typeof body.outputDigest === "string" && body.outputDigest.trim().length > 0 ? body.outputDigest.trim() : undefined;
+        const record = await this.providerCoordinator().acceptCallback({ operationId, authorization, providerOperationId, expectedStateDigest, ...(outputDigest ? { outputDigest } : {}), receipt });
+        return coordinatorJson({ protocol: CUSTOMER_PROVIDER_OPERATION_PROTOCOL, status: record.state, operation: record, receipt: `${record.receipt}; ownerSession=validated; callback=reconciled` });
+      }
+
+      if (url.pathname === "/identity/qualification/provider-operation/callback/internal") {
+        const operationId = coordinatorString(body, "operationId");
+        const providerOperationId = coordinatorString(body, "providerOperationId");
+        const expectedStateDigest = coordinatorString(body, "expectedStateDigest");
+        const receipt = coordinatorString(body, "receipt");
+        const snapshot = identity.getRecoverySnapshot();
+        const installationId = this.env.ANYAM_INSTALLATION_ID?.trim() || "unconfigured";
+        if (body.realmId !== snapshot.realm.id || body.installationId !== installationId) {
+          throw new CustomerProviderOperationError({
+            code: "unauthorized",
+            message: "The provider callback is scoped to a different Realm installation.",
+            recoveryAction: "send the callback through the coordinator belonging to the original operation",
+            receipt: `operation=${operationId}; callbackScope=invalid; overwritten=false`,
+          });
+        }
+        const providerCoordinator = this.providerCoordinator();
+        const current = await providerCoordinator.inspect(operationId);
+        if (current.owner.authorizationEpoch !== String(snapshot.realm.authorizationEpoch)) {
+          throw new CustomerProviderOperationError({
+            code: "unauthorized",
+            message: "The provider callback was issued under an outdated Realm authorization epoch.",
+            recoveryAction: "reconcile the operation after owner authorization is restored; do not replay the stale callback",
+            receipt: `operation=${operationId}; callbackEpoch=${current.owner.authorizationEpoch}; currentEpoch=${snapshot.realm.authorizationEpoch}; overwritten=false`,
+          });
+        }
+        const authorization: CustomerProviderOwnerAuthorization = {
+          realmId: current.realmId,
+          principalId: current.owner.principalId,
+          sessionId: current.owner.sessionId,
+          capability: "provider.qualification",
+          authorizationEpoch: current.owner.authorizationEpoch,
+          receipt: `internalCallback=queue-or-workflow; operation=${operationId}; credentialMaterialStored=false`,
+        };
+        const outputDigest = typeof body.outputDigest === "string" && body.outputDigest.trim().length > 0 ? body.outputDigest.trim() : undefined;
+        const record = await providerCoordinator.acceptCallback({ operationId, authorization, providerOperationId, expectedStateDigest, ...(outputDigest ? { outputDigest } : {}), receipt });
+        return coordinatorJson({ protocol: CUSTOMER_PROVIDER_OPERATION_PROTOCOL, status: record.state, operation: record, receipt: `${record.receipt}; callback=internal-reconciled; canonicalWrite=false` });
+      }
+
+      if (url.pathname === "/identity/qualification/provider-operation/cleanup") {
+        const authorization = this.providerOwnerAuthorization(coordinatorString(body, "humanSessionId"));
+        const operationId = coordinatorString(body, "operationId");
+        const record = await this.providerCoordinator().cleanup(operationId, authorization);
+        return coordinatorJson({ protocol: CUSTOMER_PROVIDER_OPERATION_PROTOCOL, status: record.cleanup?.status ?? "blocked", operation: record, cleanup: record.cleanup, receipt: `${record.receipt}; ownerSession=validated; cleanup=${record.cleanup?.status ?? "missing"}` });
+      }
+
+      if (url.pathname === "/identity/qualification/provider-recovery/export") {
+        const authorization = this.providerOwnerAuthorization(coordinatorString(body, "humanSessionId"));
+        const bundle = await this.providerCoordinator().exportRecovery();
+        return coordinatorJson({ protocol: CUSTOMER_PROVIDER_OPERATION_PROTOCOL, status: "recovery-exported", bundle, ownerPrincipalId: authorization.principalId, receipt: `${bundle.integrity.receipt}; ownerSession=validated; authority=not-restored` });
+      }
+
+      if (url.pathname === "/identity/qualification/provider-recovery/restore") {
+        const authorization = this.providerOwnerAuthorization(coordinatorString(body, "humanSessionId"));
+        const bundle = providerBundle(body);
+        await this.providerCoordinator().restoreRecovery(bundle);
+        return coordinatorJson({ protocol: CUSTOMER_PROVIDER_OPERATION_PROTOCOL, status: "recovery-restored", ownerPrincipalId: authorization.principalId, recordCount: bundle.records.length, receipt: `${bundle.integrity.receipt}; ownerSession=validated; authority=restored; credentials=not-restored` });
+      }
+
       if (url.pathname === "/identity/session/validate") {
         const sessionId = coordinatorString(body, "sessionId");
         const session = identity.validateSession(sessionId);
@@ -326,15 +535,40 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
 }
 
 /**
- * The Workflow binding is present to make the orchestration boundary explicit;
- * this ticket does not start or mutate a Workflow instance.
+ * The Workflow binding is deliberately narrow. It can complete the named
+ * customer-provider qualification fixture, but it is not a general Run or
+ * deployment orchestrator and never becomes state authority.
  */
-export class AnyamRealmWorkflow extends WorkflowEntrypoint<Env, { readonly operation: "foundation-probe" }> {
-  override async run(): Promise<{ readonly status: "blocked"; readonly recoveryAction: string; readonly receipt: string }> {
+export class AnyamRealmWorkflow extends WorkflowEntrypoint<Env, Record<string, unknown>> {
+  override async run(event: Readonly<WorkflowEvent<Record<string, unknown>>>, step: WorkflowStep): Promise<Record<string, unknown>> {
+    if (event.payload.protocol === CUSTOMER_PROVIDER_OPERATION_PROTOCOL && typeof event.payload.operationId === "string") {
+      const operationId = event.payload.operationId;
+      const outputDigest = typeof event.payload.outputDigest === "string" ? event.payload.outputDigest : undefined;
+      const result = await step.do("bounded customer-provider qualification", async () => ({
+        protocol: CUSTOMER_PROVIDER_OPERATION_PROTOCOL,
+        operationId,
+        status: "complete",
+        ...(outputDigest ? { outputDigest } : {}),
+        receipt: `workflow=${event.instanceId}; operation=${operationId}; step=complete; authority=coordinator`,
+      }));
+      const binding = this.env.REALM_COORDINATOR as unknown as DurableObjectNamespace | undefined;
+      const realmId = typeof event.payload.realmId === "string" ? event.payload.realmId : undefined;
+      const installationId = typeof event.payload.installationId === "string" ? event.payload.installationId : undefined;
+      const providerOperationId = typeof event.payload.providerOperationId === "string" ? event.payload.providerOperationId : undefined;
+      const expectedStateDigest = typeof event.payload.expectedStateDigest === "string" ? event.payload.expectedStateDigest : undefined;
+      if (!binding || typeof binding.idFromName !== "function" || !realmId || !installationId || !providerOperationId || !expectedStateDigest) throw new Error("workflow_provider_callback_authority_unavailable");
+      const callbackResponse = await binding.get(binding.idFromName(realmId)).fetch(new Request("https://anyam-realm-coordinator/identity/qualification/provider-operation/callback/internal", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ protocol: CUSTOMER_PROVIDER_OPERATION_PROTOCOL, realmId, installationId, operationId, providerOperationId, expectedStateDigest, ...(outputDigest ? { outputDigest } : {}), receipt: `workflow=${event.instanceId}; callback=result-accepted; authority=coordinator` }),
+      }));
+      if (!callbackResponse.ok) throw new Error(`workflow_provider_callback_rejected:${callbackResponse.status}`);
+      return result;
+    }
     return {
       status: "blocked",
-      recoveryAction: "Implement a bounded Run/Workflow operation before invoking this binding.",
-      receipt: "workflowAuthority=not-enabled; credentialFree=true",
+      recoveryAction: "Start the bounded customer-provider qualification operation before invoking this Workflow binding.",
+      receipt: "workflowAuthority=qualification-only; credentialFree=true; canonicalWrite=false",
     };
   }
 }
@@ -346,6 +580,56 @@ function isAnyamOAuthPath(pathname: string): boolean {
     || pathname === "/oauth/register"
     || pathname.startsWith("/.well-known/oauth-")
     || pathname === "/.well-known/openid-configuration";
+}
+
+function queueMessageString(message: Record<string, unknown>, key: string): string | undefined {
+  const value = message[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+async function reconcileCustomerProviderQueue(batch: MessageBatch<Record<string, unknown>>, env: Env): Promise<void> {
+  const binding = env.REALM_COORDINATOR as unknown as DurableObjectNamespace | undefined;
+  for (const message of batch.messages) {
+    const body = message.body;
+    if (body.protocol !== CUSTOMER_PROVIDER_OPERATION_PROTOCOL) {
+      // This queue is disposable and qualification-scoped. Do not allow an
+      // unrelated message to become a poison message or an authority input.
+      message.ack();
+      continue;
+    }
+    const realmId = queueMessageString(body, "realmId");
+    const installationId = queueMessageString(body, "installationId");
+    const operationId = queueMessageString(body, "operationId");
+    const providerOperationId = queueMessageString(body, "providerOperationId");
+    const expectedStateDigest = queueMessageString(body, "expectedStateDigest");
+    const outputDigest = queueMessageString(body, "outputDigest");
+    if (!binding || typeof binding.idFromName !== "function" || !realmId || !installationId || !operationId || !providerOperationId || !expectedStateDigest || !outputDigest) {
+      message.retry();
+      continue;
+    }
+    const stub = binding.get(binding.idFromName(realmId));
+    const response = await stub.fetch(new Request("https://anyam-realm-coordinator/identity/qualification/provider-operation/callback/internal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        protocol: CUSTOMER_PROVIDER_OPERATION_PROTOCOL,
+        realmId,
+        installationId,
+        operationId,
+        providerOperationId,
+        expectedStateDigest,
+        outputDigest,
+        receipt: `queue=${batch.queue}; message=${message.id}; attempts=${message.attempts}; result=coordinator-callback`,
+      }),
+    }));
+    if (!response.ok) {
+      message.retry();
+      continue;
+    }
+    const result = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (result.status === "succeeded") message.ack();
+    else message.retry();
+  }
 }
 
 export default {
@@ -365,5 +649,8 @@ export default {
       issuer: origin,
     });
     return oauthProvider.fetch(request, env, ctx);
+  },
+  async queue(batch: MessageBatch<Record<string, unknown>>, env: Env): Promise<void> {
+    await reconcileCustomerProviderQueue(batch, env);
   },
 };

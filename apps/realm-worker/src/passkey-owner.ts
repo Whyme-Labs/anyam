@@ -390,7 +390,7 @@ async function ownerKernelSession(request: Request, env: AnyamRealmOAuthEnv): Pr
   }
 }
 
-type QualificationOperation = "delegate" | "credentials" | "revoke" | "recovery/export" | "recovery/restore";
+type QualificationOperation = "delegate" | "credentials" | "revoke" | "recovery/export" | "recovery/restore" | "provider-operation" | "provider-operation/resume" | "provider-operation/callback" | "provider-operation/cleanup" | "provider-recovery/export" | "provider-recovery/restore";
 
 async function qualificationRequest(request: Request, env: AnyamRealmOAuthEnv, operation: QualificationOperation): Promise<Response> {
   const ownerState = await ownerKernelSession(request, env);
@@ -605,6 +605,12 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
         qualificationRevoke: "/api/owner/qualification/revoke",
         recoveryExport: "/api/owner/qualification/recovery/export",
         recoveryRestore: "/api/owner/qualification/recovery/restore",
+        providerOperation: "/api/owner/qualification/provider-operation",
+        providerOperationResume: "/api/owner/qualification/provider-operation/resume",
+        providerOperationCallback: "/api/owner/qualification/provider-operation/callback",
+        providerOperationCleanup: "/api/owner/qualification/provider-operation/cleanup",
+        providerRecoveryExport: "/api/owner/qualification/provider-recovery/export",
+        providerRecoveryRestore: "/api/owner/qualification/provider-recovery/restore",
         recoveryAction: url.pathname === "/owner/claim" ? "Send the customer-owned bootstrap secret in the request header for the first-owner registration ceremony." : "Complete passkey authentication and retry the protected operation.",
         receipt: `${ANYAM_PASSKEY_SIZING_RECEIPT}; browserUI=qualification-minimal; ownerKernelMembership=verified-at-coordinator; credentialMaterialStored=false`,
       });
@@ -619,6 +625,12 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
     if (url.pathname === "/api/owner/qualification/revoke" && request.method === "POST") return await qualificationRequest(request, env, "revoke");
     if (url.pathname === "/api/owner/qualification/recovery/export" && request.method === "POST") return await qualificationRequest(request, env, "recovery/export");
     if (url.pathname === "/api/owner/qualification/recovery/restore" && request.method === "POST") return await qualificationRequest(request, env, "recovery/restore");
+    if (url.pathname === "/api/owner/qualification/provider-operation" && request.method === "POST") return await qualificationRequest(request, env, "provider-operation");
+    if (url.pathname === "/api/owner/qualification/provider-operation/resume" && request.method === "POST") return await qualificationRequest(request, env, "provider-operation/resume");
+    if (url.pathname === "/api/owner/qualification/provider-operation/callback" && request.method === "POST") return await qualificationRequest(request, env, "provider-operation/callback");
+    if (url.pathname === "/api/owner/qualification/provider-operation/cleanup" && request.method === "POST") return await qualificationRequest(request, env, "provider-operation/cleanup");
+    if (url.pathname === "/api/owner/qualification/provider-recovery/export" && request.method === "POST") return await qualificationRequest(request, env, "provider-recovery/export");
+    if (url.pathname === "/api/owner/qualification/provider-recovery/restore" && request.method === "POST") return await qualificationRequest(request, env, "provider-recovery/restore");
   } catch (error) {
     const code = error instanceof Error ? error.message : "owner_authentication_failed";
     return json({ code, recoveryAction: "Retry the same ceremony with a fresh challenge; no credential or session was returned.", receipt: `ownerAuth=passkey; exception=${code}; credentialMaterialStored=false` }, 422);

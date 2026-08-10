@@ -51,6 +51,11 @@
         "binding": "ANYAM_EVENTS",
         "queue": "replace-with-customer-anyam-events"
       }
+    ],
+    "consumers": [
+      {
+        "queue": "replace-with-customer-anyam-events"
+      }
     ]
   },
   "workflows": [

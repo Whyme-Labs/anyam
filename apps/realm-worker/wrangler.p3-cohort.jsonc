@@ -44,6 +44,11 @@
         "binding": "ANYAM_EVENTS",
         "queue": "anyam-p3-cohort-20260803-events"
       }
+    ],
+    "consumers": [
+      {
+        "queue": "anyam-p3-cohort-20260803-events"
+      }
     ]
   },
   "workflows": [

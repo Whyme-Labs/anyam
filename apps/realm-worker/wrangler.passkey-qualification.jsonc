@@ -52,6 +52,11 @@
         "binding": "ANYAM_EVENTS",
         "queue": "anyam-realm-auth-20260808-events"
       }
+    ],
+    "consumers": [
+      {
+        "queue": "anyam-realm-auth-20260808-events"
+      }
     ]
   },
   "workflows": [

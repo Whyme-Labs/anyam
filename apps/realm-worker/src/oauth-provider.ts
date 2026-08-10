@@ -38,6 +38,11 @@ export type AnyamRealmOAuthProps = {
 export type AnyamRealmOAuthEnv = CustomerRealmWorkerEnv & {
   OAUTH_KV: KVNamespace;
   ANYAM_METADATA_DB: D1Database;
+  ANYAM_EXPORTS: R2Bucket;
+  ANYAM_EVENTS: Queue<Record<string, unknown>>;
+  ANYAM_WORKFLOW: Workflow<Record<string, unknown>>;
+  ANYAM_PROVIDER_WORKER?: Fetcher;
+  ANYAM_PROVIDER_WORKER_URL?: string;
   ANYAM_OWNER_BOOTSTRAP_TOKEN?: string;
   ANYAM_REALM_RP_ID?: string;
   OAUTH_PROVIDER?: OAuthHelpers;

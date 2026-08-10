@@ -6,7 +6,7 @@ Issue: [#131 Run a live external Runner and generic Target qualification](https:
 
 Protocol: `anyam.external-runner-qualification/v1`
 
-Status: **complete live matrix passed; cleanup pending at receipt capture**
+Status: **complete live matrix passed; disposable resources deleted and verified absent**
 
 ## Decision boundary
 
@@ -135,10 +135,30 @@ added from them.
 | Attempt-scoped R2 output, read-back, digest verification | **passed** |
 | Unchanged generic Target publication and duplicate upload rejection | **passed** |
 | Provider failure/retry behavior | **passed for duplicate publication and fresh Runner retry** |
-| Cleanup inventory | **pending deletion below** |
+| Cleanup inventory | **passed; exact resources deleted and verified absent below** |
 
-## Cleanup plan
+## Cleanup receipt
 
-The exact disposable Queue, R2 bucket, Worker, and GitHub Target are authorized
-for deletion after this receipt is committed. No canonical repository,
-production Target, user project, or credential will be touched.
+The exact disposable resources were deleted after this receipt was committed:
+
+```text
+R2 objects deleted:
+outputs/job:live-0ff1b2d0-909c-428a-955d-72d7380064ec/artifact/anyam-live-runner.txt
+outputs/job:retry-b1dca78e-63a4-49e6-b5db-f5f1d202e991/artifact/anyam-retry-runner.txt
+
+Worker deletion: successful
+Queue deletion: successful
+R2 bucket deletion: successful
+GitHub Target repository deletion: successful
+
+post-delete Worker HTTP=404
+post-delete Queue=absent
+post-delete R2 bucket=absent
+post-delete GitHub Target=absent
+post-delete Worker secret list=Worker not found
+```
+
+The failed pre-bind Job `job:live-9b6c4fb9-68dc-43b9-bc00-a3616a840960` created
+no R2 object; its Queue message was removed with the exact disposable Queue.
+No canonical repository, production Target, user project, or credential was
+touched.

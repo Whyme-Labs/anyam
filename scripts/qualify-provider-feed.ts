@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 type JsonObject = Record<string, unknown>;
 
 const protocol = "anyam.provider-feed-observation/v1" as const;
@@ -6,6 +8,12 @@ function required(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
   return value;
+}
+
+function configuredAccountId(): string | undefined {
+  const configUrl = new URL("../apps/realm-worker/wrangler.p3-24-live.jsonc", import.meta.url);
+  const config = readFileSync(configUrl, "utf8");
+  return config.match(/"account_id"\s*:\s*"([^"]+)"/)?.[1];
 }
 
 function csv(name: string): string[] {
@@ -112,6 +120,10 @@ const queueDiscoveryQuery = `query QueueDiscovery($accountTag: string!, $datetim
 async function run(): Promise<void> {
   const token = required("ANYAM_ACCOUNT_ANALYTICS_TOKEN");
   const accountTag = required("ANYAM_CLOUDFLARE_ACCOUNT_ID");
+  const expectedAccountTag = configuredAccountId();
+  if (expectedAccountTag && accountTag !== expectedAccountTag) {
+    throw new Error(`ANYAM_CLOUDFLARE_ACCOUNT_ID does not match the named cohort config (expected ${expectedAccountTag}, received ${accountTag})`);
+  }
   const datetimeStart = required("ANYAM_PROVIDER_FEED_START");
   const datetimeEnd = required("ANYAM_PROVIDER_FEED_END");
   const dateStart = datetimeStart.slice(0, 10);

@@ -13,7 +13,7 @@ The disposable customer-provider cohort is owner-authorized and remains live, bu
 
 | Field | Value |
 |---|---|
-| Cloudflare account | `swmengappdev` (`1e0170aaabc90ec9a295faad8e519458`) |
+| Cloudflare account | `swmengappdev` (`1e0170aaabc90ecf5f466128d1f0466a`) |
 | Live Worker | `anyam-p3-24-live-20260810` |
 | Target Worker | `anyam-p3-24-target-20260810` |
 | D1 database | `anyam-p3-24-live-20260810-metadata` (`19ebda9a-ed35-4009-877b-198d84e08f99`) |
@@ -30,7 +30,7 @@ The disposable customer-provider cohort is owner-authorized and remains live, bu
 The one-hour query returned an empty JSON result:
 
 ```text
-CLOUDFLARE_ACCOUNT_ID=1e0170aaabc90ec9a295faad8e519458 \
+CLOUDFLARE_ACCOUNT_ID=1e0170aaabc90ecf5f466128d1f0466a \
   npx wrangler d1 insights anyam-p3-24-live-20260810-metadata \
   --time-period 1h --json --limit 100
 → []
@@ -54,7 +54,7 @@ The supplied token must not be reused. Revoke it and create a fresh account-scop
 
 ### Fresh-token authorization probe
 
-The next fresh-token run reached the GraphQL endpoint successfully, but every named surface (Workers, R2, D1, Workflow, and Queue discovery) returned HTTP `200` with GraphQL `authz` / `not authorized for that account` for account `1e0170aaabc90ec9a295faad8e519458`.
+The next fresh-token run reached the GraphQL endpoint successfully, but every named surface (Workers, R2, D1, Workflow, and Queue discovery) returned HTTP `200` with GraphQL `authz` / `not authorized for that account` for the incorrectly supplied account tag `1e0170aaabc90ec9a295faad8e519458`. `npx wrangler whoami` and the live Worker config identify the actual `swmengappdev` account as `1e0170aaabc90ecf5f466128d1f0466a`.
 
 This distinguishes an accepted token from an authorized token. The next recovery action is to inspect the token policy without exposing its value: the permission must be the account-scoped **Account Analytics Read** group and the resource must include the `swmengappdev` account. A Zone-scoped Analytics permission or a token restricted to another account cannot satisfy this receipt.
 

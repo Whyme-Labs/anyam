@@ -64,7 +64,7 @@ async function digest(value: unknown): Promise<string> {
   return `sha256:${Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
-async function archiveKey(projectId: string, requestId: string): Promise<string> {
+export async function publicGatewayReplayArchiveKey(projectId: string, requestId: string): Promise<string> {
   const identityDigest = await digest({ projectId, requestId });
   return `anyam/public-gateway/replay-index/v1/${identityDigest.slice("sha256:".length)}.json`;
 }
@@ -96,7 +96,7 @@ export class CloudflarePublicGatewayReplayArchive {
   async put(tombstone: PublicGatewayRequestTombstone): Promise<PublicGatewayReplayArchiveReceipt> {
     required(tombstone.requestId, "tombstone.requestId");
     required(tombstone.payloadDigest, "tombstone.payloadDigest");
-    const key = await archiveKey(this.projectId, tombstone.requestId);
+    const key = await publicGatewayReplayArchiveKey(this.projectId, tombstone.requestId);
     const unsigned: Omit<PublicGatewayReplayArchiveObject, "digest"> = {
       protocol: PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL,
       requestId: tombstone.requestId,
@@ -141,7 +141,7 @@ export class CloudflarePublicGatewayReplayArchive {
 
   async get(requestId: string): Promise<PublicGatewayRequestTombstone | undefined> {
     required(requestId, "requestId");
-    const key = await archiveKey(this.projectId, requestId);
+    const key = await publicGatewayReplayArchiveKey(this.projectId, requestId);
     let object: { arrayBuffer(): Promise<ArrayBuffer> } | null;
     try {
       object = await this.bucket.get(key);

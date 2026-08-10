@@ -1,0 +1,18 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-p3-28-replay-workload-20260811",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-10",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "account_id": "1e0170aaabc90ecf5f466128d1f0466a",
+  "vars": {
+    "PROJECT_ID": "project:anyam-p3-28-replay-workload-20260811"
+  },
+  "r2_buckets": [
+    {
+      "binding": "PUBLIC_GATEWAY_REPLAY_ARCHIVE",
+      "bucket_name": "anyam-p3-26-replay-archive-20260810"
+    }
+  ]
+}

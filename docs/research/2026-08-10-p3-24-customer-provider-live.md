@@ -112,13 +112,20 @@ The bounded test run passed all 136 selected tests. The live Worker was redeploy
 
 ## Cleanup state
 
-The exact qualification provider effects and the named Cloudflare resources remain live pending explicit owner confirmation for destructive cleanup. Cleanup is not considered complete until each operation reports an exact cleanup receipt and the following resources are verified absent:
+Cleanup was explicitly authorized by the owner and completed. The detailed
+receipt is [the P3-24 customer-provider cleanup receipt](./2026-08-10-p3-24-customer-provider-cleanup.md).
+
+All ten exact operation identities returned `status=succeeded` from the
+owner-only cleanup panel. The named Cloudflare resources were then deleted and
+verified absent. The unrelated `fabric-events` Queue remains present.
+
+The cleanup inventory was:
 
 ```text
-Worker: anyam-p3-24-live-20260810
-Target Worker: anyam-p3-24-target-20260810
-D1: anyam-p3-24-live-20260810-metadata
-R2: anyam-p3-24-live-20260810-exports
-Queue: anyam-p3-24-live-20260810-events
-Workflow: anyam-p3-24-live-20260810-workflow
+Worker:        anyam-p3-24-live-20260810 — absent
+Target Worker: anyam-p3-24-target-20260810 — absent
+D1:            anyam-p3-24-live-20260810-metadata — absent
+R2:            anyam-p3-24-live-20260810-exports — absent
+Queue:         anyam-p3-24-live-20260810-events — absent
+Workflow:      anyam-p3-24-live-20260810-workflow — absent
 ```

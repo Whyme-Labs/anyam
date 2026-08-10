@@ -8,7 +8,7 @@
   "account_id": "1e0170aaabc90ecf5f466128d1f0466a",
   "vars": {
     "ANYAM_HOSTED_SAAS_MODE": "hosted-saas",
-    "ANYAM_BUILD_REVISION": "aa61dc9"
+    "ANYAM_BUILD_REVISION": "4904ddc"
   },
   "durable_objects": {
     "bindings": [

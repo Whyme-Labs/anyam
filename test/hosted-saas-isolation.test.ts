@@ -144,3 +144,21 @@ test("host routing ignores caller-supplied Realm identifiers and fails closed wi
   assert.equal(JSON.stringify(missingAuth).includes("hosted-token"), false);
   assert.equal(JSON.stringify(missingAuth).includes("project:route"), false);
 });
+
+test("Hosted SaaS cleanup removes all synthetic state and returns only counts", async () => {
+  const store = new HostedSaaSIsolationStore();
+  store.registerRealm({ realmId: "realm:cleanup", host: "cleanup.hosted.test" });
+  const token = store.issueCredential({ realmId: "realm:cleanup", principalId: "principal:cleanup" });
+  const router = new HostedSaaSRouter(store);
+  await createProject(router, { host: "cleanup.hosted.test", token, projectId: "project:cleanup", name: "Disposable project", digest: "sha256:cleanup" });
+  const cleanup = store.cleanup();
+  assert.equal(cleanup.realms, 1);
+  assert.equal(cleanup.projects, 1);
+  assert.equal(cleanup.credentials, 1);
+  assert.equal(cleanup.receipt.includes("credentialMaterialStored=false"), true);
+  assert.deepEqual(store.snapshot().realms, []);
+  assert.deepEqual(store.snapshot().projects, []);
+  assert.deepEqual(store.snapshot().queue, []);
+  assert.deepEqual(store.snapshot().events, []);
+  assert.deepEqual(store.snapshot().logs, []);
+});

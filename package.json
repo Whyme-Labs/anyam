@@ -9,6 +9,7 @@
     "test": "tsx --test \"test/**/*.test.ts\"",
     "harness": "tsx src/harness/cli.ts",
     "qualification:external-runner": "tsx scripts/qualify-external-runner.ts",
+    "qualification:hosted-saas": "tsx scripts/qualify-hosted-saas.ts",
     "typecheck:qualification-worker": "tsc -p apps/runner-qualification/tsconfig.json --noEmit",
     "typecheck:hosted-saas": "tsc -p apps/hosted-saas-qualification/tsconfig.json --noEmit",
     "build:qualification-worker": "npm run typecheck:qualification-worker && wrangler deploy --dry-run --config apps/runner-qualification/wrangler.qualification.jsonc --outdir=dist/qualification-worker",

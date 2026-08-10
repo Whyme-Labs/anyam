@@ -71,7 +71,9 @@ export class HostedSaaSCoordinatorDO extends DurableObject<Env> {
     const url = new URL(request.url);
     try {
       if (url.pathname === "/admin/register-realm" && request.method === "POST") return await this.registerRealm(request);
+      if (url.pathname === "/admin/issue-credential" && request.method === "POST") return await this.issueCredential(request);
       if (url.pathname === "/admin/revoke-realm" && request.method === "POST") return await this.revokeRealm(request);
+      if (url.pathname === "/admin/cleanup" && request.method === "POST") return await this.cleanup(request);
       if (url.pathname === "/admin/state" && request.method === "GET") return this.state(request);
       const routed = this.routeAlias(request);
       const response = await this.router.handle(routed);
@@ -114,6 +116,21 @@ export class HostedSaaSCoordinatorDO extends DurableObject<Env> {
     this.store.revokeRealm(realmId);
     await this.persist();
     return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, status: "revoked", realmId, receipt: `realm=${realmId}; authorizationEpoch=advanced; credentials=invalidated` });
+  }
+
+  private async issueCredential(request: Request): Promise<Response> {
+    if (!authorized(request, this.env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before issuing a replacement credential", receipt: "ownerAuthorization=missing; credential=not-issued" }, 401);
+    const body = await bodyObject(request);
+    const realmId = requiredString(body, "realmId");
+    const token = this.store.issueCredential({ realmId, principalId: requiredString(body, "principalId") });
+    return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, status: "issued", realmId, credential: { audience: "aud:anyam:hosted-api", token }, receipt: `realm=${realmId}; credentialMaterialStored=false; canonicalWrite=false` });
+  }
+
+  private async cleanup(request: Request): Promise<Response> {
+    if (!authorized(request, this.env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before cleanup", receipt: "ownerAuthorization=missing; cleanup=not-applied" }, 401);
+    const cleanupReceipt = this.store.cleanup();
+    await this.persist();
+    return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, status: "cleaned", ...cleanupReceipt });
   }
 
   private state(request: Request): Response {

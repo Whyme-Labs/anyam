@@ -111,6 +111,18 @@ export type HostedSaaSInspection = {
   readonly logRequestIds: readonly string[];
 };
 
+export type HostedSaaSCleanupReceipt = {
+  readonly realms: number;
+  readonly projects: number;
+  readonly credentials: number;
+  readonly queueMessages: number;
+  readonly events: number;
+  readonly logs: number;
+  readonly cacheEntries: number;
+  readonly exports: number;
+  readonly receipt: string;
+};
+
 export class HostedSaaSIsolationError extends Error {
   readonly code = "hosted_saas_isolation_error" as const;
   readonly status: 400 | 404 | 409;
@@ -275,6 +287,29 @@ export class HostedSaaSIsolationStore {
       exportKeys: [...this.exports.values()].filter((record) => record.realmId === realmId).map((record) => record.key),
       logRequestIds: this.logs.filter((log) => log.realmId === realmId).map((log) => log.requestId),
     };
+  }
+
+  cleanup(): HostedSaaSCleanupReceipt {
+    const receipt: HostedSaaSCleanupReceipt = {
+      realms: this.realms.size,
+      projects: this.projects.size,
+      credentials: this.credentials.size,
+      queueMessages: this.queue.length,
+      events: this.events.length,
+      logs: this.logs.length,
+      cacheEntries: this.cache.size,
+      exports: this.exports.size,
+      receipt: "cleanup=exact-store; credentialMaterialStored=false; canonicalWrite=false",
+    };
+    this.realms.clear();
+    this.projects.clear();
+    this.credentials.clear();
+    this.queue.length = 0;
+    this.events.length = 0;
+    this.logs.length = 0;
+    this.cache.clear();
+    this.exports.clear();
+    return receipt;
   }
 
   snapshot(): HostedSaaSIsolationSnapshot {

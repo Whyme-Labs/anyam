@@ -1,0 +1,27 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-p3-22-live-20260810",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-10",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "account_id": "1e0170aaabc90ecf5f466128d1f0466a",
+  "vars": {
+    "ANYAM_HOSTED_SAAS_MODE": "hosted-saas",
+    "ANYAM_BUILD_REVISION": "686af75"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "HOSTED_SAAS_COORDINATOR",
+        "class_name": "HostedSaaSCoordinatorDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "anyam-p3-22-live-20260810-v1",
+      "new_sqlite_classes": ["HostedSaaSCoordinatorDO"]
+    }
+  ]
+}

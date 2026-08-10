@@ -8,7 +8,9 @@
   "account_id": "1e0170aaabc90ecf5f466128d1f0466a",
   "vars": {
     "COHORT_ID": "anyam-p3-25-live-20260810",
-    "PROTOCOL_VERSION": "anyam.external-runner-qualification/v1"
+    "PROTOCOL_VERSION": "anyam.external-runner-qualification/v1",
+    "REQUIRE_MANIFEST_BINDING": "true",
+    "MAX_OUTPUT_DISCLOSURE": "project"
   },
   "durable_objects": {
     "bindings": [

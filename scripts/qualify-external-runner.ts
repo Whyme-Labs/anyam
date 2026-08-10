@@ -55,6 +55,41 @@ function numberEnv(name: string): number {
   return value;
 }
 
+async function pushQueue(queueUrl: string, queueToken: string, body: Json, label: string): Promise<Json> {
+  return requestJson(`${queueUrl}/messages`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${queueToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ body, content_type: "json" }),
+  }, label);
+}
+
+async function pullQueue(queueUrl: string, queueToken: string, visibilityTimeoutMs: number, jobId: string, label: string): Promise<DecodedPulledMessage> {
+  const pulledResponse = await requestJson(`${queueUrl}/messages/pull`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${queueToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ visibility_timeout_ms: visibilityTimeoutMs, batch_size: 10 }),
+  }, label);
+  const result = jsonObject(pulledResponse.result, `${label} result`);
+  const messages = result.messages;
+  if (!Array.isArray(messages)) throw new Error(`${label} returned no messages array`);
+  const decodedMessages = messages.map((value): DecodedPulledMessage => {
+    const message = jsonObject(value, "Queue message") as unknown as PulledMessage;
+    const decoded = decodeQueueMessageBody(message.body);
+    return { ...message, body: decoded.body, bodyEncoding: decoded.encoding };
+  });
+  const pulled = decodedMessages.find((value) => value.id && value.body.jobId === jobId);
+  if (!pulled) throw new Error(`${label} did not return the expected job ${jobId}; leave the queue message for redelivery and inspect the cohort before retrying`);
+  return pulled;
+}
+
+async function ackQueue(queueUrl: string, queueToken: string, leaseId: string, label: string): Promise<Json> {
+  return requestJson(`${queueUrl}/messages/ack`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${queueToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ acks: [{ lease_id: leaseId }], retries: [] }),
+  }, label);
+}
+
 function jsonObject(value: unknown, label: string): Json {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} was not a JSON object`);
   return value as Json;
@@ -96,6 +131,19 @@ async function requestJson(url: string, init: RequestInit, label: string): Promi
   return jsonObject(body, label);
 }
 
+async function requestExpectedFailure(url: string, init: RequestInit, expectedStatus: number, label: string): Promise<Json> {
+  const response = await fetch(url, init);
+  const raw = await response.text();
+  let body: unknown;
+  try {
+    body = raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error(`${label} returned non-JSON HTTP ${response.status}`);
+  }
+  if (response.status !== expectedStatus) throw new Error(`${label} returned HTTP ${response.status}; expected ${expectedStatus}: ${JSON.stringify(body)}`);
+  return jsonObject(body, label);
+}
+
 function diskAvailableBytes(): number | undefined {
   try {
     const output = execFileSync("df", ["-k", "."], { encoding: "utf8" }).trim().split("\n").at(-1)?.trim().split(/\s+/);
@@ -110,6 +158,7 @@ async function main(): Promise<void> {
   const accountId = required("CLOUDFLARE_ACCOUNT_ID");
   const queueId = required("ANYAM_QUALIFICATION_QUEUE_ID");
   const queueToken = required("ANYAM_QUALIFICATION_CF_API_TOKEN");
+  const controlToken = required("ANYAM_QUALIFICATION_CONTROL_TOKEN");
   const coordinatorUrl = required("ANYAM_QUALIFICATION_COORDINATOR_URL").replace(/\/$/, "");
   const leaseExpiresAt = required("ANYAM_QUALIFICATION_LEASE_EXPIRES_AT");
   const visibilityTimeoutMs = numberEnv("ANYAM_QUALIFICATION_VISIBILITY_TIMEOUT_MS");
@@ -124,6 +173,9 @@ async function main(): Promise<void> {
   const attemptId = `attempt:${randomUUID()}`;
   const actionId = "action:cli-archive";
   const outputRoot = `outputs/${jobId}`;
+  const projectViewId = "project-view:external-runner-qualification";
+  const outputPaths = ["artifact/anyam-live-runner.txt"];
+  const outputDisclosure = "project" as const;
   const sourceSnapshotDigest = digest("anyam-live-qualification-source/v1");
   const inputManifestDigest = digest(stableJson({ actionId, sourceSnapshotDigest, outputRoot, runnerId }));
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -142,6 +194,9 @@ async function main(): Promise<void> {
     inputManifestDigest,
     sourceSnapshotDigest,
     outputRoot,
+    projectViewId,
+    outputPaths,
+    disclosure: outputDisclosure,
     leaseExpiresAt,
     receipt: "synthetic-input; canonicalWrite=false; outputDisclosure=project",
   };
@@ -151,6 +206,12 @@ async function main(): Promise<void> {
     headers: { authorization: `Bearer ${queueToken}`, "content-type": "application/json" },
     body: JSON.stringify({ body: jobMessage, content_type: "json" }),
   }, "Queue push");
+
+  await requestJson(`${coordinatorJobUrl}/bind`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${controlToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ inputManifestDigest, sourceSnapshotDigest, projectViewId, outputRoot, outputPaths, disclosure: outputDisclosure }),
+  }, "Owner manifest bind");
 
   const pulledResponse = await requestJson(`${queueUrl}/messages/pull`, {
     method: "POST",
@@ -179,6 +240,9 @@ async function main(): Promise<void> {
       inputManifestDigest,
       sourceSnapshotDigest,
       outputRoot,
+      projectViewId,
+      outputPaths,
+      disclosure: outputDisclosure,
       leaseExpiresAt,
       publicKey: publicKeyEncoded,
       challenge,
@@ -191,12 +255,23 @@ async function main(): Promise<void> {
   const artifactBytes = Buffer.from(`Anyam external Runner qualification\njob=${jobId}\nattempt=${attemptId}\n`);
   const artifactPath = "artifact/anyam-live-runner.txt";
   const artifactDigest = digest(artifactBytes);
+  const disclosureRejection = await requestExpectedFailure(`${coordinatorJobUrl}/outputs`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+    body: JSON.stringify({ attemptId, path: artifactPath, kind: "artifact", disclosure: "restricted", digest: artifactDigest, contentBase64: artifactBytes.toString("base64url") }),
+  }, 422, "Unauthorized disclosure output");
   const outputResponse = await requestJson(`${coordinatorJobUrl}/outputs`, {
     method: "POST",
     headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
     body: JSON.stringify({ attemptId, path: artifactPath, kind: "artifact", disclosure: "project", digest: artifactDigest, contentBase64: artifactBytes.toString("base64url") }),
   }, "Runner output upload");
   const storedOutput = jsonObject(outputResponse.output, "Runner output response");
+
+  const readBackResponse = await fetch(`${coordinatorJobUrl}/output?path=${encodeURIComponent(artifactPath)}`, { headers: { authorization: `Bearer ${credential}` } });
+  if (!readBackResponse.ok) throw new Error(`R2 read-back returned HTTP ${readBackResponse.status}`);
+  const readBackBytes = Buffer.from(await readBackResponse.arrayBuffer());
+  const readBackDigest = digest(readBackBytes);
+  if (readBackDigest !== artifactDigest) throw new Error(`R2 read-back digest mismatch: declared=${artifactDigest}; readBack=${readBackDigest}`);
 
   const resultEnvelope = {
     jobId,
@@ -214,17 +289,80 @@ async function main(): Promise<void> {
   const resultStatus = jsonObject(completeResponse.status, "Runner completion status");
   if (resultStatus.status !== "succeeded") throw new Error(`Coordinator did not accept a succeeded Result: ${JSON.stringify(resultStatus)}`);
 
-  const readBackResponse = await fetch(`${coordinatorJobUrl}/output?path=${encodeURIComponent(artifactPath)}`, { headers: { authorization: `Bearer ${credential}` } });
-  if (!readBackResponse.ok) throw new Error(`R2 read-back returned HTTP ${readBackResponse.status}`);
-  const readBackBytes = Buffer.from(await readBackResponse.arrayBuffer());
-  const readBackDigest = digest(readBackBytes);
-  if (readBackDigest !== artifactDigest) throw new Error(`R2 read-back digest mismatch: declared=${artifactDigest}; readBack=${readBackDigest}`);
+  const revokedOutput = await requestExpectedFailure(`${coordinatorJobUrl}/outputs`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+    body: JSON.stringify({ attemptId, path: artifactPath, kind: "artifact", disclosure: outputDisclosure, digest: artifactDigest, contentBase64: artifactBytes.toString("base64url") }),
+  }, 401, "Revoked credential output");
 
   const ackResponse = await requestJson(`${queueUrl}/messages/ack`, {
     method: "POST",
     headers: { authorization: `Bearer ${queueToken}`, "content-type": "application/json" },
     body: JSON.stringify({ acks: [{ lease_id: pulled.lease_id }], retries: [] }),
   }, "Queue acknowledgement");
+
+  await pushQueue(queueUrl, queueToken, jobMessage, "Duplicate Queue push");
+  const duplicatePulled = await pullQueue(queueUrl, queueToken, visibilityTimeoutMs, jobId, "Duplicate Queue pull");
+  const duplicateClaim = await requestExpectedFailure(`${coordinatorJobUrl}/claim`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ attemptId, runnerId, actionId, inputManifestDigest, sourceSnapshotDigest, outputRoot, projectViewId, outputPaths, disclosure: outputDisclosure, leaseExpiresAt, publicKey: publicKeyEncoded, challenge, signature: claimSignature }),
+  }, 409, "Duplicate Runner claim");
+  const duplicateAck = await ackQueue(queueUrl, queueToken, duplicatePulled.lease_id, "Duplicate Queue acknowledgement");
+
+  const createControlAttempt = async (label: string, withArtifact: boolean, retryOf?: string) => {
+    const controlJobId = `job:${label}-${randomUUID()}`;
+    const controlAttemptId = `attempt:${randomUUID()}`;
+    const controlRunnerId = `runner:mac-${label}-${randomUUID()}`;
+    const controlOutputRoot = `outputs/${controlJobId}`;
+    const controlOutputPaths = [withArtifact ? "artifact/anyam-retry-runner.txt" : "control/none.txt"];
+    const controlSourceSnapshotDigest = digest(`anyam-live-qualification-source/${label}/v1`);
+    const controlInputManifestDigest = digest(stableJson({ actionId, controlSourceSnapshotDigest, controlOutputRoot, controlRunnerId, retryOf: retryOf ?? null }));
+    const controlKeys = generateKeyPairSync("ed25519");
+    const controlPublicKey = controlKeys.publicKey.export({ type: "spki", format: "der" }).toString("base64url");
+    const controlChallenge = base64Url(Buffer.from(randomUUID()));
+    const controlSignature = base64Url(sign(null, Buffer.from(`anyam.runner-claim/v1|${controlChallenge}`), controlKeys.privateKey));
+    const controlManifest = { inputManifestDigest: controlInputManifestDigest, sourceSnapshotDigest: controlSourceSnapshotDigest, projectViewId, outputRoot: controlOutputRoot, outputPaths: controlOutputPaths, disclosure: outputDisclosure };
+    const controlJobMessage = { protocol: "anyam.external-runner-qualification/v1", jobId: controlJobId, attemptId: controlAttemptId, runnerId: controlRunnerId, actionId, inputManifestDigest: controlInputManifestDigest, sourceSnapshotDigest: controlSourceSnapshotDigest, outputRoot: controlOutputRoot, projectViewId, outputPaths: controlOutputPaths, disclosure: outputDisclosure, ...(retryOf ? { retryOf } : {}), leaseExpiresAt, receipt: `synthetic-${label}; canonicalWrite=false; outputDisclosure=project` };
+    const controlJobUrl = `${coordinatorUrl}/jobs/${encodeURIComponent(controlJobId)}`;
+    await pushQueue(queueUrl, queueToken, controlJobMessage, `${label} Queue push`);
+    await requestJson(`${controlJobUrl}/bind`, { method: "POST", headers: { authorization: `Bearer ${controlToken}`, "content-type": "application/json" }, body: JSON.stringify(controlManifest) }, `${label} owner manifest bind`);
+    const controlPulled = await pullQueue(queueUrl, queueToken, visibilityTimeoutMs, controlJobId, `${label} Queue pull`);
+    const controlClaim = await requestJson(`${controlJobUrl}/claim`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ attemptId: controlAttemptId, runnerId: controlRunnerId, actionId, ...controlManifest, leaseExpiresAt, publicKey: controlPublicKey, challenge: controlChallenge, signature: controlSignature }) }, `${label} Runner claim`);
+    const controlCredential = requiredString(jsonObject(controlClaim.credential, `${label} claim credential`), "token");
+    return { jobId: controlJobId, attemptId: controlAttemptId, runnerId: controlRunnerId, outputRoot: controlOutputRoot, outputPaths: controlOutputPaths, sourceSnapshotDigest: controlSourceSnapshotDigest, inputManifestDigest: controlInputManifestDigest, publicKey: controlPublicKey, privateKey: controlKeys.privateKey, jobUrl: controlJobUrl, pulled: controlPulled, credential: controlCredential };
+  };
+
+  const cancellationAttempt = await createControlAttempt("cancel", false);
+  const cancellationResponse = await requestJson(`${cancellationAttempt.jobUrl}/cancel`, { method: "POST", headers: { authorization: `Bearer ${controlToken}`, "content-type": "application/json" }, body: JSON.stringify({ reason: "live-qualification-cancellation" }) }, "Runner cancellation");
+  const cancellationStatus = jsonObject(cancellationResponse.status, "Runner cancellation status");
+  if (cancellationStatus.status !== "cancelled") throw new Error(`Coordinator did not record cancellation: ${JSON.stringify(cancellationStatus)}`);
+  const cancellationCredentialRejection = await requestExpectedFailure(`${cancellationAttempt.jobUrl}/outputs`, { method: "POST", headers: { authorization: `Bearer ${cancellationAttempt.credential}`, "content-type": "application/json" }, body: JSON.stringify({ attemptId: cancellationAttempt.attemptId, path: cancellationAttempt.outputPaths[0], kind: "artifact", disclosure: outputDisclosure, digest: digest("cancelled-output"), contentBase64: Buffer.from("cancelled-output").toString("base64url") }) }, 401, "Cancelled credential output");
+  const cancellationAck = await ackQueue(queueUrl, queueToken, cancellationAttempt.pulled.lease_id, "Cancellation Queue acknowledgement");
+
+  const revocationAttempt = await createControlAttempt("revoke", false);
+  const revocationResponse = await requestJson(`${revocationAttempt.jobUrl}/revoke`, { method: "POST", headers: { authorization: `Bearer ${controlToken}`, "content-type": "application/json" }, body: JSON.stringify({ reason: "live-qualification-revocation" }) }, "Runner credential revocation");
+  const revocationStatus = jsonObject(revocationResponse.status, "Runner revocation status");
+  if (revocationStatus.status !== "revoked") throw new Error(`Coordinator did not record revocation: ${JSON.stringify(revocationStatus)}`);
+  const revocationCredentialRejection = await requestExpectedFailure(`${revocationAttempt.jobUrl}/outputs`, { method: "POST", headers: { authorization: `Bearer ${revocationAttempt.credential}`, "content-type": "application/json" }, body: JSON.stringify({ attemptId: revocationAttempt.attemptId, path: revocationAttempt.outputPaths[0], kind: "artifact", disclosure: outputDisclosure, digest: digest("revoked-output"), contentBase64: Buffer.from("revoked-output").toString("base64url") }) }, 401, "Revoked credential output");
+  const revocationAck = await ackQueue(queueUrl, queueToken, revocationAttempt.pulled.lease_id, "Revocation Queue acknowledgement");
+
+  const retryAttempt = await createControlAttempt("retry", true, cancellationAttempt.jobId);
+  const retryBytes = Buffer.from(`Anyam external Runner retry qualification\nretryOf=${cancellationAttempt.jobId}\njob=${retryAttempt.jobId}\nattempt=${retryAttempt.attemptId}\n`);
+  const retryPath = retryAttempt.outputPaths[0];
+  const retryDigest = digest(retryBytes);
+  const retryOutput = await requestJson(`${retryAttempt.jobUrl}/outputs`, { method: "POST", headers: { authorization: `Bearer ${retryAttempt.credential}`, "content-type": "application/json" }, body: JSON.stringify({ attemptId: retryAttempt.attemptId, path: retryPath, kind: "artifact", disclosure: outputDisclosure, digest: retryDigest, contentBase64: retryBytes.toString("base64url") }) }, "Retry output upload");
+  const retryReadBack = await fetch(`${retryAttempt.jobUrl}/output?path=${encodeURIComponent(retryPath)}`, { headers: { authorization: `Bearer ${retryAttempt.credential}` } });
+  if (!retryReadBack.ok) throw new Error(`Retry R2 read-back returned HTTP ${retryReadBack.status}`);
+  const retryReadBackBytes = Buffer.from(await retryReadBack.arrayBuffer());
+  const retryReadBackDigest = digest(retryReadBackBytes);
+  if (retryReadBackDigest !== retryDigest) throw new Error(`Retry R2 read-back digest mismatch: declared=${retryDigest}; readBack=${retryReadBackDigest}`);
+  const retryResultEnvelope = { jobId: retryAttempt.jobId, attemptId: retryAttempt.attemptId, status: "succeeded", outputs: [{ path: retryPath, kind: "artifact", disclosure: outputDisclosure, digest: retryDigest, bytes: retryBytes.byteLength }] };
+  const retryResultSignature = base64Url(sign(null, Buffer.from(`anyam.runner-result/v1|${stableJson(retryResultEnvelope)}`), retryAttempt.privateKey));
+  const retryCompletion = await requestJson(`${retryAttempt.jobUrl}/result`, { method: "POST", headers: { authorization: `Bearer ${retryAttempt.credential}`, "content-type": "application/json" }, body: JSON.stringify({ ...retryResultEnvelope, signature: retryResultSignature }) }, "Retry Runner result");
+  const retryStatus = jsonObject(retryCompletion.status, "Retry completion status");
+  if (retryStatus.status !== "succeeded") throw new Error(`Coordinator did not accept the retry Result: ${JSON.stringify(retryStatus)}`);
+  const retryAck = await ackQueue(queueUrl, queueToken, retryAttempt.pulled.lease_id, "Retry Queue acknowledgement");
 
   const statusResponse = await requestJson(`${coordinatorJobUrl}/status`, { method: "GET" }, "Coordinator status");
   const targetRepository = optional("ANYAM_GITHUB_TARGET_REPOSITORY");
@@ -244,9 +382,15 @@ async function main(): Promise<void> {
     attemptId,
     runnerId,
     queue: { messageId: pulled.id, messageIdDigest: digest(pulled.id), attempts: pulled.attempts, batchSize: 10, bodyEncoding: pulled.bodyEncoding, leaseId: "[redacted]", leaseIdDigest: digest(pulled.lease_id), ack: jsonObject(ackResponse.result ?? ackResponse, "Queue acknowledgement result") },
-    input: { actionId, inputManifestDigest, sourceSnapshotDigest, queueBodyJobId: pulledBody.jobId },
+    input: { actionId, inputManifestDigest, sourceSnapshotDigest, projectViewId, outputPaths, disclosure: outputDisclosure, queueBodyJobId: pulledBody.jobId },
     output: { path: artifactPath, digest: artifactDigest, readBackDigest, bytes: artifactBytes.byteLength, coordinatorStored: storedOutput },
-    coordinator: { status: resultStatus.status, resultDigest: completeResponse.resultDigest, receipt: completeResponse.receipt },
+    coordinator: { status: resultStatus.status, resultDigest: completeResponse.resultDigest, receipt: completeResponse.receipt, disclosureRejection, revokedCredentialRejection: revokedOutput },
+    residuals: {
+      duplicate: { messageId: duplicatePulled.id, attempts: duplicatePulled.attempts, claimRejection: duplicateClaim, ack: jsonObject(duplicateAck.result ?? duplicateAck, "Duplicate Queue acknowledgement result") },
+      cancellation: { jobId: cancellationAttempt.jobId, status: cancellationStatus, credentialRejection: cancellationCredentialRejection, ack: jsonObject(cancellationAck.result ?? cancellationAck, "Cancellation Queue acknowledgement result") },
+      revocation: { jobId: revocationAttempt.jobId, status: revocationStatus, credentialRejection: revocationCredentialRejection, ack: jsonObject(revocationAck.result ?? revocationAck, "Revocation Queue acknowledgement result") },
+      retry: { jobId: retryAttempt.jobId, retryOf: cancellationAttempt.jobId, status: retryStatus, output: retryOutput, readBackDigest: retryReadBackDigest, ack: jsonObject(retryAck.result ?? retryAck, "Retry Queue acknowledgement result") },
+    },
     target: targetReceipt,
     host: { platform: platform(), arch: arch(), release: release(), totalMemoryBytes: totalmem(), freeMemoryBeforeBytes: freeMemoryBefore, freeMemoryAfterBytes: freemem(), rssBeforeBytes: memoryBefore.rss, rssAfterBytes: memoryAfter.rss, processUserMicros: processAfter.userCPUTime - processBefore.userCPUTime, processSystemMicros: processAfter.systemCPUTime - processBefore.systemCPUTime, diskAvailableBeforeBytes: diskAvailableBytes(), diskAvailableAfterBytes: diskAvailableBytes(), networkBytes: "not-observed" },
     timing: { startedAt, finishedAt, elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt), visibilityTimeoutMs, leaseExpiresAt },

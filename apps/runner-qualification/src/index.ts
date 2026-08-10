@@ -4,12 +4,22 @@ import { DurableObject } from "cloudflare:workers";
 
 type JsonObject = Record<string, unknown>;
 
-type JobStatus = "running" | "succeeded" | "failed" | "indeterminate";
+type JobStatus = "running" | "succeeded" | "failed" | "indeterminate" | "cancelled" | "revoked";
+type Disclosure = "public" | "project" | "restricted";
+
+type JobManifest = {
+  inputManifestDigest: string;
+  sourceSnapshotDigest: string;
+  projectViewId: string;
+  outputRoot: string;
+  outputPaths: string[];
+  disclosure: Disclosure;
+};
 
 type StoredOutput = {
   path: string;
   kind: "log" | "artifact" | "evidence";
-  disclosure: "public" | "project" | "restricted";
+  disclosure: Disclosure;
   digest: string;
   bytes: number;
   key: string;
@@ -29,6 +39,8 @@ type JobRecord = {
   challengeDigest: string;
   credentialDigest: string;
   credentialExpiresAt: string;
+  credentialRevokedAt?: string;
+  manifest: JobManifest;
   status: JobStatus;
   outputs: StoredOutput[];
   resultDigest?: string;
@@ -42,6 +54,9 @@ export interface Env {
   OUTPUTS: R2Bucket;
   COHORT_ID: string;
   PROTOCOL_VERSION: string;
+  CONTROL_TOKEN?: string;
+  REQUIRE_MANIFEST_BINDING?: string;
+  MAX_OUTPUT_DISCLOSURE?: Disclosure;
 }
 
 function json(value: unknown, status = 200, headers?: HeadersInit): Response {
@@ -124,6 +139,24 @@ function bytesToBase64(value: Uint8Array): string {
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
 
+function disclosureRank(value: Disclosure): number {
+  return value === "public" ? 0 : value === "project" ? 1 : 2;
+}
+
+function disclosureAllows(outer: Disclosure, inner: Disclosure): boolean {
+  return disclosureRank(inner) <= disclosureRank(outer);
+}
+
+function disclosure(value: string, field: string): Disclosure {
+  if (value !== "public" && value !== "project" && value !== "restricted") throw new Error(`${field} must be public, project, or restricted`);
+  return value;
+}
+
+function stringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim().length === 0)) throw new Error(`${field} must be a non-empty string array`);
+  return value.map((item) => safePath(item as string));
+}
+
 async function verifyEd25519(publicKey: string, message: string, signature: string): Promise<boolean> {
   try {
     const key = await crypto.subtle.importKey("spki", base64ToBytes(publicKey).buffer as ArrayBuffer, { name: "Ed25519" }, false, ["verify"]);
@@ -172,6 +205,7 @@ function credentialFree(record: JobRecord): Record<string, unknown> {
     sourceSnapshotDigest: record.sourceSnapshotDigest,
     outputRoot: record.outputRoot,
     leaseExpiresAt: record.leaseExpiresAt,
+    manifest: record.manifest,
     status: record.status,
     outputs: record.outputs,
     ...(record.resultDigest ? { resultDigest: record.resultDigest } : {}),
@@ -188,6 +222,18 @@ class QualificationCoordinator extends DurableObject<Env> {
     return await this.ctx.storage.get<JobRecord>(`job:${jobId}`);
   }
 
+  private async readManifest(jobId: string): Promise<JobManifest | undefined> {
+    return await this.ctx.storage.get<JobManifest>(`manifest:${jobId}`);
+  }
+
+  private async controlAuthorized(request: Request): Promise<void> {
+    const configured = this.env.CONTROL_TOKEN?.trim();
+    const value = request.headers.get("authorization");
+    if (!configured || !value?.startsWith("Bearer ") || !(await constantTimeEqual(value.slice("Bearer ".length).trim(), configured))) {
+      throw new Error("qualification control credential is invalid or unavailable");
+    }
+  }
+
   private async write(record: JobRecord): Promise<void> {
     await this.ctx.storage.put(`job:${record.jobId}`, record);
   }
@@ -196,6 +242,7 @@ class QualificationCoordinator extends DurableObject<Env> {
     const token = bearer(request);
     const tokenDigest = await digest(token);
     if (!(await constantTimeEqual(tokenDigest, job.credentialDigest))) throw new Error("credential is invalid or revoked");
+    if (job.credentialRevokedAt) throw new Error("credential is invalid or revoked");
     if (Date.parse(job.credentialExpiresAt) <= Date.now()) throw new Error("credential is expired");
     return token;
   }
@@ -217,6 +264,24 @@ class QualificationCoordinator extends DurableObject<Env> {
         return record ? json(credentialFree(record)) : json({ code: "job_not_found", recoveryAction: "submit the signed claim for the immutable Queue job first" }, 404);
       }
 
+      if (request.method === "POST" && url.pathname.endsWith("/bind")) {
+        await this.controlAuthorized(request);
+        if (await this.read(jobId)) return json({ code: "job_already_claimed", recoveryAction: "inspect the existing credential-free status and do not replace the immutable manifest", receipt: `job=${jobId}; manifest=already-claimed` }, 409);
+        const body = await bodyObject(request);
+        const manifest: JobManifest = {
+          inputManifestDigest: requiredString(body, "inputManifestDigest"),
+          sourceSnapshotDigest: requiredString(body, "sourceSnapshotDigest"),
+          projectViewId: requiredString(body, "projectViewId"),
+          outputRoot: safePath(requiredString(body, "outputRoot")),
+          outputPaths: stringArray(body.outputPaths, "outputPaths"),
+          disclosure: disclosure(requiredString(body, "disclosure"), "disclosure"),
+        };
+        const existing = await this.readManifest(jobId);
+        if (existing && stableJson(existing) !== stableJson(manifest)) return json({ code: "manifest_conflict", recoveryAction: "reuse the exact Queue job manifest or choose a new immutable job id", receipt: `job=${jobId}; manifest=conflict` }, 409);
+        await this.ctx.storage.put(`manifest:${jobId}`, manifest);
+        return json({ jobId, manifest, receipt: `manifest=bound; job=${jobId}; credentialMaterialStored=false; canonicalWrite=false` });
+      }
+
       if (request.method === "POST" && url.pathname.endsWith("/claim")) {
         const body = await bodyObject(request);
         const existing = await this.read(jobId);
@@ -227,10 +292,17 @@ class QualificationCoordinator extends DurableObject<Env> {
         const inputManifestDigest = requiredString(body, "inputManifestDigest");
         const sourceSnapshotDigest = requiredString(body, "sourceSnapshotDigest");
         const outputRoot = safePath(requiredString(body, "outputRoot"));
+        const projectViewId = requiredString(body, "projectViewId");
+        const outputPaths = stringArray(body.outputPaths, "outputPaths");
+        const requestedDisclosure = disclosure(requiredString(body, "disclosure"), "disclosure");
         const leaseExpiresAt = requiredString(body, "leaseExpiresAt");
         const publicKey = requiredString(body, "publicKey");
         const challenge = requiredString(body, "challenge");
         const signature = requiredString(body, "signature");
+        const manifest: JobManifest = { inputManifestDigest, sourceSnapshotDigest, projectViewId, outputRoot, outputPaths, disclosure: requestedDisclosure };
+        const boundManifest = await this.readManifest(jobId);
+        if (this.env.REQUIRE_MANIFEST_BINDING === "true" && !boundManifest) return json({ code: "manifest_not_bound", recoveryAction: "bind the owner-approved Queue manifest before claiming the Runner Attempt", receipt: `job=${jobId}; manifest=missing` }, 409);
+        if (boundManifest && stableJson(boundManifest) !== stableJson(manifest)) return json({ code: "manifest_mismatch", recoveryAction: "claim only the exact Project View and input manifest bound by the coordinator", receipt: `job=${jobId}; manifest=mismatch` }, 422);
         if (!Number.isFinite(Date.parse(leaseExpiresAt)) || Date.parse(leaseExpiresAt) <= Date.now()) throw new Error("leaseExpiresAt must be in the future");
         const valid = await verifyEd25519(publicKey, `anyam.runner-claim/v1|${challenge}`, signature);
         if (!valid) return json({ code: "runner_proof_invalid", recoveryAction: "sign the exact claim challenge with the enrolled Runner key", receipt: `job=${jobId}; proof=invalid` }, 422);
@@ -251,6 +323,7 @@ class QualificationCoordinator extends DurableObject<Env> {
           challengeDigest: await challengeDigest(challenge),
           credentialDigest: await digest(token),
           credentialExpiresAt: leaseExpiresAt,
+          manifest: boundManifest ?? manifest,
           status: "running",
           outputs: [],
           createdAt: now,
@@ -263,6 +336,26 @@ class QualificationCoordinator extends DurableObject<Env> {
       const record = await this.read(jobId);
       if (!record) return json({ code: "job_not_found", recoveryAction: "submit the signed claim for the immutable Queue job first" }, 404);
 
+      if (request.method === "POST" && (url.pathname.endsWith("/cancel") || url.pathname.endsWith("/revoke"))) {
+        await this.controlAuthorized(request);
+        const body = await bodyObject(request);
+        const reason = requiredString(body, "reason");
+        if (record.status !== "running") return json({ code: "control_state_invalid", recoveryAction: "cancel or revoke only an active Attempt, then create a fresh Attempt for retry", receipt: `job=${jobId}; status=${record.status}` }, 409);
+        const nextStatus: JobStatus = url.pathname.endsWith("/cancel") ? "cancelled" : "revoked";
+        const now = new Date().toISOString();
+        const resultEnvelope = { jobId, status: nextStatus, reason };
+        const next: JobRecord = {
+          ...record,
+          status: nextStatus,
+          resultDigest: await digest(stableJson(resultEnvelope)),
+          resultReceipt: `control=${nextStatus}; reason=${reason}; credentialRevoked=true; canonicalWrite=false`,
+          credentialRevokedAt: now,
+          updatedAt: now,
+        };
+        await this.write(next);
+        return json({ status: credentialFree(next), receipt: next.resultReceipt });
+      }
+
       if (request.method === "POST" && url.pathname.endsWith("/outputs")) {
         await this.authorized(request, record);
         if (record.status !== "running") return json({ code: "job_not_running", recoveryAction: "upload outputs only while the current Attempt is running", receipt: `job=${jobId}; status=${record.status}` }, 409);
@@ -272,15 +365,17 @@ class QualificationCoordinator extends DurableObject<Env> {
         const path = safePath(requiredString(body, "path"));
         const kind = requiredString(body, "kind");
         if (kind !== "log" && kind !== "artifact" && kind !== "evidence") throw new Error("kind must be log, artifact, or evidence");
-        const disclosure = optionalString(body, "disclosure") ?? "project";
-        if (disclosure !== "public" && disclosure !== "project" && disclosure !== "restricted") throw new Error("disclosure must be public, project, or restricted");
+        const outputDisclosure = disclosure(optionalString(body, "disclosure") ?? "project", "disclosure");
+        const maximumDisclosure = disclosure(this.env.MAX_OUTPUT_DISCLOSURE ?? record.manifest.disclosure, "MAX_OUTPUT_DISCLOSURE");
+        if (!disclosureAllows(maximumDisclosure, outputDisclosure) || !disclosureAllows(record.manifest.disclosure, outputDisclosure)) return json({ code: "output_disclosure_forbidden", recoveryAction: "return an output at or below the bound Project View disclosure", receipt: `job=${jobId}; jobDisclosure=${record.manifest.disclosure}; maximumDisclosure=${maximumDisclosure}; outputDisclosure=${outputDisclosure}` }, 422);
+        if (!record.manifest.outputPaths.includes(path)) return json({ code: "output_path_forbidden", recoveryAction: "upload only a path declared in the owner-bound output manifest", receipt: `job=${jobId}; path=${path}; declaredPaths=${record.manifest.outputPaths.join(",")}` }, 422);
         const content = base64ToBytes(requiredString(body, "contentBase64"));
         const contentDigest = await digest(content);
         const declaredDigest = requiredString(body, "digest");
         if (!(await constantTimeEqual(contentDigest, declaredDigest))) throw new Error("declared digest does not match uploaded bytes");
         const key = `${record.outputRoot}/${path}`;
         await this.env.OUTPUTS.put(key, content, { httpMetadata: { contentType: "application/octet-stream" } });
-        const output: StoredOutput = { path, kind, disclosure, digest: contentDigest, bytes: content.byteLength, key };
+        const output: StoredOutput = { path, kind, disclosure: outputDisclosure, digest: contentDigest, bytes: content.byteLength, key };
         const next: JobRecord = { ...record, outputs: [...record.outputs.filter((item) => item.path !== path), output], updatedAt: new Date().toISOString() };
         await this.write(next);
         return json({ output, receipt: `output=stored; job=${jobId}; attempt=${record.attemptId}; credentialMaterialStored=false` });
@@ -307,6 +402,15 @@ class QualificationCoordinator extends DurableObject<Env> {
         const signature = requiredString(body, "signature");
         const outputs = body.outputs;
         if (!Array.isArray(outputs)) throw new Error("outputs must be an array");
+        if (outputs.length !== record.outputs.length) return json({ code: "result_output_manifest_mismatch", recoveryAction: "sign exactly the output references accepted by the coordinator before submitting the Result", receipt: `job=${jobId}; acceptedOutputs=${record.outputs.length}; resultOutputs=${outputs.length}` }, 422);
+        const maximumDisclosure = disclosure(this.env.MAX_OUTPUT_DISCLOSURE ?? record.manifest.disclosure, "MAX_OUTPUT_DISCLOSURE");
+        for (const item of outputs) {
+          if (!isRecord(item)) return json({ code: "result_output_manifest_mismatch", recoveryAction: "return structured output references matching the accepted output manifest", receipt: `job=${jobId}; output=not-object` }, 422);
+          const path = typeof item.path === "string" ? safePath(item.path) : "";
+          const accepted = record.outputs.find((output) => output.path === path);
+          const itemDisclosure = typeof item.disclosure === "string" ? disclosure(item.disclosure, "outputs.disclosure") : "project";
+          if (!accepted || item.kind !== accepted.kind || item.digest !== accepted.digest || item.bytes !== accepted.bytes || !disclosureAllows(maximumDisclosure, itemDisclosure) || !disclosureAllows(record.manifest.disclosure, itemDisclosure)) return json({ code: "result_output_manifest_mismatch", recoveryAction: "return only the exact, disclosure-safe outputs accepted for this Attempt", receipt: `job=${jobId}; path=${path}; manifest=not-matched` }, 422);
+        }
         const recoveryAction = optionalString(body, "recoveryAction");
         const resultEnvelope = { jobId, attemptId, status, outputs, ...(recoveryAction ? { recoveryAction } : {}) };
         const resultMessage = `anyam.runner-result/v1|${stableJson(resultEnvelope)}`;
@@ -320,7 +424,7 @@ class QualificationCoordinator extends DurableObject<Env> {
         }
         const resultDigest = await digest(stableJson(resultEnvelope));
         const nextStatus = status === "succeeded" ? "succeeded" : status;
-        const next: JobRecord = { ...record, status: nextStatus, resultDigest, resultReceipt: `result=accepted; outputReadBack=verified; queueAck=not-performed; canonicalWrite=false`, updatedAt: new Date().toISOString() };
+        const next: JobRecord = { ...record, status: nextStatus, resultDigest, resultReceipt: `result=accepted; outputReadBack=verified; queueAck=not-performed; canonicalWrite=false`, credentialRevokedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
         await this.write(next);
         return json({ status: credentialFree(next), ackRequired: true, resultDigest, receipt: next.resultReceipt });
       }

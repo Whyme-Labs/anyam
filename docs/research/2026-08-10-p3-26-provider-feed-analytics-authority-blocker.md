@@ -52,6 +52,12 @@ An owner supplied a temporary token for the named account. It was used only in m
 
 The supplied token must not be reused. Revoke it and create a fresh account-scoped token before retrying. This result is an authentication observation, not a provider outage or an Anyam reliability result.
 
+### Fresh-token authorization probe
+
+The next fresh-token run reached the GraphQL endpoint successfully, but every named surface (Workers, R2, D1, Workflow, and Queue discovery) returned HTTP `200` with GraphQL `authz` / `not authorized for that account` for account `1e0170aaabc90ec9a295faad8e519458`.
+
+This distinguishes an accepted token from an authorized token. The next recovery action is to inspect the token policy without exposing its value: the permission must be the account-scoped **Account Analytics Read** group and the resource must include the `swmengappdev` account. A Zone-scoped Analytics permission or a token restricted to another account cannot satisfy this receipt.
+
 ## Required recovery action
 
 Create a temporary account-scoped API token with **Account Analytics Read** only, set it in the local qualification environment without committing or printing it, and rerun the bounded observation window. Cloudflare documents this permission in the [API token permission reference](https://developers.cloudflare.com/fundamentals/api/reference/permissions/).

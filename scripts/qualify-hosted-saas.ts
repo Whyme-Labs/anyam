@@ -58,7 +58,7 @@ function tokenFrom(body: JsonObject): string {
 
 function assertNoDisclosure(body: JsonObject, values: readonly string[]): void {
   const serialized = JSON.stringify(body);
-  for (const value of values) assert.equal(serialized.includes(value), false, `negative response disclosed ${value}`);
+  for (const value of [...values, "queue", "event", "log", "cache", "timing", "correlation"]) assert.equal(serialized.includes(value), false, `negative response disclosed ${value}`);
 }
 
 async function register(input: typeof realmA): Promise<RealmFixture> {
@@ -111,6 +111,13 @@ async function run(): Promise<void> {
   assert.equal(foreignExport.response.status, 404);
   assertNoDisclosure(foreignExport.body, [b.projectId, b.digest, b.realmId]);
 
+  const wrongAudience = await realmRequest(a, "GET", `/api/projects/${a.projectId}`, undefined, a.token, { "x-anyam-audience": "aud:anyam:git" });
+  assert.equal(wrongAudience.response.status, 404);
+  assertNoDisclosure(wrongAudience.body, [a.projectId, a.realmId, a.digest]);
+  const unknownHost = await realmRequest({ host: "unknown.hosted.invalid", realmId: "unknown", projectId: "unknown", digest: "unknown", token: a.token }, "GET", "/api/projects/project:unknown");
+  assert.equal(unknownHost.response.status, 404);
+  assertNoDisclosure(unknownHost.body, [a.projectId, a.realmId, b.projectId, b.realmId]);
+
   const headerProbe = await realmRequest(a, "GET", `/api/projects/${a.projectId}`, undefined, a.token, { "x-anyam-realm": b.realmId });
   assert.equal(headerProbe.response.status, 200);
   const missingAuth = await call(route(a, `/api/projects/${a.projectId}`));
@@ -127,6 +134,29 @@ async function run(): Promise<void> {
   const replacementRead = await realmRequest(a, "GET", `/api/projects/${a.projectId}`, undefined, replacement);
   assert.equal(replacementRead.response.status, 200);
 
+  const reopened = await admin("/admin/reopen", {});
+  assert.equal(reopened.status, "reopened");
+  const oldTokenAfterReopen = await realmRequest(a, "GET", `/api/projects/${a.projectId}`, undefined, replacement);
+  assert.equal(oldTokenAfterReopen.response.status, 404);
+  assertNoDisclosure(oldTokenAfterReopen.body, [a.projectId, a.realmId, a.digest]);
+  const reopenedState = await admin("/admin/state");
+  assert.deepEqual((reopenedState.realms as JsonObject[]).map((realm) => realm.realmId), [a.realmId, b.realmId]);
+
+  const recoveryExport = await admin("/admin/recovery-export");
+  assert.equal(recoveryExport.credentialFree, true);
+  assertNoDisclosure(recoveryExport, [a.token, b.token, replacement]);
+  const snapshot = recoveryExport.snapshot;
+  assert.ok(snapshot !== null && typeof snapshot === "object" && !Array.isArray(snapshot));
+  const restored = await admin("/admin/recovery-restore", { snapshot: snapshot as JsonObject });
+  assert.equal(restored.status, "restored");
+  const oldTokenAfterRestore = await realmRequest(a, "GET", `/api/projects/${a.projectId}`, undefined, replacement);
+  assert.equal(oldTokenAfterRestore.response.status, 404);
+  assertNoDisclosure(oldTokenAfterRestore.body, [a.projectId, a.realmId, a.digest]);
+  const replacementAAfterRestore = tokenFrom(await admin("/admin/issue-credential", { realmId: a.realmId, principalId: `${a.realmId}:owner` }));
+  const replacementBAfterRestore = tokenFrom(await admin("/admin/issue-credential", { realmId: b.realmId, principalId: `${b.realmId}:owner` }));
+  assert.equal((await realmRequest(a, "GET", `/api/projects/${a.projectId}`, undefined, replacementAAfterRestore)).response.status, 200);
+  assert.equal((await realmRequest(b, "GET", `/api/projects/${b.projectId}`, undefined, replacementBAfterRestore)).response.status, 200);
+
   const stateBeforeCleanup = await admin("/admin/state");
   assert.equal(stateBeforeCleanup.credentialFree, true);
   assert.equal(JSON.stringify(stateBeforeCleanup).includes(a.token), false);
@@ -138,7 +168,7 @@ async function run(): Promise<void> {
   assert.deepEqual(stateAfterCleanup.realms, []);
   assert.equal(stateAfterCleanup.observations, 0);
 
-  console.log(JSON.stringify({ protocol, status: "succeeded", release: health.body.buildRevision, hostingMode: health.body.hostingMode, realms: [a.realmId, b.realmId], hosts: [a.host, b.host], positive: ["register", "create", "read", "mutate", "enumerate", "export"], negative: ["foreign-read", "foreign-mutation", "foreign-enumeration", "foreign-export", "missing-credential", "caller-header-ignored"], recovery: ["authorization-epoch-revocation", "replacement-credential", "credential-free-state"], cleanup: cleanupResult, startedAt, finishedAt: new Date().toISOString(), credentialValues: "not-printed", physicalIsolation: "not-claimed", anyamLimits: "none-added" }, null, 2));
+  console.log(JSON.stringify({ protocol, status: "succeeded", release: health.body.buildRevision, hostingMode: health.body.hostingMode, realms: [a.realmId, b.realmId], hosts: [a.host, b.host], positive: ["register", "create", "read", "mutate", "enumerate", "export"], negative: ["foreign-read", "foreign-mutation", "foreign-enumeration", "foreign-export", "wrong-audience", "unknown-host", "missing-credential", "caller-header-ignored", "metadata-disclosure"], recovery: ["authorization-epoch-revocation", "replacement-credential", "coordinator-reopen", "credential-free-export", "credential-free-restore", "replacement-after-restore"], cleanup: cleanupResult, startedAt, finishedAt: new Date().toISOString(), credentialValues: "not-printed", physicalIsolation: "not-claimed", anyamLimits: "none-added" }, null, 2));
 }
 
 try {

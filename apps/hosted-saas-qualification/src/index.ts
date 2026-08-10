@@ -78,6 +78,9 @@ export class HostedSaaSCoordinatorDO extends DurableObject<Env> {
       if (url.pathname === "/admin/issue-credential" && request.method === "POST") return await this.issueCredential(request);
       if (url.pathname === "/admin/revoke-realm" && request.method === "POST") return await this.revokeRealm(request);
       if (url.pathname === "/admin/cleanup" && request.method === "POST") return await this.cleanup(request);
+      if (url.pathname === "/admin/reopen" && request.method === "POST") return await this.reopen(request);
+      if (url.pathname === "/admin/recovery-export" && request.method === "GET") return this.recoveryExport(request);
+      if (url.pathname === "/admin/recovery-restore" && request.method === "POST") return await this.recoveryRestore(request);
       if (url.pathname === "/admin/state" && request.method === "GET") return this.state(request);
       const routed = this.routeAlias(request);
       const response = await this.router.handle(routed);
@@ -135,6 +138,31 @@ export class HostedSaaSCoordinatorDO extends DurableObject<Env> {
     const cleanupReceipt = this.store.cleanup();
     await this.persist();
     return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, status: "cleaned", ...cleanupReceipt });
+  }
+
+  private async reopen(request: Request): Promise<Response> {
+    if (!coordinatorAuthorized(request, this.env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before reopening the Coordinator", receipt: "ownerAuthorization=missing; reopen=not-applied" }, 401);
+    const snapshot = await this.ctx.storage.get<HostedSaaSIsolationSnapshot>("hosted-saas/isolation-snapshot/v1");
+    if (!snapshot) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "not_found", recoveryAction: "persist a credential-free Coordinator snapshot before reopening", receipt: "snapshot=missing; reopen=not-applied" }, 404);
+    this.store.restore(snapshot);
+    await this.persist();
+    return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, status: "reopened", credentialFree: true, credentials: 0, receipt: "coordinator=reopened-from-persisted-snapshot; credentialMaterialStored=false; credentials=not-restored" });
+  }
+
+  private recoveryExport(request: Request): Response {
+    if (!coordinatorAuthorized(request, this.env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before exporting recovery state", receipt: "ownerAuthorization=missing; recovery=not-exported" }, 401);
+    const snapshot = this.store.snapshot();
+    return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, status: "exported", credentialFree: snapshot.credentialFree, snapshot, receipt: "recovery=exported; credentialMaterialStored=false; authority=not-restored" });
+  }
+
+  private async recoveryRestore(request: Request): Promise<Response> {
+    if (!coordinatorAuthorized(request, this.env)) return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the disposable Hosted SaaS owner before restoring recovery state", receipt: "ownerAuthorization=missing; recovery=not-restored" }, 401);
+    const body = await bodyObject(request);
+    const snapshot = body.snapshot;
+    if (snapshot === null || typeof snapshot !== "object" || Array.isArray(snapshot)) throw new Error("snapshot is required");
+    this.store.restore(snapshot as HostedSaaSIsolationSnapshot);
+    await this.persist();
+    return json({ protocol: HOSTED_SAAS_QUALIFICATION_PROTOCOL, status: "restored", credentialFree: true, credentials: 0, receipt: "recovery=restored; credentialMaterialStored=false; credentials=not-restored" });
   }
 
   private state(request: Request): Response {

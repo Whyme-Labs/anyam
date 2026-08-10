@@ -209,10 +209,10 @@ export class HostedSaaSIsolationStore {
     realm.authorizationEpoch += 1;
   }
 
-  authenticate(token: string, realmId: string): Credential {
+  authenticate(token: string, realmId: string, expectedAudience: string = HOSTED_SAAS_TOKEN_AUDIENCE): Credential {
     const credential = this.credentials.get(required(token, "token"));
     const realm = this.realms.get(required(realmId, "realmId"));
-    if (!credential || !realm || credential.audience !== HOSTED_SAAS_TOKEN_AUDIENCE || credential.realmId !== realm.realmId || credential.authorizationEpoch !== realm.authorizationEpoch) {
+    if (!credential || !realm || credential.audience !== expectedAudience || credential.realmId !== realm.realmId || credential.authorizationEpoch !== realm.authorizationEpoch) {
       throw new HostedSaaSIsolationError({ status: 404, message: "Resource not found.", receipt: "authorization=not-disclosed; cross-realm=not-disclosed" });
     }
     return clone(credential);
@@ -361,7 +361,8 @@ export class HostedSaaSRouter {
     const authorization = request.headers.get("authorization");
     const token = authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : undefined;
     try {
-      this.store.authenticate(required(token, "authorization"), realm.realmId);
+      const expectedAudience = request.headers.get("x-anyam-audience") ?? HOSTED_SAAS_TOKEN_AUDIENCE;
+      this.store.authenticate(required(token, "authorization"), realm.realmId, expectedAudience);
       const payload = request.method === "GET" ? undefined : await request.json().catch(() => undefined);
       const projectId = url.pathname.startsWith("/api/projects/") ? decodeURIComponent(url.pathname.slice("/api/projects/".length)) : undefined;
       const correlationId = request.headers.get("x-anyam-correlation-id") ?? `request:${crypto.randomUUID()}`;

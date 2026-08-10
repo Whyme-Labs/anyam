@@ -559,7 +559,21 @@ export class CustomerProviderQualificationCoordinator {
     }
     if (observation.status !== "accepted") {
       const state: CustomerProviderOperationState = observation.status === "indeterminate" ? "indeterminate" : observation.retryable ? "degraded" : "blocked";
-      const failed = nextRecord(record, { state, providerOperationId: observation.providerOperationId, providerStatus: observation.providerStatus, providerReceipt: observation.receipt, providerPartialEffects: [...observation.partialEffects], ...(observation.outputDigest ? { outputDigest: observation.outputDigest } : {}), ...(observation.providerStatus === "transport-accepted" || observation.providerStatus === "transport-duplicate-or-partial" ? { callbackStateDigest: record.checkpoint.stateDigest } : {}), recoveryAction: observation.recoveryAction, receipt: `${record.receipt}; providerStatus=${observation.providerStatus}; state=${state}` }, this.now(), observation.partialEffects, [record.resourceKey]);
+      const failed = nextRecord(record, {
+        state,
+        providerOperationId: observation.providerOperationId,
+        providerStatus: observation.providerStatus,
+        providerReceipt: observation.receipt,
+        providerPartialEffects: [...observation.partialEffects],
+        ...(observation.outputDigest ? { outputDigest: observation.outputDigest } : {}),
+        ...(observation.providerStatus === "transport-accepted"
+          || observation.providerStatus === "transport-duplicate-or-partial"
+          || observation.providerStatus === "instance-created"
+          ? { callbackStateDigest: record.checkpoint.stateDigest }
+          : {}),
+        recoveryAction: observation.recoveryAction,
+        receipt: `${record.receipt}; providerStatus=${observation.providerStatus}; state=${state}`,
+      }, this.now(), observation.partialEffects, [record.resourceKey]);
       await this.input.store.put(failed, record.checkpoint.stateDigest);
       return failed;
     }

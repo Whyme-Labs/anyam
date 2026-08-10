@@ -1,0 +1,8 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-p3-24-target-20260810",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-27",
+  "workers_dev": true,
+  "account_id": "1e0170aaabc90ecf5f466128d1f0466a"
+}

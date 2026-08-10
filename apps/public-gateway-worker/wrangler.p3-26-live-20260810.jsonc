@@ -1,0 +1,59 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-p3-26-live-20260810",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-10",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": true,
+  "account_id": "1e0170aaabc90ecf5f466128d1f0466a",
+  "vars": {
+    "PUBLIC_PROJECT_ID": "project:anyam-p3-26-live-replay-archive",
+    "PUBLIC_SOURCE_SPACE_ID": "source:public-p3-26-replay-archive",
+    "PUBLIC_SNAPSHOT_ID": "snapshot:p3-26-public-fixture",
+    "PUBLIC_CONTENT_DIGEST": "sha256:ec6c39a662e73192f009428a85dc00551e75fa8ee27d81889b938b3b9bdcede8",
+    "PUBLIC_POLICY_RECEIPT": "receipt:p3-26-controlled-edge-tripwire-live-20260810",
+    "PUBLIC_EDGE_LIMIT": "1",
+    "PUBLIC_EDGE_LIMIT_UNIT": "public-gateway-edge-requests",
+    "PUBLIC_EDGE_LIMIT_RECEIPT": "receipt:p3-26-controlled-one-request-window-20260810",
+    "PUBLIC_EDGE_LIMIT_MEASURED_AT": "2026-08-10T15:22:32.300Z",
+    "PUBLIC_EDGE_LIMIT_METHOD": "controlled-qualification-one-request-per-window",
+    "PUBLIC_INTAKE_MODE": "approval-only",
+    "PUBLIC_INTAKE_LIMIT_UNIT": "public-contribution-requests",
+    "PUBLIC_INTAKE_LIMIT_RECEIPT": "receipt:p3-26-approval-only-no-logical-quota-20260810",
+    "PUBLIC_INTAKE_LIMIT_MEASURED_AT": "2026-08-10T15:22:32.300Z",
+    "PUBLIC_INTAKE_LIMIT_METHOD": "controlled-qualification-approval-only",
+    "PUBLIC_ENABLE_FIXTURE_FAILURES": "false",
+    "PUBLIC_ABUSE_MODE": "edge-only",
+    "UPSTREAM_GIT_BASE": "https://github.com/wms2537/anyam.git"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PUBLIC_GATEWAY_COORDINATOR",
+        "class_name": "PublicGatewayCoordinatorDO"
+      }
+    ]
+  },
+  "r2_buckets": [
+    {
+      "binding": "PUBLIC_GATEWAY_REPLAY_ARCHIVE",
+      "bucket_name": "anyam-p3-26-replay-archive-20260810"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "PUBLIC_EDGE_RATE_LIMITER",
+      "namespace_id": "90000026",
+      "simple": {
+        "limit": 1,
+        "period": 10
+      }
+    }
+  ],
+  "migrations": [
+    {
+      "tag": "p3-26-initial",
+      "new_sqlite_classes": ["PublicGatewayCoordinatorDO"]
+    }
+  ]
+}

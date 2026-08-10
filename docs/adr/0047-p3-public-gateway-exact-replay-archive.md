@@ -1,8 +1,9 @@
 # ADR 0047: P3 Public Gateway exact replay archive
 
-- Status: Accepted with a provider qualification residual
+- Status: Accepted; bounded Cloudflare adapter live-qualified
 - Date: 2026-08-08
 - Issue: [Qualify an archival replay-index adapter beyond the Public Gateway tombstone tripwire](https://github.com/wms2537/anyam/issues/113)
+- Live qualification: [P3-26 live customer-owned replay archive qualification](../research/2026-08-10-p3-26-replay-archive-live-qualification.md)
 - Depends on: [ADR 0046](./0046-p3-public-gateway-ledger-retention-and-recovery-export.md)
 
 ## Context
@@ -77,6 +78,8 @@ safe to retry.
 - Archive object bytes and provider latency/cost are workload measurements,
   not universal limits. Each customer must remeasure and set tripwires from
   its own receipt.
-- Live R2 qualification remains separate until the executing Cloudflare
-  identity has R2 bucket permission and a disposable customer bucket can be
-  created, deployed, read back, and deleted with receipts.
+- The bounded Cloudflare R2 path is live-qualified on a disposable
+  customer-owned bucket. Workload distribution, retention/deletion policy,
+  provider cost/latency sizing, and a portable external object-store adapter
+  remain separate map decisions; this receipt does not claim universal R2
+  support.

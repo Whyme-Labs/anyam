@@ -135,6 +135,9 @@ async function run(): Promise<void> {
   const workflowName = required("ANYAM_PROVIDER_WORKFLOW_NAME");
   const queueId = process.env.ANYAM_PROVIDER_QUEUE_ID?.trim();
   const operationIds = process.env.ANYAM_PROVIDER_OPERATION_IDS?.split(",").map((value) => value.trim()).filter(Boolean) ?? [];
+  if (queueId && operationIds.length === 0) {
+    throw new Error("ANYAM_PROVIDER_OPERATION_IDS is required when binding a named queue; provide the owner-qualified Anyam operation identities and rerun the same bounded window");
+  }
   const variables = { accountTag, datetimeStart, datetimeEnd, dateStart, dateEnd };
   const feeds: JsonObject[] = [];
 

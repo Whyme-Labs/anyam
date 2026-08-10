@@ -41,9 +41,10 @@ public Space:   source:public-p3-26-replay-archive
 snapshot:       snapshot:p3-26-public-fixture
 ```
 
-The owner-only `ADMIN_TOKEN` and the temporary cleanup Worker credential were
-generated in-process, never printed, and never committed. Canonical writes
-were not enabled.
+The owner-only `ADMIN_TOKEN` and an initial temporary cleanup Worker credential
+were generated in-process, never printed, and never committed. The cleanup
+instrument was disposable and removed after the exact bucket inventory.
+Canonical writes were not enabled.
 
 ## Deployment receipt
 
@@ -243,8 +244,8 @@ authoritative ledger.
 Cleanup was exact and owner-authorized:
 
 1. The two live-project objects were removed through Wrangler.
-2. A temporary owner-protected cleanup Worker enumerated the bucket through the
-   Workers R2 API. It found two stale objects from the earlier disposable
+2. A temporary qualification-only cleanup Worker enumerated the bucket through
+   the Workers R2 API. It found two stale objects from the earlier disposable
    project namespace and deleted exactly those two keys:
 
    ```text

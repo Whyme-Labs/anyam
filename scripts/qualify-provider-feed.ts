@@ -102,7 +102,8 @@ const queueQuery = `query Queue($accountTag: string!, $datetimeStart: Time!, $da
     }
     operations: queueMessageOperationsAdaptiveGroups(limit: 10000, filter: { queueId: $queueId, datetime_geq: $datetimeStart, datetime_leq: $datetimeEnd }) {
       count
-      sum { bytes lagTime retryCount billableOperations }
+      sum { bytes billableOperations }
+      avg { lagTime retryCount }
       dimensions { datetimeMinute actionType consumerType outcome queueId }
     }
   } }

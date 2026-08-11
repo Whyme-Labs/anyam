@@ -114,6 +114,17 @@ export type CloudflareWorkerTargetAdapterConfig = {
    */
   previewUrlForVersion: (versionId: string) => string;
   healthUrl: string | ((input: { target: WorkerTarget; deploymentId?: string; providerVersionId: string }) => string);
+  /**
+   * Some provider routes are reachable only after the deployment response has
+   * returned. This policy is deliberately opt-in and status-specific: it is
+   * a readiness observation, not a replacement for a real production health
+   * check. The caller must provide the measurement-backed tripwire.
+   */
+  healthRetry?: {
+    maxAttempts: number;
+    delayMs: number;
+    retryStatuses: readonly number[];
+  };
   fetch?: typeof fetch;
   now?: () => string;
   healthHeaders?: Readonly<Record<string, string>>;
@@ -332,6 +343,17 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     required(config.accountId, "accountId");
     required(config.scriptName, "scriptName");
     if (typeof config.previewUrlForVersion !== "function") throw new Error("previewUrlForVersion is required");
+    if (config.healthRetry) {
+      if (!Number.isInteger(config.healthRetry.maxAttempts) || config.healthRetry.maxAttempts < 1) {
+        throw new Error(`healthRetry.maxAttempts must be a positive integer; received ${config.healthRetry.maxAttempts}`);
+      }
+      if (!Number.isFinite(config.healthRetry.delayMs) || config.healthRetry.delayMs < 0) {
+        throw new Error(`healthRetry.delayMs must be a non-negative finite number; received ${config.healthRetry.delayMs}`);
+      }
+      if (config.healthRetry.retryStatuses.length === 0) {
+        throw new Error("healthRetry.retryStatuses must contain at least one HTTP status");
+      }
+    }
     this.now = config.now ?? (() => new Date().toISOString());
     this.fetcher = config.fetch ?? fetch;
     this.contractDigest = config.contractDigest ?? digest({
@@ -417,11 +439,14 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     const healthUrl = typeof this.config.healthUrl === "string"
       ? this.config.healthUrl
       : this.config.healthUrl({ target: input.target, ...(input.deploymentId ? { deploymentId: input.deploymentId } : {}), providerVersionId: version.id });
-    const response = await this.fetchHealth(healthUrl);
+    const response = await this.fetchHealth(healthUrl, this.config.healthRetry);
     if (isFailure(response)) return response;
     const state: HealthObservation["state"] = response.status >= 200 && response.status < 300 ? "healthy" : "unhealthy";
     const operationId = `health:${version.id}:${digest({ status: response.status, bodyDigest: response.bodyDigest })}`;
-    const receipt = `provider=cloudflare-workers; operation=health; providerOperationId=${operationId}; providerVersionId=${version.id}; deploymentId=${input.deploymentId ?? "not-provided"}; url=${healthUrl}; httpStatus=${response.status}; bodyDigest=${response.bodyDigest}; releaseDigest=${input.release.releaseDigest}; credentialMaterialStored=false`;
+    const retryReceipt = this.config.healthRetry
+      ? `; healthAttempts=${response.attempts}; healthRetryMaxAttempts=${this.config.healthRetry.maxAttempts}; healthRetryDelayMs=${this.config.healthRetry.delayMs}; healthRetryStatuses=${this.config.healthRetry.retryStatuses.join(",")}`
+      : "; healthAttempts=1";
+    const receipt = `provider=cloudflare-workers; operation=health; providerOperationId=${operationId}; providerVersionId=${version.id}; deploymentId=${input.deploymentId ?? "not-provided"}; url=${healthUrl}; httpStatus=${response.status}; bodyDigest=${response.bodyDigest}; releaseDigest=${input.release.releaseDigest}${retryReceipt}; credentialMaterialStored=false`;
     return {
       status: "succeeded",
       value: {
@@ -559,14 +584,21 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     return version;
   }
 
-  private async fetchHealth(url: string): Promise<{ status: number; bodyDigest: string } | DeliveryAdapterFailure> {
-    try {
-      const response = await this.fetcher(url, { method: "GET", ...(this.config.healthHeaders ? { headers: this.config.healthHeaders } : {}) });
-      const body = new Uint8Array(await response.arrayBuffer());
-      return { status: response.status, bodyDigest: sha256(body) };
-    } catch (error) {
-      return failure({ operation: "health", code: "health.transport", message: `Cloudflare Worker health request failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "inspect the named preview or deployed Worker endpoint and retry health without changing the Release", receipt: `url=${url}; providerOperation=health-request; credentialMaterialStored=false` });
+  private async fetchHealth(url: string, retry?: CloudflareWorkerTargetAdapterConfig["healthRetry"]): Promise<{ status: number; bodyDigest: string; attempts: number } | DeliveryAdapterFailure> {
+    const maxAttempts = retry?.maxAttempts ?? 1;
+    const retryStatuses = new Set(retry?.retryStatuses ?? []);
+    for (let attempts = 1; attempts <= maxAttempts; attempts += 1) {
+      try {
+        const response = await this.fetcher(url, { method: "GET", ...(this.config.healthHeaders ? { headers: this.config.healthHeaders } : {}) });
+        const body = new Uint8Array(await response.arrayBuffer());
+        const observation = { status: response.status, bodyDigest: sha256(body), attempts };
+        if (attempts === maxAttempts || !retryStatuses.has(response.status)) return observation;
+        if (retry?.delayMs) await new Promise<void>((resolve) => setTimeout(resolve, retry.delayMs));
+      } catch (error) {
+        return failure({ operation: "health", code: "health.transport", message: `Cloudflare Worker health request failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "inspect the named preview or deployed Worker endpoint and retry health without changing the Release", receipt: `url=${url}; providerOperation=health-request; credentialMaterialStored=false` });
+      }
     }
+    throw new Error("health retry loop exhausted without an observation");
   }
 }
 

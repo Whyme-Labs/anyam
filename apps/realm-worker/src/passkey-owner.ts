@@ -14,13 +14,14 @@ import type {
   AnyamRealmOAuthAuthorizationDecision,
   AnyamRealmOAuthEnv,
 } from "./oauth-provider.ts";
+import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "./coordinator-protocol.ts";
+import { toOAuthSubject } from "../../../src/identity/oauth-subject.ts";
 
 export const ANYAM_PASSKEY_OWNER_PROTOCOL = "anyam.passkey-owner/v1" as const;
 export const ANYAM_PASSKEY_CHALLENGE_TTL_SECONDS = 300;
 export const ANYAM_OWNER_SESSION_TTL_SECONDS = 8 * 60 * 60;
 export const ANYAM_PASSKEY_SIZING_RECEIPT = "challengeTtl=300s; sessionTtl=28800s; sizing=qualification-tripwire; remeasure-before-production" as const;
 
-const CHALLENGE_PREFIX = "anyam:passkey:challenge:";
 const SESSION_PREFIX = "anyam:passkey:session:";
 const OWNER_BOOTSTRAP_HEADER = "x-anyam-owner-bootstrap-token";
 const COOKIE_NAME = "anyam_owner_session";
@@ -83,13 +84,13 @@ function configuredRelyingPartyId(env: AnyamRealmOAuthEnv, request: Request): st
   return env.ANYAM_REALM_RP_ID?.trim() || new URL(request.url).hostname;
 }
 
-async function realmCoordinatorRequest(env: AnyamRealmOAuthEnv, path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+export async function requestAnyamRealmCoordinator(env: AnyamRealmOAuthEnv, path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
   const binding = env.REALM_COORDINATOR as unknown as DurableObjectNamespace | undefined;
   if (!binding || typeof binding.idFromName !== "function") throw new Error("realm_coordinator_unavailable");
   const stub = binding.get(binding.idFromName(realmId(env)));
   const response = await stub.fetch(new Request(`https://anyam-realm-coordinator${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE },
     body: JSON.stringify(body),
   }));
   const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
@@ -101,6 +102,28 @@ async function realmCoordinatorRequest(env: AnyamRealmOAuthEnv, path: string, bo
     throw new Error(`realm_coordinator_${code}; message=${message}; recoveryAction=${recoveryAction}; ${receipt}`);
   }
   return payload;
+}
+
+const realmCoordinatorRequest = requestAnyamRealmCoordinator;
+
+async function issuePasskeyChallenge(env: AnyamRealmOAuthEnv, input: { challengeId: string; ceremony: "registration" | "authentication"; challenge: string; userId?: string; displayName?: string }): Promise<void> {
+  const expiresAt = new Date(Date.now() + ANYAM_PASSKEY_CHALLENGE_TTL_SECONDS * 1000).toISOString();
+  await realmCoordinatorRequest(env, "/identity/passkey-challenge/issue", {
+    challengeId: input.challengeId,
+    ceremony: input.ceremony,
+    challenge: input.challenge,
+    realmId: realmId(env),
+    ...(input.userId ? { userId: input.userId } : {}),
+    ...(input.displayName ? { displayName: input.displayName } : {}),
+    expiresAt,
+  });
+}
+
+async function consumePasskeyChallenge(env: AnyamRealmOAuthEnv, challengeId: string, ceremony: "registration" | "authentication"): Promise<PasskeyChallenge> {
+  const result = await realmCoordinatorRequest(env, "/identity/passkey-challenge/consume", { challengeId, ceremony });
+  const value = result.challenge;
+  if (value === null || typeof value !== "object" || Array.isArray(value) || (value as Record<string, unknown>).ceremony !== ceremony || typeof (value as Record<string, unknown>).challenge !== "string" || typeof (value as Record<string, unknown>).realmId !== "string") throw new Error("realm_coordinator_challenge_malformed");
+  return value as PasskeyChallenge;
 }
 
 function randomId(prefix: string): string {
@@ -448,6 +471,12 @@ async function readSession(request: Request, env: AnyamRealmOAuthEnv): Promise<O
   return session;
 }
 
+/** Returns the durable kernel-session identifier; the opaque host cookie never crosses the OAuth boundary. */
+export async function anyamRealmOwnerSessionId(request: Request, env: AnyamRealmOAuthEnv): Promise<string | undefined> {
+  const session = await readSession(request, env);
+  return session && session.realmId === realmId(env) ? session.kernelSessionId : undefined;
+}
+
 async function ownerKernelSession(request: Request, env: AnyamRealmOAuthEnv): Promise<{ session: OwnerSession; kernelSession: Record<string, unknown> } | Response> {
   const session = await readSession(request, env);
   if (!session || session.realmId !== realmId(env) || !session.kernelSessionId) return json({ code: "owner_authentication_required", recoveryAction: "Complete passkey authentication before requesting a qualification agent or credential operation.", receipt: "ownerSession=missing-or-invalid; kernelSession=missing" }, 401);
@@ -528,7 +557,7 @@ async function registrationOptions(request: Request, env: AnyamRealmOAuthEnv): P
   });
   const challengeId = randomId("registration");
   const challenge: PasskeyChallenge = { ceremony: "registration", challenge: options.challenge, realmId: realmId(env), userId, displayName, createdAt: new Date().toISOString() };
-  await env.OAUTH_KV.put(`${CHALLENGE_PREFIX}${challengeId}`, JSON.stringify(challenge), { expirationTtl: ANYAM_PASSKEY_CHALLENGE_TTL_SECONDS });
+  await issuePasskeyChallenge(env, { challengeId, ceremony: "registration", challenge: options.challenge, userId, displayName });
   return json({ protocol: ANYAM_PASSKEY_OWNER_PROTOCOL, status: "challenge-issued", ceremony: "registration", challengeId, options, receipt: `${ANYAM_PASSKEY_SIZING_RECEIPT}; owner=not-created; proof=browser-passkey-required` });
 }
 
@@ -542,8 +571,15 @@ async function registrationVerify(request: Request, env: AnyamRealmOAuthEnv): Pr
     return json({ code: "invalid_request", recoveryAction: "Send challengeId and the browser RegistrationResponseJSON.", receipt: "registrationVerify=json-object-required" }, 422);
   }
   const challengeId = requiredString(body.challengeId, "challengeId");
-  const challenge = await env.OAUTH_KV.get(`${CHALLENGE_PREFIX}${challengeId}`, "json") as PasskeyChallenge | null;
-  if (!challenge || challenge.ceremony !== "registration" || challenge.realmId !== realmId(env) || !challenge.userId || !challenge.displayName) return json({ code: "passkey_challenge_expired", recoveryAction: "Start a fresh owner registration ceremony.", receipt: "registrationChallenge=missing-or-invalid; owner=not-created" }, 410);
+  let challenge: PasskeyChallenge;
+  try {
+    challenge = await consumePasskeyChallenge(env, challengeId, "registration");
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_challenge_expired";
+    if (detail.includes("challenge_expired") || detail.includes("challenge_malformed")) return json({ code: "passkey_challenge_expired", recoveryAction: "Start a fresh owner registration ceremony; the prior challenge was consumed or expired.", receipt: "registrationChallenge=missing-or-invalid; one-time-consumption=serialized; owner=not-created" }, 410);
+    throw error;
+  }
+  if (challenge.realmId !== realmId(env) || !challenge.userId || !challenge.displayName) return json({ code: "passkey_challenge_expired", recoveryAction: "Start a fresh owner registration ceremony.", receipt: "registrationChallenge=realm-or-payload-invalid; owner=not-created" }, 410);
   if (await owner(env, challenge.realmId)) return json({ code: "owner_already_enrolled", recoveryAction: "Authenticate the existing Realm owner instead of registering another first owner.", receipt: "owner=already-enrolled; registration=not-applied" }, 409);
   try {
     const verification = await verifyRegistrationResponse({
@@ -568,13 +604,13 @@ async function registrationVerify(request: Request, env: AnyamRealmOAuthEnv): Pr
       if (detail.startsWith("realm_coordinator_")) return json({ code: "realm_identity_enrollment_failed", recoveryAction: "Retry the owner claim after checking the durable Realm coordinator; the passkey was verified but no host session was issued.", receipt: `webauthn=verified; kernelMembership=not-confirmed; ${detail}` }, 503);
       throw error;
     }
+    if (kernel.status === "owner-already-enrolled") return json({ code: "owner_already_enrolled", recoveryAction: "Authenticate the existing Realm owner instead of registering another first owner.", receipt: "owner=already-enrolled; ownerUniqueness=serialized; registration=not-applied" }, 409);
     const principalId = typeof kernel.principalId === "string" ? kernel.principalId : challenge.userId;
     const createdAt = new Date().toISOString();
     await env.ANYAM_METADATA_DB.batch([
       env.ANYAM_METADATA_DB.prepare("INSERT INTO anyam_realm_owners (realm_id, user_id, display_name, credential_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)").bind(challenge.realmId, principalId, challenge.displayName, credential.id, createdAt),
       env.ANYAM_METADATA_DB.prepare("INSERT INTO anyam_realm_passkeys (credential_id, realm_id, user_id, display_name, public_key, counter, transports, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)").bind(credential.id, challenge.realmId, principalId, challenge.displayName, base64UrlEncode(credential.publicKey), credential.counter, JSON.stringify([]), createdAt),
     ]);
-    await env.OAUTH_KV.delete(`${CHALLENGE_PREFIX}${challengeId}`);
     return json({ protocol: ANYAM_PASSKEY_OWNER_PROTOCOL, status: "owner-enrolled", realmId: challenge.realmId, userId: principalId, displayName: challenge.displayName, credentialId: credential.id, nextAction: "Authenticate at /owner/login before requesting OAuth authorization.", receipt: `${ANYAM_PASSKEY_SIZING_RECEIPT}; webauthn=verified; userVerification=true; ownerRecord=created; kernelMembership=verified; session=not-issued; credentialMaterialStored=false` });
   } catch {
     return json({ code: "passkey_registration_failed", recoveryAction: "Start a fresh owner registration ceremony and retry; no owner session was issued.", receipt: "webauthn=verification-error; owner=not-created" }, 422);
@@ -593,7 +629,7 @@ async function authenticationOptions(request: Request, env: AnyamRealmOAuthEnv):
   });
   const challengeId = randomId("authentication");
   const challenge: PasskeyChallenge = { ceremony: "authentication", challenge: options.challenge, realmId: realmId(env), createdAt: new Date().toISOString() };
-  await env.OAUTH_KV.put(`${CHALLENGE_PREFIX}${challengeId}`, JSON.stringify(challenge), { expirationTtl: ANYAM_PASSKEY_CHALLENGE_TTL_SECONDS });
+  await issuePasskeyChallenge(env, { challengeId, ceremony: "authentication", challenge: options.challenge });
   return json({ protocol: ANYAM_PASSKEY_OWNER_PROTOCOL, status: "challenge-issued", ceremony: "authentication", challengeId, options, receipt: `${ANYAM_PASSKEY_SIZING_RECEIPT}; owner=present; proof=browser-passkey-required` });
 }
 
@@ -606,8 +642,15 @@ async function authenticationVerify(request: Request, env: AnyamRealmOAuthEnv): 
     return json({ code: "invalid_request", recoveryAction: "Send challengeId and the browser AuthenticationResponseJSON.", receipt: "authenticationVerify=json-object-required" }, 422);
   }
   const challengeId = requiredString(body.challengeId, "challengeId");
-  const challenge = await env.OAUTH_KV.get(`${CHALLENGE_PREFIX}${challengeId}`, "json") as PasskeyChallenge | null;
-  if (!challenge || challenge.ceremony !== "authentication" || challenge.realmId !== realmId(env)) return json({ code: "passkey_challenge_expired", recoveryAction: "Start a fresh owner authentication ceremony.", receipt: "authenticationChallenge=missing-or-invalid; session=not-created" }, 410);
+  let challenge: PasskeyChallenge;
+  try {
+    challenge = await consumePasskeyChallenge(env, challengeId, "authentication");
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_challenge_expired";
+    if (detail.includes("challenge_expired") || detail.includes("challenge_malformed")) return json({ code: "passkey_challenge_expired", recoveryAction: "Start a fresh owner authentication ceremony; the prior challenge was consumed or expired.", receipt: "authenticationChallenge=missing-or-invalid; one-time-consumption=serialized; session=not-created" }, 410);
+    throw error;
+  }
+  if (challenge.realmId !== realmId(env)) return json({ code: "passkey_challenge_expired", recoveryAction: "Start a fresh owner authentication ceremony.", receipt: "authenticationChallenge=realm-mismatch; session=not-created" }, 410);
   const response = body.response as AuthenticationResponseJSON;
   const credentialRow = await env.ANYAM_METADATA_DB.prepare("SELECT credential_id, realm_id, user_id, display_name, public_key, counter, transports FROM anyam_realm_passkeys WHERE realm_id = ?1 AND credential_id = ?2").bind(challenge.realmId, response?.id).first<PasskeyRow>();
   if (!credentialRow) return json({ code: "passkey_unknown", recoveryAction: "Use a passkey enrolled in this Realm or complete owner enrollment.", receipt: "credential=not-found; session=not-created" }, 403);
@@ -616,13 +659,18 @@ async function authenticationVerify(request: Request, env: AnyamRealmOAuthEnv): 
     const verification = await verifyAuthenticationResponse({ response, expectedChallenge: challenge.challenge, expectedOrigin: new URL(request.url).origin, expectedRPID: configuredRelyingPartyId(env, request), credential, requireUserVerification: true });
     if (!verification.verified) return json({ code: "passkey_authentication_rejected", recoveryAction: "Retry with a passkey that completes user verification on the customer Realm origin.", receipt: "webauthn=verified-false; session=not-created" }, 403);
     if (verification.authenticationInfo.newCounter < credentialRow.counter) return json({ code: "passkey_counter_regression", recoveryAction: "Revoke this credential and enroll a fresh passkey after checking for authenticator cloning.", receipt: `counterRegression=true; stored=${credentialRow.counter}; presented=${verification.authenticationInfo.newCounter}; session=not-created` }, 403);
+    if (verification.authenticationInfo.newCounter > credentialRow.counter) {
+      const counterUpdate = await env.ANYAM_METADATA_DB.prepare("UPDATE anyam_realm_passkeys SET counter = ?1 WHERE realm_id = ?2 AND credential_id = ?3 AND counter = ?4").bind(verification.authenticationInfo.newCounter, credentialRow.realm_id, credentialRow.credential_id, credentialRow.counter).run();
+      const changes = typeof counterUpdate.meta?.changes === "number" ? counterUpdate.meta.changes : 0;
+      if (changes !== 1) return json({ code: "passkey_counter_replay", recoveryAction: "Start a fresh authentication ceremony; another request advanced this credential counter first.", receipt: `counterUpdate=conditional; expected=1; changed=${changes}; session=not-created` }, 409);
+    }
     let kernel: Record<string, unknown>;
     try {
       kernel = await realmCoordinatorRequest(env, "/identity/passkey-auth", {
         credentialId: credentialRow.credential_id,
         relyingPartyId: configuredRelyingPartyId(env, request),
         challenge: challenge.challenge,
-        verified: true,
+        signCount: verification.authenticationInfo.newCounter,
         clientId: "client:anyam-web",
       });
     } catch (error) {
@@ -634,8 +682,6 @@ async function authenticationVerify(request: Request, env: AnyamRealmOAuthEnv): 
     if (!kernelSession || typeof kernelSession.id !== "string" || typeof kernelSession.actorId !== "string" || typeof kernelSession.expiresAt !== "string" || kernelSession.principalId !== credentialRow.user_id) {
       return json({ code: "realm_identity_session_invalid", recoveryAction: "Inspect the durable Realm coordinator response and retry authentication; no host session was issued.", receipt: "kernelMembership=verified; kernelSession=malformed; session=not-created" }, 503);
     }
-    await env.ANYAM_METADATA_DB.prepare("UPDATE anyam_realm_passkeys SET counter = ?1 WHERE credential_id = ?2").bind(verification.authenticationInfo.newCounter, credentialRow.credential_id).run();
-    await env.OAUTH_KV.delete(`${CHALLENGE_PREFIX}${challengeId}`);
     const session = await issueSession(env, { realmId: credentialRow.realm_id, userId: credentialRow.user_id, displayName: credentialRow.display_name, credentialId: credentialRow.credential_id, kernelSessionId: kernelSession.id, actorId: kernelSession.actorId, expiresAt: kernelSession.expiresAt });
     return json({ protocol: ANYAM_PASSKEY_OWNER_PROTOCOL, status: "authenticated", realmId: credentialRow.realm_id, userId: credentialRow.user_id, displayName: credentialRow.display_name, credentialId: credentialRow.credential_id, kernelSessionId: kernelSession.id, receipt: `${ANYAM_PASSKEY_SIZING_RECEIPT}; webauthn=verified; userVerification=true; ownerRecord=verified; kernelMembership=verified; session=issued; hostSession=opaque` }, 200, { "set-cookie": session.cookie });
   } catch {
@@ -650,12 +696,66 @@ export const anyamPasskeyOwnerAuthorization: AnyamRealmOAuthAuthorizationAdapter
     const kernel = await realmCoordinatorRequest(env, "/identity/session/validate", { sessionId: session.kernelSessionId });
     const kernelSession = kernel.session as Record<string, unknown> | undefined;
     if (!kernelSession || kernelSession.id !== session.kernelSessionId || kernelSession.actorId !== session.actorId || kernelSession.principalId !== session.userId) return { status: "blocked", code: "owner_kernel_session_mismatch", recoveryAction: "Re-authenticate through /owner/login after inspecting the Realm coordinator session chain.", receipt: "kernelSession=identity-mismatch; oauthGrant=not-created" };
-    return { status: "authorized", userId: session.userId, displayName: session.displayName, realmId: session.realmId, scopes: ["project.read", "source.read", "change.write", "run.invoke"], authorizationReceipt: `ownerAuth=passkey; ownerRecord=verified; policy=qualification-owner-default; kernelMembership=verified; kernelSession=${session.kernelSessionId}; session=${session.sessionId}; credential=${session.credentialId}` };
+    return { status: "authorized", userId: session.userId, displayName: session.displayName, realmId: session.realmId, sessionId: session.kernelSessionId, scopes: ["project.read", "source.read", "change.write", "run.invoke"], authorizationReceipt: `ownerAuth=passkey; ownerRecord=verified; policy=qualification-owner-default; kernelMembership=verified; kernelSession=${session.kernelSessionId}; session=${session.sessionId}; credential=${session.credentialId}` };
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
     return { status: "blocked", code: "owner_kernel_session_invalid", recoveryAction: "Re-authenticate through /owner/login and retry after checking the Realm coordinator.", receipt: `kernelSession=invalid; oauthGrant=not-created; detail=${detail}` };
   }
 };
+
+async function listOAuthGrants(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
+  const ownerState = await ownerKernelSession(request, env);
+  if (ownerState instanceof Response) return ownerState;
+  try {
+    const result = await realmCoordinatorRequest(env, "/identity/oauth-grants/list", { sessionId: ownerState.session.kernelSessionId });
+    return json({
+      protocol: ANYAM_PASSKEY_OWNER_PROTOCOL,
+      status: "oauth-grants-listed",
+      grants: Array.isArray(result.grants) ? result.grants : [],
+      receipt: `${typeof result.receipt === "string" ? result.receipt : "oauthGrant=list"}; ownerSession=validated; providerGrantTokens=not-returned`,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    return json({ code: "oauth_grant_list_failed", recoveryAction: "Retry after checking the durable Realm coordinator; no grant authority was changed.", receipt: `oauthGrant=list-failed; detail=${detail}` }, 503);
+  }
+}
+
+async function revokeOAuthGrant(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
+  const ownerState = await ownerKernelSession(request, env);
+  if (ownerState instanceof Response) return ownerState;
+  let body: Record<string, unknown>;
+  try {
+    body = await readJson(request);
+  } catch {
+    return json({ code: "invalid_request", recoveryAction: "Send a JSON object containing grantId.", receipt: "oauthGrant=revoke; grantId=required" }, 422);
+  }
+  let grantId: string;
+  try {
+    grantId = requiredString(body.grantId, "grantId");
+  } catch {
+    return json({ code: "invalid_request", recoveryAction: "Send the local Anyam grantId returned by the authenticated grant list.", receipt: "oauthGrant=revoke; grantId=required" }, 422);
+  }
+  let authorization: Record<string, unknown>;
+  try {
+    authorization = await realmCoordinatorRequest(env, "/identity/oauth-grant/revoke", { sessionId: ownerState.session.kernelSessionId, grantId });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    return json({ code: "oauth_grant_revoke_not_authorized", recoveryAction: "List grants through the authenticated Realm session and revoke only one owned grant.", receipt: `oauthGrant=owner-check-failed; detail=${detail}` }, 403);
+  }
+  const grant = authorization.grant as Record<string, unknown> | undefined;
+  if (!grant || typeof grant.providerGrantId !== "string" || typeof grant.principalId !== "string") return json({ code: "oauth_grant_record_invalid", recoveryAction: "Inspect the coordinator grant record and retry only after its provider mapping is repaired.", receipt: "oauthGrant=provider-mapping-missing; providerRevocation=not-started" }, 503);
+  if (grant.status === "revoked") return json({ protocol: ANYAM_PASSKEY_OWNER_PROTOCOL, status: "oauth-grant-already-revoked", grantId, receipt: "oauthGrant=already-revoked; providerRevocation=previously-confirmed" });
+  const provider = env.OAUTH_PROVIDER;
+  if (!provider) return json({ code: "oauth_provider_unavailable", recoveryAction: "Configure the provider helper before revoking an OAuth grant.", receipt: "oauthGrant=provider-revocation-not-started" }, 503);
+  try {
+    await provider.revokeGrant(grant.providerGrantId, toOAuthSubject(ownerState.session.userId));
+    const marked = await realmCoordinatorRequest(env, "/identity/oauth-grant/mark-revoked", { sessionId: ownerState.session.kernelSessionId, grantId });
+    return json({ protocol: ANYAM_PASSKEY_OWNER_PROTOCOL, status: "oauth-grant-revoked", grant: marked.grant ?? grant, receipt: `${typeof marked.receipt === "string" ? marked.receipt : "oauthGrant=revoked"}; providerRevocation=confirmed; ownerSession=validated` });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "provider_revoke_failed";
+    return json({ code: "oauth_grant_revoke_failed", recoveryAction: "Retry the same grantId; the local record remains active until provider revocation is confirmed.", receipt: `oauthGrant=provider-revocation-failed; providerGrant=${grant.providerGrantId}; detail=${detail}` }, 503);
+  }
+}
 
 export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamRealmOAuthEnv): Promise<Response | undefined> {
   const url = new URL(request.url);
@@ -672,6 +772,8 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
         registrationVerify: "/api/owner/passkey/register/verify",
         authenticationOptions: "/api/owner/passkey/auth/options",
         authenticationVerify: "/api/owner/passkey/auth/verify",
+        oauthGrants: "/api/owner/oauth/grants",
+        oauthGrantRevoke: "/api/owner/oauth/grants/revoke",
         qualificationDelegate: "/api/owner/qualification/delegate",
         qualificationCredentials: "/api/owner/qualification/credentials",
         qualificationRevoke: "/api/owner/qualification/revoke",
@@ -692,6 +794,8 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
     if (url.pathname === "/api/owner/passkey/auth/options" && request.method === "POST") return await authenticationOptions(request, env);
     if (url.pathname === "/api/owner/passkey/auth/verify" && request.method === "POST") return await authenticationVerify(request, env);
     if (url.pathname === "/api/owner/session/revoke" && request.method === "POST") return await revokeSession(request, env);
+    if (url.pathname === "/api/owner/oauth/grants" && request.method === "GET") return await listOAuthGrants(request, env);
+    if (url.pathname === "/api/owner/oauth/grants/revoke" && request.method === "POST") return await revokeOAuthGrant(request, env);
     if (url.pathname === "/api/owner/qualification/delegate" && request.method === "POST") return await qualificationRequest(request, env, "delegate");
     if (url.pathname === "/api/owner/qualification/credentials" && request.method === "POST") return await qualificationRequest(request, env, "credentials");
     if (url.pathname === "/api/owner/qualification/revoke" && request.method === "POST") return await qualificationRequest(request, env, "revoke");

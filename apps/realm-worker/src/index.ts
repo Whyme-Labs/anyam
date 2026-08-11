@@ -14,14 +14,19 @@ import {
   type CustomerProviderRecoveryBundle,
 } from "../../../src/cloudflare/customer-provider-operation.ts";
 import { CREDENTIAL_AUDIENCES, RealmIdentityError, RealmIdentityPolicy, type CredentialClass, type RealmRecoverySnapshot } from "../../../src/identity/realm.ts";
+import { oauthConsentBindingMatches } from "../../../src/identity/oauth-consent.ts";
 import { createAnyamRealmOAuthProvider, type AnyamRealmOAuthEnv } from "./oauth-provider.ts";
 import { handleAnyamRealmOwnerRequest } from "./passkey-owner.ts";
 import { createCloudflareCustomerProviderAdapters } from "./customer-provider-adapters.ts";
+import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "./coordinator-protocol.ts";
 
 export type Env = AnyamRealmOAuthEnv;
 
 const REALM_IDENTITY_SNAPSHOT_KEY = "anyam/realm-identity/snapshot/v1";
 const REALM_RECOVERY_STATUS_KEY = "anyam/realm-identity/recovery-status/v1";
+const REALM_PASSKEY_CHALLENGE_PREFIX = "anyam/realm-passkey-challenge/v1:";
+const REALM_OAUTH_CONSENT_PREFIX = "anyam/realm-oauth-consent/v1:";
+const REALM_OAUTH_GRANT_PREFIX = "anyam/realm-oauth-grant/v1:";
 const REALM_COORDINATOR_PROTOCOL = "anyam.realm-coordinator/v1" as const;
 const REALM_QUALIFICATION_PROJECT_ID = "project:realm-qualification";
 const REALM_QUALIFICATION_SOURCE_SPACE_ID = "source:realm-qualification";
@@ -36,6 +41,59 @@ const CUSTOMER_PROVIDER_SURFACES: readonly CustomerProviderSurface[] = ["d1", "r
 const CUSTOMER_PROVIDER_FAILURE_MODES: readonly CustomerProviderFailureMode[] = ["none", "provider-outage", "authorization-revoked", "timeout", "duplicate-delivery", "partial-mutation", "stale-callback"];
 
 type CoordinatorRequestBody = Record<string, unknown>;
+
+type StoredPasskeyChallenge = {
+  protocol: "anyam.realm-passkey-challenge/v1";
+  id: string;
+  ceremony: "registration" | "authentication";
+  challenge: string;
+  realmId: string;
+  userId?: string;
+  displayName?: string;
+  createdAt: string;
+  expiresAt: string;
+};
+
+type StoredOAuthAuthRequest = {
+  responseType: string;
+  clientId: string;
+  redirectUri: string;
+  scope: string[];
+  state: string;
+  codeChallenge?: string;
+  codeChallengeMethod?: string;
+  resource?: string | string[];
+  issuer?: string;
+};
+
+type StoredOAuthConsent = {
+  protocol: "anyam.oauth-consent/v1";
+  id: string;
+  csrfToken: string;
+  realmId: string;
+  principalId: string;
+  sessionId: string;
+  clientId: string;
+  clientName: string;
+  requestedScopes: string[];
+  allowedScopes: string[];
+  authRequest: StoredOAuthAuthRequest;
+  createdAt: string;
+  expiresAt: string;
+};
+
+type StoredOAuthGrant = {
+  protocol: "anyam.oauth-grant/v1";
+  id: string;
+  providerGrantId: string;
+  realmId: string;
+  principalId: string;
+  clientId: string;
+  scopes: string[];
+  status: "active" | "revoked";
+  createdAt: string;
+  revokedAt?: string;
+};
 
 function coordinatorJson(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
@@ -62,6 +120,53 @@ function coordinatorString(body: CoordinatorRequestBody, key: string): string {
 function coordinatorOptionalString(body: CoordinatorRequestBody, key: string, fallback: string): string {
   const value = body[key];
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
+}
+
+function coordinatorTimestamp(body: CoordinatorRequestBody, key: string): string {
+  const value = coordinatorString(body, key);
+  if (!Number.isFinite(Date.parse(value)) || Date.parse(value) <= Date.now()) throw new RealmIdentityError({ code: "coordinator.timestamp_invalid", message: `${key} must be a future ISO timestamp.`, recoveryAction: "create a fresh bounded ceremony or consent record with an expiry in the future", receipt: `${key}=future-iso-required` });
+  return value;
+}
+
+function coordinatorStringArray(body: CoordinatorRequestBody, key: string): string[] {
+  const value = body[key];
+  if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== "string" || item.trim().length === 0)) throw new RealmIdentityError({ code: "coordinator.array_invalid", message: `${key} must be a non-empty array of strings.`, recoveryAction: `provide a non-empty ${key} array and retry`, receipt: `${key}=string-array-required` });
+  return [...new Set(value.map((item) => (item as string).trim()))];
+}
+
+function coordinatorAuthRequest(value: unknown): StoredOAuthAuthRequest {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new RealmIdentityError({ code: "oauth.consent_request_invalid", message: "OAuth consent requires the parsed authorization request object.", recoveryAction: "start a fresh OAuth authorization request and do not reconstruct it in the browser", receipt: "oauthRequest=object-required" });
+  const request = value as Record<string, unknown>;
+  const responseType = typeof request.responseType === "string" ? request.responseType.trim() : "";
+  const clientId = typeof request.clientId === "string" ? request.clientId.trim() : "";
+  const redirectUri = typeof request.redirectUri === "string" ? request.redirectUri.trim() : "";
+  const state = typeof request.state === "string" ? request.state : "";
+  const scope = Array.isArray(request.scope) && request.scope.every((item) => typeof item === "string" && item.trim().length > 0) ? [...new Set(request.scope.map((item) => (item as string).trim()))] : [];
+  if (!responseType || !clientId || !redirectUri || scope.length === 0) throw new RealmIdentityError({ code: "oauth.consent_request_invalid", message: "The stored OAuth request is incomplete; no consent record was created.", recoveryAction: "restart the OAuth authorization-code request with a valid redirect URI and at least one scope", receipt: "oauthRequest=responseType,clientId,redirectUri,scope-required" });
+  const optionalString = (key: string): string | undefined => typeof request[key] === "string" && (request[key] as string).length > 0 ? request[key] as string : undefined;
+  const codeChallenge = optionalString("codeChallenge");
+  const codeChallengeMethod = optionalString("codeChallengeMethod");
+  const issuer = optionalString("issuer");
+  const resource = typeof request.resource === "string" ? request.resource : Array.isArray(request.resource) && request.resource.every((item) => typeof item === "string") ? [...request.resource] as string[] : undefined;
+  return {
+    responseType,
+    clientId,
+    redirectUri,
+    scope,
+    state,
+    ...(codeChallenge ? { codeChallenge } : {}),
+    ...(codeChallengeMethod ? { codeChallengeMethod } : {}),
+    ...(resource ? { resource } : {}),
+    ...(issuer ? { issuer } : {}),
+  };
+}
+
+function storageKey(prefix: string, id: string): string {
+  return `${prefix}${id}`;
+}
+
+function recordExpired(expiresAt: string): boolean {
+  return Date.parse(expiresAt) <= Date.now();
 }
 
 function providerSurface(body: CoordinatorRequestBody): CustomerProviderSurface {
@@ -285,8 +390,162 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         });
       }
       if (request.method !== "POST") return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, code: "method_not_allowed", recoveryAction: "use GET for identity status or POST for a bounded identity transition", receipt: "coordinator=method-not-allowed" }, 405);
+      if (request.headers.get(REALM_COORDINATOR_INTERNAL_HEADER) !== REALM_COORDINATOR_INTERNAL_VALUE) return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, code: "coordinator.internal_only", recoveryAction: "invoke the coordinator through the bound Realm Worker; direct mutation requests are not a public API", receipt: "coordinator=internal-binding-required; mutation=not-accepted" }, 403);
       const body = await coordinatorBody(request);
       const identity = this.requireIdentity();
+
+      if (url.pathname === "/identity/passkey-challenge/issue") {
+        return await this.ctx.blockConcurrencyWhile(async () => {
+          const id = coordinatorString(body, "challengeId");
+          const ceremony = coordinatorString(body, "ceremony");
+          if (ceremony !== "registration" && ceremony !== "authentication") throw new RealmIdentityError({ code: "passkey.challenge_ceremony_invalid", message: "Passkey challenge ceremony must be registration or authentication.", recoveryAction: "issue a fresh challenge for one supported WebAuthn ceremony", receipt: `ceremony=${ceremony}; challenge=not-created` });
+          const challenge = coordinatorString(body, "challenge");
+          const realmId = coordinatorString(body, "realmId");
+          if (realmId !== identity.realm.id) throw new RealmIdentityError({ code: "realm.id_mismatch", message: "The passkey challenge belongs to a different Realm.", recoveryAction: "issue the challenge through the coordinator bound to the current Realm", receipt: `configured=${identity.realm.id}; presented=${realmId}` });
+          const expiresAt = coordinatorTimestamp(body, "expiresAt");
+          const key = storageKey(REALM_PASSKEY_CHALLENGE_PREFIX, id);
+          const existing = await this.ctx.storage.get<StoredPasskeyChallenge>(key);
+          if (existing) throw new RealmIdentityError({ code: "passkey.challenge_exists", message: `Passkey challenge ${id} already exists; challenge identities are one-use.`, recoveryAction: "generate a new challenge identity and retry", receipt: `challenge=${id}; duplicate=true` });
+          const createdAt = new Date().toISOString();
+          const record: StoredPasskeyChallenge = {
+            protocol: "anyam.realm-passkey-challenge/v1",
+            id,
+            ceremony,
+            challenge,
+            realmId,
+            ...(typeof body.userId === "string" && body.userId.trim() ? { userId: body.userId.trim() } : {}),
+            ...(typeof body.displayName === "string" && body.displayName.trim() ? { displayName: body.displayName.trim() } : {}),
+            createdAt,
+            expiresAt,
+          };
+          await this.ctx.storage.put(key, record);
+          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "challenge-issued", challengeId: id, ceremony, expiresAt, receipt: "challenge=durable-object; one-time-consumption=serialized; credentialMaterialStored=false" });
+        });
+      }
+
+      if (url.pathname === "/identity/passkey-challenge/consume") {
+        return await this.ctx.blockConcurrencyWhile(async () => {
+          const id = coordinatorString(body, "challengeId");
+          const ceremony = coordinatorString(body, "ceremony");
+          const key = storageKey(REALM_PASSKEY_CHALLENGE_PREFIX, id);
+          const record = await this.ctx.storage.get<StoredPasskeyChallenge>(key);
+          if (!record || record.realmId !== identity.realm.id || record.ceremony !== ceremony || recordExpired(record.expiresAt)) {
+            if (record) await this.ctx.storage.delete(key);
+            throw new RealmIdentityError({ code: "passkey.challenge_expired", message: "The passkey challenge is missing, expired, or belongs to another ceremony.", recoveryAction: "start a fresh passkey ceremony; challenge consumption is one-use and serialized", receipt: `challenge=${id}; ceremony=${ceremony}; consumed=false` });
+          }
+          await this.ctx.storage.delete(key);
+          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "challenge-consumed", challenge: record, receipt: "challenge=consumed; one-time-consumption=serialized; replay=false" });
+        });
+      }
+
+      if (url.pathname === "/identity/oauth-consent/create") {
+        return await this.ctx.blockConcurrencyWhile(async () => {
+          const id = coordinatorString(body, "consentId");
+          const csrfToken = coordinatorString(body, "csrfToken");
+          const realmId = coordinatorString(body, "realmId");
+          const principalId = coordinatorString(body, "principalId");
+          const sessionId = coordinatorString(body, "sessionId");
+          const clientId = coordinatorString(body, "clientId");
+          const clientName = coordinatorOptionalString(body, "clientName", clientId);
+          const requestedScopes = coordinatorStringArray(body, "requestedScopes");
+          const allowedScopes = coordinatorStringArray(body, "allowedScopes");
+          const authRequest = coordinatorAuthRequest(body.authRequest);
+          if (realmId !== identity.realm.id || authRequest.clientId !== clientId || authRequest.scope.length !== requestedScopes.length || !authRequest.scope.every((scope) => requestedScopes.includes(scope)) || !allowedScopes.every((scope) => requestedScopes.includes(scope))) throw new RealmIdentityError({ code: "oauth.consent_scope_mismatch", message: "The OAuth consent record does not match the parsed request and cannot be created.", recoveryAction: "restart authorization and let the coordinator receive the exact parsed request", receipt: "oauthConsent=scope-or-client-mismatch; grant=not-created" });
+          const session = identity.validateSession(sessionId);
+          if (session.principalId !== principalId) throw new RealmIdentityError({ code: "oauth.consent_session_mismatch", message: "The OAuth consent session does not belong to the authenticated Principal.", recoveryAction: "authenticate the Realm owner again and start a fresh authorization request", receipt: "oauthConsent=principal-session-mismatch; grant=not-created" });
+          const expiresAt = coordinatorTimestamp(body, "expiresAt");
+          const key = storageKey(REALM_OAUTH_CONSENT_PREFIX, id);
+          if (await this.ctx.storage.get<StoredOAuthConsent>(key)) throw new RealmIdentityError({ code: "oauth.consent_exists", message: `OAuth consent record ${id} already exists; use a fresh authorization request.`, recoveryAction: "restart authorization to obtain a new CSRF-bound consent record", receipt: `consent=${id}; duplicate=true` });
+          const record: StoredOAuthConsent = { protocol: "anyam.oauth-consent/v1", id, csrfToken, realmId, principalId, sessionId, clientId, clientName, requestedScopes, allowedScopes, authRequest, createdAt: new Date().toISOString(), expiresAt };
+          await this.ctx.storage.put(key, record);
+          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "consent-created", consentId: id, clientId, clientName, requestedScopes, allowedScopes, expiresAt, receipt: "oauthConsent=durable-object; csrf=bound; one-time-consumption=serialized; grant=not-created" });
+        });
+      }
+
+      if (url.pathname === "/identity/oauth-consent/consume") {
+        return await this.ctx.blockConcurrencyWhile(async () => {
+          const id = coordinatorString(body, "consentId");
+          const csrfToken = coordinatorString(body, "csrfToken");
+          const sessionId = coordinatorString(body, "sessionId");
+          const session = identity.validateSession(sessionId);
+          const key = storageKey(REALM_OAUTH_CONSENT_PREFIX, id);
+          const record = await this.ctx.storage.get<StoredOAuthConsent>(key);
+          if (!record || !oauthConsentBindingMatches(record, { realmId: identity.realm.id, principalId: session.principalId, sessionId, csrfToken }) || recordExpired(record.expiresAt)) {
+            if (record && recordExpired(record.expiresAt)) await this.ctx.storage.delete(key);
+            throw new RealmIdentityError({ code: "oauth.consent_invalid", message: "The OAuth consent is expired, replayed, or not bound to the current authenticated session.", recoveryAction: "restart authorization and approve it through the displayed consent page", receipt: `consent=${id}; csrf=session-binding=failed; grant=not-created` });
+          }
+          await this.ctx.storage.delete(key);
+          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "consent-consumed", consent: record, receipt: "oauthConsent=consumed; csrf=bound; replay=false" });
+        });
+      }
+
+      if (url.pathname === "/identity/oauth-consent/inspect") {
+        const id = coordinatorString(body, "consentId");
+        const sessionId = coordinatorString(body, "sessionId");
+        const session = identity.validateSession(sessionId);
+        const key = storageKey(REALM_OAUTH_CONSENT_PREFIX, id);
+        const record = await this.ctx.storage.get<StoredOAuthConsent>(key);
+        if (!record || !oauthConsentBindingMatches(record, { realmId: identity.realm.id, principalId: session.principalId, sessionId }) || recordExpired(record.expiresAt)) {
+          if (record && recordExpired(record.expiresAt)) await this.ctx.storage.delete(key);
+          throw new RealmIdentityError({ code: "oauth.consent_invalid", message: "The OAuth consent is expired, missing, or not bound to the authenticated Principal and Session.", recoveryAction: "restart authorization and approve it through the displayed consent page", receipt: `consent=${id}; inspect=session-binding-failed; grant=not-created` });
+        }
+        return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "consent-inspected", consent: record, receipt: "oauthConsent=inspected; csrf=not-consumed; replay=false" });
+      }
+
+      if (url.pathname === "/identity/oauth-grant/record") {
+        return await this.ctx.blockConcurrencyWhile(async () => {
+          const sessionId = coordinatorString(body, "sessionId");
+          const session = identity.validateSession(sessionId);
+          const id = coordinatorString(body, "grantId");
+          const providerGrantId = coordinatorString(body, "providerGrantId");
+          const clientId = coordinatorString(body, "clientId");
+          const scopes = coordinatorStringArray(body, "scopes");
+          const key = storageKey(REALM_OAUTH_GRANT_PREFIX, id);
+          const existing = await this.ctx.storage.get<StoredOAuthGrant>(key);
+          const createdAt = new Date().toISOString();
+          const record: StoredOAuthGrant = { protocol: "anyam.oauth-grant/v1", id, providerGrantId, realmId: identity.realm.id, principalId: session.principalId, clientId, scopes, status: "active", createdAt };
+          if (existing) {
+            if (existing.providerGrantId !== providerGrantId || existing.principalId !== record.principalId || existing.clientId !== clientId || JSON.stringify(existing.scopes) !== JSON.stringify(scopes)) throw new RealmIdentityError({ code: "oauth.grant_conflict", message: `OAuth grant ${id} is already bound to different provider state.`, recoveryAction: "do not reuse a local grant identity; reconcile the provider grant before retrying", receipt: `grant=${id}; conflict=true; authority=unchanged` });
+            return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-recorded", grant: existing, receipt: "oauthGrant=idempotent; revocable=true" });
+          }
+          await this.ctx.storage.put(key, record);
+          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-recorded", grant: record, receipt: "oauthGrant=persisted; revocable=true; credentialMaterialStored=false" });
+        });
+      }
+
+      if (url.pathname === "/identity/oauth-grant/revoke") {
+        const sessionId = coordinatorString(body, "sessionId");
+        const session = identity.validateSession(sessionId);
+        const id = coordinatorString(body, "grantId");
+        const key = storageKey(REALM_OAUTH_GRANT_PREFIX, id);
+        const record = await this.ctx.storage.get<StoredOAuthGrant>(key);
+        if (!record || record.realmId !== identity.realm.id || record.principalId !== session.principalId) throw new RealmIdentityError({ code: "oauth.grant_not_found", message: "The requested OAuth grant is not owned by the authenticated Realm Principal.", recoveryAction: "list grants through the authenticated Realm session and revoke only one of those grants", receipt: `grant=${id}; owner=false; revocation=not-started` });
+        if (record.status === "revoked") return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-already-revoked", grant: record, receipt: "oauthGrant=already-revoked; providerRevocation=may-be-retried" });
+        return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-revocation-authorized", grant: record, receipt: "oauthGrant=owner-verified; providerRevocation=required" });
+      }
+
+      if (url.pathname === "/identity/oauth-grant/mark-revoked") {
+        return await this.ctx.blockConcurrencyWhile(async () => {
+          const sessionId = coordinatorString(body, "sessionId");
+          const session = identity.validateSession(sessionId);
+          const id = coordinatorString(body, "grantId");
+          const key = storageKey(REALM_OAUTH_GRANT_PREFIX, id);
+          const record = await this.ctx.storage.get<StoredOAuthGrant>(key);
+          if (!record || record.principalId !== session.principalId) throw new RealmIdentityError({ code: "oauth.grant_not_found", message: "The OAuth grant cannot be marked revoked by this Principal.", recoveryAction: "re-read the authenticated grant list and retry the same grant identity", receipt: `grant=${id}; mark-revoked=denied` });
+          if (record.status === "revoked") return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-already-revoked", grant: record, receipt: "oauthGrant=already-revoked; providerRevocation=confirmed" });
+          const revoked: StoredOAuthGrant = { ...record, status: "revoked", revokedAt: new Date().toISOString() };
+          await this.ctx.storage.put(key, revoked);
+          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-revoked", grant: revoked, receipt: "oauthGrant=revoked; providerRevocation=confirmed" });
+        });
+      }
+
+      if (url.pathname === "/identity/oauth-grants/list") {
+        const sessionId = coordinatorString(body, "sessionId");
+        const session = identity.validateSession(sessionId);
+        const entries = await this.ctx.storage.list<StoredOAuthGrant>({ prefix: REALM_OAUTH_GRANT_PREFIX });
+        const grants = [...entries.values()].filter((grant) => grant.realmId === identity.realm.id && grant.principalId === session.principalId);
+        return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grants-listed", grants, receipt: "oauthGrant=list; owner-session=validated; providerGrantTokens=not-returned" });
+      }
 
       if (url.pathname === "/identity/owner-enroll") {
         const principalId = coordinatorString(body, "principalId");
@@ -295,28 +554,37 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         const relyingPartyId = coordinatorString(body, "relyingPartyId");
         const current = identity.getRecoverySnapshot();
         if (relyingPartyId !== current.realm.relyingPartyId) throw new RealmIdentityError({ code: "realm.rp_id_mismatch", message: "The passkey relying-party ID does not match this Realm's configured authentication origin.", recoveryAction: `use the configured Realm origin ${current.realm.relyingPartyId} or update the customer-owned Realm configuration before beginning a new ceremony`, receipt: `configured=${current.realm.relyingPartyId}; presented=${relyingPartyId}` });
-        const existing = current.passkeys[credentialId];
-        if (existing) {
-          if (existing.relyingPartyId !== relyingPartyId || existing.principalId !== principalId) throw new RealmIdentityError({ code: "passkey.exists", message: "The passkey is already bound to a different Realm principal or relying party.", recoveryAction: "use the original owner enrollment or begin a deliberate Realm migration", receipt: "passkey idempotency mismatch" });
-          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "owner-already-enrolled", realmId: current.realm.id, principalId, credentialId, identity: identitySummary(identity), receipt: "kernelMembership=verified; ownerEnrollment=idempotent; credentialMaterialStored=false" });
-        }
-        return await this.transitionIdentity((next) => {
+        return await this.ctx.blockConcurrencyWhile(() => this.transitionIdentity((next) => {
+          const latest = next.getRecoverySnapshot();
+          const existingOwner = Object.values(latest.relationships).find((relationship) => relationship.status === "active" && relationship.role === "owner" && relationship.resource.realmId === latest.realm.id);
+          if (existingOwner) {
+            const existingOwnerPasskey = latest.passkeys[credentialId];
+            if (existingOwnerPasskey?.principalId === existingOwner.principalId && existingOwnerPasskey.relyingPartyId === relyingPartyId) return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "owner-already-enrolled", realmId: latest.realm.id, principalId: existingOwner.principalId, credentialId, identity: identitySummary(next), receipt: "kernelMembership=verified; ownerEnrollment=idempotent; ownerUniqueness=serialized; credentialMaterialStored=false" });
+            throw new RealmIdentityError({ code: "owner.exists", message: "This Realm already has an active owner; first-owner enrollment is unique.", recoveryAction: "authenticate the existing Realm owner or perform an explicit recovery/migration ceremony", receipt: `ownerPrincipal=${existingOwner.principalId}; ownerUniqueness=serialized; ownerEnrollment=not-applied` });
+          }
+          const existing = latest.passkeys[credentialId];
+          if (existing) {
+            if (existing.relyingPartyId !== relyingPartyId || existing.principalId !== principalId) throw new RealmIdentityError({ code: "passkey.exists", message: "The passkey is already bound to a different Realm principal or relying party.", recoveryAction: "use the original owner enrollment or begin a deliberate Realm migration", receipt: "passkey idempotency mismatch" });
+            return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "owner-already-enrolled", realmId: latest.realm.id, principalId, credentialId, identity: identitySummary(next), receipt: "kernelMembership=verified; ownerEnrollment=idempotent; credentialMaterialStored=false" });
+          }
           const principal = next.createPrincipal({ id: principalId, displayName });
           next.registerPasskey({ principalId: principal.id, credentialId, relyingPartyId });
-          next.addRelationship({ principalId: principal.id, kind: "organization-member", subjectId: principal.id, role: "owner", resource: { realmId: current.realm.id } });
-          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "owner-enrolled", realmId: current.realm.id, principalId: principal.id, credentialId, identity: identitySummary(next), receipt: "kernelMembership=verified; ownerEnrollment=durable; credentialMaterialStored=false" });
-        });
+          next.addRelationship({ principalId: principal.id, kind: "organization-member", subjectId: principal.id, role: "owner", resource: { realmId: latest.realm.id } });
+          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "owner-enrolled", realmId: latest.realm.id, principalId: principal.id, credentialId, identity: identitySummary(next), receipt: "kernelMembership=verified; ownerEnrollment=durable; ownerUniqueness=serialized; credentialMaterialStored=false" });
+        }));
       }
 
       if (url.pathname === "/identity/passkey-auth") {
         const credentialId = coordinatorString(body, "credentialId");
         const relyingPartyId = coordinatorString(body, "relyingPartyId");
         const challenge = coordinatorString(body, "challenge");
-        return await this.transitionIdentity((next) => {
-          const session = next.authenticatePasskey({ credentialId, relyingPartyId, challenge, verified: body.verified === true, clientId: typeof body.clientId === "string" ? body.clientId : "client:anyam-web" });
+        const signCount = body.signCount === undefined ? undefined : body.signCount;
+        if (signCount !== undefined && (typeof signCount !== "number" || !Number.isSafeInteger(signCount) || signCount < 0)) throw new RealmIdentityError({ code: "auth.passkey_counter_invalid", message: "The verified passkey counter must be a non-negative integer.", recoveryAction: "complete a fresh WebAuthn authentication ceremony", receipt: "passkeyCounter=non-negative-safe-integer-required" });
+        return await this.ctx.blockConcurrencyWhile(() => this.transitionIdentity((next) => {
+          const session = next.authenticatePasskey({ credentialId, relyingPartyId, challenge, verified: true, ...(signCount === undefined ? {} : { signCount }), clientId: typeof body.clientId === "string" ? body.clientId : "client:anyam-web" });
           this.recoveryStatus = "active";
-          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "session-issued", session, identity: identitySummary(next), receipt: "kernelMembership=verified; session=durable; authentication=passkey" });
-        });
+          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "session-issued", session, identity: identitySummary(next), receipt: "kernelMembership=verified; session=durable; authentication=passkey; verification=worker-boundary; callerVerifiedFlag=ignored" });
+        }));
       }
 
       if (url.pathname === "/identity/qualification/delegate") {
@@ -559,7 +827,7 @@ export class AnyamRealmWorkflow extends WorkflowEntrypoint<Env, Record<string, u
       if (!binding || typeof binding.idFromName !== "function" || !realmId || !installationId || !providerOperationId || !expectedStateDigest) throw new Error("workflow_provider_callback_authority_unavailable");
       const callbackResponse = await binding.get(binding.idFromName(realmId)).fetch(new Request("https://anyam-realm-coordinator/identity/qualification/provider-operation/callback/internal", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE },
         body: JSON.stringify({ protocol: CUSTOMER_PROVIDER_OPERATION_PROTOCOL, realmId, installationId, operationId, providerOperationId, expectedStateDigest, ...(outputDigest ? { outputDigest } : {}), receipt: `workflow=${event.instanceId}; callback=result-accepted; authority=coordinator` }),
       }));
       if (!callbackResponse.ok) throw new Error(`workflow_provider_callback_rejected:${callbackResponse.status}`);
@@ -610,7 +878,7 @@ async function reconcileCustomerProviderQueue(batch: MessageBatch<Record<string,
     const stub = binding.get(binding.idFromName(realmId));
     const response = await stub.fetch(new Request("https://anyam-realm-coordinator/identity/qualification/provider-operation/callback/internal", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE },
       body: JSON.stringify({
         protocol: CUSTOMER_PROVIDER_OPERATION_PROTOCOL,
         realmId,

@@ -1022,11 +1022,16 @@ export class RealmIdentityPolicy {
     return clone(identity);
   }
 
-  authenticatePasskey(input: { credentialId: string; relyingPartyId?: string; challenge: string; verified: boolean; clientId?: string }): RealmSession {
+  authenticatePasskey(input: { credentialId: string; relyingPartyId?: string; challenge: string; verified: boolean; signCount?: number; clientId?: string }): RealmSession {
     const credential = this.state.passkeys[input.credentialId];
     if (!credential || credential.status !== "active" || credential.relyingPartyId !== (input.relyingPartyId ?? this.state.realm.relyingPartyId)) throw new RealmIdentityError({ code: "auth.passkey_invalid", message: "Passkey authentication was not accepted by this Realm.", recoveryAction: "retry with a passkey enrolled for this Realm origin", receipt: "passkey credential and relying-party check" });
     if (!input.challenge || !input.verified) throw new RealmIdentityError({ code: "auth.passkey_unverified", message: "The passkey assertion was not verified; no session was created.", recoveryAction: "complete a fresh WebAuthn assertion through the Realm adapter", receipt: "verified WebAuthn assertion required" });
-    credential.signCount += 1;
+    if (input.signCount !== undefined) {
+      if (!Number.isSafeInteger(input.signCount) || input.signCount < credential.signCount) throw new RealmIdentityError({ code: "auth.passkey_counter_regression", message: "The verified passkey counter regressed inside the serialized Realm coordinator.", recoveryAction: "revoke the credential and enroll a fresh passkey after checking for authenticator cloning", receipt: `stored=${credential.signCount}; presented=${input.signCount}; counter=regression` });
+      credential.signCount = input.signCount;
+    } else {
+      credential.signCount += 1;
+    }
     return this.createHumanSession({ principalId: credential.principalId, clientId: input.clientId ?? "client:anyam-web", method: "passkey", strength: "passkey" });
   }
 
@@ -1038,7 +1043,7 @@ export class RealmIdentityPolicy {
     return this.createHumanSession({ principalId: identity.principalId, clientId: input.clientId ?? "client:anyam-web", method: "oidc", strength: "oidc" });
   }
 
-  authenticate(input: { method: "passkey"; credentialId: string; relyingPartyId?: string; challenge: string; verified: boolean; clientId?: string } | { method: "oidc"; issuer: string; subject: string; verified: boolean; clientId?: string }): RealmSession {
+  authenticate(input: { method: "passkey"; credentialId: string; relyingPartyId?: string; challenge: string; verified: boolean; signCount?: number; clientId?: string } | { method: "oidc"; issuer: string; subject: string; verified: boolean; clientId?: string }): RealmSession {
     return input.method === "passkey" ? this.authenticatePasskey(input) : this.authenticateOidc(input);
   }
 

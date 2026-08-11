@@ -109,6 +109,19 @@ test("authenticates through passkey and OIDC while retaining Realm-local identit
   assert.deepEqual(realm.validateSession(passkeySession.id), passkeySession);
 });
 
+test("accepts monotonic verified passkey counters and rejects regressions", () => {
+  const { realm, principal } = createRealm();
+  realm.registerPasskey({ principalId: principal.id, credentialId: "passkey:counter", signCount: 7 });
+  const first = realm.authenticatePasskey({ credentialId: "passkey:counter", challenge: "counter-1", verified: true, signCount: 8 });
+  assert.equal(first.method, "passkey");
+  assert.equal(realm.snapshot().passkeys["passkey:counter"]?.signCount, 8);
+  assert.throws(
+    () => realm.authenticatePasskey({ credentialId: "passkey:counter", challenge: "counter-2", verified: true, signCount: 7 }),
+    (error: unknown) => error instanceof RealmIdentityError && error.code === "auth.passkey_counter_regression",
+  );
+  assert.equal(realm.snapshot().passkeys["passkey:counter"]?.signCount, 8);
+});
+
 test("intersects role, Source Space policy, task grant, client/session state, and explicit denies", () => {
   const { realm, principal, passkeySession } = createRealm();
   const { task, grant } = taskAndGrant(realm, passkeySession);

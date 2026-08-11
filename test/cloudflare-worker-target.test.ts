@@ -108,7 +108,8 @@ class InMemoryCloudflareWorkerApi {
       return { status: 200, ok: true, result: version as T, errors: [], messages: [] };
     }
     if (request.method === "POST" && request.path.endsWith("/deployments")) {
-      const body = JSON.parse(String(request.body)) as { versions: readonly { version_id: string; percentage: number }[] };
+      const body = JSON.parse(String(request.body)) as { versions: readonly { version_id: string; percentage: number }[]; annotations?: Record<string, string> };
+      assert.equal(body.annotations && "workers/triggered_by" in body.annotations, false);
       const deployment: CloudflareWorkerDeployment = { id: `deployment:${++this.sequence}`, versions: body.versions };
       this.deployments.unshift(deployment);
       return { status: 200, ok: true, result: deployment as T, errors: [], messages: [] };

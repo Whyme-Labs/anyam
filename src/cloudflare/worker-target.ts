@@ -315,7 +315,7 @@ function deploymentBody(versionId: string, message: string): string {
   return JSON.stringify({
     strategy: "percentage",
     versions: [{ percentage: 100, version_id: versionId }],
-    annotations: { "workers/message": message, "workers/triggered_by": "anyam-promotion" },
+    annotations: { "workers/message": message },
   });
 }
 

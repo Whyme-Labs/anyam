@@ -42,6 +42,13 @@ function workerModule(failing: boolean): Uint8Array {
   return new TextEncoder().encode(source);
 }
 
+function workerModuleUpload(bytes: Uint8Array): FormData {
+  const form = new FormData();
+  form.append("metadata", JSON.stringify({ main_module: "worker.js" }));
+  form.append("worker.js", new Blob([Buffer.from(bytes)], { type: "application/javascript" }), "worker.js");
+  return form;
+}
+
 function release(input: { id: string; fileName: string; bytes: Uint8Array }): { immutable: ImmutableRelease; artifact: Artifact } {
   const artifact: Artifact = {
     protocol: CONTRACT_VERSIONS.artifact,
@@ -108,11 +115,10 @@ async function run(): Promise<Record<string, unknown>> {
     method: "PUT",
     path: `/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}`,
     token,
-    // The direct script-upload endpoint rejects the module-specific MIME type
-    // even though the Version Upload API accepts it inside multipart data.
-    // Use the provider's plain JavaScript content type for this seed request.
-    headers: { "content-type": "application/javascript" },
-    body: Buffer.from(healthyBytes),
+    // The direct script-upload endpoint needs multipart metadata to distinguish
+    // an ES module from service-worker syntax. The provider otherwise parses
+    // the raw body as a service worker and rejects the `export` declaration.
+    body: workerModuleUpload(healthyBytes),
   });
   if (!seeded.ok) throw new Error(`seed Worker upload returned HTTP ${seeded.status}: ${responseErrors(seeded)}`);
 

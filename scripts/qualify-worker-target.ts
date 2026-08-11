@@ -6,6 +6,7 @@ import {
   createMapWorkerArtifactReader,
   type CloudflareWorkerApiResponse,
   type CloudflareWorkerCredential,
+  type CloudflareWorkerHealthResponseValidator,
 } from "../src/cloudflare/worker-target.ts";
 import {
   CONTRACT_VERSIONS,
@@ -53,10 +54,31 @@ function responseErrors<T>(response: CloudflareWorkerApiResponse<T>): string {
   return [...response.errors, ...response.messages].map((error) => `${error.code ?? "unknown"}:${error.message}`).join(" | ") || `http-${response.status}`;
 }
 
-function workerModule(failing: boolean): Uint8Array {
-  const source = `export default { fetch(request) { const preview = new URL(request.url).searchParams.get("anyam_preview") === "1"; const failing = ${failing ? "true" : "false"}; const status = failing && !preview ? 503 : 200; return new Response(JSON.stringify({ status: status === 200 ? "healthy" : "unhealthy" }), { status, headers: { "content-type": "application/json" } }); } };\n`;
+function workerModule(failing: boolean, releaseId: string): Uint8Array {
+  const source = `export default { fetch(request) { const preview = new URL(request.url).searchParams.get("anyam_preview") === "1"; const failing = ${failing ? "true" : "false"}; const status = failing && !preview ? 503 : 200; return new Response(JSON.stringify({ status: status === 200 ? "healthy" : "unhealthy", releaseId: ${JSON.stringify(releaseId)} }), { status, headers: { "content-type": "application/json" } }); } };\n`;
   return new TextEncoder().encode(source);
 }
+
+const healthResponseValidator: CloudflareWorkerHealthResponseValidator = ({ status, body, release }) => {
+  let parsed: { status?: unknown; releaseId?: unknown };
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(body)) as typeof parsed;
+  } catch {
+    return { state: "unknown", receipt: `healthValidation=invalid-json; expectedRelease=${release.release.id}` };
+  }
+  const observedRelease = typeof parsed.releaseId === "string" ? parsed.releaseId : "missing";
+  const observedStatus = typeof parsed.status === "string" ? parsed.status : "missing";
+  const statusHealthy = status >= 200 && status < 300;
+  const releaseMatches = observedRelease === release.release.id;
+  const bodyHealthy = observedStatus === "healthy";
+  if (statusHealthy && releaseMatches && bodyHealthy) {
+    return { state: "healthy", receipt: `healthValidation=release-bound; expectedRelease=${release.release.id}; observedRelease=${observedRelease}; bodyStatus=${observedStatus}` };
+  }
+  return {
+    state: "unhealthy",
+    receipt: `healthValidation=${releaseMatches ? "status-mismatch" : "release-mismatch"}; expectedRelease=${release.release.id}; observedRelease=${observedRelease}; bodyStatus=${observedStatus}`,
+  };
+};
 
 function workerModuleUpload(bytes: Uint8Array): FormData {
   const form = new FormData();
@@ -137,8 +159,8 @@ async function run(): Promise<Record<string, unknown>> {
     retryStatuses: [404, 503] as const,
   };
   const transport = createCloudflareWorkerRestTransport({});
-  const healthyBytes = workerModule(false);
-  const failingBytes = workerModule(true);
+  const healthyBytes = workerModule(false, "release:healthy");
+  const failingBytes = workerModule(true, "release:failing");
   const seeded = await transport.request<unknown>({
     method: "PUT",
     path: `/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}`,
@@ -171,6 +193,7 @@ async function run(): Promise<Record<string, unknown>> {
     artifactReader: createMapWorkerArtifactReader(contents),
     previewUrlForVersion: (versionId) => `https://${versionId.slice(0, 8)}-${scriptName}.${previewSubdomain}.workers.dev/?anyam_preview=1`,
     healthUrl,
+    healthResponseValidator,
     routeReadinessRetry,
     rollbackRouteReadinessRetry,
   });

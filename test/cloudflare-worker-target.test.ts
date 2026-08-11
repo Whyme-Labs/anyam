@@ -166,6 +166,15 @@ test("Cloudflare Worker Target uploads digest-bound versions, promotes after pre
       },
       previewUrlForVersion: (versionId) => `https://${versionId}.preview.workers.dev`,
       healthUrl: "https://anyam-target-test.workers.dev/health",
+      healthResponseValidator: ({ status, body, release }) => {
+        const parsed = JSON.parse(new TextDecoder().decode(body)) as { status?: string; releaseId?: string };
+        const releaseMatches = parsed.releaseId === release.release.id;
+        const healthy = status >= 200 && status < 300 && releaseMatches && parsed.status === "healthy";
+        return {
+          state: healthy ? "healthy" : "unhealthy",
+          receipt: `healthValidation=${healthy ? "release-bound" : releaseMatches ? "status-mismatch" : "release-mismatch"}; expectedRelease=${release.release.id}; observedRelease=${parsed.releaseId ?? "missing"}`,
+        };
+      },
       routeReadinessRetry: { maxAttempts: 2, delayMs: 0, retryStatuses: [404] },
       rollbackRouteReadinessRetry: { maxAttempts: 2, delayMs: 0, retryStatuses: [404, 503] },
       fetch: async (url) => {
@@ -173,10 +182,13 @@ test("Cloudflare Worker Target uploads digest-bound versions, promotes after pre
         if (requestedUrl.includes("preview")) {
           previewRequestCount += 1;
           if (previewRequestCount % 2 === 1) return new Response("preview-route-not-ready", { status: 404 });
-          return new Response("preview-ok", { status: 200 });
+          const releaseId = previewRequestCount <= 2 ? first.release.release.id : second.release.release.id;
+          return new Response(JSON.stringify({ status: "healthy", releaseId }), { status: 200, headers: { "content-type": "application/json" } });
         }
-        const status = productionHealthStates[productionHealthIndex++] ?? 200;
-        return new Response(status === 200 ? "healthy" : "broken", { status });
+        const responseIndex = productionHealthIndex++;
+        const status = productionHealthStates[responseIndex] ?? 200;
+        const releaseId = responseIndex === 0 || responseIndex === 1 || responseIndex === 4 ? first.release.release.id : second.release.release.id;
+        return new Response(JSON.stringify({ status: status === 200 ? "healthy" : "unhealthy", releaseId }), { status, headers: { "content-type": "application/json" } });
       },
       now: () => "2026-08-11T00:00:00.000Z",
     });
@@ -201,6 +213,7 @@ test("Cloudflare Worker Target uploads digest-bound versions, promotes after pre
     const firstPromotion = await coordinator.promote({ releaseId: first.release.release.id, idempotencyKey: "ship:cloudflare:first", actor });
     assert.equal(firstPromotion.state, "healthy");
     assert.match(firstPromotion.health?.receipt ?? "", /routeReadinessAttempts=2/);
+    assert.match(firstPromotion.health?.receipt ?? "", /healthValidation=release-bound|healthValidation=status-mismatch/);
     assert.match(firstPromotion.health?.receipt ?? "", /phase=candidate/);
     assert.equal(previewRequestCount, 2);
     const secondPromotion = await coordinator.promote({ releaseId: second.release.release.id, idempotencyKey: "ship:cloudflare:second", actor });
@@ -220,6 +233,63 @@ test("Cloudflare Worker Target uploads digest-bound versions, promotes after pre
     assert.ok(api.requests.every((request) => request.token === "provider-secret-never-in-receipt"));
   } finally {
     await Promise.all([rm(first.directory, { recursive: true, force: true }), rm(second.directory, { recursive: true, force: true })]);
+  }
+});
+
+test("Cloudflare Worker Target rejects a stale 2xx health response from a previous Release", async () => {
+  const candidate = await release("stale-health");
+  try {
+    const api = new InMemoryCloudflareWorkerApi();
+    const artifact = candidate.release.artifacts[0];
+    assert.ok(artifact?.outputPath);
+    const bytes = new Uint8Array(await readFile(join(candidate.directory, artifact.outputPath)));
+    const target = createWorkerTarget({
+      target: {
+        protocol: CONTRACT_VERSIONS.target,
+        id: "target:stale-health",
+        projectId: "project:worker",
+        name: "Stale health test",
+        adapterId: "cloudflare.worker",
+        acceptedArtifactTypes: ["worker.bundle"],
+        requiredEvidenceKeys: [],
+        state: "configured",
+      },
+      capabilities: { preview: true, promote: true, healthCheck: true, rollback: true },
+    });
+    const adapter = new CloudflareWorkerTargetAdapter({
+      accountId: "account:stale-health",
+      scriptName: "anyam-stale-health",
+      transport: api,
+      credentialBroker: {
+        async issue(input) {
+          return { token: "stale-health-token", credentialId: `credential:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, receipt: "credential=brokered; token=redacted" };
+        },
+      },
+      artifactReader: { async read() { return bytes; } },
+      previewUrlForVersion: (versionId) => `https://${versionId}.preview.workers.dev`,
+      healthUrl: "https://anyam-stale-health.workers.dev/health",
+      healthResponseValidator: ({ status, body, release }) => {
+        const parsed = JSON.parse(new TextDecoder().decode(body)) as { status?: string; releaseId?: string };
+        const releaseMatches = parsed.releaseId === release.release.id;
+        return {
+          state: status >= 200 && status < 300 && releaseMatches && parsed.status === "healthy" ? "healthy" : "unhealthy",
+          receipt: `healthValidation=${releaseMatches ? "status-mismatch" : "release-mismatch"}; expectedRelease=${release.release.id}; observedRelease=${parsed.releaseId ?? "missing"}`,
+        };
+      },
+      fetch: async () => new Response(JSON.stringify({ status: "healthy", releaseId: "release:previous" }), { status: 200, headers: { "content-type": "application/json" } }),
+    });
+    const deployment = await adapter.apply({ promotionId: "promotion:stale-health", attempt: 1, release: candidate.release, target });
+    assert.equal(deployment.status, "succeeded");
+    if (deployment.status === "succeeded") {
+      const health = await adapter.health({ promotionId: "promotion:stale-health", attempt: 1, release: candidate.release, target, deploymentId: deployment.value.deploymentId });
+      assert.equal(health.status, "succeeded");
+      if (health.status === "succeeded") {
+        assert.equal(health.value.state, "unhealthy");
+        assert.match(health.value.receipt, /healthValidation=release-mismatch/);
+      }
+    }
+  } finally {
+    await rm(candidate.directory, { recursive: true, force: true });
   }
 });
 

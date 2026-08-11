@@ -44,6 +44,13 @@ The adapter uses the Workers Versions and Deployments APIs:
 - A configured preview URL and health URL are observed through `fetch`; URL
   construction remains outside the kernel because the customer owns the
   `workers.dev` subdomain or custom domain.
+- A caller may provide a health-response validator that binds the response to
+  the expected Release. This is required for a trustworthy production health
+  contract when the provider route can still serve a previous version: a
+  stale HTTP 2xx must be recorded as unhealthy rather than treated as proof
+  that the candidate is serving. Without a validator, the adapter retains a
+  compatibility `provider-status-only` receipt and does not claim release
+  identity.
 - A caller may provide an explicit, measured route-readiness policy for
   preview and production observations. The qualification uses a 404-only
   retry tripwire because the live provider can return a route-not-ready 404

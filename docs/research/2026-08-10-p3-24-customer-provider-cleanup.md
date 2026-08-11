@@ -1,9 +1,9 @@
 # Anyam P3-24 customer-provider cleanup receipt
 
-Date: 2026-08-10  
-Issue: [Qualify customer-owned provider failure and recovery matrix](https://github.com/wms2537/anyam/issues/129)  
-Implementation dependency: [Implement bounded customer-provider operation fixture for failure and recovery qualification](https://github.com/wms2537/anyam/issues/136)  
-Map: [Plan Anyam beyond bounded P3 public beta](https://github.com/wms2537/anyam/issues/118)  
+Date: 2026-08-10
+Issue: [Qualify customer-owned provider failure and recovery matrix](https://github.com/Whyme-Labs/anyam/issues/129)
+Implementation dependency: [Implement bounded customer-provider operation fixture for failure and recovery qualification](https://github.com/Whyme-Labs/anyam/issues/136)
+Map: [Plan Anyam beyond bounded P3 public beta](https://github.com/Whyme-Labs/anyam/issues/118)
 Protocol: `anyam.p3-24-customer-provider-cleanup/v1`  
 Status: complete
 

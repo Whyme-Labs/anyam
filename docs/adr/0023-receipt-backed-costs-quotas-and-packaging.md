@@ -10,7 +10,7 @@ container seconds, model calls, log events, and Evidence objects. Conversely,
 provider invoices are delayed, may be restricted, and do not provide the
 real-time control needed to stop a runaway agent or public mirror.
 
-Issue [#31](https://github.com/wms2537/anyam/issues/31) asked for measurable
+Issue [#31](https://github.com/Whyme-Labs/anyam/issues/31) asked for measurable
 cost drivers, abuse surfaces, quotas, budget controls, metering boundaries,
 and packaging hypotheses across all Hosting Modes. The primary-source research
 is recorded in

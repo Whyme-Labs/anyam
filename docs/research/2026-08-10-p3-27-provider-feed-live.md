@@ -1,10 +1,10 @@
 # Anyam P3-27 provider-feed live observation
 
 Date: 2026-08-10
-Wayfinder ticket: [Qualify live provider-feed reconciliation and per-surface reliability](https://github.com/wms2537/anyam/issues/127)
+Wayfinder ticket: [Qualify live provider-feed reconciliation and per-surface reliability](https://github.com/Whyme-Labs/anyam/issues/127)
 Protocol: `anyam.provider-feed-observation/v1`
 Observation status: `succeeded`
-Cleanup status: pending under [Qualify customer-owned provider failure and recovery matrix](https://github.com/wms2537/anyam/issues/129)
+Cleanup status: pending under [Qualify customer-owned provider failure and recovery matrix](https://github.com/Whyme-Labs/anyam/issues/129)
 
 ## Decision
 
@@ -150,7 +150,7 @@ The list matches the healthy and failure/recovery operation identities in [the P
 - Provider facts are not Anyam limits. No platform-wide SLO, quota, cost, capacity, retention, or universal provider-support claim is made.
 - Network-byte observation was not available in the related P3-24 qualification; no network budget is inferred.
 - Credentials are not printed, persisted in this receipt, or included in `output.log`.
-- The named Cloudflare resources and disposable provider effects remain live. Exact operation cleanup and absence verification are intentionally owned by [Qualify customer-owned provider failure and recovery matrix](https://github.com/wms2537/anyam/issues/129); this ticket is not a cleanup receipt.
+- The named Cloudflare resources and disposable provider effects remain live. Exact operation cleanup and absence verification are intentionally owned by [Qualify customer-owned provider failure and recovery matrix](https://github.com/Whyme-Labs/anyam/issues/129); this ticket is not a cleanup receipt.
 
 ## Verification
 

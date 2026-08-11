@@ -11,15 +11,15 @@ change after a Run. The system must preserve what was observed, make stale
 Evidence visible, explain policy blockers, and avoid disclosing restricted
 inputs through public results or caches.
 
-Issue [#21](https://github.com/wms2537/anyam/issues/21) asked for schemas and
+Issue [#21](https://github.com/Whyme-Labs/anyam/issues/21) asked for schemas and
 validity rules for Runs, findings, Evidence, attestations, policy decisions,
 approvals, and provenance, including freshness and invalidation, effect
 declarations, semantic diffs, sealed-result disclosure, SLSA/SBOM integration,
 human and agent provenance, policy explanation, and cached-Evidence reuse.
 
 The lifecycle was exercised in the throwaway prototype on branch
-[`codex/prototype-evidence-lifecycle`](https://github.com/wms2537/anyam/tree/codex/prototype-evidence-lifecycle),
-commit `8019817`. The owner accepted its behavior in ticket [#21](https://github.com/wms2537/anyam/issues/21).
+[`codex/prototype-evidence-lifecycle`](https://github.com/Whyme-Labs/anyam/tree/codex/prototype-evidence-lifecycle),
+commit `8019817`. The owner accepted its behavior in ticket [#21](https://github.com/Whyme-Labs/anyam/issues/21).
 
 ## Decision
 

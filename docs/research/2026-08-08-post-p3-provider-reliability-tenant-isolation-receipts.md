@@ -1,9 +1,9 @@
 # Post-P3 provider-feed, reliability, and tenant-isolation receipts
 
-Date: 2026-08-08  
-Issue: [Measure provider feed, reliability, and tenant-isolation receipts](https://github.com/wms2537/anyam/issues/120)  
-Map: [Plan Anyam beyond bounded P3 public beta](https://github.com/wms2537/anyam/issues/118)  
-Protocol: `anyam.post-p3-provider-reliability-tenant-isolation/v1`  
+Date: 2026-08-08
+Issue: [Measure provider feed, reliability, and tenant-isolation receipts](https://github.com/Whyme-Labs/anyam/issues/120)
+Map: [Plan Anyam beyond bounded P3 public beta](https://github.com/Whyme-Labs/anyam/issues/118)
+Protocol: `anyam.post-p3-provider-reliability-tenant-isolation/v1`
 Status: bounded receipt and measurement contract qualified; live provider-feed, shared-hosted reliability, and live cross-Realm isolation remain unqualified
 
 ## Question

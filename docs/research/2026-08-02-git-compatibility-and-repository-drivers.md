@@ -2,7 +2,7 @@
 
 **Research date:** 2 August 2026
 
-**Decision status:** Accepted planning baseline for [Define Git compatibility and repository drivers](https://github.com/wms2537/anyam/issues/10). Cloudflare Artifacts remains conditional until the qualification gates in this document pass.
+**Decision status:** Accepted planning baseline for [Define Git compatibility and repository drivers](https://github.com/Whyme-Labs/anyam/issues/10). Cloudflare Artifacts remains conditional until the qualification gates in this document pass.
 
 **Evidence policy:** Current official Git, Git LFS, Cloudflare, and GitHub documentation. Documentation establishes contracts and reported capability, not production readiness; every provider still has to pass Anyam's conformance suite.
 
@@ -690,7 +690,7 @@ No driver receives production status from documentation alone.
 
 ## 15. Consequences for later tickets
 
-- [Design and qualify the Cloudflare architecture](https://github.com/wms2537/anyam/issues/23) must assign Landing journals, Project Revision CAS, Git projection reconciliation, gateway streaming, staging repositories, and the Native Cloudflare driver contingency to concrete Cloudflare primitives.
+- [Design and qualify the Cloudflare architecture](https://github.com/Whyme-Labs/anyam/issues/23) must assign Landing journals, Project Revision CAS, Git projection reconciliation, gateway streaming, staging repositories, and the Native Cloudflare driver contingency to concrete Cloudflare primitives.
 - The identity and authorization decision must define Anyam Git credentials, gateway audience checks, provider-token exchange, and Landing service identity separately from MCP and runner tokens.
 - The Project Export decision must include the repository and LFS packages defined here and automated cross-driver restore evidence.
 - The CLI decision must make `git-credential-anyam` and exact Project View Revision checkout the normal local experience while preserving ordinary `git clone`, `fetch`, and `push` per Source Space.

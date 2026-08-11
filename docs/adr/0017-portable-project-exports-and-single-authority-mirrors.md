@@ -11,7 +11,7 @@ mirroring to work in both directions, but a second canonical authority would
 make hybrid Source Spaces, Evidence, Releases, and policy impossible to reason
 about.
 
-Issue [#25](https://github.com/wms2537/anyam/issues/25) asked for complete
+Issue [#25](https://github.com/Whyme-Labs/anyam/issues/25) asked for complete
 Project export/import, repository mirrors, public contribution loops,
 disaster-recovery bundles, portable metadata and attestations, backend
 migration, cross-Realm contribution, and the line between early mirroring and

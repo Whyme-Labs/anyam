@@ -783,7 +783,7 @@ governance, extensions, positioning, and staged delivery.
 The remaining work is implementation handoff, not a missing product decision:
 translate the requirements and journeys into ordered tickets, assign owner
 profiles, and define the first approved risk spikes. That is the scope of
-[Create the implementation handoff](https://github.com/wms2537/anyam/issues/41).
+[Create the implementation handoff](https://github.com/Whyme-Labs/anyam/issues/41).
 
 If handoff discovers a contradiction, it must create a new Wayfinder ticket and
 return the blueprint to this audit rather than silently editing a normative

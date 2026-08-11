@@ -1,7 +1,7 @@
 # P3-15 live public Git Gateway and abuse-control qualification
 
 Date: 2026-08-08
-Issue: [Qualify live public gateway and abuse controls for P3](https://github.com/wms2537/anyam/issues/107)
+Issue: [Qualify live public gateway and abuse controls for P3](https://github.com/Whyme-Labs/anyam/issues/107)
 Protocol: `anyam.public-gateway/v1`
 Status: passed with bounded provider residuals
 
@@ -46,7 +46,7 @@ git diff --check — clean before commit
 
 ```text
 Cloudflare account: 1e0170aaabc90ecf5f466128d1f0466a
-Upstream fixture: https://github.com/wms2537/anyam-p3-public-gateway-20260808
+Upstream fixture: https://github.com/Whyme-Labs/anyam-p3-public-gateway-20260808
 Fixture commit: 9bf2d11859ec07fa8787f1014c3d5ae3eb7dd057
 Fixture archive digest: sha256:17cc549fe6ced2792b70fd3bbfd435a19153ec671832a6499c6244d7e290c188
 Initial Worker: anyam-p3-public-gateway-20260808

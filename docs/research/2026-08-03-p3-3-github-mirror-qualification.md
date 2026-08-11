@@ -1,7 +1,7 @@
 # P3 public beta: GitHub mirror qualification receipt
 
 **Date:** 3 August 2026
-**Ticket:** [#83](https://github.com/wms2537/anyam/issues/83)
+**Ticket:** [#83](https://github.com/Whyme-Labs/anyam/issues/83)
 **Status:** passed with bounded recovery qualification
 
 ## Decision
@@ -33,7 +33,7 @@ approval or canonical Landing.
 The qualification used a disposable public GitHub repository created for this
 run:
 
-- Repository: [wms2537/anyam-p3-mirror-20260803](https://github.com/wms2537/anyam-p3-mirror-20260803)
+- Repository: [Whyme-Labs/anyam-p3-mirror-20260803](https://github.com/Whyme-Labs/anyam-p3-mirror-20260803)
 - Transport: git+ssh for Git push; gh api for authenticated GitHub API observation
 - Credential material: not read by the harness
 - Anyam project: project:video-player
@@ -62,14 +62,14 @@ inboundState=lagging; inboundChanges=1; origin=github
 duplicateInboundChangeInputs=1
 postLandingState=healthy; pendingInbound=0; remoteHead=180d5642a14ecabd595229bea819c7bca1c44662
 privateRefsForwarded=false; mappedRefs=refs/heads/main
-providerReceipt=github-api; repository=wms2537/anyam-p3-mirror-20260803; generations=seed->outbound->inbound
+providerReceipt=github-api; repository=Whyme-Labs/anyam-p3-mirror-20260803; generations=seed->outbound->inbound
 ```
 
 The inbound Change carried the exact mirror origin:
 
 ```text
 source=github
-remoteRepository=wms2537/anyam-p3-mirror-20260803
+remoteRepository=Whyme-Labs/anyam-p3-mirror-20260803
 remoteRef=refs/heads/main
 remoteCommit=180d5642a14ecabd595229bea819c7bca1c44662
 disclosure=public

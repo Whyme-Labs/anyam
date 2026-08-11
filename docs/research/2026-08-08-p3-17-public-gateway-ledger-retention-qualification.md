@@ -1,7 +1,7 @@
 # P3-17 Public Gateway ledger retention and recovery qualification
 
 Date: 2026-08-08
-Issue: [Qualify bounded Public Gateway ledger retention and recovery export](https://github.com/wms2537/anyam/issues/110)
+Issue: [Qualify bounded Public Gateway ledger retention and recovery export](https://github.com/Whyme-Labs/anyam/issues/110)
 Protocol: `anyam.public-gateway-ledger/v1`
 Status: passed with an exact replay-index residual
 

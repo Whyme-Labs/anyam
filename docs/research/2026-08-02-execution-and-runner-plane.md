@@ -1,7 +1,7 @@
 # Anyam execution and runner plane
 
 **Research snapshot:** 2 August 2026
-**Ticket:** [#20](https://github.com/wms2537/anyam/issues/20)
+**Ticket:** [#20](https://github.com/Whyme-Labs/anyam/issues/20)
 **Status:** Decision-grade platform research. Cloudflare product facts below are receipts from current first-party documentation; Anyam protocol decisions are recommendations and still require implementation qualification.
 
 ## Executive decision

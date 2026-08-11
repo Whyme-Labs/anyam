@@ -11,12 +11,12 @@ in a customer account, or import an existing GitHub/GitLab/generic-Git
 repository. The same Project should then reach an agent workspace, preview,
 Release, and first Promotion with recoverable failures.
 
-Issue [#27](https://github.com/wms2537/anyam/issues/27) asked for the safe
+Issue [#27](https://github.com/Whyme-Labs/anyam/issues/27) asked for the safe
 bootstrap state machine, local CLI setup, Realm owner recovery, provider
 imports, Source Space decomposition, agent connection, first preview,
 Promotion, and damaging recovery cases. The logic prototype is preserved on
-[`codex/prototype-bootstrap-onboarding`](https://github.com/wms2537/anyam/tree/codex/prototype-bootstrap-onboarding)
-at commit [`18387d5`](https://github.com/wms2537/anyam/commit/18387d5).
+[`codex/prototype-bootstrap-onboarding`](https://github.com/Whyme-Labs/anyam/tree/codex/prototype-bootstrap-onboarding)
+at commit [`18387d5`](https://github.com/Whyme-Labs/anyam/commit/18387d5).
 
 ## Decision
 
@@ -318,7 +318,7 @@ when a material input changes.
 
 ## References
 
-- [Bootstrap prototype](https://github.com/wms2537/anyam/tree/codex/prototype-bootstrap-onboarding)
+- [Bootstrap prototype](https://github.com/Whyme-Labs/anyam/tree/codex/prototype-bootstrap-onboarding)
 - [Hosting, tenancy, and ownership](0018-hosting-tenancy-and-ownership-modes.md)
 - [Portable Project Exports](0017-portable-project-exports-and-single-authority-mirrors.md)
 - [CLI, Git, MCP, and agent connection](0009-cli-git-mcp-agent-connection.md)

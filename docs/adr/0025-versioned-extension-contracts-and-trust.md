@@ -9,11 +9,11 @@ code or requiring a marketplace. Repository Drivers, Actions, Verifiers,
 Target adapters, project experiences, IDE integrations, coding-agent skills,
 and installed Apps have different lifecycle and authority needs.
 
-Issue [#33](https://github.com/wms2537/anyam/issues/33) asked for safe,
+Issue [#33](https://github.com/Whyme-Labs/anyam/issues/33) asked for safe,
 versioned contracts covering discovery, packaging, compatibility, sandboxing,
 trust, distribution, and deprecation. The logic prototype is preserved on
-[`codex/prototype-extension-ecosystem`](https://github.com/wms2537/anyam/tree/codex/prototype-extension-ecosystem)
-at commit [`db65f3f`](https://github.com/wms2537/anyam/commit/db65f3f).
+[`codex/prototype-extension-ecosystem`](https://github.com/Whyme-Labs/anyam/tree/codex/prototype-extension-ecosystem)
+at commit [`db65f3f`](https://github.com/Whyme-Labs/anyam/commit/db65f3f).
 
 The prototype showed that the useful boundary is not a marketplace listing. It
 is a signed/digested manifest, a Project-scoped installation, a narrower

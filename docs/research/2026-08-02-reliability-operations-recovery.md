@@ -1,7 +1,7 @@
 # Anyam reliability, operations, and recovery
 
-**Research snapshot:** 2 August 2026  
-**Ticket:** [#30 Plan reliability, operations, and recovery](https://github.com/wms2537/anyam/issues/30)  
+**Research snapshot:** 2 August 2026
+**Ticket:** [#30 Plan reliability, operations, and recovery](https://github.com/Whyme-Labs/anyam/issues/30)
 **Status:** Decision-grade research. Cloudflare and standards facts below are receipts from primary documentation available at the snapshot date. Anyam SLO targets, retention periods, quotas, and RPO/RTO values are not chosen here: they require workload measurements, an explicit product decision, and a tested recovery receipt.
 
 ## Executive decision

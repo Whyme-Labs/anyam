@@ -1,8 +1,8 @@
 # P3-26 live customer-owned replay archive qualification
 
 Date: 2026-08-10
-Issue: [Qualify live customer-owned replay archival beyond the Public Gateway tombstone tripwire](https://github.com/wms2537/anyam/issues/139)
-Map: [Plan Anyam customer-owned replay archival beyond the local tripwire](https://github.com/wms2537/anyam/issues/138)
+Issue: [Qualify live customer-owned replay archival beyond the Public Gateway tombstone tripwire](https://github.com/Whyme-Labs/anyam/issues/139)
+Map: [Plan Anyam customer-owned replay archival beyond the local tripwire](https://github.com/Whyme-Labs/anyam/issues/138)
 Protocol: `anyam.public-gateway-replay-archive/v1`
 Status: passed for the bounded disposable Cloudflare adapter; workload and retention sizing remain open
 

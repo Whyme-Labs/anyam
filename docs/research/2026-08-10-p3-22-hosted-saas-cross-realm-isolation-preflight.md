@@ -1,9 +1,9 @@
 # Shared Hosted SaaS cross-Realm isolation preflight
 
-Date: 2026-08-10  
-Issue: [Qualify shared Hosted SaaS cross-Realm isolation](https://github.com/wms2537/anyam/issues/128)  
-Map: [Plan Anyam beyond bounded P3 public beta](https://github.com/wms2537/anyam/issues/118)  
-Protocol: `anyam.p3-22-hosted-saas-cross-realm-isolation-preflight/v1`  
+Date: 2026-08-10
+Issue: [Qualify shared Hosted SaaS cross-Realm isolation](https://github.com/Whyme-Labs/anyam/issues/128)
+Map: [Plan Anyam beyond bounded P3 public beta](https://github.com/Whyme-Labs/anyam/issues/118)
+Protocol: `anyam.p3-22-hosted-saas-cross-realm-isolation-preflight/v1`
 Status: preflight blocked; no live Hosted SaaS qualification claimed
 
 ## Question

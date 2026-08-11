@@ -1,7 +1,7 @@
 # Anyam portability, mirroring, and federation research
 
-**Research snapshot:** 2 August 2026  
-**Ticket:** [#25](https://github.com/wms2537/anyam/issues/25)  
+**Research snapshot:** 2 August 2026
+**Ticket:** [#25](https://github.com/Whyme-Labs/anyam/issues/25)
 **Status:** portability and integration baseline; federation remains a later qualification
 
 ## Executive findings

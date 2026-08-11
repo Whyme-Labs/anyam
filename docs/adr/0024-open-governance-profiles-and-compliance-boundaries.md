@@ -11,7 +11,7 @@ support, and compliance requirements. Those requirements must not create a
 proprietary enterprise edition or turn an unverified provider guarantee into a
 legal promise.
 
-Issue [#32](https://github.com/wms2537/anyam/issues/32) asked which enterprise
+Issue [#32](https://github.com/Whyme-Labs/anyam/issues/32) asked which enterprise
 controls belong in the kernel, which are adapters, how they should be
 administered, and how to sequence them without promising certifications before
 their prerequisites are known.

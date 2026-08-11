@@ -10,11 +10,11 @@ product has to serve solo developers, teams, public contributors, and multiple
 coding agents while preserving Source Space disclosure, recovery, portability,
 security, accessibility, performance, and operations.
 
-Issue [#29](https://github.com/wms2537/anyam/issues/29) asked for the executable
+Issue [#29](https://github.com/Whyme-Labs/anyam/issues/29) asked for the executable
 contract that proves those journeys and permits a Stage to advance. The logic
 prototype is preserved on
-[`codex/prototype-acceptance-validation`](https://github.com/wms2537/anyam/tree/codex/prototype-acceptance-validation)
-at commit [`5dafe8d`](https://github.com/wms2537/anyam/commit/5dafe8d).
+[`codex/prototype-acceptance-validation`](https://github.com/Whyme-Labs/anyam/tree/codex/prototype-acceptance-validation)
+at commit [`5dafe8d`](https://github.com/Whyme-Labs/anyam/commit/5dafe8d).
 
 The prototype demonstrated that a matrix of explicit Evidence records is more
 honest than a checklist: missing, failed, and stale Evidence have different

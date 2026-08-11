@@ -1,9 +1,9 @@
 # Customer-owned provider failure and recovery preflight
 
-Date: 2026-08-10  
-Issue: [Qualify customer-owned provider failure and recovery matrix](https://github.com/wms2537/anyam/issues/129)  
-Map: [Plan Anyam beyond bounded P3 public beta](https://github.com/wms2537/anyam/issues/118)  
-Protocol: `anyam.p3-23-customer-provider-failure-recovery-preflight/v1`  
+Date: 2026-08-10
+Issue: [Qualify customer-owned provider failure and recovery matrix](https://github.com/Whyme-Labs/anyam/issues/129)
+Map: [Plan Anyam beyond bounded P3 public beta](https://github.com/Whyme-Labs/anyam/issues/118)
+Protocol: `anyam.p3-23-customer-provider-failure-recovery-preflight/v1`
 Status: preflight blocked; no live failure/recovery qualification claimed
 
 ## Question

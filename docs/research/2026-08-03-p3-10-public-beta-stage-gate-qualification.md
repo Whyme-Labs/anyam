@@ -1,8 +1,8 @@
 # P3-10 public-beta Stage Gate and operational receipts qualification
 
-Date: 2026-08-03  
-Issue: [Qualify the P3 public-beta Stage Gate and operational receipts](https://github.com/wms2537/anyam/issues/87)  
-Protocol: `anyam.p3-stage-gate-qualification/v1`  
+Date: 2026-08-03
+Issue: [Qualify the P3 public-beta Stage Gate and operational receipts](https://github.com/Whyme-Labs/anyam/issues/87)
+Protocol: `anyam.p3-stage-gate-qualification/v1`
 Status: ready with bounded provider and tenant advisories; not a universal-support claim
 
 ## Question

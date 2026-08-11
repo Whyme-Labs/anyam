@@ -2,7 +2,7 @@
 
 Date: 2026-08-10
 
-Issue: [#131 Run a live external Runner and generic Target qualification](https://github.com/wms2537/anyam/issues/131)
+Issue: [#131 Run a live external Runner and generic Target qualification](https://github.com/Whyme-Labs/anyam/issues/131)
 
 Protocol: `anyam.external-runner-qualification/v1`
 
@@ -31,7 +31,7 @@ HTTP pull consumer ID: 8086538a8e7c4079a31f4bd4146f2136
 R2 bucket: anyam-p3-25-live-20260810-outputs
 Coordinator Worker: anyam-p3-25-live-20260810-coordinator
 Coordinator endpoint: https://anyam-p3-25-live-20260810-coordinator.swmengappdev.workers.dev
-GitHub Target repository: wms2537/anyam-p3-25-live-20260810-target
+GitHub Target repository: Whyme-Labs/anyam-p3-25-live-20260810-target
 GitHub Target tag: anyam-p3-25-live-20260810
 GitHub Target asset ID: RA_kwDOTz1rGs4eTUsF
 GitHub Target asset: anyam-live-runner.txt
@@ -74,7 +74,7 @@ credentialFree=true
 The unchanged GitHub Target publication matched the R2 bytes:
 
 ```text
-release=https://github.com/wms2537/anyam-p3-25-live-20260810-target/releases/tag/anyam-p3-25-live-20260810
+release=https://github.com/Whyme-Labs/anyam-p3-25-live-20260810-target/releases/tag/anyam-p3-25-live-20260810
 providerAssetId=RA_kwDOTz1rGs4eTUsF
 providerAssetSize=139
 providerAssetDigest=sha256:5acbe3933627b8e3c9e9c5432c527ee47ba26a4f567764e3773a298e682e1b4c

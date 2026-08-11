@@ -8,7 +8,7 @@ Anyam must let a developer or coding agent work on a Project whose source is spl
 
 The local loop also needs to be fast and recoverable. A developer should see one status and diff, edits should be captured without ceremony, undo should not erase history, and a remote/local divergence must remain inspectable until someone chooses how to resolve it.
 
-The composite filesystem question was exercised by the throwaway TypeScript reducer and terminal prototype on branch [`codex/prototype-composite-local-workspace`](https://github.com/wms2537/anyam/tree/codex/prototype-composite-local-workspace), commit `9afcc9d`, and accepted by the owner after review.
+The composite filesystem question was exercised by the throwaway TypeScript reducer and terminal prototype on branch [`codex/prototype-composite-local-workspace`](https://github.com/Whyme-Labs/anyam/tree/codex/prototype-composite-local-workspace), commit `9afcc9d`, and accepted by the owner after review.
 
 ## Decision
 

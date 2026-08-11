@@ -2,8 +2,8 @@
 
 - Status: Accepted; owner-authorized terminal-denial deletion implemented
 - Date: 2026-08-11
-- Issue: [Decide replay archive retention and deletion policy after replay defense expires](https://github.com/wms2537/anyam/issues/141)
-- Map: [Plan Anyam customer-owned replay archival beyond the local tripwire](https://github.com/wms2537/anyam/issues/138)
+- Issue: [Decide replay archive retention and deletion policy after replay defense expires](https://github.com/Whyme-Labs/anyam/issues/141)
+- Map: [Plan Anyam customer-owned replay archival beyond the local tripwire](https://github.com/Whyme-Labs/anyam/issues/138)
 - Depends on: [ADR 0046](./0046-p3-public-gateway-ledger-retention-and-recovery-export.md), [ADR 0047](./0047-p3-public-gateway-exact-replay-archive.md)
 
 ## Context

@@ -3,7 +3,7 @@
 **Status:** Local contract qualification complete; Cloudflare Durable Object
 and R2 provider qualification not claimed.
 
-**Ticket:** [Persist customer-operated Realm state and Recovery Checkpoints](https://github.com/wms2537/anyam/issues/76)
+**Ticket:** [Persist customer-operated Realm state and Recovery Checkpoints](https://github.com/Whyme-Labs/anyam/issues/76)
 
 ## Authority boundary
 

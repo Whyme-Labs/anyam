@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-03
-- Issue: [Qualify the P3 public-beta Stage Gate and operational receipts](https://github.com/wms2537/anyam/issues/87)
+- Issue: [Qualify the P3 public-beta Stage Gate and operational receipts](https://github.com/Whyme-Labs/anyam/issues/87)
 - Depends on: [ADR 0038](./0038-stage-gates-and-operational-receipts.md), [ADR 0040](./0040-realm-owned-agent-actors-and-human-to-agent-delegation.md)
 
 ## Context

@@ -1,8 +1,8 @@
 # Provider-feed analytics authority blocker
 
-**Issue:** [Qualify live provider-feed reconciliation and per-surface reliability](https://github.com/wms2537/anyam/issues/127)  
-**Protocol:** `anyam.p3-26-provider-feed-analytics-authority/v1`  
-**Status:** blocked before live feed reconciliation  
+**Issue:** [Qualify live provider-feed reconciliation and per-surface reliability](https://github.com/Whyme-Labs/anyam/issues/127)
+**Protocol:** `anyam.p3-26-provider-feed-analytics-authority/v1`
+**Status:** blocked before live feed reconciliation
 **Observed:** 2026-08-10
 
 ## Decision boundary

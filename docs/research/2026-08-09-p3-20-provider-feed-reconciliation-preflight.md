@@ -1,9 +1,9 @@
 # P3-20 provider-feed reconciliation and per-surface reliability preflight
 
-Date: 2026-08-09  
-Issue: [Qualify live provider-feed reconciliation and per-surface reliability](https://github.com/wms2537/anyam/issues/127)  
-Map: [Plan Anyam beyond bounded P3 public beta](https://github.com/wms2537/anyam/issues/118)  
-Protocol: `anyam.provider-feed-reconciliation-preflight/v1`  
+Date: 2026-08-09
+Issue: [Qualify live provider-feed reconciliation and per-surface reliability](https://github.com/Whyme-Labs/anyam/issues/127)
+Map: [Plan Anyam beyond bounded P3 public beta](https://github.com/Whyme-Labs/anyam/issues/118)
+Protocol: `anyam.provider-feed-reconciliation-preflight/v1`
 Status: **primary-source preflight complete; live provider cohort remains unqualified**
 
 ## Question
@@ -15,7 +15,7 @@ acknowledgement into an authoritative state transition?
 
 ## Decision
 
-The measurement contract from [#120](https://github.com/wms2537/anyam/issues/120)
+The measurement contract from [#120](https://github.com/Whyme-Labs/anyam/issues/120)
 is implementable with the current Cloudflare primitives, but the provider
 facts below do not constitute a live Anyam receipt. A live qualification still
 requires an owner-authorized disposable cohort, an exact observation window,

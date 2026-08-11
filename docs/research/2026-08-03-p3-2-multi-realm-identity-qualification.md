@@ -1,7 +1,7 @@
 # P3-2 multi-Realm team identity and delegated capability qualification
 
-Date: 2026-08-03  
-Issue: [Qualify multi-Realm team identity and delegated capability](https://github.com/wms2537/anyam/issues/82)  
+Date: 2026-08-03
+Issue: [Qualify multi-Realm team identity and delegated capability](https://github.com/Whyme-Labs/anyam/issues/82)
 Status: Realm-local identity, team membership, capability intersection, audience isolation, revocation, and disclosure boundaries passed in the framework-neutral kernel; first-class agent identity and live provider authentication remain unqualified
 
 ## Question

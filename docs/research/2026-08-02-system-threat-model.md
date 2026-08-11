@@ -1,7 +1,7 @@
 # Anyam system threat-model research
 
-**Research snapshot:** 2 August 2026  
-**Ticket:** [#22](https://github.com/wms2537/anyam/issues/22)  
+**Research snapshot:** 2 August 2026
+**Ticket:** [#22](https://github.com/Whyme-Labs/anyam/issues/22)
 **Purpose:** primary-source security receipts and threat-model inputs for the accepted Anyam architecture
 
 This note records external security and platform facts that inform ADR-0014. The asset inventory, trust boundaries, adversaries, and Anyam-specific requirements are design analysis derived from those facts and the accepted Anyam ADRs; they are not claims that an external source has validated Anyam.

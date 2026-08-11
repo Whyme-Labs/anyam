@@ -1,6 +1,6 @@
 # Issue tracker: GitHub
 
-Issues and PRDs for this repository live as GitHub issues in `wms2537/anyam`. Use the `gh` CLI for all operations.
+Issues and PRDs for this repository live as GitHub issues in `Whyme-Labs/anyam`. Use the `gh` CLI for all operations.
 
 ## Conventions
 
@@ -27,7 +27,7 @@ GitHub shares one number space across issues and pull requests. Resolve an ambig
 
 ## When a skill says "publish to the issue tracker"
 
-Create a GitHub issue in `wms2537/anyam`.
+Create a GitHub issue in `Whyme-Labs/anyam`.
 
 ## When a skill says "fetch the relevant ticket"
 
@@ -39,7 +39,7 @@ The `wayfinder` skill represents a map as one GitHub issue and its tickets as ch
 
 - **Map**: one issue labelled `wayfinder:map`, containing Notes, Decisions so far, Not yet specified, and Out of scope.
 - **Child ticket**: an issue linked to the map as a GitHub sub-issue. Where sub-issues are unavailable, add it to a task list in the map and put `Part of #<map>` at the top of the child body. Apply one `wayfinder:<type>` label: `research`, `prototype`, `grilling`, or `task`.
-- **Blocking**: use GitHub's native issue dependencies. Add an edge with `gh api --method POST repos/wms2537/anyam/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-database-id>`, where the blocker database ID comes from `gh api repos/wms2537/anyam/issues/<number> --jq .id`. If dependencies are unavailable, use a `Blocked by: #<number>, #<number>` line.
+- **Blocking**: use GitHub's native issue dependencies. Add an edge with `gh api --method POST repos/Whyme-Labs/anyam/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-database-id>`, where the blocker database ID comes from `gh api repos/Whyme-Labs/anyam/issues/<number> --jq .id`. If dependencies are unavailable, use a `Blocked by: #<number>, #<number>` line.
 - **Frontier**: among the map's open children, select the first issue with no open blocker and no assignee.
 - **Claim**: `gh issue edit <number> --add-assignee @me` before doing any work.
 - **Resolve**: comment with the answer, close the issue, then append a linked one-line gist to the map's Decisions-so-far section.

@@ -11,7 +11,7 @@ alone is not enough: a Release must retain the exact source, Change, Action,
 Verifier, inputs, outputs, toolchain, dependencies, policy, Target, disclosure,
 and actor provenance that made the result valid.
 
-Issue [#46](https://github.com/wms2537/anyam/issues/46) asks for a complete
+Issue [#46](https://github.com/Whyme-Labs/anyam/issues/46) asks for a complete
 local loop over the Worker and TypeScript library Reference Fixtures.
 
 ## Decision

@@ -6,7 +6,7 @@ Status: Accepted
 
 Anyam has one authorization surface across browser users, CLI clients, Git, local and remote MCP, agents, runners, integrations, and Targets. Roles alone cannot express Source Space disclosure, model-provider restrictions, Secret Use, task budgets, device posture, or separation of duties. A bearer token or upstream identity provider cannot be the policy source of truth.
 
-The owner resolved the policy model through the one-question-at-a-time grilling in ticket [#16](https://github.com/wms2537/anyam/issues/16). The preceding authentication and credential standards are recorded in [ADR-0007](0007-realm-owned-authentication-and-delegation.md).
+The owner resolved the policy model through the one-question-at-a-time grilling in ticket [#16](https://github.com/Whyme-Labs/anyam/issues/16). The preceding authentication and credential standards are recorded in [ADR-0007](0007-realm-owned-authentication-and-delegation.md).
 
 ## Decision
 

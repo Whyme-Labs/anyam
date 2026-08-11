@@ -8,7 +8,7 @@ Anyam must support a Project that publishes a useful open-source Source Space wh
 
 Public contributors also need meaningful validation against restricted implementations or data. Giving them private repositories or raw CI output would defeat Source Space isolation. Returning an unexplained green check, however, is not sufficient for engineering feedback or appeal.
 
-The owner resolved the Publication Change and Sealed Verification decision tree in ticket [#12](https://github.com/wms2537/anyam/issues/12).
+The owner resolved the Publication Change and Sealed Verification decision tree in ticket [#12](https://github.com/Whyme-Labs/anyam/issues/12).
 
 ## Decision
 

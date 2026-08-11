@@ -4,7 +4,7 @@ const baseUrl = process.env.ANYAM_HOSTED_QUALIFICATION_URL?.replace(/\/$/, "");
 const bootstrapToken = process.env.ANYAM_HOSTED_QUALIFICATION_TOKEN;
 
 if (!baseUrl || !bootstrapToken) {
-  console.error(JSON.stringify({ protocol: "anyam.p3-22-hosted-saas-qualification/v1", status: "blocked", error: "ANYAM_HOSTED_QUALIFICATION_URL and ANYAM_HOSTED_QUALIFICATION_TOKEN are required", credentialValues: "not-printed" }, null, 2));
+  console.error(JSON.stringify({ protocol: "anyam.p3-22-hosted-saas-qualification/v1", status: "blocked", error: "ANYAM_HOSTED_QUALIFICATION_URL and ANYAM_HOSTED_QUALIFICATION_TOKEN are required", credentialValues: "not-printed", recoveryAction: "set the named qualification inputs and retry the same bounded hosted-SaaS observation" }, null, 2));
   process.exit(2);
 }
 

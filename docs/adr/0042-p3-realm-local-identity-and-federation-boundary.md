@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-03
-- Issue: [Decide whether Realm federation belongs in P3](https://github.com/wms2537/anyam/issues/101)
+- Issue: [Decide whether Realm federation belongs in P3](https://github.com/Whyme-Labs/anyam/issues/101)
 - Depends on: [ADR 0024](./0024-open-governance-profiles-and-compliance-boundaries.md), [ADR 0030](./0030-realm-identity-and-capability-policy.md), [ADR 0040](./0040-realm-owned-agent-actors-and-human-to-agent-delegation.md)
 
 ## Context

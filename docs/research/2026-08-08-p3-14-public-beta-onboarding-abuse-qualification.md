@@ -1,7 +1,7 @@
 # P3-14 public-beta onboarding and abuse boundary qualification
 
 Date: 2026-08-08
-Issue: [Prototype the minimum public-beta onboarding and abuse-control journey](https://github.com/wms2537/anyam/issues/102)
+Issue: [Prototype the minimum public-beta onboarding and abuse-control journey](https://github.com/Whyme-Labs/anyam/issues/102)
 Protocol: `anyam.p3-public-beta-onboarding-abuse-qualification/v1`
 Status: passed for the provider-neutral durable contract; live edge/provider qualification remains open
 

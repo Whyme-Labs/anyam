@@ -1,8 +1,8 @@
 # P3-8 customer-operated installation control path qualification
 
-Date: 2026-08-03  
-Issue: [Implement the customer-operated install and owner-claim control path](https://github.com/wms2537/anyam/issues/88)  
-Protocol: `anyam.customer-realm-control-qualification/v1`  
+Date: 2026-08-03
+Issue: [Implement the customer-operated install and owner-claim control path](https://github.com/Whyme-Labs/anyam/issues/88)
+Protocol: `anyam.customer-realm-control-qualification/v1`
 Status: passed with a provider-neutral, customer-operated control boundary
 
 ## Question

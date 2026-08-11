@@ -1,7 +1,7 @@
 # Anyam authentication and delegation standards profile
 
 **Research snapshot:** 2 August 2026
-**Ticket:** [#15](https://github.com/wms2537/anyam/issues/15)
+**Ticket:** [#15](https://github.com/Whyme-Labs/anyam/issues/15)
 **Status:** Decision-grade research; implementation commitments are limited to the “implement now” profile below.
 
 This snapshot refreshes the authentication section of [`2026-07-31-platform-and-standards-assumptions.md`](2026-07-31-platform-and-standards-assumptions.md); it does not replace that broader platform audit.

@@ -1,8 +1,8 @@
 # P3-19 live customer-owned R2 replay archive qualification
 
 Date: 2026-08-08
-Issue: [Qualify live customer-owned R2 replay archive write/read-back/recovery](https://github.com/wms2537/anyam/issues/115)
-Depends on: [Qualify an archival replay-index adapter beyond the Public Gateway tombstone tripwire](https://github.com/wms2537/anyam/issues/113)
+Issue: [Qualify live customer-owned R2 replay archive write/read-back/recovery](https://github.com/Whyme-Labs/anyam/issues/115)
+Depends on: [Qualify an archival replay-index adapter beyond the Public Gateway tombstone tripwire](https://github.com/Whyme-Labs/anyam/issues/113)
 Protocol: `anyam.public-gateway-replay-archive/v1`
 Status: blocked by Cloudflare R2 authorization; no provider support claim
 

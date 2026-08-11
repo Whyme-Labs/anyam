@@ -2,7 +2,7 @@
 
 Date: 2026-08-08
 
-Issue: [#124 Qualify a live external Runner and generic Target](https://github.com/wms2537/anyam/issues/124)
+Issue: [#124 Qualify a live external Runner and generic Target](https://github.com/Whyme-Labs/anyam/issues/124)
 
 Protocol: `anyam.external-runner-generic-target-qualification/v1`
 

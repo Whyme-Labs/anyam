@@ -6,7 +6,7 @@ Status: Accepted
 
 Anyam must support browser users, native CLI clients, headless automation, Git clients, local and remote MCP clients, coding agents, CI runners, installed integrations, production applications, and Customer-operated Realms. These clients have different transport and credential requirements, but they must not create independent or conflicting authorization models.
 
-The owner resolved this standards profile in ticket [#15](https://github.com/wms2537/anyam/issues/15). The dated research receipt is [`docs/research/2026-08-02-authentication-and-delegation-standards.md`](../research/2026-08-02-authentication-and-delegation-standards.md).
+The owner resolved this standards profile in ticket [#15](https://github.com/Whyme-Labs/anyam/issues/15). The dated research receipt is [`docs/research/2026-08-02-authentication-and-delegation-standards.md`](../research/2026-08-02-authentication-and-delegation-standards.md).
 
 ## Decision
 

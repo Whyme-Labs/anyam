@@ -6,7 +6,7 @@ Status: Accepted
 
 Anyam must connect developers and coding agents without replacing Codex, Claude Code, Cursor, or other agent runtimes. Git is the source-object data plane; MCP and the CLI are semantic control surfaces. The connection must preserve the Realm authorization model, keep refresh credentials out of repositories and model context, and prevent ordinary clients from writing canonical source.
 
-The connection was exercised in the throwaway prototype on branch [`codex/prototype-cli-agent-connections`](https://github.com/wms2537/anyam/tree/codex/prototype-cli-agent-connections), commit `5d1b4a4`. The owner accepted its command/session/credential behavior in ticket [#17](https://github.com/wms2537/anyam/issues/17).
+The connection was exercised in the throwaway prototype on branch [`codex/prototype-cli-agent-connections`](https://github.com/Whyme-Labs/anyam/tree/codex/prototype-cli-agent-connections), commit `5d1b4a4`. The owner accepted its command/session/credential behavior in ticket [#17](https://github.com/Whyme-Labs/anyam/issues/17).
 
 ## Decision
 

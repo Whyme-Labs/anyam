@@ -1,8 +1,8 @@
 # P3-16 provider-specific Public Gateway bot and edge qualification
 
-Date: 2026-08-08  
-Issue: [Qualify provider-specific public Gateway bot and edge controls](https://github.com/wms2537/anyam/issues/109)  
-Protocol: `anyam.public-gateway-abuse/v1`  
+Date: 2026-08-08
+Issue: [Qualify provider-specific public Gateway bot and edge controls](https://github.com/Whyme-Labs/anyam/issues/109)
+Protocol: `anyam.public-gateway-abuse/v1`
 Status: passed with bounded provider residuals
 
 ## Question
@@ -81,7 +81,7 @@ the Worker-origin live result below.
 
 ```text
 Cloudflare account: 1e0170aaabc90ecf5f466128d1f0466a
-Upstream fixture: https://github.com/wms2537/anyam-p3-public-gateway-bot-20260808
+Upstream fixture: https://github.com/Whyme-Labs/anyam-p3-public-gateway-bot-20260808
 Fixture commit: a4bd9c626f2f029b8429d3181fef3ea022ab89a7
 Fixture archive digest: sha256:320efa394e2ef78db0828116e204b058bdc91f1e91d7b5b927f4725ac6429e84
 Final Worker: anyam-p3-public-gateway-bot-final4-20260808

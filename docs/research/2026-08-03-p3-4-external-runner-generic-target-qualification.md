@@ -1,7 +1,7 @@
 # P3 public beta: external pull Runner and generic Target qualification
 
 **Date:** 3 August 2026
-**Ticket:** [#84](https://github.com/wms2537/anyam/issues/84)
+**Ticket:** [#84](https://github.com/Whyme-Labs/anyam/issues/84)
 **Status:** protocol qualified; production provider lane remains unqualified
 
 ## Decision

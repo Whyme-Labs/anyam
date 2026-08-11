@@ -2,7 +2,7 @@
 
 - Status: Accepted with a qualified Turnstile path and bounded provider residuals
 - Date: 2026-08-08
-- Issue: [Qualify provider-specific public Gateway bot and edge controls](https://github.com/wms2537/anyam/issues/109)
+- Issue: [Qualify provider-specific public Gateway bot and edge controls](https://github.com/Whyme-Labs/anyam/issues/109)
 - Depends on: [ADR 0043](./0043-p3-public-beta-onboarding-and-abuse-boundary.md), [ADR 0044](./0044-p3-live-public-gateway-and-abuse-boundary.md)
 
 ## Context

@@ -13,7 +13,7 @@ shapes without creating a hosted-only product tier:
 3. Customer-operated Realm, where the customer deploys and controls Anyam in
    its own Cloudflare account without requiring Anyam SaaS.
 
-Issue [#26](https://github.com/wms2537/anyam/issues/26) asked how those modes
+Issue [#26](https://github.com/Whyme-Labs/anyam/issues/26) asked how those modes
 share code, preserve ownership and isolation, manage upgrades, support
 application-attached portals and custom domains, and separate the control and
 application planes. The owner confirmed the decisions in a one-question-at-a-
@@ -291,7 +291,7 @@ change.
 
 ## References
 
-- [Hosting and tenancy issue](https://github.com/wms2537/anyam/issues/26)
+- [Hosting and tenancy issue](https://github.com/Whyme-Labs/anyam/issues/26)
 - [Cloudflare-first architecture](0015-cloudflare-first-architecture-and-provider-boundaries.md)
 - [Portable Project Exports and mirrors](0017-portable-project-exports-and-single-authority-mirrors.md)
 - [Realm authentication and delegation](0007-realm-owned-authentication-and-delegation.md)

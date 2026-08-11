@@ -4,13 +4,13 @@
   "description": "Package-manager-neutral TypeScript scaffolding and local Anyam CLI",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wms2537/anyam.git",
+    "url": "git+https://github.com/Whyme-Labs/anyam.git",
     "directory": "packages/create-anyam"
   },
   "bugs": {
-    "url": "https://github.com/wms2537/anyam/issues"
+    "url": "https://github.com/Whyme-Labs/anyam/issues"
   },
-  "homepage": "https://github.com/wms2537/anyam/tree/main/packages/create-anyam#readme",
+  "homepage": "https://github.com/Whyme-Labs/anyam/tree/main/packages/create-anyam#readme",
   "publishConfig": {
     "access": "public"
   },

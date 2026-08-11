@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-08
-- Issue: [Prototype the minimum public-beta onboarding and abuse-control journey](https://github.com/wms2537/anyam/issues/102)
+- Issue: [Prototype the minimum public-beta onboarding and abuse-control journey](https://github.com/Whyme-Labs/anyam/issues/102)
 - Depends on: [ADR 0019](./0019-bootstrap-onboarding-import-and-recovery.md), [ADR 0023](./0023-receipt-backed-costs-quotas-and-packaging.md), [ADR 0032](./0032-hybrid-public-private-projections-and-sealed-verifiers.md), [ADR 0039](./0039-customer-operated-installation-control-path.md), [ADR 0040](./0040-realm-owned-agent-actors-and-human-to-agent-delegation.md), [ADR 0042](./0042-p3-realm-local-identity-and-federation-boundary.md)
 
 ## Context

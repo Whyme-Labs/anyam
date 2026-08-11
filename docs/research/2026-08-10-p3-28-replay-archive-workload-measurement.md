@@ -1,8 +1,8 @@
 # P3-28 replay archive workload measurement
 
 Date: 2026-08-10 (provider receipt time)
-Issue: [Measure representative replay archive workload and object-size distribution](https://github.com/wms2537/anyam/issues/140)
-Map: [Plan Anyam customer-owned replay archival beyond the local tripwire](https://github.com/wms2537/anyam/issues/138)
+Issue: [Measure representative replay archive workload and object-size distribution](https://github.com/Whyme-Labs/anyam/issues/140)
+Map: [Plan Anyam customer-owned replay archival beyond the local tripwire](https://github.com/Whyme-Labs/anyam/issues/138)
 Protocol: `anyam.replay-archive-workload-qualification/v1`
 Status: passed for a bounded contract-shaped sample; no production tripwire or provider limit is proposed
 

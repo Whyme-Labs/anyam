@@ -11,7 +11,7 @@ Landing, Releases, Targets, bidirectional Mirrors, and customer-operated
 Realms. A conventional repository threat model would miss the boundaries
 between those objects.
 
-Issue [#22](https://github.com/wms2537/anyam/issues/22) asked for a prioritized
+Issue [#22](https://github.com/Whyme-Labs/anyam/issues/22) asked for a prioritized
 threat model covering assets, trust boundaries, adversaries, metadata leakage,
 supply-chain attacks, agent attacks, cross-tenant failures, publication
 failures, operational compromise, residual risks, and verification obligations.

@@ -10,7 +10,7 @@ the durable value: a project-level change and delivery model that lets humans
 and agents work across public/private trust boundaries and produce verified,
 portable Releases.
 
-Issue [#34](https://github.com/wms2537/anyam/issues/34) asked for the category,
+Issue [#34](https://github.com/Whyme-Labs/anyam/issues/34) asked for the category,
 differentiation, open-source promise, Cloudflare relationship, developer
 workflow, agent neutrality, public/private model, terminology, documentation,
 onboarding, and adoption path.

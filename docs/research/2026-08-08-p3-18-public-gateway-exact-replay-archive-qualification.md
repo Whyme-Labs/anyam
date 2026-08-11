@@ -1,7 +1,7 @@
 # P3-18 Public Gateway exact replay archive qualification
 
 Date: 2026-08-08
-Issue: [Qualify an archival replay-index adapter beyond the Public Gateway tombstone tripwire](https://github.com/wms2537/anyam/issues/113)
+Issue: [Qualify an archival replay-index adapter beyond the Public Gateway tombstone tripwire](https://github.com/Whyme-Labs/anyam/issues/113)
 Protocol: `anyam.public-gateway-replay-archive/v1`
 Status: passed locally with a live Cloudflare R2 authorization residual
 

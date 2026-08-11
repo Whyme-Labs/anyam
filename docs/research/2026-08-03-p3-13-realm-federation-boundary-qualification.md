@@ -2,7 +2,7 @@
 
 Date: 2026-08-03
 
-Issue: [Decide whether Realm federation belongs in P3](https://github.com/wms2537/anyam/issues/101)
+Issue: [Decide whether Realm federation belongs in P3](https://github.com/Whyme-Labs/anyam/issues/101)
 
 Protocol: `anyam.p3-realm-federation-boundary/v1`
 

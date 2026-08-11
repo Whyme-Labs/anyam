@@ -1,6 +1,6 @@
 # P3-19 Realm authentication qualification cleanup inventory
 
-**Issue:** [Provision a live Realm authentication qualification surface](https://github.com/wms2537/anyam/issues/130)
+**Issue:** [Provision a live Realm authentication qualification surface](https://github.com/Whyme-Labs/anyam/issues/130)
 
 **Status:** authenticated owner lifecycle and exact disposable-resource cleanup are complete; post-cleanup absence was verified account-scoped.
 

@@ -11,7 +11,7 @@ customer-operated Cloudflare deployment. The breadth creates a landmine if the
 project attempts to ship every hosting mode, runner, registry, mirror, and
 enterprise feature at once.
 
-Issue [#28](https://github.com/wms2537/anyam/issues/28) asked for a releasable
+Issue [#28](https://github.com/Whyme-Labs/anyam/issues/28) asked for a releasable
 sequence that preserves the long-term model while identifying the smallest
 end-to-end product, stage gates, omissions, migration paths, and risk
 retirement. The prior decisions establish the domain model, provider

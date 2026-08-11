@@ -1,7 +1,7 @@
 # Anyam costs, quotas, billing, and unit economics
 
-**Research snapshot:** 2 August 2026  
-**Ticket:** [#31](https://github.com/wms2537/anyam/issues/31)  
+**Research snapshot:** 2 August 2026
+**Ticket:** [#31](https://github.com/Whyme-Labs/anyam/issues/31)
 **Status:** Decision-grade research. Provider facts below are receipts from current first-party documentation available at the snapshot date. Anyam quotas, customer-facing prices, and margin targets are recommendations or hypotheses; they are not final commitments.
 
 ## Executive decision

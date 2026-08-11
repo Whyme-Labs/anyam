@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-03
-- Issue: [#56 — Qualify Stage Gates and operational receipts](https://github.com/wms2537/anyam/issues/56)
+- Issue: [#56 — Qualify Stage Gates and operational receipts](https://github.com/Whyme-Labs/anyam/issues/56)
 - Depends on: [ADR 0020](./0020-releasable-stages-and-entry-exit-gates.md), [ADR 0021](./0021-evidence-backed-acceptance-and-validation.md), [ADR 0022](./0022-reliability-operations-and-recovery-contract.md), [ADR 0023](./0023-receipt-backed-costs-quotas-and-packaging.md), [ADR 0027](./0027-phased-delivery-program.md), [ADR 0037](./0037-external-pull-runners-and-generic-target-qualification.md)
 
 ## Decision

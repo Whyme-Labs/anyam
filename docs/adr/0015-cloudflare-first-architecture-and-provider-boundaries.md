@@ -11,7 +11,7 @@ Cloudflare's managed primitives where they give a durable advantage without
 making a beta product, an undocumented limit, or one provider's execution
 shape a hidden load-bearing dependency.
 
-Issue [#23](https://github.com/wms2537/anyam/issues/23) asked how Workers,
+Issue [#23](https://github.com/Whyme-Labs/anyam/issues/23) asked how Workers,
 Durable Objects, D1, R2, Queues, Workflows, Artifacts, Containers/Sandbox,
 Workers for Platforms, and external Runners should be assigned authoritative
 state, read models, execution, consistency, scale, cost, availability,

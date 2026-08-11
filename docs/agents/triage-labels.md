@@ -1,6 +1,6 @@
 # Triage labels
 
-The engineering skills use five canonical triage roles. This table maps those roles to the labels used in `wms2537/anyam`.
+The engineering skills use five canonical triage roles. This table maps those roles to the labels used in `Whyme-Labs/anyam`.
 
 | Canonical role | GitHub label | Meaning |
 | --- | --- | --- |

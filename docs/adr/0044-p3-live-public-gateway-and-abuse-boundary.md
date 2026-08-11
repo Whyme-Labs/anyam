@@ -2,7 +2,7 @@
 
 - Status: Accepted with bounded provider residuals
 - Date: 2026-08-08
-- Issue: [Qualify live public gateway and abuse controls for P3](https://github.com/wms2537/anyam/issues/107)
+- Issue: [Qualify live public gateway and abuse controls for P3](https://github.com/Whyme-Labs/anyam/issues/107)
 - Depends on: [ADR 0015](./0015-cloudflare-first-architecture-and-provider-boundaries.md), [ADR 0023](./0023-receipt-backed-costs-quotas-and-packaging.md), [ADR 0032](./0032-hybrid-public-private-projections-and-sealed-verifiers.md), [ADR 0036](./0036-bidirectional-repository-mirrors-and-recovery.md), [ADR 0043](./0043-p3-public-beta-onboarding-and-abuse-boundary.md)
 
 ## Context

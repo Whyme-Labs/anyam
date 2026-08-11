@@ -1,0 +1,45 @@
+name: Repository gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - "**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Anyam repository gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the exact revision
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up pnpm and Bun for package entrypoint qualification
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run the repository gate
+        run: npm run check

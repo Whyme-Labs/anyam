@@ -2,7 +2,7 @@
 
 Date: 2026-08-03
 
-Issue: [Provision the live provider cohort for P3 qualification](https://github.com/wms2537/anyam/issues/99)
+Issue: [Provision the live provider cohort for P3 qualification](https://github.com/Whyme-Labs/anyam/issues/99)
 
 Protocol: `anyam.p3-provider-cohort-provisioning/v1`
 Status: provisioned with explicit gaps; held for the dependent live-path qualification
@@ -32,8 +32,8 @@ Both repositories are disposable and contain only a synthetic README fixture.
 
 | Purpose | Repository | GitHub id | Visibility | `main` receipt |
 | --- | --- | ---: | --- | --- |
-| public Source Space/mirror | [anyam-p3-cohort-public-20260803](https://github.com/wms2537/anyam-p3-cohort-public-20260803) | `1321765830` | public | `42b46185112f9c93692fcb490e90fb5406999109` |
-| private Source Space/provider auth | [anyam-p3-cohort-private-20260803](https://github.com/wms2537/anyam-p3-cohort-private-20260803) | `1321765880` | private | `abb58a0d09968ad50b58416c3ef7b2fa6daca753` |
+| public Source Space/mirror | [anyam-p3-cohort-public-20260803](https://github.com/Whyme-Labs/anyam-p3-cohort-public-20260803) | `1321765830` | public | `42b46185112f9c93692fcb490e90fb5406999109` |
+| private Source Space/provider auth | [anyam-p3-cohort-private-20260803](https://github.com/Whyme-Labs/anyam-p3-cohort-private-20260803) | `1321765880` | private | `abb58a0d09968ad50b58416c3ef7b2fa6daca753` |
 
 The private fixture also has a disposable GitHub Release Target:
 
@@ -42,7 +42,7 @@ release=p3-cohort-20260803
 releaseId=364210136
 targetCommit=main
 assets=0
-url=https://github.com/wms2537/anyam-p3-cohort-private-20260803/releases/tag/p3-cohort-20260803
+url=https://github.com/Whyme-Labs/anyam-p3-cohort-private-20260803/releases/tag/p3-cohort-20260803
 ```
 
 This is a Target fixture, not a production release or a package-registry
@@ -122,8 +122,8 @@ The cohort remains provisioned for the dependent qualification ticket. After
 its receipt is recorded, delete only these exact resources and verify absence:
 
 ```text
-gh repo delete wms2537/anyam-p3-cohort-public-20260803 --yes
-gh repo delete wms2537/anyam-p3-cohort-private-20260803 --yes
+gh repo delete Whyme-Labs/anyam-p3-cohort-public-20260803 --yes
+gh repo delete Whyme-Labs/anyam-p3-cohort-private-20260803 --yes
 CLOUDFLARE_ACCOUNT_ID=1e0170aaabc90ecf5f466128d1f0466a npx wrangler delete anyam-p3-cohort-20260803
 CLOUDFLARE_ACCOUNT_ID=1e0170aaabc90ecf5f466128d1f0466a npx wrangler workflows delete anyam-p3-cohort-20260803-workflow
 CLOUDFLARE_ACCOUNT_ID=1e0170aaabc90ecf5f466128d1f0466a npx wrangler queues delete anyam-p3-cohort-20260803-events

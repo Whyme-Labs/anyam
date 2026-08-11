@@ -1,7 +1,7 @@
 # P3 public beta: TypeScript package Release publication to a real Target
 
 **Date:** 3 August 2026
-**Ticket:** [#85](https://github.com/wms2537/anyam/issues/85)
+**Ticket:** [#85](https://github.com/Whyme-Labs/anyam/issues/85)
 **Status:** passed with bounded provider recovery qualification
 
 ## Decision
@@ -35,7 +35,7 @@ Target pointers, retry state, and release history.
 
 The qualification used a disposable public repository created for this run:
 
-- Repository: [wms2537/anyam-p3-release-20260803](https://github.com/wms2537/anyam-p3-release-20260803)
+- Repository: [Whyme-Labs/anyam-p3-release-20260803](https://github.com/Whyme-Labs/anyam-p3-release-20260803)
 - Transport: `gh` CLI/API over HTTPS
 - Credential material: not read by the harness
 - Target adapter: `github.release-assets`

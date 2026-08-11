@@ -11,7 +11,7 @@ slow to start and would force agents to infer conventions that the host
 ecosystem already makes obvious. A completely implicit system would make
 Actions, Verifiers, and Target adapters impossible to review or reproduce.
 
-Issue [#19](https://github.com/wms2537/anyam/issues/19) asked for a minimal,
+Issue [#19](https://github.com/Whyme-Labs/anyam/issues/19) asked for a minimal,
 portable contract covering modules, dependencies, Actions, environments,
 inputs, outputs, caches, networks, resources, Verifiers, Artifact types, and
 Target adapters, while preserving zero-config detection, explicit
@@ -19,8 +19,8 @@ configuration, schema evolution, local/remote parity, and the Cloudflare
 Worker plus Rust CLI reference Projects.
 
 The contract was exercised in the throwaway prototype on branch
-[`codex/prototype-project-manifest-contract`](https://github.com/wms2537/anyam/tree/codex/prototype-project-manifest-contract),
-commit `877bfaf`. The owner accepted its behavior in ticket [#19](https://github.com/wms2537/anyam/issues/19).
+[`codex/prototype-project-manifest-contract`](https://github.com/Whyme-Labs/anyam/tree/codex/prototype-project-manifest-contract),
+commit `877bfaf`. The owner accepted its behavior in ticket [#19](https://github.com/Whyme-Labs/anyam/issues/19).
 
 ## Decision
 

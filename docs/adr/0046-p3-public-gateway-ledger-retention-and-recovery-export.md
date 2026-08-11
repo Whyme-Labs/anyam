@@ -2,7 +2,7 @@
 
 - Status: Accepted with an exact replay-index tripwire
 - Date: 2026-08-08
-- Issue: [Qualify bounded Public Gateway ledger retention and recovery export](https://github.com/wms2537/anyam/issues/110)
+- Issue: [Qualify bounded Public Gateway ledger retention and recovery export](https://github.com/Whyme-Labs/anyam/issues/110)
 - Depends on: [ADR 0044](./0044-p3-live-public-gateway-and-abuse-boundary.md), [ADR 0045](./0045-p3-provider-specific-public-gateway-abuse-controls.md)
 
 ## Context

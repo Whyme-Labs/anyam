@@ -10,12 +10,12 @@ provider callbacks, and external pull Runners. Duplicating domain semantics in
 each transport would create inconsistent idempotency, disclosure, errors,
 pagination, and authorization behavior.
 
-Issue [#24](https://github.com/wms2537/anyam/issues/24) asked for an
+Issue [#24](https://github.com/Whyme-Labs/anyam/issues/24) asked for an
 implementation-level logical architecture and representative schemas without
 prematurely splitting every bounded context into a deployed service. The
 throwaway contract prototype is preserved on
-[`codex/prototype-service-contracts`](https://github.com/wms2537/anyam/tree/codex/prototype-service-contracts)
-at commit [`155bf38`](https://github.com/wms2537/anyam/commit/155bf38). It
+[`codex/prototype-service-contracts`](https://github.com/Whyme-Labs/anyam/tree/codex/prototype-service-contracts)
+at commit [`155bf38`](https://github.com/Whyme-Labs/anyam/commit/155bf38). It
 exercised normalized mutation envelopes, duplicate idempotency replay,
 idempotency-key conflict, stale expected-version rejection, event emission,
 and opaque cursor pagination.
@@ -414,7 +414,7 @@ not evidence that these production gates have passed.
 
 ## References
 
-- [Service-contract prototype](https://github.com/wms2537/anyam/tree/codex/prototype-service-contracts)
+- [Service-contract prototype](https://github.com/Whyme-Labs/anyam/tree/codex/prototype-service-contracts)
 - [Cloudflare-first architecture](0015-cloudflare-first-architecture-and-provider-boundaries.md)
 - [Explainable capability policy](0008-explainable-capability-policy.md)
 - [Evidence validity and provenance](0013-evidence-validity-policy-and-provenance.md)

@@ -1,3 +1,5 @@
 packages:
   - packages/create-anyam
   - apps/realm-worker
+  - apps/public-gateway-worker
+  - apps/hosted-saas-qualification

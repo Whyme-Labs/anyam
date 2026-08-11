@@ -55,7 +55,7 @@ WIPO explicitly says its Global Brand Database does not replace national or regi
 | Product word | Real Malay word with a positive, relevant meaning | Amber | Strong working brand; potentially weaker exclusivity in Malay/Indonesian markets |
 | Pronunciation | DBP gives `[a.nyam]` | Green | Brand guide uses **AH-nyam** as the English approximation and preserves local pronunciation |
 | Exact SCM/developer platform | No exact product found in reviewed primary sources | Amber | No discovered knockout; absence is bounded to the reviewed set |
-| GitHub identity | `github.com/anyam` exists as a user | Red for exact namespace | Keep `wms2537/anyam`; pursue `anyam-dev` or a company-owned alternative only after clearance |
+| GitHub identity | `github.com/anyam` exists as a user | Red for exact namespace | Keep `Whyme-Labs/anyam`; pursue `anyam-dev` or a company-owned alternative only after clearance |
 | npm scope | `@anyam` is occupied and publishing | Red for exact scope | Never publish under `@anyam` without a legitimate transfer; use a controlled alternate scope |
 | npm unscoped package | Official package endpoint returned 404 for `anyam` | Amber | A 404 is not a reservation; do not publish before legal clearance |
 | PyPI project | Official JSON endpoint returned 404 for `anyam` | Amber | Same: observation, not entitlement or reservation [[PyPI API](https://pypi.org/pypi/anyam/json)] |
@@ -141,8 +141,8 @@ The following system is normative **after `anyam.dev` is acquired and legal clea
 | Python SDK | `anyam-sdk` distribution, `anyam` import only if secured | Verify both distribution and import-name conflicts before publication |
 | Rust crate | `anyam-sdk` / `anyam-cli` | Verify current registry state immediately before publication |
 | Go modules | `anyam.dev/sdk-go` | Domain-derived module identity avoids a central bare-name namespace |
-| OCI images | `ghcr.io/wms2537/anyam/...` initially; migrate to controlled company org | Never publish as `docker.io/anyam/...` without control |
-| GitHub repository | `github.com/wms2537/anyam` initially | Move only to a controlled organization through GitHub's supported transfer flow |
+| OCI images | `ghcr.io/Whyme-Labs/anyam/...` initially; migrate to controlled company org | Never publish as `docker.io/anyam/...` without control |
+| GitHub repository | `github.com/Whyme-Labs/anyam` initially | Move only to a controlled organization through GitHub's supported transfer flow |
 | JSON Schema identifiers | `https://schemas.anyam.dev/{schema}/{version}` | Stable HTTPS IDs, immutable by version |
 | Event types | `dev.anyam.<domain>.<event>.v1` | Activate only after domain acquisition; document ownership |
 | HTTP media | `application/json` with versioned schemas | Do not invent `application/vnd.anyam+json` until a consumer requires content negotiation |
@@ -186,7 +186,7 @@ The exact unscoped `anyam` package endpoint returned `404`. Neither observation 
 
 #### Docker Hub and containers
 
-Docker Hub's official API returns an existing `anyam` user. The correct first-party container path is therefore a controlled GitHub Container Registry owner such as `ghcr.io/wms2537/anyam/...`, followed later by a verified company organization. [[Docker Hub API](https://hub.docker.com/v2/users/anyam/)]
+Docker Hub's official API returns an existing `anyam` user. The correct first-party container path is therefore a controlled GitHub Container Registry owner such as `ghcr.io/Whyme-Labs/anyam/...`, followed later by a verified company organization. [[Docker Hub API](https://hub.docker.com/v2/users/anyam/)]
 
 ### Domain collisions and observations
 
@@ -335,7 +335,7 @@ If a rebrand occurs **after** an alpha release, provide:
 - **Working product name:** Anyam
 - **Intended command:** `anyam`
 - **Preferred authority domain:** `anyam.dev`, contingent on legal clearance and successful acquisition
-- **Current canonical repository:** `github.com/wms2537/anyam`
+- **Current canonical repository:** `github.com/Whyme-Labs/anyam`
 - **Current status:** pre-clearance; no public namespace claims
 
 ### Reject now

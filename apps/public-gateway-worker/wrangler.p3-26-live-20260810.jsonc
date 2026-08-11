@@ -24,7 +24,7 @@
     "PUBLIC_INTAKE_LIMIT_METHOD": "controlled-qualification-approval-only",
     "PUBLIC_ENABLE_FIXTURE_FAILURES": "false",
     "PUBLIC_ABUSE_MODE": "edge-only",
-    "UPSTREAM_GIT_BASE": "https://github.com/wms2537/anyam.git"
+    "UPSTREAM_GIT_BASE": "https://github.com/Whyme-Labs/anyam.git"
   },
   "durable_objects": {
     "bindings": [

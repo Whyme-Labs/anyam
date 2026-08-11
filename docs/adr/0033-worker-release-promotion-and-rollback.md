@@ -2,7 +2,7 @@
 
 Status: Accepted
 
-Issue: [#51](https://github.com/wms2537/anyam/issues/51)
+Issue: [#51](https://github.com/Whyme-Labs/anyam/issues/51)
 
 ## Context
 

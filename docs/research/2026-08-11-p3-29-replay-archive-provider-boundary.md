@@ -1,9 +1,9 @@
 # P3-29 first qualified replay archive provider boundary
 
-Date: 2026-08-11  
-Issue: [#142 — Decide first qualified replay archive provider boundary](https://github.com/wms2537/anyam/issues/142)  
-Map: [#138 — Plan Anyam customer-owned replay archival beyond the local tripwire](https://github.com/wms2537/anyam/issues/138)  
-Protocol: `anyam.public-gateway-replay-archive/v1`  
+Date: 2026-08-11
+Issue: [#142 — Decide first qualified replay archive provider boundary](https://github.com/Whyme-Labs/anyam/issues/142)
+Map: [#138 — Plan Anyam customer-owned replay archival beyond the local tripwire](https://github.com/Whyme-Labs/anyam/issues/138)
+Protocol: `anyam.public-gateway-replay-archive/v1`
 Status: decision recommendation; R2 is the only qualified provider
 
 ## Executive decision

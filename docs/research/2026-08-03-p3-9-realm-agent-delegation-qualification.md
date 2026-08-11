@@ -1,8 +1,8 @@
 # P3-9 Realm-owned agent Actor and human-to-agent delegation qualification
 
-Date: 2026-08-03  
-Issue: [Implement Realm-owned agent Actors and human-to-agent delegation](https://github.com/wms2537/anyam/issues/90)  
-Protocol: `anyam.agent-delegation-qualification/v1`  
+Date: 2026-08-03
+Issue: [Implement Realm-owned agent Actors and human-to-agent delegation](https://github.com/Whyme-Labs/anyam/issues/90)
+Protocol: `anyam.agent-delegation-qualification/v1`
 Status: passed with a bounded, Realm-local human-to-agent kernel path
 
 ## Question

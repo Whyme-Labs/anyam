@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-Issues and PRDs are tracked in GitHub Issues for `wms2537/anyam`. See `docs/agents/issue-tracker.md`.
+Issues and PRDs are tracked in GitHub Issues for `Whyme-Labs/anyam`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

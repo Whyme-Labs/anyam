@@ -160,7 +160,7 @@ the first owner-approved publish, the equivalent CLI setup is:
 
 ```bash
 npx --yes npm@11.15.0 trust github create-anyam \
-  --repository wms2537/anyam \
+  --repository Whyme-Labs/anyam \
   --file publish-create-anyam.yml \
   --environment npm-publish \
   --allow-publish

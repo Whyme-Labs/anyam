@@ -6,7 +6,7 @@ Status: Accepted
 
 Anyam must coordinate several human or agent workspaces that begin from the same canonical Project Revision and may finish in a different order. A branch name or mutable pull-request head is not enough to preserve the identity of work across review iterations and rebase. A direct push or last-writer-wins merge would allow a stale Workspace to overwrite a newer canonical state.
 
-The state-machine question was exercised by the throwaway TypeScript prototype on branch [`codex/prototype-change-landing-state-machine`](https://github.com/wms2537/anyam/tree/codex/prototype-change-landing-state-machine), commit `c637c08`, and accepted by the owner after review in ticket [#13](https://github.com/wms2537/anyam/issues/13).
+The state-machine question was exercised by the throwaway TypeScript prototype on branch [`codex/prototype-change-landing-state-machine`](https://github.com/Whyme-Labs/anyam/tree/codex/prototype-change-landing-state-machine), commit `c637c08`, and accepted by the owner after review in ticket [#13](https://github.com/Whyme-Labs/anyam/issues/13).
 
 ## Decision
 

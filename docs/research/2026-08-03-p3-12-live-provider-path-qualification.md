@@ -2,7 +2,7 @@
 
 Date: 2026-08-03
 
-Issue: [Qualify live provider paths for the P3 public-beta cohort](https://github.com/wms2537/anyam/issues/100)
+Issue: [Qualify live provider paths for the P3 public-beta cohort](https://github.com/Whyme-Labs/anyam/issues/100)
 
 Protocol: `anyam.p3-live-provider-qualification/v1`
 
@@ -52,8 +52,8 @@ The public fixture was used as the disposable remote. All qualification commits
 were empty commits with synthetic messages; no source content was disclosed.
 
 ```text
-publicRepo=wms2537/anyam-p3-cohort-public-20260803
-privateRepo=wms2537/anyam-p3-cohort-private-20260803
+publicRepo=Whyme-Labs/anyam-p3-cohort-public-20260803
+privateRepo=Whyme-Labs/anyam-p3-cohort-private-20260803
 outboundCommit=85d3bc265639d20ecc9ad3c591bf5f0ca982e291
 outboundFetched=85d3bc265639d20ecc9ad3c591bf5f0ca982e291
 inboundCommit=cc7f41d34a40e8bd8f7796c30c5600ca9a8273b2

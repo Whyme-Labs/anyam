@@ -1,9 +1,9 @@
 # Post-P3: npm package Release Target qualification
 
-**Date:** 8 August 2026  
-**Ticket:** [#119](https://github.com/wms2537/anyam/issues/119)  
-**Related receipts:** [#52](https://github.com/wms2537/anyam/issues/52), [#85](https://github.com/wms2537/anyam/issues/85)  
-**Protocol:** `anyam.npm-release-target-qualification/v1`  
+**Date:** 8 August 2026
+**Ticket:** [#119](https://github.com/Whyme-Labs/anyam/issues/119)
+**Related receipts:** [#52](https://github.com/Whyme-Labs/anyam/issues/52), [#85](https://github.com/Whyme-Labs/anyam/issues/85)
+**Protocol:** `anyam.npm-release-target-qualification/v1`
 **Status:** **not qualified; blocked by npm namespace and authorization**
 
 ## Decision
@@ -264,7 +264,7 @@ Anyam must not claim that npm can restore or overwrite a previously published
 
 ## Required next live qualification
 
-The research decision for [Qualify live npm package publication as a Release Target](https://github.com/wms2537/anyam/issues/119) is now recorded as **not qualified**. The follow-up task [Provision an owner-controlled npm namespace and trusted publisher](https://github.com/wms2537/anyam/issues/126) must complete before a live npm transaction is attempted.
+The research decision for [Qualify live npm package publication as a Release Target](https://github.com/Whyme-Labs/anyam/issues/119) is now recorded as **not qualified**. The follow-up task [Provision an owner-controlled npm namespace and trusted publisher](https://github.com/Whyme-Labs/anyam/issues/126) must complete before a live npm transaction is attempted.
 
 Do not attempt the live qualification until a controlled npm namespace and owner decision exist.
 The next qualification run should use a unique package version and a
@@ -311,4 +311,4 @@ npmRollback=provider semantics documented, not live-qualified
 productionNpmSupport=false
 ```
 
-[Qualify live npm package publication as a Release Target](https://github.com/wms2537/anyam/issues/119) is resolved with an explicit unqualified decision; no product code was changed by this research receipt.
+[Qualify live npm package publication as a Release Target](https://github.com/Whyme-Labs/anyam/issues/119) is resolved with an explicit unqualified decision; no product code was changed by this research receipt.

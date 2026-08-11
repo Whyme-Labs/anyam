@@ -1,7 +1,7 @@
 # P2-1 customer Realm persistence and recovery provider qualification
 
 Date: 2026-08-03
-Issue: [Qualify customer-operated Realm persistence and recovery on Cloudflare](https://github.com/wms2537/anyam/issues/78)
+Issue: [Qualify customer-operated Realm persistence and recovery on Cloudflare](https://github.com/Whyme-Labs/anyam/issues/78)
 Status: passed; disposable resources torn down and post-delete listings empty
 
 ## Question

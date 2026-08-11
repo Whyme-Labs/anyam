@@ -1,7 +1,7 @@
 # P3-1 customer-operated Realm installation and owner claim qualification
 
 Date: 2026-08-03
-Issue: [Qualify a new customer-operated Realm installation and claim](https://github.com/wms2537/anyam/issues/81)
+Issue: [Qualify a new customer-operated Realm installation and claim](https://github.com/Whyme-Labs/anyam/issues/81)
 Status: provider binding/deployment boundary passed; end-to-end installer and live owner-claim path blocked
 
 ## Question
@@ -118,7 +118,7 @@ The requested end-to-end customer journey is **not yet qualified**:
 - Project import was intentionally not part of this ticket.
 
 The missing product path is tracked in [Implement the customer-operated install
-and owner-claim control path](https://github.com/wms2537/anyam/issues/88).
+and owner-claim control path](https://github.com/Whyme-Labs/anyam/issues/88).
 
 ## Teardown
 

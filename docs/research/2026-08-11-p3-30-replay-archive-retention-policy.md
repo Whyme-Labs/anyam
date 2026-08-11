@@ -1,8 +1,8 @@
 # P3-30 replay archive retention and deletion policy
 
 Date: 2026-08-11
-Issue: [#141 — Decide replay archive retention and deletion policy after replay defense expires](https://github.com/wms2537/anyam/issues/141)
-Map: [#138 — Plan Anyam customer-owned replay archival beyond the local tripwire](https://github.com/wms2537/anyam/issues/138)
+Issue: [#141 — Decide replay archive retention and deletion policy after replay defense expires](https://github.com/Whyme-Labs/anyam/issues/141)
+Map: [#138 — Plan Anyam customer-owned replay archival beyond the local tripwire](https://github.com/Whyme-Labs/anyam/issues/138)
 ADR: [0049 — P3 Public Gateway replay-archive retention and deletion](../adr/0049-p3-public-gateway-replay-archive-retention-and-deletion.md)
 Protocol: `anyam.public-gateway-replay-archive/v1`
 Status: implementation complete locally; live provider deletion remains a separately qualified operation

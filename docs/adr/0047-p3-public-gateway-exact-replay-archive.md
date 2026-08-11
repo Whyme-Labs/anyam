@@ -2,7 +2,7 @@
 
 - Status: Accepted; bounded Cloudflare adapter live-qualified
 - Date: 2026-08-08
-- Issue: [Qualify an archival replay-index adapter beyond the Public Gateway tombstone tripwire](https://github.com/wms2537/anyam/issues/113)
+- Issue: [Qualify an archival replay-index adapter beyond the Public Gateway tombstone tripwire](https://github.com/Whyme-Labs/anyam/issues/113)
 - Live qualification: [P3-26 live customer-owned replay archive qualification](../research/2026-08-10-p3-26-replay-archive-live-qualification.md)
 - Depends on: [ADR 0046](./0046-p3-public-gateway-ledger-retention-and-recovery-export.md)
 

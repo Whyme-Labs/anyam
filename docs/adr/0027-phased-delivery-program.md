@@ -4,11 +4,11 @@ Status: Accepted
 
 ## Context
 
-ADR 0020 defines the four capability stages. Issue [#36](https://github.com/wms2537/anyam/issues/36)
+ADR 0020 defines the four capability stages. Issue [#36](https://github.com/Whyme-Labs/anyam/issues/36)
 asked how those stages become an implementation-ready program without turning
 speculative dates, staffing, provider limits, or throughput into commitments.
 The logic prototype on
-[`codex/prototype-phased-delivery`](https://github.com/wms2537/anyam/tree/codex/prototype-phased-delivery)
+[`codex/prototype-phased-delivery`](https://github.com/Whyme-Labs/anyam/tree/codex/prototype-phased-delivery)
 (`e6d4c17`) was used to exercise the state model: a stage can start only after
 its dependencies complete, and it can promote only after its Evidence is
 accepted and its risk spikes are retired.

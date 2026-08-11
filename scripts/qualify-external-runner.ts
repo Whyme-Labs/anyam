@@ -333,23 +333,31 @@ async function main(): Promise<void> {
     return { jobId: controlJobId, attemptId: controlAttemptId, runnerId: controlRunnerId, outputRoot: controlOutputRoot, outputPaths: controlOutputPaths, sourceSnapshotDigest: controlSourceSnapshotDigest, inputManifestDigest: controlInputManifestDigest, publicKey: controlPublicKey, privateKey: controlKeys.privateKey, jobUrl: controlJobUrl, pulled: controlPulled, credential: controlCredential };
   };
 
+  const firstOutputPath = (attempt: { outputPaths: readonly string[] }, label: string): string => {
+    const path = attempt.outputPaths[0];
+    if (!path) throw new Error(`${label} control Attempt has no declared output path`);
+    return path;
+  };
+
   const cancellationAttempt = await createControlAttempt("cancel", false);
+  const cancellationPath = firstOutputPath(cancellationAttempt, "Cancellation");
   const cancellationResponse = await requestJson(`${cancellationAttempt.jobUrl}/cancel`, { method: "POST", headers: { authorization: `Bearer ${controlToken}`, "content-type": "application/json" }, body: JSON.stringify({ reason: "live-qualification-cancellation" }) }, "Runner cancellation");
   const cancellationStatus = jsonObject(cancellationResponse.status, "Runner cancellation status");
   if (cancellationStatus.status !== "cancelled") throw new Error(`Coordinator did not record cancellation: ${JSON.stringify(cancellationStatus)}`);
-  const cancellationCredentialRejection = await requestExpectedFailure(`${cancellationAttempt.jobUrl}/outputs`, { method: "POST", headers: { authorization: `Bearer ${cancellationAttempt.credential}`, "content-type": "application/json" }, body: JSON.stringify({ attemptId: cancellationAttempt.attemptId, path: cancellationAttempt.outputPaths[0], kind: "artifact", disclosure: outputDisclosure, digest: digest("cancelled-output"), contentBase64: Buffer.from("cancelled-output").toString("base64url") }) }, 401, "Cancelled credential output");
+  const cancellationCredentialRejection = await requestExpectedFailure(`${cancellationAttempt.jobUrl}/outputs`, { method: "POST", headers: { authorization: `Bearer ${cancellationAttempt.credential}`, "content-type": "application/json" }, body: JSON.stringify({ attemptId: cancellationAttempt.attemptId, path: cancellationPath, kind: "artifact", disclosure: outputDisclosure, digest: digest("cancelled-output"), contentBase64: Buffer.from("cancelled-output").toString("base64url") }) }, 401, "Cancelled credential output");
   const cancellationAck = await ackQueue(queueUrl, queueToken, cancellationAttempt.pulled.lease_id, "Cancellation Queue acknowledgement");
 
   const revocationAttempt = await createControlAttempt("revoke", false);
+  const revocationPath = firstOutputPath(revocationAttempt, "Revocation");
   const revocationResponse = await requestJson(`${revocationAttempt.jobUrl}/revoke`, { method: "POST", headers: { authorization: `Bearer ${controlToken}`, "content-type": "application/json" }, body: JSON.stringify({ reason: "live-qualification-revocation" }) }, "Runner credential revocation");
   const revocationStatus = jsonObject(revocationResponse.status, "Runner revocation status");
   if (revocationStatus.status !== "revoked") throw new Error(`Coordinator did not record revocation: ${JSON.stringify(revocationStatus)}`);
-  const revocationCredentialRejection = await requestExpectedFailure(`${revocationAttempt.jobUrl}/outputs`, { method: "POST", headers: { authorization: `Bearer ${revocationAttempt.credential}`, "content-type": "application/json" }, body: JSON.stringify({ attemptId: revocationAttempt.attemptId, path: revocationAttempt.outputPaths[0], kind: "artifact", disclosure: outputDisclosure, digest: digest("revoked-output"), contentBase64: Buffer.from("revoked-output").toString("base64url") }) }, 401, "Revoked credential output");
+  const revocationCredentialRejection = await requestExpectedFailure(`${revocationAttempt.jobUrl}/outputs`, { method: "POST", headers: { authorization: `Bearer ${revocationAttempt.credential}`, "content-type": "application/json" }, body: JSON.stringify({ attemptId: revocationAttempt.attemptId, path: revocationPath, kind: "artifact", disclosure: outputDisclosure, digest: digest("revoked-output"), contentBase64: Buffer.from("revoked-output").toString("base64url") }) }, 401, "Revoked credential output");
   const revocationAck = await ackQueue(queueUrl, queueToken, revocationAttempt.pulled.lease_id, "Revocation Queue acknowledgement");
 
   const retryAttempt = await createControlAttempt("retry", true, cancellationAttempt.jobId);
   const retryBytes = Buffer.from(`Anyam external Runner retry qualification\nretryOf=${cancellationAttempt.jobId}\njob=${retryAttempt.jobId}\nattempt=${retryAttempt.attemptId}\n`);
-  const retryPath = retryAttempt.outputPaths[0];
+  const retryPath = firstOutputPath(retryAttempt, "Retry");
   const retryDigest = digest(retryBytes);
   const retryOutput = await requestJson(`${retryAttempt.jobUrl}/outputs`, { method: "POST", headers: { authorization: `Bearer ${retryAttempt.credential}`, "content-type": "application/json" }, body: JSON.stringify({ attemptId: retryAttempt.attemptId, path: retryPath, kind: "artifact", disclosure: outputDisclosure, digest: retryDigest, contentBase64: retryBytes.toString("base64url") }) }, "Retry output upload");
   const retryReadBack = await fetch(`${retryAttempt.jobUrl}/output?path=${encodeURIComponent(retryPath)}`, { headers: { authorization: `Bearer ${retryAttempt.credential}` } });

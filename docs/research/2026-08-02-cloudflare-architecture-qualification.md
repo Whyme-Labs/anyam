@@ -1,7 +1,7 @@
 # Anyam Cloudflare architecture qualification research
 
-**Research snapshot:** 2 August 2026  
-**Ticket:** [#23](https://github.com/wms2537/anyam/issues/23)  
+**Research snapshot:** 2 August 2026
+**Ticket:** [#23](https://github.com/Whyme-Labs/anyam/issues/23)
 **Status:** architecture inputs and qualification gates; not a promise that every Cloudflare feature is a production-ready dependency
 
 This note uses current first-party Cloudflare documentation and the earlier

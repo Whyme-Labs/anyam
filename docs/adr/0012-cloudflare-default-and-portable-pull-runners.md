@@ -10,7 +10,7 @@ control plane and a useful default Linux execution lane, but no honest
 Cloudflare-only promise covers macOS, Windows, ARM, GPUs, hardware-in-the-loop,
 private corporate networks, or every large-memory workload.
 
-Issue [#20](https://github.com/wms2537/anyam/issues/20) asked which workloads
+Issue [#20](https://github.com/Whyme-Labs/anyam/issues/20) asked which workloads
 belong on Cloudflare's managed execution plane, which require external pull
 runners, and how isolation, immutable inputs, caching, networking, secret
 brokerage, job identity, logs, cancellation, artifact upload, Evidence,

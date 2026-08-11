@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-03
-- Issue: [Implement Realm-owned agent Actors and human-to-agent delegation](https://github.com/wms2537/anyam/issues/90)
+- Issue: [Implement Realm-owned agent Actors and human-to-agent delegation](https://github.com/Whyme-Labs/anyam/issues/90)
 - Depends on: [ADR 0030](./0030-realm-identity-and-capability-policy.md), [ADR 0039](./0039-customer-operated-installation-control-path.md)
 
 ## Context

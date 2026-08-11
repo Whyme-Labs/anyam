@@ -4,7 +4,7 @@ status: accepted
 
 # Protect hybrid public/private Source Spaces with independent public lineages
 
-Issue [#50](https://github.com/wms2537/anyam/issues/50) asked Anyam to make the
+Issue [#50](https://github.com/Whyme-Labs/anyam/issues/50) asked Anyam to make the
 hybrid video-player promise executable: a public player can be cloned and
 changed without exposing a private codec, while an owner may run a sealed
 compatibility verifier and return only an approved result projection.

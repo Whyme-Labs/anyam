@@ -1,7 +1,7 @@
 # P3 public beta: public contribution through a safe hybrid Source Space projection
 
 **Date:** 3 August 2026
-**Ticket:** [#86](https://github.com/wms2537/anyam/issues/86)
+**Ticket:** [#86](https://github.com/Whyme-Labs/anyam/issues/86)
 **Status:** passed with bounded public-projection qualification
 
 ## Decision

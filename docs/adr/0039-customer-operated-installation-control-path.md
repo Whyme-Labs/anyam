@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-03
-- Issue: [Implement the customer-operated install and owner-claim control path](https://github.com/wms2537/anyam/issues/88)
+- Issue: [Implement the customer-operated install and owner-claim control path](https://github.com/Whyme-Labs/anyam/issues/88)
 - Depends on: [ADR 0031](./0031-customer-operated-realm-installation-and-recovery.md)
 
 ## Context

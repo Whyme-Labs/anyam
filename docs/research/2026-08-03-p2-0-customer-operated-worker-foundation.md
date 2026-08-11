@@ -3,7 +3,7 @@
 **Status:** Local contract qualification complete; Cloudflare provider
 qualification not claimed.
 
-**Ticket:** [Deploy a customer-operated Cloudflare control-plane foundation](https://github.com/wms2537/anyam/issues/74)
+**Ticket:** [Deploy a customer-operated Cloudflare control-plane foundation](https://github.com/Whyme-Labs/anyam/issues/74)
 
 ## What this receipt proves
 

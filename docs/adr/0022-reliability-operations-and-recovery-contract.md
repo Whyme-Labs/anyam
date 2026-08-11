@@ -10,7 +10,7 @@ Target adapters, and external mirrors. A provider acknowledgement, Queue
 acknowledgement, Workflow state, dashboard log, or deployment version is not by
 itself an Anyam state transition.
 
-Issue [#30](https://github.com/wms2537/anyam/issues/30) asked for SLOs, error
+Issue [#30](https://github.com/Whyme-Labs/anyam/issues/30) asked for SLOs, error
 budgets, capacity assumptions, observability, audit retention, backups, restore,
 RPO/RTO, degraded modes, incident response, support tooling, change management,
 and runbooks for provider outages, partial cross-space Landing, queue

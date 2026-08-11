@@ -6,7 +6,7 @@ Status: Accepted
 
 Anyam must deliver more than web applications: packages, command-line binaries, documentation, infrastructure plans, models, datasets, mobile builds, firmware, and device releases all need a trustworthy path from source to an externally visible result. A kernel that calls every result a deployment would either become web-specific or conceal important differences in registry, store, fleet, and stateful infrastructure behavior.
 
-The owner resolved the kernel-versus-adapter and delivery semantics in ticket [#14](https://github.com/wms2537/anyam/issues/14).
+The owner resolved the kernel-versus-adapter and delivery semantics in ticket [#14](https://github.com/Whyme-Labs/anyam/issues/14).
 
 ## Decision
 

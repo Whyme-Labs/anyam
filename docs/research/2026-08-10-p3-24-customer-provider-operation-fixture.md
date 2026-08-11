@@ -1,9 +1,9 @@
 # Bounded customer-provider operation fixture
 
 Date: 2026-08-10
-Issue: [Implement bounded customer-provider operation fixture for failure and recovery qualification](https://github.com/wms2537/anyam/issues/136)
-Parent qualification: [Qualify customer-owned provider failure and recovery matrix](https://github.com/wms2537/anyam/issues/129)
-Map: [Plan Anyam beyond bounded P3 public beta](https://github.com/wms2537/anyam/issues/118)
+Issue: [Implement bounded customer-provider operation fixture for failure and recovery qualification](https://github.com/Whyme-Labs/anyam/issues/136)
+Parent qualification: [Qualify customer-owned provider failure and recovery matrix](https://github.com/Whyme-Labs/anyam/issues/129)
+Map: [Plan Anyam beyond bounded P3 public beta](https://github.com/Whyme-Labs/anyam/issues/118)
 Protocol: `anyam.p3-24-customer-provider-operation-fixture/v1`
 Status: local fixture implemented and worker bundle qualified; live cohort remains unclaimed
 

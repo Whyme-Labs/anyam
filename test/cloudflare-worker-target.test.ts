@@ -12,6 +12,7 @@ import {
   type CloudflareWorkerDeployment,
   type CloudflareWorkerTargetOperation,
   type CloudflareWorkerVersion,
+  type CloudflareWorkerVersionList,
 } from "../src/cloudflare/worker-target.ts";
 import { CONTRACT_VERSIONS } from "../src/kernel/contracts.ts";
 import {
@@ -89,7 +90,7 @@ class InMemoryCloudflareWorkerApi {
   async request<T>(request: CloudflareWorkerApiRequest): Promise<CloudflareWorkerApiResponse<T>> {
     this.requests.push({ method: request.method, path: request.path, token: request.token });
     if (request.method === "GET" && request.path.includes("/versions?")) {
-      return { status: 200, ok: true, result: [...this.versions] as T, errors: [], messages: [] };
+      return { status: 200, ok: true, result: { items: [...this.versions] } as CloudflareWorkerVersionList as T, errors: [], messages: [] };
     }
     if (request.method === "POST" && request.path.endsWith("/versions")) {
       assert.ok(request.body instanceof FormData);

@@ -121,6 +121,16 @@ async function run(): Promise<Record<string, unknown>> {
     body: workerModuleUpload(healthyBytes),
   });
   if (!seeded.ok) throw new Error(`seed Worker upload returned HTTP ${seeded.status}: ${responseErrors(seeded)}`);
+  const subdomain = await transport.request<{ enabled: boolean; previews_enabled: boolean }>({
+    method: "POST",
+    path: `/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}/subdomain`,
+    token,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ enabled: true, previews_enabled: true }),
+  });
+  if (!subdomain.ok || !subdomain.result?.enabled || !subdomain.result.previews_enabled) {
+    throw new Error(`Worker subdomain preview enablement failed: HTTP ${subdomain.status}: ${responseErrors(subdomain)}`);
+  }
 
   const first = release({ id: "healthy", fileName: "healthy.js", bytes: healthyBytes });
   const second = release({ id: "failing", fileName: "failing.js", bytes: failingBytes });
@@ -151,7 +161,7 @@ async function run(): Promise<Record<string, unknown>> {
   coordinator.registerRelease(first.immutable);
   coordinator.registerRelease(second.immutable);
   const healthyPromotion = await coordinator.promote({ releaseId: first.immutable.release.id, idempotencyKey: "qualification:healthy", actor: { principalId: "principal:qualification", actorId: "actor:qualification", sessionId: "session:qualification", clientId: "client:qualification" } });
-  if (healthyPromotion.state !== "healthy") throw new Error(`healthy promotion did not reach healthy state: ${healthyPromotion.state}`);
+  if (healthyPromotion.state !== "healthy") throw new Error(`healthy promotion did not reach healthy state: ${healthyPromotion.state}; receipt=${healthyPromotion.receipt}; recoveryAction=${healthyPromotion.recoveryAction}`);
   const failingPromotion = await coordinator.promote({ releaseId: second.immutable.release.id, idempotencyKey: "qualification:failing", actor: { principalId: "principal:qualification", actorId: "actor:qualification", sessionId: "session:qualification", clientId: "client:qualification" } });
   if (failingPromotion.state !== "rolled-back" || failingPromotion.health?.state !== "unhealthy" || failingPromotion.rollbackHealth?.state !== "healthy") throw new Error(`failed health did not preserve the known-good Release: state=${failingPromotion.state}; health=${failingPromotion.health?.state}; rollbackHealth=${failingPromotion.rollbackHealth?.state}`);
   return { protocol, status: "succeeded", scriptName, accountId, healthyPromotion: { state: healthyPromotion.state, releaseDigest: healthyPromotion.releaseDigest }, failingPromotion: { state: failingPromotion.state, health: failingPromotion.health?.state, rollbackHealth: failingPromotion.rollbackHealth?.state }, targetReleaseId: coordinator.getTarget().currentReleaseId, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true };

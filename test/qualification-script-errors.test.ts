@@ -50,4 +50,6 @@ test("worker-target qualification declares module syntax in its seed upload", as
   assert.match(source, /form\.append\("metadata",\s*new Blob\(\[JSON\.stringify\(\{\s*main_module:\s*"worker\.js"\s*\}\)\],\s*\{\s*type:\s*"application\/json"\s*\}\),\s*"metadata\.json"\)/);
   assert.match(source, /form\.append\("worker\.js",\s*new Blob\(\[Buffer\.from\(bytes\)\],\s*\{\s*type:\s*"application\/javascript\+module"\s*\}\),\s*"worker\.js"\)/);
   assert.match(source, /body:\s*workerModuleUpload\(healthyBytes\)/);
+  assert.match(source, /path:\s*`\/accounts\/\$\{encodeURIComponent\(accountId\)\}\/workers\/scripts\/\$\{encodeURIComponent\(scriptName\)\}\/subdomain`/);
+  assert.match(source, /body:\s*JSON\.stringify\(\{\s*enabled:\s*true,\s*previews_enabled:\s*true\s*\}\)/);
 });

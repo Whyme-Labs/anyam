@@ -90,6 +90,10 @@ export type CloudflareWorkerVersion = {
   number?: number;
 };
 
+export type CloudflareWorkerVersionList = {
+  items?: readonly CloudflareWorkerVersion[];
+};
+
 export type CloudflareWorkerDeployment = {
   id: string;
   versions: readonly { version_id: string; percentage: number }[];
@@ -536,9 +540,9 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     if (cached) return cached;
     const credential = await this.issueCredential("version-read");
     if (isFailure(credential)) return credential;
-    let response: CloudflareWorkerApiResponse<readonly CloudflareWorkerVersion[]>;
+    let response: CloudflareWorkerApiResponse<CloudflareWorkerVersionList>;
     try {
-      response = await this.config.transport.request<readonly CloudflareWorkerVersion[]>({
+      response = await this.config.transport.request<CloudflareWorkerVersionList>({
         method: "GET",
         path: `${operationPath(this.config.accountId, this.config.scriptName, "/versions")}?per_page=100`,
         token: credential.token,
@@ -549,7 +553,7 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     const result = responseResult(response, operation);
     if (isFailure(result)) return result;
     const tag = tagForRelease(release);
-    const version = result.find((candidate) => candidate.metadata?.annotations?.["workers/tag"] === tag);
+    const version = (result.items ?? []).find((candidate) => candidate.metadata?.annotations?.["workers/tag"] === tag);
     if (!version) return failure({ operation, code: "cloudflare.version-not-found", message: `Cloudflare Worker version for Release ${release.release.id} was not found by its immutable tag.`, recoveryAction: "upload the exact verified Release Artifact or reconcile the provider version list before retrying", receipt: `releaseDigest=${release.releaseDigest}; tag=${tag}; providerOperation=version-list; found=false` });
     this.versionsByPromotion.set(release.releaseDigest, version);
     return version;

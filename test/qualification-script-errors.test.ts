@@ -9,6 +9,7 @@ const scripts = [
   "scripts/qualify-provider-feed.ts",
   "scripts/qualify-replay-archive-workload.ts",
   "scripts/qualify-hosted-saas.ts",
+  "scripts/qualify-worker-target.ts",
 ] as const;
 
 function cleanEnvironment(): NodeJS.ProcessEnv {

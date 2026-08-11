@@ -10,6 +10,7 @@
     "harness": "tsx src/harness/cli.ts",
     "qualification:external-runner": "tsx scripts/qualify-external-runner.ts",
     "qualification:provider-feed": "tsx scripts/qualify-provider-feed.ts",
+    "qualification:worker-target": "tsx scripts/qualify-worker-target.ts",
     "qualification:replay-archive-workload": "tsx scripts/qualify-replay-archive-workload.ts",
     "qualification:hosted-saas": "tsx scripts/qualify-hosted-saas.ts",
     "typecheck:scripts": "tsc -p tsconfig.scripts.json --noEmit",

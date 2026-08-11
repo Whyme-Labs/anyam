@@ -20,6 +20,7 @@ export * from "./disclosure/public-intake.ts";
 export * from "./cloudflare/public-gateway.ts";
 export * from "./cloudflare/public-gateway-replay-archive.ts";
 export * from "./cloudflare/public-gateway-abuse.ts";
+export * from "./cloudflare/worker-target.ts";
 export * from "./delivery/promotion.ts";
 export * from "./delivery/release-publication.ts";
 export * from "./qualification/stages.ts";

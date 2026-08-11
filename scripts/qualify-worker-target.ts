@@ -44,8 +44,8 @@ function workerModule(failing: boolean): Uint8Array {
 
 function workerModuleUpload(bytes: Uint8Array): FormData {
   const form = new FormData();
-  form.append("metadata", JSON.stringify({ main_module: "worker.js" }));
-  form.append("worker.js", new Blob([Buffer.from(bytes)], { type: "application/javascript" }), "worker.js");
+  form.append("metadata", new Blob([JSON.stringify({ main_module: "worker.js" })], { type: "application/json" }), "metadata.json");
+  form.append("worker.js", new Blob([Buffer.from(bytes)], { type: "application/javascript+module" }), "worker.js");
   return form;
 }
 

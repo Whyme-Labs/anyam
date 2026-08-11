@@ -594,11 +594,12 @@ export function createCloudflareWorkerRestTransport(input: { fetch?: typeof fetc
           parsed = { errors: [{ message: `Cloudflare returned non-JSON response (${text.slice(0, 120)})` }] };
         }
       }
+      const errors = parsed.errors ?? [];
       return {
         status: response.status,
-        ok: response.ok && parsed.errors?.length === 0,
+        ok: response.ok && errors.length === 0,
         ...(parsed.result !== undefined ? { result: parsed.result } : {}),
-        errors: parsed.errors ?? [],
+        errors,
         messages: parsed.messages ?? [],
       };
     },

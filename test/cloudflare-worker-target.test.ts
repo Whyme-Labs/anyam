@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
   CloudflareWorkerTargetAdapter,
+  createCloudflareWorkerRestTransport,
   type CloudflareWorkerApiRequest,
   type CloudflareWorkerApiResponse,
   type CloudflareWorkerDeployment,
@@ -115,6 +116,22 @@ class InMemoryCloudflareWorkerApi {
     return { status: 404, ok: false, errors: [{ code: 1000, message: "unknown test provider route" }], messages: [] };
   }
 }
+
+test("Cloudflare REST transport accepts successful responses that omit optional error arrays", async () => {
+  const transport = createCloudflareWorkerRestTransport({
+    apiBase: "https://api.example.test",
+    fetch: async () => new Response(JSON.stringify({ success: true, result: { items: [] } }), { status: 200, headers: { "content-type": "application/json" } }),
+  });
+  const response = await transport.request<{ items: readonly unknown[] }>({
+    method: "GET",
+    path: "/accounts/account/versions",
+    token: "provider-token",
+  });
+  assert.equal(response.ok, true);
+  assert.deepEqual(response.result, { items: [] });
+  assert.deepEqual(response.errors, []);
+  assert.deepEqual(response.messages, []);
+});
 
 test("Cloudflare Worker Target uploads digest-bound versions, promotes after preview, and rolls back after unhealthy health", async () => {
   const first = await release("first");

@@ -57,6 +57,10 @@ The adapter uses the Workers Versions and Deployments APIs:
   just after a successful version upload or deployment. The final observation
   is still the real provider URL; this policy never turns a non-2xx response
   into healthy.
+- The same qualification tripwire may retry transient preview/health
+  transport failures (such as DNS or connection setup) after the provider has
+  accepted the immutable operation. The receipt records whether that behavior
+  was enabled; a transport failure remains indeterminate after the tripwire.
 - Rollback health may use a separate policy for transient provider traffic
   responses (including 503) because the previous known-good version can take
   time to receive traffic after the rollback deployment is accepted. Candidate
@@ -113,6 +117,10 @@ Write permission, a script name beginning with
 4. uploads a candidate whose health returns 503;
 5. verifies the coordinator records rollback and preserves the first Release;
 6. deletes the disposable Worker in a `finally` cleanup path.
+
+The cleanup path also retries bounded transient provider failures and records
+the attempts; a cleanup transport failure remains blocked and must be
+reconciled before another qualification is treated as complete.
 
 The script prints credential-free receipts and never claims production SLOs,
 provider limits, or universal Cloudflare support. Its route-readiness values

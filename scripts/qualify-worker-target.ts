@@ -54,6 +54,10 @@ function responseErrors<T>(response: CloudflareWorkerApiResponse<T>): string {
   return [...response.errors, ...response.messages].map((error) => `${error.code ?? "unknown"}:${error.message}`).join(" | ") || `http-${response.status}`;
 }
 
+function retryableProviderStatus(status: number): boolean {
+  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+}
+
 function workerModule(failing: boolean, releaseId: string): Uint8Array {
   const source = `export default { fetch(request) { const preview = new URL(request.url).searchParams.get("anyam_preview") === "1"; const failing = ${failing ? "true" : "false"}; const status = failing && !preview ? 503 : 200; return new Response(JSON.stringify({ status: status === 200 ? "healthy" : "unhealthy", releaseId: ${JSON.stringify(releaseId)} }), { status, headers: { "content-type": "application/json" } }); } };\n`;
   return new TextEncoder().encode(source);
@@ -153,6 +157,7 @@ async function run(): Promise<Record<string, unknown>> {
     maxAttempts: positiveInteger("ANYAM_WORKER_TARGET_HEALTH_RETRY_ATTEMPTS", 10),
     delayMs: nonNegativeNumber("ANYAM_WORKER_TARGET_HEALTH_RETRY_DELAY_MS", 1000),
     retryStatuses: [404] as const,
+    retryTransportErrors: true,
   };
   const rollbackRouteReadinessRetry = {
     ...routeReadinessRetry,
@@ -219,7 +224,7 @@ async function run(): Promise<Record<string, unknown>> {
   if (failingPromotion.state !== "rolled-back" || failingPromotion.health?.state !== "unhealthy" || failingPromotion.rollbackHealth?.state !== "healthy") {
     throw new Error(`failed health did not preserve the known-good Release: state=${failingPromotion.state}; health=${failingPromotion.health?.state}; rollbackHealth=${failingPromotion.rollbackHealth?.state}; receipt=${failingPromotion.receipt}; recoveryAction=${failingPromotion.recoveryAction ?? "not-provided"}`);
   }
-  return { protocol, status: "succeeded", scriptName, accountId, healthyPromotion: { state: healthyPromotion.state, releaseDigest: healthyPromotion.releaseDigest }, failingPromotion: { state: failingPromotion.state, health: failingPromotion.health?.state, rollbackHealth: failingPromotion.rollbackHealth?.state }, targetReleaseId: coordinator.getTarget().currentReleaseId, routeReadiness: { candidate: { retryStatuses: routeReadinessRetry.retryStatuses, maxAttempts: routeReadinessRetry.maxAttempts, delayMs: routeReadinessRetry.delayMs }, rollback: { retryStatuses: rollbackRouteReadinessRetry.retryStatuses, maxAttempts: rollbackRouteReadinessRetry.maxAttempts, delayMs: rollbackRouteReadinessRetry.delayMs }, receipt: "qualification-tripwire; preview-and-production-route-readiness; rollback-503-is-transient-only-after-known-good-release; remeasure-before-production" }, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true };
+  return { protocol, status: "succeeded", scriptName, accountId, healthyPromotion: { state: healthyPromotion.state, releaseDigest: healthyPromotion.releaseDigest }, failingPromotion: { state: failingPromotion.state, health: failingPromotion.health?.state, rollbackHealth: failingPromotion.rollbackHealth?.state }, targetReleaseId: coordinator.getTarget().currentReleaseId, routeReadiness: { candidate: { retryStatuses: routeReadinessRetry.retryStatuses, maxAttempts: routeReadinessRetry.maxAttempts, delayMs: routeReadinessRetry.delayMs, retryTransportErrors: routeReadinessRetry.retryTransportErrors }, rollback: { retryStatuses: rollbackRouteReadinessRetry.retryStatuses, maxAttempts: rollbackRouteReadinessRetry.maxAttempts, delayMs: rollbackRouteReadinessRetry.delayMs, retryTransportErrors: rollbackRouteReadinessRetry.retryTransportErrors }, receipt: "qualification-tripwire; preview-and-production-route-readiness; transient-transport-errors-retried; rollback-503-is-transient-only-after-known-good-release; remeasure-before-production" }, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true };
 }
 
 async function cleanup(): Promise<{ status: "succeeded" | "blocked"; receipt: string }> {
@@ -227,9 +232,21 @@ async function cleanup(): Promise<{ status: "succeeded" | "blocked"; receipt: st
   const token = process.env.ANYAM_WORKER_TARGET_API_TOKEN?.trim();
   const scriptName = process.env.ANYAM_WORKER_TARGET_SCRIPT_NAME?.trim();
   if (!accountId || !token || !scriptName || !scriptName.startsWith(qualificationPrefix)) return { status: "blocked", receipt: "cleanup=not-attempted; recovery=set the same disposable qualification inputs before deleting anything" };
+  const maxAttempts = positiveInteger("ANYAM_WORKER_TARGET_CLEANUP_RETRY_ATTEMPTS", 3);
+  const delayMs = nonNegativeNumber("ANYAM_WORKER_TARGET_CLEANUP_RETRY_DELAY_MS", 1000);
   const transport = createCloudflareWorkerRestTransport({});
-  const response = await transport.request<unknown>({ method: "DELETE", path: `/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}`, token });
-  return response.ok ? { status: "succeeded", receipt: `cleanup=worker-deleted; scriptName=${scriptName}; credentialMaterialStored=false` } : { status: "blocked", receipt: `cleanup=blocked; scriptName=${scriptName}; httpStatus=${response.status}; error=${responseErrors(response)}; credentialMaterialStored=false` };
+  const path = `/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}`;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const response = await transport.request<unknown>({ method: "DELETE", path, token });
+      if (response.ok) return { status: "succeeded", receipt: `cleanup=worker-deleted; scriptName=${scriptName}; attempts=${attempt}; maxAttempts=${maxAttempts}; delayMs=${delayMs}; retryableStatuses=408,409,425,429,5xx; sizing=qualification-tripwire; credentialMaterialStored=false` };
+      if (!retryableProviderStatus(response.status) || attempt === maxAttempts) return { status: "blocked", receipt: `cleanup=blocked; scriptName=${scriptName}; httpStatus=${response.status}; error=${responseErrors(response)}; attempts=${attempt}; maxAttempts=${maxAttempts}; delayMs=${delayMs}; retryableStatuses=408,409,425,429,5xx; sizing=qualification-tripwire; credentialMaterialStored=false` };
+    } catch (error) {
+      if (attempt === maxAttempts) return { status: "blocked", receipt: `cleanup=blocked; scriptName=${scriptName}; error=${error instanceof Error ? error.message : String(error)}; attempts=${attempt}; maxAttempts=${maxAttempts}; delayMs=${delayMs}; retryableErrors=transport; sizing=qualification-tripwire; credentialMaterialStored=false` };
+    }
+    if (delayMs) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+  }
+  return { status: "blocked", receipt: `cleanup=blocked; scriptName=${scriptName}; error=retry-loop-exhausted; maxAttempts=${maxAttempts}; credentialMaterialStored=false` };
 }
 
 let result: Record<string, unknown> | undefined;

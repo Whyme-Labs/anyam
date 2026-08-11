@@ -148,6 +148,8 @@ export type CloudflareWorkerRouteReadinessRetry = {
   maxAttempts: number;
   delayMs: number;
   retryStatuses: readonly number[];
+  /** Retry transient DNS/TLS/connection failures during route readiness. */
+  retryTransportErrors?: boolean;
 };
 
 export type CloudflareWorkerHealthResponseValidator = (input: {
@@ -300,7 +302,7 @@ function providerErrors(response: CloudflareWorkerApiResponse<unknown>): string 
 
 function routeReadinessReceipt(retry: CloudflareWorkerRouteReadinessRetry | undefined, attempts: number): string {
   if (!retry) return `routeReadinessAttempts=${attempts}`;
-  return `routeReadinessAttempts=${attempts}; routeReadinessMaxAttempts=${retry.maxAttempts}; routeReadinessDelayMs=${retry.delayMs}; routeReadinessStatuses=${retry.retryStatuses.join(",")}`;
+  return `routeReadinessAttempts=${attempts}; routeReadinessMaxAttempts=${retry.maxAttempts}; routeReadinessDelayMs=${retry.delayMs}; routeReadinessStatuses=${retry.retryStatuses.join(",")}; routeReadinessRetryTransportErrors=${retry.retryTransportErrors === true}`;
 }
 
 function validateRouteReadinessRetry(retry: CloudflareWorkerRouteReadinessRetry, name: string): void {
@@ -451,7 +453,7 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     const version = await this.ensureVersion(input, "preview");
     if (isFailure(version)) return version;
     const previewUrl = this.config.previewUrlForVersion(version.id);
-    const previewResponse = await this.fetchHealth(previewUrl, this.config.routeReadinessRetry);
+    const previewResponse = await this.fetchHealth(previewUrl, this.config.routeReadinessRetry, "preview");
     if (isFailure(previewResponse)) return previewResponse;
     const validation = validateHealthResponse({
       operation: "preview",
@@ -536,7 +538,7 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     const routeReadinessRetry = input.phase === "rollback"
       ? this.config.rollbackRouteReadinessRetry ?? this.config.routeReadinessRetry
       : this.config.routeReadinessRetry;
-    const response = await this.fetchHealth(healthUrl, routeReadinessRetry);
+    const response = await this.fetchHealth(healthUrl, routeReadinessRetry, "health");
     if (isFailure(response)) return response;
     const phase = input.phase ?? "candidate";
     const validation = validateHealthResponse({
@@ -690,7 +692,7 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     return version;
   }
 
-  private async fetchHealth(url: string, retry?: CloudflareWorkerRouteReadinessRetry): Promise<{ status: number; body: Uint8Array; bodyDigest: string; attempts: number } | DeliveryAdapterFailure> {
+  private async fetchHealth(url: string, retry: CloudflareWorkerRouteReadinessRetry | undefined, operation: "preview" | "health"): Promise<{ status: number; body: Uint8Array; bodyDigest: string; attempts: number } | DeliveryAdapterFailure> {
     const maxAttempts = retry?.maxAttempts ?? 1;
     const retryStatuses = new Set(retry?.retryStatuses ?? []);
     for (let attempts = 1; attempts <= maxAttempts; attempts += 1) {
@@ -701,7 +703,11 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
         if (attempts === maxAttempts || !retryStatuses.has(response.status)) return observation;
         if (retry?.delayMs) await new Promise<void>((resolve) => setTimeout(resolve, retry.delayMs));
       } catch (error) {
-        return failure({ operation: "health", code: "health.transport", message: `Cloudflare Worker health request failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "inspect the named preview or deployed Worker endpoint and retry health without changing the Release", receipt: `url=${url}; providerOperation=health-request; credentialMaterialStored=false` });
+        if (retry?.retryTransportErrors === true && attempts < maxAttempts) {
+          if (retry.delayMs) await new Promise<void>((resolve) => setTimeout(resolve, retry.delayMs));
+          continue;
+        }
+        return failure({ operation, code: "health.transport", message: `Cloudflare Worker ${operation} request failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: `inspect the named ${operation} Worker endpoint and retry ${operation} without changing the Release`, receipt: `url=${url}; providerOperation=${operation}-request; ${routeReadinessReceipt(retry, attempts)}; credentialMaterialStored=false` });
       }
     }
     throw new Error("health retry loop exhausted without an observation");

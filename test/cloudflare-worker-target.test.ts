@@ -293,6 +293,54 @@ test("Cloudflare Worker Target rejects a stale 2xx health response from a previo
   }
 });
 
+test("Cloudflare Worker Target retries transient preview transport failures when route readiness allows it", async () => {
+  const candidate = await release("transport-retry");
+  try {
+    const api = new InMemoryCloudflareWorkerApi();
+    const artifact = candidate.release.artifacts[0];
+    assert.ok(artifact?.outputPath);
+    const bytes = new Uint8Array(await readFile(join(candidate.directory, artifact.outputPath)));
+    const target = createWorkerTarget({
+      target: {
+        protocol: CONTRACT_VERSIONS.target,
+        id: "target:transport-retry",
+        projectId: "project:worker",
+        name: "Transport retry test",
+        adapterId: "cloudflare.worker",
+        acceptedArtifactTypes: ["worker.bundle"],
+        requiredEvidenceKeys: [],
+        state: "configured",
+      },
+      capabilities: { preview: true, promote: true, healthCheck: true, rollback: true },
+    });
+    let fetchAttempts = 0;
+    const adapter = new CloudflareWorkerTargetAdapter({
+      accountId: "account:transport-retry",
+      scriptName: "anyam-transport-retry",
+      transport: api,
+      credentialBroker: {
+        async issue(input) {
+          return { token: "transport-retry-token", credentialId: `credential:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, receipt: "credential=brokered; token=redacted" };
+        },
+      },
+      artifactReader: { async read() { return bytes; } },
+      previewUrlForVersion: (versionId) => `https://${versionId}.preview.workers.dev`,
+      healthUrl: "https://anyam-transport-retry.workers.dev/health",
+      routeReadinessRetry: { maxAttempts: 2, delayMs: 0, retryStatuses: [404], retryTransportErrors: true },
+      fetch: async () => {
+        fetchAttempts += 1;
+        if (fetchAttempts === 1) throw new Error("temporary DNS failure");
+        return new Response("preview-ok", { status: 200 });
+      },
+    });
+    const preview = await adapter.preview({ promotionId: "promotion:transport-retry", attempt: 1, release: candidate.release, target });
+    assert.equal(preview.status, "succeeded");
+    if (preview.status === "succeeded") assert.match(preview.receipt, /routeReadinessAttempts=2;.*routeReadinessRetryTransportErrors=true/);
+  } finally {
+    await rm(candidate.directory, { recursive: true, force: true });
+  }
+});
+
 test("Cloudflare Worker Target fails a non-2xx preview before deployment", async () => {
   const candidate = await release("preview-failure");
   try {

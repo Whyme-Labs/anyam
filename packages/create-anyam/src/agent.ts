@@ -1,11 +1,16 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
+import { homedir } from "node:os";
+import { execFile as execFileCallback } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { basename, join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { gitCommitIdentity, gitProjectRevisionId, gitTreeIdentity, inspectGitSource, isGitAncestor, LocalGitSourceError } from "./git-source.js";
 import { runLocalCheck } from "./scaffold.js";
+
+const execFile = promisify(execFileCallback);
 
 export const AGENT_SESSION_PROTOCOL = "anyam.agent-session/v1";
 export const AGENT_STATE_PROTOCOL = "anyam.agent-state/v1";
@@ -54,6 +59,8 @@ export const PROHIBITED_OPERATIONS = [
 export const LOCAL_AGENT_POLICY = {
   credentialLifetimeMs: 15 * 60 * 1000,
   sessionLifetimeMs: 2 * 60 * 60 * 1000,
+  stateLockTimeoutMs: 5_000,
+  stateLockRetryDelayMs: 10,
   receipt: "policy=local-agent/v1; sizing=provisional-tripwire; remeasure-before-production",
 } as const;
 
@@ -254,12 +261,27 @@ type ChangeMetadata = {
 
 export type LocalAgentManagerOptions = {
   directory: string;
+  stateDirectory?: string;
   principalId?: string;
   clientId?: string;
   credentialLifetimeMs?: number;
   sessionLifetimeMs?: number;
   now?: () => Date;
 };
+
+export function defaultAgentStateDirectory(): string {
+  const configured = process.env.ANYAM_STATE_HOME?.trim();
+  if (configured) return resolve(configured);
+  if (process.platform === "darwin") return join(homedir(), "Library", "Application Support", "Anyam");
+  if (process.platform === "win32") return join(process.env.LOCALAPPDATA?.trim() || join(homedir(), "AppData", "Local"), "Anyam");
+  return join(process.env.XDG_STATE_HOME?.trim() || join(homedir(), ".local", "state"), "anyam");
+}
+
+export function localAgentStatePath(directoryInput: string, stateDirectory = defaultAgentStateDirectory()): string {
+  const directory = resolve(directoryInput);
+  const projectKey = createHash("sha256").update(directory).digest("hex");
+  return join(resolve(stateDirectory), "projects", projectKey, "state.json");
+}
 
 export class LocalAgentError extends Error {
   readonly code: string;
@@ -541,6 +563,7 @@ function emptyState(): AgentState {
 
 export class LocalAgentManager {
   readonly directory: string;
+  readonly statePathname: string;
   private readonly principalId: string;
   private readonly clientId: string;
   private readonly credentialLifetimeMs: number;
@@ -549,6 +572,7 @@ export class LocalAgentManager {
 
   constructor(options: LocalAgentManagerOptions) {
     this.directory = resolve(options.directory);
+    this.statePathname = localAgentStatePath(this.directory, options.stateDirectory);
     this.principalId = options.principalId ?? "principal:local-owner";
     this.clientId = options.clientId ?? "client:anyam-local-broker";
     this.credentialLifetimeMs = options.credentialLifetimeMs ?? LOCAL_AGENT_POLICY.credentialLifetimeMs;
@@ -563,7 +587,72 @@ export class LocalAgentManager {
   }
 
   private statePath(): string {
-    return join(this.directory, ".anyam", "agents", "state.json");
+    return this.statePathname;
+  }
+
+  private stateLockPath(): string {
+    return `${this.statePath()}.lock`;
+  }
+
+  private async acquireStateLock(): Promise<() => Promise<void>> {
+    const lockPath = this.stateLockPath();
+    await mkdir(join(lockPath, ".."), { recursive: true });
+    const startedAt = Date.now();
+    while (true) {
+      try {
+        const handle = await open(lockPath, "wx");
+        try {
+          await handle.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`, "utf8");
+          return async () => {
+            await handle.close();
+            await unlink(lockPath).catch(() => undefined);
+          };
+        } catch (error) {
+          await handle.close().catch(() => undefined);
+          await unlink(lockPath).catch(() => undefined);
+          throw error;
+        }
+      } catch (error) {
+        const code = isRecord(error) && typeof error.code === "string" ? error.code : "";
+        if (code !== "EEXIST") throw error;
+        if (Date.now() - startedAt >= LOCAL_AGENT_POLICY.stateLockTimeoutMs) {
+          let stale = false;
+          try {
+            const lock = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: unknown };
+            if (typeof lock.pid === "number" && lock.pid !== process.pid) {
+              try {
+                process.kill(lock.pid, 0);
+              } catch {
+                stale = true;
+              }
+            }
+          } catch {
+            stale = true;
+          }
+          if (stale) {
+            await unlink(lockPath).catch(() => undefined);
+            continue;
+          }
+          throw new LocalAgentError({
+            code: "agent.state.busy",
+            message: `Agent state is locked by another broker; budget=state-lock; limit=${LOCAL_AGENT_POLICY.stateLockTimeoutMs}ms; asked=one exclusive state transaction; no state mutation was performed.`,
+            affectedObject: this.statePath(),
+            recoveryAction: "wait for the other broker to finish, then retry the operation",
+            receipt: `${LOCAL_AGENT_POLICY.receipt}; state-lock-timeout-ms=${LOCAL_AGENT_POLICY.stateLockTimeoutMs}`,
+          });
+        }
+        await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, LOCAL_AGENT_POLICY.stateLockRetryDelayMs));
+      }
+    }
+  }
+
+  private async withStateLock<T>(operation: () => Promise<T>): Promise<T> {
+    const release = await this.acquireStateLock();
+    try {
+      return await operation();
+    } finally {
+      await release();
+    }
   }
 
   private async readState(): Promise<AgentState> {
@@ -661,7 +750,7 @@ export class LocalAgentManager {
     return { session, grant, context };
   }
 
-  private async requireActiveSession(): Promise<{ state: AgentState; session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+  private async requireActiveSessionUnlocked(): Promise<{ state: AgentState; session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
     const state = await this.readState();
     const active = this.activeSession(state);
     if (!active) throw new LocalAgentError({ code: "agent.session.missing", message: "No active local agent session is available for this Project.", recoveryAction: "run anyam agent start <codex|claude|cursor|cli>", receipt: "currentSessionId did not resolve to an active session" });
@@ -674,7 +763,7 @@ export class LocalAgentManager {
     return { state, session: active.session, grant: active.grant, context: active.context };
   }
 
-  async startSession(input: { agent: string; changeId?: string }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+  private async startSessionUnlocked(input: { agent: string; changeId?: string }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
     const agent = ensureAgent(input.agent);
     const project = await this.projectMetadata();
     const change = await this.changeMetadata();
@@ -758,18 +847,24 @@ export class LocalAgentManager {
     return { session, grant, context };
   }
 
-  async ensureActiveSession(agent: string): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
-    const requested = ensureAgent(agent);
-    const state = await this.readState();
-    const active = this.activeSession(state);
-    if (active && !this.expireIfNeeded(state, active.session, active.grant) && active.session.agent === requested) {
-      await this.writeState(state);
-      return { session: clone(active.session), grant: clone(active.grant), context: clone(active.context) };
-    }
-    return this.startSession({ agent: requested });
+  async startSession(input: { agent: string; changeId?: string }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+    return this.withStateLock(() => this.startSessionUnlocked(input));
   }
 
-  async revoke(sessionId?: string): Promise<{ sessionId: string; grantId: string; status: "revoked" | "missing" }> {
+  async ensureActiveSession(agent: string): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+    return this.withStateLock(async () => {
+      const requested = ensureAgent(agent);
+      const state = await this.readState();
+      const active = this.activeSession(state);
+      if (active && !this.expireIfNeeded(state, active.session, active.grant) && active.session.agent === requested) {
+        await this.writeState(state);
+        return { session: clone(active.session), grant: clone(active.grant), context: clone(active.context) };
+      }
+      return this.startSessionUnlocked({ agent: requested });
+    });
+  }
+
+  private async revokeUnlocked(sessionId?: string): Promise<{ sessionId: string; grantId: string; status: "revoked" | "missing" }> {
     const state = await this.readState();
     const id = sessionId ?? state.currentSessionId;
     if (!id || !state.sessions[id]) return { sessionId: id ?? "", grantId: "", status: "missing" };
@@ -786,42 +881,52 @@ export class LocalAgentManager {
     return { sessionId: id, grantId: session.grantId, status: "revoked" };
   }
 
+  async revoke(sessionId?: string): Promise<{ sessionId: string; grantId: string; status: "revoked" | "missing" }> {
+    return this.withStateLock(() => this.revokeUnlocked(sessionId));
+  }
+
   async handoff(input: { agent: string; changeId?: string }): Promise<{ previousSessionId: string | null; next: Awaited<ReturnType<LocalAgentManager["startSession"]>> }> {
-    const state = await this.readState();
-    const previousSessionId = state.currentSessionId;
-    if (previousSessionId) await this.revoke(previousSessionId);
-    const next = await this.startSession({ agent: input.agent, ...(input.changeId ? { changeId: input.changeId } : {}) });
-    const nextState = await this.readState();
-    this.record(nextState, { operation: "session.handoff", outcome: "observed", sessionId: next.session.id, grantId: next.grant.id, taskId: next.session.taskId, projectId: next.session.projectId, changeId: next.session.changeId, workspaceId: next.session.workspaceId, actorId: next.session.actorId, agent: next.session.agent, details: { previousSessionId } });
-    await this.writeState(nextState);
-    return { previousSessionId, next };
+    return this.withStateLock(async () => {
+      const state = await this.readState();
+      const previousSessionId = state.currentSessionId;
+      if (previousSessionId) await this.revokeUnlocked(previousSessionId);
+      const next = await this.startSessionUnlocked({ agent: input.agent, ...(input.changeId ? { changeId: input.changeId } : {}) });
+      const nextState = await this.readState();
+      this.record(nextState, { operation: "session.handoff", outcome: "observed", sessionId: next.session.id, grantId: next.grant.id, taskId: next.session.taskId, projectId: next.session.projectId, changeId: next.session.changeId, workspaceId: next.session.workspaceId, actorId: next.session.actorId, agent: next.session.agent, details: { previousSessionId } });
+      await this.writeState(nextState);
+      return { previousSessionId, next };
+    });
   }
 
   async status(): Promise<AgentStatus> {
-    const state = await this.readState();
-    const active = this.activeSession(state);
-    if (active && this.expireIfNeeded(state, active.session, active.grant)) {
-      state.currentSessionId = null;
-      await this.writeState(state);
-      return { session: null, grant: null, context: null, activeCredentialCount: 0, auditCount: state.audit.length };
-    }
-    const activeCredentialCount = active ? Object.values(state.credentials).filter((credential) => credential.sessionId === active.session.id && !isExpired(credential.expiresAt, this.now)).length : 0;
-    return { session: active ? clone(active.session) : null, grant: active ? clone(active.grant) : null, context: active ? clone(active.context) : null, activeCredentialCount, auditCount: state.audit.length };
+    return this.withStateLock(async () => {
+      const state = await this.readState();
+      const active = this.activeSession(state);
+      if (active && this.expireIfNeeded(state, active.session, active.grant)) {
+        state.currentSessionId = null;
+        await this.writeState(state);
+        return { session: null, grant: null, context: null, activeCredentialCount: 0, auditCount: state.audit.length };
+      }
+      const activeCredentialCount = active ? Object.values(state.credentials).filter((credential) => credential.sessionId === active.session.id && !isExpired(credential.expiresAt, this.now)).length : 0;
+      return { session: active ? clone(active.session) : null, grant: active ? clone(active.grant) : null, context: active ? clone(active.context) : null, activeCredentialCount, auditCount: state.audit.length };
+    });
   }
 
   async issueWorkspaceCredential(sessionId?: string): Promise<WorkspaceCredential> {
-    const active = await this.requireActiveSession();
-    if (sessionId && sessionId !== active.session.id) throw new LocalAgentError({ code: "credential.session_mismatch", message: `Credential request targeted ${sessionId}, not the active session ${active.session.id}.`, affectedObject: sessionId, recoveryAction: "request a credential for the active Change Workspace", receipt: `active-session=${active.session.id}` });
-    const issuedAt = nowIso(this.now);
-    const expiry = expiresAt(this.now, this.credentialLifetimeMs);
-    const token = randomBytes(32).toString("base64url");
-    const tokenDigest = digest(token);
-    const audience = `git:workspace:${active.session.workspaceId}`;
-    active.state.credentials[tokenDigest] = { digest: tokenDigest, sessionId: active.session.id, audience, workspaceId: active.session.workspaceId, issuedAt, expiresAt: expiry };
-    active.session.issuedCredentialDigests.push(tokenDigest);
-    this.record(active.state, { operation: "credential.issued", outcome: "observed", sessionId: active.session.id, grantId: active.grant.id, taskId: active.session.taskId, projectId: active.session.projectId, changeId: active.session.changeId, workspaceId: active.session.workspaceId, actorId: active.session.actorId, agent: active.session.agent, details: { audience, permissions: ["read", "write-workspace"], canonicalWrite: false, receipt: `${LOCAL_AGENT_POLICY.receipt}; credential-ttl-ms=${this.credentialLifetimeMs}` } });
-    await this.writeState(active.state);
-    return { protocol: "anyam.git-credential/v1", token, audience, sessionId: active.session.id, projectId: active.session.projectId, changeId: active.session.changeId, workspaceId: active.session.workspaceId, permissions: ["read", "write-workspace"], canonicalWrite: false, issuedAt, expiresAt: expiry };
+    return this.withStateLock(async () => {
+      const active = await this.requireActiveSessionUnlocked();
+      if (sessionId && sessionId !== active.session.id) throw new LocalAgentError({ code: "credential.session_mismatch", message: `Credential request targeted ${sessionId}, not the active session ${active.session.id}.`, affectedObject: sessionId, recoveryAction: "request a credential for the active Change Workspace", receipt: `active-session=${active.session.id}` });
+      const issuedAt = nowIso(this.now);
+      const expiry = expiresAt(this.now, this.credentialLifetimeMs);
+      const token = randomBytes(32).toString("base64url");
+      const tokenDigest = digest(token);
+      const audience = `git:workspace:${active.session.workspaceId}`;
+      active.state.credentials[tokenDigest] = { digest: tokenDigest, sessionId: active.session.id, audience, workspaceId: active.session.workspaceId, issuedAt, expiresAt: expiry };
+      active.session.issuedCredentialDigests.push(tokenDigest);
+      this.record(active.state, { operation: "credential.issued", outcome: "observed", sessionId: active.session.id, grantId: active.grant.id, taskId: active.session.taskId, projectId: active.session.projectId, changeId: active.session.changeId, workspaceId: active.session.workspaceId, actorId: active.session.actorId, agent: active.session.agent, details: { audience, permissions: ["read", "write-workspace"], canonicalWrite: false, receipt: `${LOCAL_AGENT_POLICY.receipt}; credential-ttl-ms=${this.credentialLifetimeMs}` } });
+      await this.writeState(active.state);
+      return { protocol: "anyam.git-credential/v1", token, audience, sessionId: active.session.id, projectId: active.session.projectId, changeId: active.session.changeId, workspaceId: active.session.workspaceId, permissions: ["read", "write-workspace"], canonicalWrite: false, issuedAt, expiresAt: expiry };
+    });
   }
 
   async validateWorkspaceCredential(credential: WorkspaceCredential): Promise<{ valid: true; sessionId: string; workspaceId: string } | { valid: false; code: string }> {
@@ -848,8 +953,8 @@ export class LocalAgentManager {
     await this.writeState(active.state);
   }
 
-  async invokeTool(name: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
-    const active = await this.requireActiveSession();
+  private async invokeToolUnlocked(name: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    const active = await this.requireActiveSessionUnlocked();
     if (!LOCAL_MCP_TOOLS.some((entry) => entry.name === name)) return this.denial(active, name);
     const project = await this.projectMetadata();
     const change = await this.changeMetadata();
@@ -989,6 +1094,10 @@ export class LocalAgentManager {
     }
     return this.denial(active, name);
   }
+
+  async invokeTool(name: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    return this.withStateLock(() => this.invokeToolUnlocked(name, args));
+  }
 }
 
 export type McpStdioOptions = {
@@ -1067,8 +1176,66 @@ async function writeLine(output: Writable, value: Record<string, unknown>): Prom
   });
 }
 
-export async function gitCredentialGet(input: { directory: string; agent?: string }): Promise<{ username: string; password: string; credential: WorkspaceCredential }> {
-  const manager = new LocalAgentManager({ directory: input.directory });
+export type GitCredentialContext = {
+  protocol: string;
+  host: string;
+  path: string;
+  username?: string;
+  operation?: string;
+};
+
+function normalizedGitPath(value: string): string {
+  const path = `/${value.trim().replace(/^\/+/, "").replace(/\/+$/, "")}`;
+  return path.endsWith(".git") ? path.slice(0, -4) : path;
+}
+
+export async function readGitCredentialContext(input: Readable): Promise<GitCredentialContext> {
+  const fields = new Map<string, string>();
+  const lines = createInterface({ input, crlfDelay: Infinity });
+  for await (const line of lines) {
+    if (!line) break;
+    const separator = line.indexOf("=");
+    if (separator <= 0) throw new LocalAgentError({ code: "git.credential.protocol_invalid", message: `Git credential context contains a malformed field; asked=${line.slice(0, 80) || "empty"}.`, recoveryAction: "let Git invoke git-credential-anyam with protocol, host, and path fields", receipt: "credential protocol line parsing" });
+    const key = line.slice(0, separator);
+    const value = line.slice(separator + 1);
+    if (fields.has(key)) throw new LocalAgentError({ code: "git.credential.protocol_duplicate", message: `Git credential context contains duplicate field ${key}; no credential was issued.`, affectedObject: key, recoveryAction: "remove duplicate credential context fields and retry", receipt: "credential protocol field uniqueness" });
+    fields.set(key, value);
+  }
+  const protocol = fields.get("protocol")?.trim().toLowerCase() ?? "";
+  const host = fields.get("host")?.trim().toLowerCase() ?? "";
+  const path = fields.get("path")?.trim() ?? "";
+  if (!protocol || !host || !path) throw new LocalAgentError({ code: "git.credential.context_missing", message: `Git credential context must include protocol, host, and path; received=${["protocol", "host", "path"].filter((key) => !fields.get(key)).join(",") || "unknown"}.`, recoveryAction: "run the helper through Git so it supplies the full remote context", receipt: "credential protocol required fields" });
+  const operation = fields.get("operation")?.trim().toLowerCase();
+  if (operation && operation !== "get") throw new LocalAgentError({ code: "git.credential.operation_denied", message: `Git credential operation ${operation} is not permitted; Anyam only issues credentials for a matching read/write Workspace context.`, affectedObject: operation, recoveryAction: "invoke git-credential-anyam for a get operation", receipt: "credential operation allowlist=get" });
+  const username = fields.get("username")?.trim();
+  if (username && username !== "x-anyam-token") throw new LocalAgentError({ code: "git.credential.username_denied", message: `Git credential username ${username} is not an Anyam Workspace identity; no credential was issued.`, affectedObject: username, recoveryAction: "clear the unrelated Git credential and retry the Anyam remote", receipt: "credential username=x-anyam-token" });
+  return { protocol, host, path, ...(username ? { username } : {}), ...(operation ? { operation } : {}) };
+}
+
+async function remoteOrigin(directory: string): Promise<{ protocol: string; host: string; path: string }> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execFile("git", ["config", "--get", "remote.origin.url"], { cwd: directory, encoding: "utf8" }));
+  } catch {
+    throw new LocalAgentError({ code: "git.credential.remote_missing", message: `No remote.origin.url is configured for ${directory}; no Workspace credential was issued.`, affectedObject: directory, recoveryAction: "configure the Anyam HTTPS Workspace remote before invoking Git", receipt: "git config --get remote.origin.url" });
+  }
+  const value = stdout.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new LocalAgentError({ code: "git.credential.transport_unsupported", message: "The Git remote is not an HTTPS URL; Anyam does not issue a Workspace credential for SSH or scp-style remotes.", affectedObject: value.slice(0, 120), recoveryAction: "set remote.origin.url to the Anyam HTTPS Workspace remote", receipt: "remote transport=https" });
+  }
+  if (parsed.protocol !== "https:" || !parsed.host) throw new LocalAgentError({ code: "git.credential.transport_unsupported", message: `Git remote transport ${parsed.protocol || "missing"} is not supported by the Anyam credential helper.`, affectedObject: parsed.host || value.slice(0, 120), recoveryAction: "use the Anyam HTTPS Workspace remote", receipt: "remote transport=https" });
+  return { protocol: "https", host: parsed.host.toLowerCase(), path: parsed.pathname };
+}
+
+export async function gitCredentialGet(input: { directory: string; agent?: string; context: GitCredentialContext; stateDirectory?: string }): Promise<{ username: string; password: string; credential: WorkspaceCredential }> {
+  const context = input.context;
+  if (context.protocol !== "https") throw new LocalAgentError({ code: "git.credential.protocol_denied", message: `Git credential protocol ${context.protocol || "missing"} is not permitted; Anyam issues credentials only for HTTPS remotes.`, affectedObject: context.protocol || "missing", recoveryAction: "invoke the helper for an HTTPS Anyam remote", receipt: "credential protocol=https" });
+  const origin = await remoteOrigin(input.directory);
+  if (origin.host !== context.host || normalizedGitPath(origin.path) !== normalizedGitPath(context.path)) throw new LocalAgentError({ code: "git.credential.context_mismatch", message: `Git credential context does not match remote.origin.url; host/path are bound to one Anyam Workspace and no credential was issued.`, affectedObject: `${context.host}${normalizedGitPath(context.path)}`, recoveryAction: "run the helper from the matching Anyam Workspace repository", receipt: `remote=${origin.host}${normalizedGitPath(origin.path)}; requested=${context.host}${normalizedGitPath(context.path)}` });
+  const manager = new LocalAgentManager({ directory: input.directory, ...(input.stateDirectory ? { stateDirectory: input.stateDirectory } : {}) });
   await manager.ensureActiveSession(input.agent ?? "cli");
   const credential = await manager.issueWorkspaceCredential();
   return { username: "x-anyam-token", password: credential.token, credential };

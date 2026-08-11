@@ -1,5 +1,6 @@
 import { proposedManifest, runLocalCheck, scaffoldProject, startChange, type ProjectTemplateKind } from "./scaffold.js";
-import { gitCredentialGet, LocalAgentManager, runMcpStdio, setupAgent } from "./agent.js";
+import { gitCredentialGet, LocalAgentManager, readGitCredentialContext, runMcpStdio, setupAgent } from "./agent.js";
+import type { Readable } from "node:stream";
 
 function valueAfter(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
@@ -44,7 +45,7 @@ function subcommandPositionals(args: readonly string[]): readonly string[] {
 }
 
 function printHelp(): void {
-  console.log(`Anyam local CLI\n\nCommands:\n  init [directory]                 create a local TypeScript Project\n  check [directory]                inspect manifest and source locally\n  change start <title>             start a local Change\n  agent setup <agent>              configure the local MCP broker and instructions\n  agent start [agent]              start or resume a local agent session\n  agent handoff <agent>            revoke the current session and start another\n  agent status                     inspect the current local session\n  agent revoke                     revoke the current local session\n  mcp serve --stdio                serve the semantic MCP tools over stdio\n  auth revoke                      revoke the current local session\n  git-credential-anyam get         issue a memory-only Workspace Git credential\n\nOptions:\n  --type worker|library             choose the template (default: worker)\n  --name <name>                     choose the Project name\n  --agent codex|claude|cursor|cli   choose the local coding agent\n  --directory <path>               choose a Project directory\n  --json                            print machine-readable output\n  --dry-run                         print the proposed manifest without writing\n\nThe local broker never stores bearer credentials, writes canonical Git refs, reads secret values, approves Changes, or promotes production.`);
+  console.log(`Anyam local CLI\n\nCommands:\n  init [directory]                 create a local TypeScript Project\n  check [directory]                inspect manifest and source locally\n  change start <title>             start a local Change\n  agent setup <agent>              configure the local MCP broker and instructions\n  agent start [agent]              start or resume a local agent session\n  agent handoff <agent>            revoke the current session and start another\n  agent status                     inspect the current local session\n  agent revoke                     revoke the current local session\n  mcp serve --stdio                serve the semantic MCP tools over stdio\n  auth revoke                      revoke the current local session\n  git-credential-anyam get         issue a context-bound memory-only Workspace Git credential\n\nOptions:\n  --type worker|library             choose the template (default: worker)\n  --name <name>                     choose the Project name\n  --agent codex|claude|cursor|cli   choose the local coding agent\n  --directory <path>               choose a Project directory\n  --json                            print machine-readable output\n  --dry-run                         print the proposed manifest without writing\n\nThe local broker never stores bearer credentials, writes canonical Git refs, reads secret values, approves Changes, or promotes production.`);
 }
 
 function agentValue(args: readonly string[], fallback?: string): string {
@@ -60,14 +61,18 @@ function printResult(result: unknown, json: boolean, human: string): void {
   else console.log(human);
 }
 
-async function runGitCredentialHelper(action: string | undefined, cwd: string): Promise<number> {
-  if (action !== "get") return 0;
-  const result = await gitCredentialGet({ directory: cwd, agent: "cli" });
+async function runGitCredentialHelper(action: string | undefined, cwd: string, input: Readable): Promise<number> {
+  const context = await readGitCredentialContext(input);
+  if (action !== "get") {
+    process.stderr.write(`git-credential-anyam only supports get; requested=${action ?? "missing"}; host=${context.host}; path=${context.path}\n`);
+    return 1;
+  }
+  const result = await gitCredentialGet({ directory: cwd, agent: "cli", context });
   process.stdout.write(`username=${result.username}\npassword=${result.password}\n\n`);
   return 0;
 }
 
-export async function main(args: readonly string[], cwd = process.cwd()): Promise<number> {
+export async function main(args: readonly string[], cwd = process.cwd(), input: Readable = process.stdin): Promise<number> {
   const [command, subcommand] = args;
   const json = args.includes("--json");
   if (!command || command === "--help" || command === "-h") {
@@ -163,7 +168,7 @@ export async function main(args: readonly string[], cwd = process.cwd()): Promis
   }
 
   if (command === "git-credential-anyam") {
-    return runGitCredentialHelper(subcommand, cwd);
+    return runGitCredentialHelper(subcommand, cwd, input);
   }
 
   printHelp();

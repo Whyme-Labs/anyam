@@ -1,5 +1,6 @@
 import { proposedManifest, runLocalCheck, scaffoldProject, startChange, type ProjectTemplateKind } from "./scaffold.js";
 import { gitCredentialGet, LocalAgentManager, readGitCredentialContext, runMcpStdio, setupAgent } from "./agent.js";
+import type { WorkspaceBoundaryMode } from "./workspace-boundary.js";
 import type { Readable } from "node:stream";
 
 function valueAfter(args: readonly string[], flag: string): string | undefined {
@@ -16,7 +17,7 @@ function kindFrom(args: readonly string[]): ProjectTemplateKind {
 
 function positionalArgs(args: readonly string[], command: string): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--type", "--name", "--agent", "--directory"]);
+  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode"]);
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -31,7 +32,7 @@ function positionalArgs(args: readonly string[], command: string): readonly stri
 
 function subcommandPositionals(args: readonly string[]): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--type", "--name", "--agent", "--directory"]);
+  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode"]);
   for (let index = 2; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -45,7 +46,7 @@ function subcommandPositionals(args: readonly string[]): readonly string[] {
 }
 
 function printHelp(): void {
-  console.log(`Anyam local CLI\n\nCommands:\n  init [directory]                 create a local TypeScript Project\n  check [directory]                inspect manifest and source locally\n  change start <title>             start a local Change\n  agent setup <agent>              configure the local MCP broker and instructions\n  agent start [agent]              start or resume a local agent session\n  agent handoff <agent>            revoke the current session and start another\n  agent status                     inspect the current local session\n  agent revoke                     revoke the current local session\n  mcp serve --stdio                serve the semantic MCP tools over stdio\n  auth revoke                      revoke the current local session\n  git-credential-anyam get         issue a context-bound memory-only Workspace Git credential\n\nOptions:\n  --type worker|library             choose the template (default: worker)\n  --name <name>                     choose the Project name\n  --agent codex|claude|cursor|cli   choose the local coding agent\n  --directory <path>               choose a Project directory\n  --json                            print machine-readable output\n  --dry-run                         print the proposed manifest without writing\n\nThe local broker never stores bearer credentials, writes canonical Git refs, reads secret values, approves Changes, or promotes production.`);
+  console.log(`Anyam local CLI\n\nCommands:\n  init [directory]                 create a local TypeScript Project\n  check [directory]                inspect manifest and source locally\n  change start <title>             start a local Change\n  agent setup <agent>              configure the local MCP broker and instructions\n  agent start [agent]              start or resume a local agent session\n  agent exec <agent> -- <command>  launch an agent through the Workspace boundary\n  agent handoff <agent>            revoke the current session and start another\n  agent status                     inspect the current local session\n  agent revoke                     revoke the current local session\n  mcp serve --stdio                serve the semantic MCP tools over stdio\n  auth revoke                      revoke the current local session\n  git-credential-anyam get         issue a context-bound memory-only Workspace Git credential\n\nOptions:\n  --type worker|library             choose the template (default: worker)\n  --name <name>                     choose the Project name\n  --agent codex|claude|cursor|cli   choose the local coding agent\n  --mode enforceable|supervised     choose the Workspace boundary mode\n  --directory <path>               choose a Project directory\n  --json                            print machine-readable output\n  --dry-run                         print the proposed manifest without writing\n\nThe local broker never stores bearer credentials, writes canonical Git refs, reads secret values, approves Changes, or promotes production.`);
 }
 
 function agentValue(args: readonly string[], fallback?: string): string {
@@ -135,9 +136,25 @@ export async function main(args: readonly string[], cwd = process.cwd(), input: 
 
   if (command === "agent" && subcommand === "start") {
     const agent = agentValue(args, "cli");
-    const result = await new LocalAgentManager({ directory: agentDirectory(args, cwd) }).startSession({ agent });
+    const mode = valueAfter(args, "--mode") as WorkspaceBoundaryMode | undefined;
+    if (mode && mode !== "enforceable" && mode !== "supervised") throw new Error(`--mode must be enforceable or supervised; asked=${mode}.`);
+    const result = await new LocalAgentManager({ directory: agentDirectory(args, cwd) }).startSession({ agent, ...(mode ? { mode } : {}) });
     printResult(result, json, `Agent session ${result.session.id} active for ${result.session.agent}.\nWorkspace: ${result.session.workspaceId}\nGrant: ${result.grant.id}\nCanonical write: denied`);
     return 0;
+  }
+
+  if (command === "agent" && subcommand === "exec") {
+    const agent = agentValue(args);
+    if (!agent) throw new Error("agent exec requires an agent; run anyam agent exec <codex|claude|cursor|cli> -- <command>.");
+    const separator = args.indexOf("--");
+    const executable = separator >= 0 ? args[separator + 1] : undefined;
+    if (!executable) throw new Error("agent exec requires `-- <command> [args...]`; no process was started.");
+    const mode = (valueAfter(args, "--mode") ?? "enforceable") as WorkspaceBoundaryMode;
+    if (mode !== "enforceable" && mode !== "supervised") throw new Error(`--mode must be enforceable or supervised; asked=${mode}.`);
+    const directory = valueAfter(args, "--directory") ?? cwd;
+    const result = await new LocalAgentManager({ directory }).launchAgent({ agent, command: executable, args: args.slice(separator + 2), mode });
+    printResult(result, json, `Agent process ${result.command.status} in ${result.boundary.mode} Workspace (${result.boundary.enforcement}).\nWorkspace: ${result.boundary.workspaceDirectory}\nReceipt: ${result.command.receipt}`);
+    return result.command.status === "passed" ? 0 : 1;
   }
 
   if (command === "agent" && subcommand === "handoff") {

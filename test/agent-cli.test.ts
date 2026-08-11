@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { execFile as execFileCallback } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -263,6 +263,21 @@ test("CLI configures and starts an agent without creating Realm credentials", as
   assert.doesNotMatch(state, /password/i);
 });
 
+test("CLI agent exec defaults to the enforceable Workspace lane", async () => {
+  if (process.platform !== "darwin") return;
+  const directory = await projectDirectory();
+  const previousStateHome = process.env.ANYAM_STATE_HOME;
+  process.env.ANYAM_STATE_HOME = agentStateDirectory(directory);
+  try {
+    const exitCode = await main(["agent", "exec", "cli", "--", process.execPath, "-e", "if (process.env.ANYAM_WORKSPACE_MODE !== 'enforceable') process.exit(7)"], directory);
+    assert.equal(exitCode, 0);
+    await manager(directory).revoke();
+  } finally {
+    if (previousStateHome === undefined) delete process.env.ANYAM_STATE_HOME;
+    else process.env.ANYAM_STATE_HOME = previousStateHome;
+  }
+});
+
 test("local agent authority state is outside the Project and concurrent brokers preserve credentials and audit events", async () => {
   const directory = await projectDirectory();
   const stateDirectory = agentStateDirectory(directory);
@@ -317,4 +332,65 @@ test("Git credential protocol rejects malformed, duplicate, and write operations
     readGitCredentialContext(Readable.from("protocol=https\nhost=git.anyam.dev\npath=acme/demo.git\noperation=store\n\n")),
     (error: unknown) => error instanceof LocalAgentError && error.code === "git.credential.operation_denied",
   );
+});
+
+test("enforceable Workspace hides unauthorized source, strips ambient credentials, and protects canonical refs", async () => {
+  if (process.platform !== "darwin") return;
+  const directory = await projectDirectory();
+  await mkdir(join(directory, "private"), { recursive: true });
+  await writeFile(join(directory, "private", "codec.ts"), "export const privateCodec = true;\n", "utf8");
+  await git(directory, ["add", "private/codec.ts"]);
+  await git(directory, ["commit", "--quiet", "-m", "Add private codec"]);
+  const originalHead = await git(directory, ["rev-parse", "HEAD"]);
+  const agentManager = manager(directory);
+  const script = [
+    "const fs=require('node:fs');",
+    "const path=require('node:path');",
+    "let sourceBlocked=false; try { fs.readFileSync(path.join(process.env.ANYAM_WORKSPACE_SOURCE_DIRECTORY, 'private/codec.ts')); } catch { sourceBlocked=true; }",
+    "const hidden=!fs.existsSync(path.join(process.cwd(), 'private/codec.ts'));",
+    "const ambient=!process.env.CLOUDFLARE_API_TOKEN && !process.env.SSH_AUTH_SOCK;",
+    "let authorityBlocked=false; try { fs.writeFileSync(process.env.ANYAM_WORKSPACE_STATE_PATH, 'tamper'); } catch { authorityBlocked=true; }",
+    "const branch=require('node:child_process').execFileSync('git',['symbolic-ref','--short','HEAD'],{encoding:'utf8'}).trim(); require('node:child_process').execFileSync('git',['update-ref','refs/heads/'+branch,require('node:child_process').execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim()]);",
+    "fs.writeFileSync('agent-output.txt', JSON.stringify({sourceBlocked,hidden,ambient,authorityBlocked,mode:process.env.ANYAM_WORKSPACE_MODE}));",
+    "if (!sourceBlocked || !hidden || !ambient || !authorityBlocked || process.env.ANYAM_WORKSPACE_MODE !== 'enforceable') process.exit(9);",
+  ].join(" ");
+  const result = await agentManager.launchAgent({ agent: "cli", mode: "enforceable", authorizedPaths: ["anyam.json", "src"], command: process.execPath, args: ["-e", script] });
+  assert.equal(result.command.status, "passed", `${result.command.stderr}\n${result.command.stdout}\n${result.command.receipt}`);
+  assert.equal(result.boundary.mode, "enforceable");
+  assert.equal(result.boundary.enforcement, "macos-sandbox-exec");
+  assert.match(result.boundary.receipt, /ambientCredentials=blocked/);
+  assert.match(result.boundary.profile ?? "", /deny default/);
+  assert.deepEqual(JSON.parse(await readFile(join(result.boundary.workspaceDirectory, "agent-output.txt"), "utf8")), { sourceBlocked: true, hidden: true, ambient: true, authorityBlocked: true, mode: "enforceable" });
+  assert.equal(await git(directory, ["rev-parse", "HEAD"]), originalHead);
+  await agentManager.revoke(result.session.id);
+  await assert.rejects(access(result.boundary.workspaceDirectory));
+});
+
+test("supervised local Workspace is labelled non-enforcing", async () => {
+  const directory = await projectDirectory();
+  const agentManager = manager(directory);
+  const started = await agentManager.startSession({ agent: "codex", mode: "supervised" });
+  assert.equal(started.session.workspaceMode, "supervised");
+  assert.equal(started.session.workspaceEnforcement, "none");
+  assert.equal(started.context.workspaceMode, "supervised");
+  assert.equal(started.context.workspaceEnforcement, "none");
+  assert.match(started.context.receipt, /credentials=ambient-host-not-enforced/);
+});
+
+test("revoking an enforceable Workspace terminates the running agent and removes its disposable Workspace", async () => {
+  if (process.platform !== "darwin") return;
+  const directory = await projectDirectory();
+  const agentManager = manager(directory);
+  const running = agentManager.launchAgent({ agent: "cli", mode: "enforceable", command: process.execPath, args: ["-e", "setTimeout(() => {}, 10000)"] });
+  await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 150));
+  const status = await agentManager.status();
+  assert.ok(status.session);
+  const sessionId = status.session!.id;
+  const workspace = status.session!.workspaceDirectory;
+  assert.ok(workspace);
+  const revoked = await agentManager.revoke(sessionId);
+  assert.equal(revoked.status, "revoked");
+  const result = await running;
+  assert.equal(result.command.status, "failed");
+  await assert.rejects(access(workspace!));
 });

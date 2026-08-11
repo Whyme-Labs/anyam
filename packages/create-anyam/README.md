@@ -70,6 +70,25 @@ anyam agent setup codex    # or claude, cursor, cli
 anyam agent start codex
 ```
 
+For the private-alpha restricted-source path, launch the agent through the
+qualified host boundary instead of attaching it to the ambient developer
+process:
+
+```bash
+anyam agent exec codex -- codex
+```
+
+`agent exec` defaults to `--mode enforceable`. It creates a disposable Git
+Workspace (or an authorized projection), removes ambient credential
+environment and SSH configuration, applies the host sandbox's explicit
+network policy, and keeps canonical Git refs outside the child boundary. If
+the host has no qualified sandbox backend, the command fails closed rather
+than silently falling back.
+
+`anyam agent start` is the convenient supervised local lane. It is labelled
+`mode=supervised; enforcement=none` in the session and receipt, and must not
+be used as restricted-source isolation.
+
 The setup writes only local broker configuration and shared instructions. It
 does not put a token in `.mcp.json`, `AGENTS.md`, Git config, or the Project.
 The broker exposes semantic Project, Change, Workspace, run, evidence, review,

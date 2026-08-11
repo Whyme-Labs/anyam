@@ -2,12 +2,13 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { access, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { basename, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { gitCommitIdentity, gitProjectRevisionId, gitTreeIdentity, inspectGitSource, isGitAncestor, LocalGitSourceError } from "./git-source.js";
+import { createWorkspaceBoundary, removeWorkspaceBoundary, runWorkspaceCommand, type WorkspaceBoundary, type WorkspaceBoundaryEnforcement, type WorkspaceBoundaryMode } from "./workspace-boundary.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -107,6 +108,11 @@ export type LocalAgentSession = {
   expiresAt: string;
   status: "active" | "revoked" | "expired";
   issuedCredentialDigests: string[];
+  workspaceMode?: WorkspaceBoundaryMode;
+  workspaceDirectory?: string;
+  workspaceBoundaryId?: string;
+  workspaceEnforcement?: WorkspaceBoundaryEnforcement;
+  workspaceTemporary?: boolean;
   revokedAt?: string;
 };
 
@@ -134,6 +140,8 @@ export type AgentContextManifest = {
   createdAt: string;
   expiresAt: string;
   receipt: string;
+  workspaceMode?: WorkspaceBoundaryMode;
+  workspaceEnforcement?: WorkspaceBoundaryEnforcement;
 };
 
 export type WorkspaceCredential = {
@@ -308,6 +316,22 @@ export type LocalAgentManagerOptions = {
   credentialLifetimeMs?: number;
   sessionLifetimeMs?: number;
   now?: () => Date;
+};
+
+export type AgentLaunchInput = {
+  agent: string;
+  command: string;
+  args?: readonly string[];
+  mode?: WorkspaceBoundaryMode;
+  authorizedPaths?: readonly string[];
+  network?: readonly string[];
+  workspaceDirectory?: string;
+};
+
+export type AgentLaunchResult = {
+  session: LocalAgentSession;
+  boundary: WorkspaceBoundary;
+  command: Awaited<ReturnType<typeof runWorkspaceCommand>>;
 };
 
 export function defaultAgentStateDirectory(): string {
@@ -627,11 +651,11 @@ function ensureAgent(agent: string | undefined): AgentKind {
 }
 
 function agentInstructions(): string {
-  return `# Anyam local agent contract\n\nThis project uses Anyam's local agent broker.\n\n- Work only in the assigned Change Workspace.\n- Use the Anyam MCP tools for project, Change, Workspace, checks, evidence, review, and revision operations.\n- Never attempt to write canonical Git refs, read secret values, approve a Change, change policy, or promote production.\n- Publish a revision with declared effects after the local checks pass.\n- Treat every budget error as actionable: it names the budget, limit, ask, receipt, and fix.\n- Never print, commit, or store credentials.\n`;
+  return `# Anyam local agent contract\n\nThis project uses Anyam's local agent broker.\n\n- The private-alpha launch path is anyam agent exec <agent> -- <command>; it materializes an enforceable Workspace when the host backend is qualified.\n- anyam agent start and anyam agent exec --mode supervised are developer-supervised local modes. They are explicitly not restricted-source isolation boundaries.\n- Work only in the assigned Change Workspace.\n- Use the Anyam MCP tools for project, Change, Workspace, checks, evidence, review, and revision operations.\n- Never attempt to write canonical Git refs, read secret values, approve a Change, change policy, or promote production.\n- Publish a revision with declared effects after the local checks pass.\n- Treat every budget error as actionable: it names the budget, limit, ask, receipt, and fix.\n- Never print, commit, or store credentials.\n`;
 }
 
 function sharedSkill(): string {
-  return `---\nname: anyam-change\ndescription: Work safely inside an Anyam Change Workspace.\n---\n\n# Anyam Change\n\n1. Inspect the active Change and Context Manifest.\n2. Read only the Source Spaces named in the manifest.\n3. Make edits in the assigned Workspace.\n4. Run an approved action before publishing.\n5. Declare API, schema, dependency, and infrastructure effects.\n6. Publish a Change revision through Anyam MCP.\n7. Never write canonical source or request secret values.\n`;
+  return `---\nname: anyam-change\ndescription: Work safely inside an Anyam Change Workspace.\n---\n\n# Anyam Change\n\n1. Inspect the active Change and Context Manifest.\n2. Read only the Source Spaces named in the manifest.\n3. Make edits in the assigned Workspace.\n4. Run an approved action before publishing.\n5. Declare API, schema, dependency, and infrastructure effects.\n6. Publish a Change revision through Anyam MCP.\n7. Never write canonical source or request secret values.\n8. Treat supervised local mode as developer convenience only; it does not enforce source or credential isolation.\n`;
 }
 
 function mergeJsonObject(existing: unknown, key: string, value: unknown): Record<string, unknown> {
@@ -742,6 +766,8 @@ export class LocalAgentManager {
   private readonly credentialLifetimeMs: number;
   private readonly sessionLifetimeMs: number;
   private readonly now: () => Date;
+  private readonly boundaries = new Map<string, WorkspaceBoundary>();
+  private readonly runningProcesses = new Map<string, ChildProcess>();
 
   constructor(options: LocalAgentManagerOptions) {
     this.directory = resolve(options.directory);
@@ -859,13 +885,13 @@ export class LocalAgentManager {
     state.audit.push({ protocol: AGENT_AUDIT_PROTOCOL, id: `audit:${randomUUID()}`, occurredAt: nowIso(this.now), ...event });
   }
 
-  private async projectMetadata(): Promise<ProjectMetadata> {
-    const path = join(this.directory, "anyam.json");
+  private async projectMetadata(directory = this.directory): Promise<ProjectMetadata> {
+    const path = join(directory, "anyam.json");
     let value: unknown;
     try {
       value = await readJson<unknown>(path);
     } catch (error) {
-      if (isNotFound(error)) throw new LocalAgentError({ code: "project.missing", message: `No anyam.json found in ${this.directory}; the agent needs an initialized Project.`, recoveryAction: "run anyam init and rerun anyam agent setup", receipt: "anyam.json was not found" });
+      if (isNotFound(error)) throw new LocalAgentError({ code: "project.missing", message: `No anyam.json found in ${directory}; the agent needs an initialized Project.`, recoveryAction: "run anyam init and rerun anyam agent setup", receipt: "anyam.json was not found" });
       throw error;
     }
     if (!isRecord(value)) throw new LocalAgentError({ code: "project.invalid", message: "anyam.json must be a JSON object; the agent cannot construct a Context Manifest.", recoveryAction: "repair anyam.json and rerun anyam check", receipt: "anyam.json was read" });
@@ -908,8 +934,8 @@ export class LocalAgentManager {
     }
     const manifestDigest = digest(value);
     return {
-      id: stringField(value.id, `project:local:${basename(this.directory)}`),
-      name: stringField(value.name, basename(this.directory)),
+      id: stringField(value.id, `project:local:${basename(directory)}`),
+      name: stringField(value.name, basename(directory)),
       manifestDigest,
       sourceSpaceIds: stringArray(value.sourceSpaceIds),
       actions,
@@ -971,8 +997,9 @@ export class LocalAgentManager {
     return { state, session: active.session, grant: active.grant, context: active.context };
   }
 
-  private async startSessionUnlocked(input: { agent: string; changeId?: string }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+  private async startSessionUnlocked(input: { agent: string; changeId?: string; mode?: WorkspaceBoundaryMode; authorizedPaths?: readonly string[]; network?: readonly string[]; executablePaths?: readonly string[]; workspaceDirectory?: string }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
     const agent = ensureAgent(input.agent);
+    const mode = input.mode ?? "supervised";
     const project = await this.projectMetadata();
     const change = await this.changeMetadata();
     if (change.projectId !== project.id) throw new LocalAgentError({ code: "change.project_mismatch", message: `Change ${change.id} belongs to ${change.projectId}, not ${project.id}.`, affectedObject: change.id, recoveryAction: "start the agent from the Change's Project directory", receipt: `manifest-project=${project.id}; change-project=${change.projectId}` });
@@ -982,6 +1009,8 @@ export class LocalAgentManager {
     const existing = this.activeSession(state);
     if (existing && !this.expireIfNeeded(state, existing.session, existing.grant)) {
       if (existing.session.agent !== agent) throw new LocalAgentError({ code: "agent.session.busy", message: `Change ${change.id} already has an active ${existing.session.agent} session; hand it off before starting ${agent}.`, affectedObject: existing.session.id, recoveryAction: `run anyam agent handoff ${agent}`, receipt: `active-session=${existing.session.id}` });
+      const existingMode = existing.session.workspaceMode ?? "supervised";
+      if (existingMode !== mode) throw new LocalAgentError({ code: "agent.session.mode_mismatch", message: `Change ${change.id} already has an active ${existingMode} session; it cannot be reused as ${mode}.`, affectedObject: existing.session.id, recoveryAction: "revoke the current session and start a new session with the requested Workspace mode", receipt: `active-mode=${existingMode}; requested-mode=${mode}` });
       await this.writeState(state);
       return { session: clone(existing.session), grant: clone(existing.grant), context: clone(existing.context) };
     }
@@ -993,6 +1022,25 @@ export class LocalAgentManager {
     const expires = expiresAt(this.now, this.sessionLifetimeMs);
     const actorId = `agent:${agent}:${randomUUID()}`;
     const resource: AgentResource = { projectId: project.id, changeId: change.id, workspaceId: change.workspaceId };
+    const boundary = await createWorkspaceBoundary({
+      sourceDirectory: this.directory,
+      stateDirectory: resolve(this.statePath(), ".."),
+      projectId: project.id,
+      changeId: change.id,
+      workspaceId: change.workspaceId,
+      mode,
+      ...(input.authorizedPaths ? { authorizedPaths: input.authorizedPaths } : {}),
+      ...(input.network ? { network: input.network } : {}),
+      ...(input.executablePaths ? { executablePaths: input.executablePaths } : {}),
+      ...(input.workspaceDirectory ? { workspaceDirectory: input.workspaceDirectory } : {}),
+      excludedPaths: [this.statePath(), resolve(this.statePath(), "..")],
+    });
+    boundary.environment = {
+      ...boundary.environment,
+      ANYAM_WORKSPACE_SESSION_ID: sessionId,
+      ANYAM_WORKSPACE_SOURCE_DIRECTORY: this.directory,
+      ANYAM_WORKSPACE_STATE_PATH: this.statePath(),
+    };
     const grant: LocalCapabilityGrant = {
       protocol: "anyam.capability/v1",
       id: grantId,
@@ -1026,7 +1074,9 @@ export class LocalAgentManager {
       disclosure: "local-owner",
       createdAt: startedAt,
       expiresAt: expires,
-      receipt: `${LOCAL_AGENT_POLICY.receipt}; manifest=${project.manifestDigest}`,
+      workspaceMode: mode,
+      workspaceEnforcement: boundary.enforcement,
+      receipt: `${LOCAL_AGENT_POLICY.receipt}; manifest=${project.manifestDigest}; mode=${mode}; enforcement=${boundary.enforcement}; ${boundary.receipt}`,
     };
     const session: LocalAgentSession = {
       protocol: AGENT_SESSION_PROTOCOL,
@@ -1045,17 +1095,27 @@ export class LocalAgentManager {
       expiresAt: expires,
       status: "active",
       issuedCredentialDigests: [],
+      workspaceMode: mode,
+      ...(mode === "enforceable" ? {
+        workspaceDirectory: boundary.workspaceDirectory,
+        workspaceBoundaryId: boundary.id,
+        workspaceEnforcement: boundary.enforcement,
+        workspaceTemporary: boundary.temporary,
+      } : {
+        workspaceEnforcement: boundary.enforcement,
+      }),
     };
     state.sessions[sessionId] = session;
     state.grants[grantId] = grant;
     state.contexts[sessionId] = context;
     state.currentSessionId = sessionId;
+    this.boundaries.set(sessionId, boundary);
     this.record(state, { operation: "session.started", outcome: "observed", sessionId, grantId, taskId, projectId: project.id, changeId: change.id, workspaceId: change.workspaceId, actorId, agent, details: { receipt: context.receipt } });
     await this.writeState(state);
     return { session, grant, context };
   }
 
-  async startSession(input: { agent: string; changeId?: string }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+  async startSession(input: { agent: string; changeId?: string; mode?: WorkspaceBoundaryMode; authorizedPaths?: readonly string[]; network?: readonly string[]; executablePaths?: readonly string[]; workspaceDirectory?: string }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
     return this.withStateLock(() => this.startSessionUnlocked(input));
   }
 
@@ -1078,6 +1138,11 @@ export class LocalAgentManager {
     if (!id || !state.sessions[id]) return { sessionId: id ?? "", grantId: "", status: "missing" };
     const session = state.sessions[id];
     const grant = state.grants[session.grantId];
+    const running = this.runningProcesses.get(id);
+    if (running) {
+      running.kill("SIGTERM");
+      this.runningProcesses.delete(id);
+    }
     const revokedAt = nowIso(this.now);
     session.status = "revoked";
     session.revokedAt = revokedAt;
@@ -1086,11 +1151,50 @@ export class LocalAgentManager {
     if (state.currentSessionId === id) state.currentSessionId = null;
     this.record(state, { operation: "session.revoked", outcome: "observed", sessionId: id, grantId: session.grantId, taskId: session.taskId, projectId: session.projectId, changeId: session.changeId, workspaceId: session.workspaceId, actorId: session.actorId, agent: session.agent, details: { authorizationEpoch: state.authorizationEpoch } });
     await this.writeState(state);
+    const boundary = this.boundaries.get(id);
+    this.boundaries.delete(id);
+    if (boundary) await removeWorkspaceBoundary(boundary);
     return { sessionId: id, grantId: session.grantId, status: "revoked" };
   }
 
   async revoke(sessionId?: string): Promise<{ sessionId: string; grantId: string; status: "revoked" | "missing" }> {
     return this.withStateLock(() => this.revokeUnlocked(sessionId));
+  }
+
+  async launchAgent(input: AgentLaunchInput): Promise<AgentLaunchResult> {
+    const mode = input.mode ?? "enforceable";
+    const started = await this.startSession({
+      agent: input.agent,
+      mode,
+      ...(input.authorizedPaths ? { authorizedPaths: input.authorizedPaths } : {}),
+      ...(input.network ? { network: input.network } : {}),
+      executablePaths: [input.command],
+      ...(input.workspaceDirectory ? { workspaceDirectory: input.workspaceDirectory } : {}),
+    });
+    const boundary = this.boundaries.get(started.session.id);
+    if (!boundary) throw new LocalAgentError({ code: "workspace.boundary_missing", message: `Agent session ${started.session.id} has no live Workspace boundary; no process was started.`, affectedObject: started.session.id, recoveryAction: "revoke the session and start the agent again through the boundary launcher", receipt: `mode=${mode}; boundary=missing` });
+    await this.withStateLock(async () => {
+      const state = await this.readState();
+      this.record(state, { operation: "agent.process.started", outcome: "observed", sessionId: started.session.id, grantId: started.grant.id, taskId: started.session.taskId, projectId: started.session.projectId, changeId: started.session.changeId, workspaceId: started.session.workspaceId, actorId: started.session.actorId, agent: started.session.agent, details: { command: input.command, args: input.args ?? [], mode, enforcement: boundary.enforcement, workspaceDirectory: boundary.workspaceDirectory, canonicalWrite: false, receipt: boundary.receipt } });
+      await this.writeState(state);
+    });
+    let commandResult: Awaited<ReturnType<typeof runWorkspaceCommand>>;
+    try {
+      commandResult = await runWorkspaceCommand({
+        boundary,
+        command: input.command,
+        ...(input.args ? { args: input.args } : {}),
+        onProcess: (child) => this.runningProcesses.set(started.session.id, child),
+      });
+    } finally {
+      this.runningProcesses.delete(started.session.id);
+    }
+    await this.withStateLock(async () => {
+      const state = await this.readState();
+      this.record(state, { operation: "agent.process.completed", outcome: "observed", sessionId: started.session.id, grantId: started.grant.id, taskId: started.session.taskId, projectId: started.session.projectId, changeId: started.session.changeId, workspaceId: started.session.workspaceId, actorId: started.session.actorId, agent: started.session.agent, details: { command: input.command, args: input.args ?? [], status: commandResult.status, exitCode: commandResult.exitCode, signal: commandResult.signal, mode, enforcement: boundary.enforcement, receipt: commandResult.receipt } });
+      await this.writeState(state);
+    });
+    return { session: clone(started.session), boundary, command: commandResult };
   }
 
   async handoff(input: { agent: string; changeId?: string }): Promise<{ previousSessionId: string | null; next: Awaited<ReturnType<LocalAgentManager["startSession"]>> }> {
@@ -1166,6 +1270,7 @@ export class LocalAgentManager {
     if (!LOCAL_MCP_TOOLS.some((entry) => entry.name === name)) return this.denial(active, name);
     const project = await this.projectMetadata();
     const change = await this.changeMetadata();
+    const executionDirectory = active.session.workspaceDirectory ?? this.directory;
     if (name === "project.inspect") {
       await this.appendToolAudit(active, name);
       return { project: { id: project.id, name: project.name, manifestDigest: project.manifestDigest }, sourceSpaces: { readable: project.sourceSpaceIds, writable: project.sourceSpaceIds, hidden: [] }, changeId: change.id, workspaceId: change.workspaceId, canonicalWrite: false };
@@ -1191,18 +1296,18 @@ export class LocalAgentManager {
       if (verifier && verifier.actionId !== action.id) throw new LocalAgentError({ code: "run.verifier_mismatch", message: `Verifier ${verifier.id} is bound to Action ${verifier.actionId}, not ${action.id}; no run was started.`, affectedObject: verifier.id, recoveryAction: "select the Verifier bound to the requested Action", receipt: `verifier=${verifier.id}; action=${action.id}; reference=mismatch` });
       let source: Awaited<ReturnType<typeof inspectGitSource>>;
       try {
-        source = await inspectGitSource(this.directory);
+        source = await inspectGitSource(executionDirectory);
       } catch (error) {
         if (error instanceof LocalGitSourceError) throw new LocalAgentError({ code: error.code, message: `${error.message} No Action run was started.`, affectedObject: change.id, recoveryAction: error.recoveryAction, receipt: `run=${action.id}; git-code=${error.code}` });
         throw error;
       }
       if (!source.clean) throw new LocalAgentError({ code: "run.source_dirty", message: `Action ${action.id} requires a clean committed source revision; no run was started. budget=git.worktree; limit=clean source tree; asked=${source.changedPaths.length} changed paths.`, affectedObject: source.repositoryId, recoveryAction: "commit or discard changes before starting the Action", receipt: `git-status=dirty; changed-paths=${source.changedPaths.length}` });
       const startedAt = nowIso(this.now);
-      const inputs = await localInputDigests(this.directory, action.inputGlobs);
+      const inputs = await localInputDigests(executionDirectory, action.inputGlobs);
       const toolchainDigest = digest({ node: process.version, platform: process.platform, arch: process.arch, execPath: process.execPath });
-      const environmentDigest = digest({ cwd: this.directory, nodeEnv: process.env.NODE_ENV ?? "", shell: process.platform === "win32" ? "cmd.exe" : "sh" });
-      const commandResult: LocalActionCommandResult = inputs.missing.length === 0 ? await executeDeclaredAction(this.directory, action.command) : { exitCode: undefined, stdout: "", stderr: "", timedOut: false, outputLimitExceeded: false };
-      const outputs = commandResult.exitCode === 0 && !commandResult.timedOut && !commandResult.outputLimitExceeded ? await localOutputDigests(this.directory, action.outputPaths) : { digests: [], missing: [] };
+      const environmentDigest = digest({ cwd: executionDirectory, nodeEnv: process.env.NODE_ENV ?? "", shell: process.platform === "win32" ? "cmd.exe" : "sh", workspaceMode: active.session.workspaceMode ?? "supervised" });
+      const commandResult: LocalActionCommandResult = inputs.missing.length === 0 ? await executeDeclaredAction(executionDirectory, action.command) : { exitCode: undefined, stdout: "", stderr: "", timedOut: false, outputLimitExceeded: false };
+      const outputs = commandResult.exitCode === 0 && !commandResult.timedOut && !commandResult.outputLimitExceeded ? await localOutputDigests(executionDirectory, action.outputPaths) : { digests: [], missing: [] };
       const failureReason = inputs.missing.length > 0
         ? `missing-input-patterns=${inputs.missing.join(",")}`
         : commandResult.timedOut
@@ -1284,7 +1389,7 @@ export class LocalAgentManager {
       const declaredEffects = args.declaredEffects as string[];
       let source: Awaited<ReturnType<typeof inspectGitSource>>;
       try {
-        source = await inspectGitSource(this.directory);
+        source = await inspectGitSource(executionDirectory);
       } catch (error) {
         if (error instanceof LocalGitSourceError) {
           throw new LocalAgentError({
@@ -1326,7 +1431,7 @@ export class LocalAgentManager {
           receipt: `base-repository=${change.baseRepositoryId}; current-repository=${source.repositoryId}`,
         });
       }
-      if (!(await isGitAncestor(this.directory, baseCommit, source.commitId))) {
+      if (!(await isGitAncestor(executionDirectory, baseCommit, source.commitId))) {
         throw new LocalAgentError({
           code: "change.base_stale",
           message: `Change ${change.id} is based on Git commit ${baseCommit}, which is not an ancestor of current commit ${source.commitId}; no revision was published.`,

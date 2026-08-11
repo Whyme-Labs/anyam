@@ -1,6 +1,8 @@
-import { access, mkdtemp, readFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFile as execFileCallback } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -13,11 +15,26 @@ import {
 import { main } from "../packages/create-anyam/src/cli.ts";
 import { scaffoldProject, startChange } from "../packages/create-anyam/src/scaffold.ts";
 
-async function projectDirectory(): Promise<string> {
+const execFile = promisify(execFileCallback);
+
+async function git(directory: string, args: readonly string[]): Promise<string> {
+  const result = await execFile("git", [...args], { cwd: directory, encoding: "utf8" });
+  return result.stdout.trim();
+}
+
+async function seedGit(directory: string): Promise<void> {
+  await git(directory, ["config", "user.email", "test@anyam.dev"]);
+  await git(directory, ["config", "user.name", "Anyam Test"]);
+  await git(directory, ["add", "."]);
+  await git(directory, ["commit", "--quiet", "-m", "Initial project"]);
+}
+
+async function projectDirectory(options: { startChange?: boolean } = {}): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "anyam-agent-"));
   const directory = join(root, "demo");
   await scaffoldProject({ directory, name: "demo", kind: "worker" });
-  await startChange(directory, "Add the first agent change");
+  await seedGit(directory);
+  if (options.startChange !== false) await startChange(directory, "Add the first agent change");
   return directory;
 }
 
@@ -69,9 +86,73 @@ test("MCP exposes semantic Change tools and keeps canonical writes outside the b
   const denied = await broker.handle({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "target.promote:production", arguments: {} } });
   assert.equal((denied?.result as { isError?: boolean }).isError, true);
   const revision = await broker.handle({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "change.publish_revision", arguments: { declaredEffects: ["source.modify"] } } });
-  const revisionResult = (revision?.result as { structuredContent?: { canonicalWrite?: boolean } }).structuredContent;
+  const revisionResult = (revision?.result as { structuredContent?: { canonicalWrite?: boolean; revision?: Record<string, unknown> } }).structuredContent;
   assert.equal(revisionResult?.canonicalWrite, false);
+  assert.equal(revisionResult?.revision?.sourceKind, "git");
+  assert.match(String(revisionResult?.revision?.sourceRevision), /^git:commit:[0-9a-f]{40,64}$/);
+  assert.match(String(revisionResult?.revision?.baseProjectRevisionId), /^git:project-revision:[0-9a-f]{40,64}$/);
+  assert.match(String(revisionResult?.revision?.treeDigest), /^git-tree:[0-9a-f]{40,64}$/);
+  assert.match(String(revisionResult?.revision?.gitRef), /^refs\/heads\//);
+  assert.ok(revisionResult?.revision?.gitObjectFormat === "sha1" || revisionResult?.revision?.gitObjectFormat === "sha256");
   await access(join(directory, ".anyam", "change.json"));
+});
+
+test("Change revisions use stable Git identities and reject dirty source", async () => {
+  const directory = await projectDirectory();
+  const manager = new LocalAgentManager({ directory, credentialLifetimeMs: 10_000, sessionLifetimeMs: 60_000 });
+  await manager.startSession({ agent: "codex" });
+
+  const first = await manager.invokeTool("change.publish_revision", { declaredEffects: ["source.modify"] });
+  const firstRevision = first.revision as { sourceRevision: string; treeDigest: string };
+  const repeated = await manager.invokeTool("change.publish_revision", { declaredEffects: ["source.modify"] });
+  const repeatedRevision = repeated.revision as { sourceRevision: string; treeDigest: string };
+  assert.equal(repeatedRevision.sourceRevision, firstRevision.sourceRevision);
+  assert.equal(repeatedRevision.treeDigest, firstRevision.treeDigest);
+
+  await git(directory, ["config", "user.email", "test@anyam.dev"]);
+  await git(directory, ["config", "user.name", "Anyam Test"]);
+  await writeFile(join(directory, "src", "index.ts"), "export const changed = true;\n", "utf8");
+  await assert.rejects(
+    manager.invokeTool("change.publish_revision", { declaredEffects: ["source.modify"] }),
+    (error: unknown) => error instanceof LocalAgentError && error.code === "change.source_dirty" && /asked=1 changed paths/.test(error.message),
+  );
+
+  await git(directory, ["add", "src/index.ts"]);
+  await git(directory, ["commit", "--quiet", "-m", "Change source"]);
+  const changed = await manager.invokeTool("change.publish_revision", { declaredEffects: ["source.modify"] });
+  const changedRevision = changed.revision as { sourceRevision: string; treeDigest: string };
+  assert.notEqual(changedRevision.sourceRevision, firstRevision.sourceRevision);
+  assert.notEqual(changedRevision.treeDigest, firstRevision.treeDigest);
+});
+
+test("Change revision names missing Git metadata and stale bases", async () => {
+  const missingGitDirectory = await projectDirectory();
+  const missingGitManager = new LocalAgentManager({ directory: missingGitDirectory });
+  await missingGitManager.startSession({ agent: "codex" });
+  await rm(join(missingGitDirectory, ".git"), { recursive: true, force: true });
+  await assert.rejects(
+    missingGitManager.invokeTool("change.publish_revision", { declaredEffects: [] }),
+    (error: unknown) => error instanceof LocalAgentError && error.code === "git.metadata_missing" && /recoveryAction/.test(JSON.stringify(error.toJSON())),
+  );
+
+  const staleDirectory = await projectDirectory({ startChange: false });
+  const initialCommit = await git(staleDirectory, ["rev-parse", "HEAD"]);
+  await writeFile(join(staleDirectory, "src", "index.ts"), "export const baseline = 1;\n", "utf8");
+  await git(staleDirectory, ["add", "src/index.ts"]);
+  await git(staleDirectory, ["commit", "--quiet", "-m", "Base change"]);
+  await startChange(staleDirectory, "Stale base change");
+  const baseCommit = await git(staleDirectory, ["rev-parse", "HEAD"]);
+  assert.notEqual(baseCommit, initialCommit);
+  await git(staleDirectory, ["checkout", "--quiet", "-b", "divergent", initialCommit]);
+  await writeFile(join(staleDirectory, "src", "index.ts"), "export const divergent = true;\n", "utf8");
+  await git(staleDirectory, ["add", "src/index.ts"]);
+  await git(staleDirectory, ["commit", "--quiet", "-m", "Divergent change"]);
+  const staleManager = new LocalAgentManager({ directory: staleDirectory });
+  await staleManager.startSession({ agent: "codex" });
+  await assert.rejects(
+    staleManager.invokeTool("change.publish_revision", { declaredEffects: ["source.modify"] }),
+    (error: unknown) => error instanceof LocalAgentError && error.code === "change.base_stale" && /ancestor=false/.test(error.receipt ?? ""),
+  );
 });
 
 test("CLI configures and starts an agent without creating Realm credentials", async () => {

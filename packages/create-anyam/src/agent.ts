@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { basename, join, resolve } from "node:path";
+import { gitCommitIdentity, gitProjectRevisionId, gitTreeIdentity, inspectGitSource, isGitAncestor, LocalGitSourceError } from "./git-source.js";
 import { runLocalCheck } from "./scaffold.js";
 
 export const AGENT_SESSION_PROTOCOL = "anyam.agent-session/v1";
@@ -162,6 +163,13 @@ export type LocalProposedRevision = {
   changeId: string;
   workspaceId: string;
   sourceSnapshot: string;
+  sourceRepositoryId: string;
+  sourceRevision: string;
+  baseProjectRevisionId: string;
+  gitRef: string;
+  gitObjectFormat: "sha1" | "sha256";
+  treeDigest: string;
+  sourceKind: "git";
   declaredEffects: readonly string[];
   createdAt: string;
   actorId: string;
@@ -241,6 +249,7 @@ type ChangeMetadata = {
   title: string;
   baseProjectRevisionId: string;
   workspaceId: string;
+  baseRepositoryId: string;
 };
 
 export type LocalAgentManagerOptions = {
@@ -630,6 +639,7 @@ export class LocalAgentManager {
       title: stringField(value.title, id),
       baseProjectRevisionId: stringField(value.baseProjectRevisionId, "project-revision:local:working-tree"),
       workspaceId: stringField(local.workspaceId, "workspace:local:working-tree"),
+      baseRepositoryId: stringField(local.baseRepositoryId, ""),
     };
   }
 
@@ -898,13 +908,82 @@ export class LocalAgentManager {
     if (name === "change.publish_revision") {
       if (!Array.isArray(args.declaredEffects) || args.declaredEffects.some((effect) => typeof effect !== "string")) throw new LocalAgentError({ code: "change.effects_invalid", message: "Change revision declaredEffects must be an array of strings; no revision was published.", recoveryAction: "declare the semantic effects of the proposed revision", receipt: "change.publish_revision input schema" });
       const declaredEffects = args.declaredEffects as string[];
-      const revision: LocalProposedRevision = { id: `revision:${randomUUID()}`, changeId: change.id, workspaceId: change.workspaceId, sourceSnapshot: `snapshot:local:${digest({ project: project.manifestDigest, changeId: change.id, workspaceId: change.workspaceId, effects: declaredEffects })}`, declaredEffects, createdAt: nowIso(this.now), actorId: active.session.actorId, canonicalWrite: false };
+      let source: Awaited<ReturnType<typeof inspectGitSource>>;
+      try {
+        source = await inspectGitSource(this.directory);
+      } catch (error) {
+        if (error instanceof LocalGitSourceError) {
+          throw new LocalAgentError({
+            code: error.code,
+            message: `${error.message} No revision was published.`,
+            affectedObject: change.id,
+            recoveryAction: error.recoveryAction,
+            receipt: `change=${change.id}; git-code=${error.code}; directory=${this.directory}`,
+          });
+        }
+        throw error;
+      }
+      if (!source.clean) {
+        throw new LocalAgentError({
+          code: "change.source_dirty",
+          message: `Change ${change.id} has uncommitted Git source; no Git revision was published. budget=git.worktree; limit=clean source tree; asked=${source.changedPaths.length} changed paths; changedPaths=${source.changedPaths.join(",") || "unknown"}.`,
+          affectedObject: source.repositoryId,
+          recoveryAction: "commit or explicitly discard the changed source, then rerun change.publish_revision",
+          receipt: `git-status=dirty; changed-paths=${source.changedPaths.length}; metadata-excluded=.anyam/**`,
+        });
+      }
+      const baseMatch = /^git:project-revision:([0-9a-f]{40,64})$/.exec(change.baseProjectRevisionId);
+      if (!baseMatch) {
+        throw new LocalAgentError({
+          code: "change.base_unbound",
+          message: `Change ${change.id} has no committed Git base identity; base=${change.baseProjectRevisionId} is an explicit named snapshot, not a Git revision.`,
+          affectedObject: change.id,
+          recoveryAction: "create a committed baseline, remove the ambiguous Change metadata, and start the Change again",
+          receipt: `base=${change.baseProjectRevisionId}; source-repository=${source.repositoryId}`,
+        });
+      }
+      const baseCommit = baseMatch[1]!;
+      if (change.baseRepositoryId && change.baseRepositoryId !== source.repositoryId) {
+        throw new LocalAgentError({
+          code: "change.base_repository_mismatch",
+          message: `Change ${change.id} was based on Git repository ${change.baseRepositoryId}, but the Workspace resolves to ${source.repositoryId}; no revision was published.`,
+          affectedObject: change.id,
+          recoveryAction: "open the original Change Workspace or create a new Change from this repository",
+          receipt: `base-repository=${change.baseRepositoryId}; current-repository=${source.repositoryId}`,
+        });
+      }
+      if (!(await isGitAncestor(this.directory, baseCommit, source.commitId))) {
+        throw new LocalAgentError({
+          code: "change.base_stale",
+          message: `Change ${change.id} is based on Git commit ${baseCommit}, which is not an ancestor of current commit ${source.commitId}; no revision was published.`,
+          affectedObject: change.id,
+          recoveryAction: `rebase or restart the Change onto git commit ${source.commitId}, then rerun change.publish_revision`,
+          receipt: `base-commit=${baseCommit}; current-commit=${source.commitId}; ancestor=false`,
+        });
+      }
+      const revision: LocalProposedRevision = {
+        id: `revision:${randomUUID()}`,
+        changeId: change.id,
+        workspaceId: change.workspaceId,
+        sourceSnapshot: `git:snapshot:${source.commitId}`,
+        sourceRepositoryId: source.repositoryId,
+        sourceRevision: gitCommitIdentity(source.commitId),
+        baseProjectRevisionId: gitProjectRevisionId(baseCommit),
+        gitRef: source.gitRef,
+        gitObjectFormat: source.objectFormat,
+        treeDigest: gitTreeIdentity(source.treeId),
+        sourceKind: "git",
+        declaredEffects,
+        createdAt: nowIso(this.now),
+        actorId: active.session.actorId,
+        canonicalWrite: false,
+      };
       active.state.revisions[revision.id] = revision;
       const changePath = join(this.directory, ".anyam", "change.json");
       const changeFile = await readJson<Record<string, unknown>>(changePath);
       changeFile.latestRevisionId = revision.id;
       await writeAtomic(changePath, `${JSON.stringify(changeFile, null, 2)}\n`);
-      this.record(active.state, { operation: "change.revision_proposed", outcome: "observed", sessionId: active.session.id, grantId: active.grant.id, taskId: active.session.taskId, projectId: active.session.projectId, changeId: change.id, workspaceId: change.workspaceId, actorId: active.session.actorId, agent: active.session.agent, details: { revisionId: revision.id, declaredEffects, canonicalWrite: false } });
+      this.record(active.state, { operation: "change.revision_proposed", outcome: "observed", sessionId: active.session.id, grantId: active.grant.id, taskId: active.session.taskId, projectId: active.session.projectId, changeId: change.id, workspaceId: change.workspaceId, actorId: active.session.actorId, agent: active.session.agent, details: { revisionId: revision.id, declaredEffects, sourceRepositoryId: source.repositoryId, sourceRevision: revision.sourceRevision, baseProjectRevisionId: revision.baseProjectRevisionId, treeDigest: revision.treeDigest, gitRef: source.gitRef, gitObjectFormat: source.objectFormat, canonicalWrite: false } });
       await this.appendToolAudit(active, name);
       return { revision, canonicalWrite: false, next: "review or request protected landing through the project policy" };
     }

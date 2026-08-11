@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { basename, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
+import { gitCommitIdentity, gitProjectRevisionId, gitTreeIdentity, inspectGitSource, LocalGitSourceError } from "./git-source.js";
 
 const execFile = promisify(execFileCallback);
 const packageVersion = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
@@ -356,20 +357,38 @@ export async function startChange(directoryInput: string, titleInput: string): P
   const projectId = typeof manifest.id === "string" ? manifest.id : `project:local:${basename(directory)}`;
   await mkdir(metadataDirectory, { recursive: true });
   const changeId = `change:${randomUUID()}`;
+  let baseProjectRevisionId = "project-revision:local:working-tree";
+  let local: Record<string, string> = {
+    workspaceId: "workspace:local:working-tree",
+    sourceSpaceId: "source:local",
+    baseSnapshot: "snapshot:local:working-tree",
+  };
+  try {
+    const source = await inspectGitSource(directory);
+    if (source.clean) {
+      baseProjectRevisionId = gitProjectRevisionId(source.commitId);
+      local = {
+        workspaceId: "workspace:local:working-tree",
+        sourceSpaceId: "source:local",
+        baseSnapshot: gitTreeIdentity(source.treeId),
+        baseSourceRevision: gitCommitIdentity(source.commitId),
+        baseRepositoryId: source.repositoryId,
+        baseGitRef: source.gitRef,
+      };
+    }
+  } catch (error) {
+    if (!(error instanceof LocalGitSourceError)) throw error;
+  }
   await writeFile(path, `${JSON.stringify({
     protocol: "anyam.change/v1",
     id: changeId,
     projectId,
     intentId: `intent:${randomUUID()}`,
-    baseProjectRevisionId: "project-revision:local:working-tree",
+    baseProjectRevisionId,
     status: "active",
     latestRevisionId: null,
     title,
-    local: {
-      workspaceId: "workspace:local:working-tree",
-      sourceSpaceId: "source:local",
-      baseSnapshot: "snapshot:local:working-tree",
-    },
+    local,
   }, null, 2)}\n`, "utf8");
   return { status: "created", changeId, title, path };
 }

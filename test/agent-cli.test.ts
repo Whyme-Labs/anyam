@@ -51,6 +51,15 @@ async function projectDirectory(options: { startChange?: boolean } = {}): Promis
   return directory;
 }
 
+async function replaceCheckAction(directory: string, action: Record<string, unknown>): Promise<void> {
+  const path = join(directory, "anyam.json");
+  const manifest = JSON.parse(await readFile(path, "utf8")) as { modules: Array<{ actions: Array<Record<string, unknown>> }> };
+  manifest.modules[0]!.actions[0] = { ...manifest.modules[0]!.actions[0], ...action };
+  await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  await git(directory, ["add", "anyam.json"]);
+  await git(directory, ["commit", "--quiet", "-m", "Update declared Action"]);
+}
+
 test("agent setup writes portable instructions and stdio configuration without secrets", async () => {
   const directory = await projectDirectory();
   const result = await setupAgent({ directory, agent: "codex" });
@@ -165,6 +174,75 @@ test("Change revision names missing Git metadata and stale bases", async () => {
   await assert.rejects(
     staleManager.invokeTool("change.publish_revision", { declaredEffects: ["source.modify"] }),
     (error: unknown) => error instanceof LocalAgentError && error.code === "change.base_stale" && /ancestor=false/.test(error.receipt ?? ""),
+  );
+});
+
+test("agent run.start executes the declared Action and binds passed Evidence to Git and actor state", async () => {
+  const directory = await projectDirectory();
+  await replaceCheckAction(directory, {
+    command: "node -e \"require('node:fs').writeFileSync('artifact.txt', 'passed')\"",
+    inputs: ["anyam.json"],
+    outputs: ["artifact.txt"],
+  });
+  const agentManager = manager(directory);
+  const started = await agentManager.startSession({ agent: "codex" });
+  const result = await agentManager.invokeTool("run.start", { actionId: "action:check" });
+  const run = result.run as Record<string, unknown>;
+  const evidence = result.evidence as Record<string, unknown>;
+  assert.equal(run.status, "passed");
+  assert.equal(run.exitCode, 0);
+  assert.equal(evidence.status, "passed");
+  assert.equal(evidence.actorId, started.session.actorId);
+  assert.equal(evidence.grantId, started.grant.id);
+  assert.match(String(run.sourceRevision), /^git:commit:[0-9a-f]{40,64}$/);
+  assert.match(String(run.actionContractDigest), /^sha256:/);
+  assert.match(String(run.stdoutDigest), /^sha256:/);
+  assert.match(String(run.stderrDigest), /^sha256:/);
+  assert.match(String(run.outputDigest), /^sha256:/);
+  assert.match(String(run.toolchainDigest), /^sha256:/);
+  assert.match(String(run.environmentDigest), /^sha256:/);
+  assert.match(String(evidence.receipt), /action=action:check; verifier=verifier:local-check/);
+});
+
+test("agent run.start records failed Actions and never reports passed Evidence", async () => {
+  const directory = await projectDirectory();
+  await replaceCheckAction(directory, { command: "node -e \"process.stderr.write('failure'); process.exit(7)\"", inputs: ["anyam.json"], outputs: [] });
+  const agentManager = manager(directory);
+  await agentManager.startSession({ agent: "codex" });
+  const result = await agentManager.invokeTool("run.start", { actionId: "action:check" });
+  const run = result.run as Record<string, unknown>;
+  const evidence = result.evidence as Record<string, unknown>;
+  assert.equal(run.status, "failed");
+  assert.equal(run.exitCode, 7);
+  assert.equal(evidence.status, "failed");
+  assert.match(String(evidence.receipt), /exit-code=7/);
+});
+
+test("agent run.start fails closed for missing inputs and outputs", async () => {
+  const missingInputDirectory = await projectDirectory();
+  await replaceCheckAction(missingInputDirectory, { command: "node -e \"process.exit(0)\"", inputs: ["missing-input.txt"], outputs: [] });
+  const missingInputManager = manager(missingInputDirectory);
+  await missingInputManager.startSession({ agent: "codex" });
+  const missingInput = await missingInputManager.invokeTool("run.start", { actionId: "action:check" });
+  assert.equal((missingInput.run as Record<string, unknown>).status, "failed");
+  assert.match(String((missingInput.evidence as Record<string, unknown>).receipt), /missing-input-patterns=missing-input.txt/);
+
+  const missingOutputDirectory = await projectDirectory();
+  await replaceCheckAction(missingOutputDirectory, { command: "node -e \"process.exit(0)\"", inputs: ["anyam.json"], outputs: ["missing-output.txt"] });
+  const missingOutputManager = manager(missingOutputDirectory);
+  await missingOutputManager.startSession({ agent: "codex" });
+  const missingOutput = await missingOutputManager.invokeTool("run.start", { actionId: "action:check" });
+  assert.equal((missingOutput.run as Record<string, unknown>).status, "failed");
+  assert.match(String((missingOutput.evidence as Record<string, unknown>).receipt), /missing-output-paths=missing-output.txt/);
+});
+
+test("agent run.start rejects malformed Action declarations before execution", async () => {
+  const directory = await projectDirectory();
+  await replaceCheckAction(directory, { inputs: "not-an-array" });
+  const agentManager = manager(directory);
+  await assert.rejects(
+    agentManager.startSession({ agent: "codex" }),
+    (error: unknown) => error instanceof LocalAgentError && error.code === "run.manifest_invalid" && /inputs/.test(error.message),
   );
 });
 

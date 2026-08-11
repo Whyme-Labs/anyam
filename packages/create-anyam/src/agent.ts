@@ -1,14 +1,13 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { access, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { execFile as execFileCallback } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
-import { basename, join, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { gitCommitIdentity, gitProjectRevisionId, gitTreeIdentity, inspectGitSource, isGitAncestor, LocalGitSourceError } from "./git-source.js";
-import { runLocalCheck } from "./scaffold.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -62,6 +61,12 @@ export const LOCAL_AGENT_POLICY = {
   stateLockTimeoutMs: 5_000,
   stateLockRetryDelayMs: 10,
   receipt: "policy=local-agent/v1; sizing=provisional-tripwire; remeasure-before-production",
+} as const;
+
+export const LOCAL_ACTION_POLICY = {
+  timeoutMs: 2 * 60 * 1000,
+  maxOutputBytes: 4 * 1024 * 1024,
+  receipt: "policy=local-action/v1; sizing=provisional-tripwire; remeasure-before-production",
 } as const;
 
 export type AgentResource = {
@@ -148,11 +153,27 @@ export type WorkspaceCredential = {
 export type LocalRunObservation = {
   id: string;
   actionId: string;
-  status: "passed" | "blocked";
+  status: "passed" | "failed" | "blocked";
   evidenceId: string;
   evidenceDigest: string;
   startedAt: string;
   completedAt: string;
+  sourceRevision: string;
+  sourceSnapshot: string;
+  actionContractDigest: string;
+  verifierId: string;
+  verifierContractDigest?: string;
+  exitCode?: number;
+  stdoutDigest: string;
+  stderrDigest: string;
+  inputDigests: readonly string[];
+  outputDigests: readonly string[];
+  outputDigest: string;
+  toolchainDigest: string;
+  environmentDigest: string;
+  actorId: string;
+  grantId: string;
+  taskId: string;
   receipt: string;
 };
 
@@ -246,8 +267,28 @@ type ProjectMetadata = {
   name: string;
   manifestDigest: string;
   sourceSpaceIds: readonly string[];
-  actions: readonly string[];
-  verifiers: readonly string[];
+  actions: readonly LocalDeclaredAction[];
+  verifiers: readonly LocalDeclaredVerifier[];
+};
+
+type LocalDeclaredAction = {
+  id: string;
+  moduleId: string;
+  moduleRoot: string;
+  command: string;
+  inputGlobs: readonly string[];
+  outputPaths: readonly string[];
+  network: readonly string[];
+  resources: Readonly<Record<string, string | number | boolean>>;
+  contractDigest: string;
+};
+
+type LocalDeclaredVerifier = {
+  id: string;
+  actionId: string;
+  disclosure: "full" | "result-only";
+  requiredFor: readonly string[];
+  contractDigest: string;
 };
 
 type ChangeMetadata = {
@@ -441,6 +482,138 @@ async function writeJsonIfAbsent(path: string, value: unknown): Promise<boolean>
 
 async function readJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf8")) as T;
+}
+
+function declaredString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new LocalAgentError({ code: "run.manifest_invalid", message: `Declared Action field ${field} must be a non-empty string; no run was started.`, affectedObject: field, recoveryAction: "repair anyam.json and rerun anyam check", receipt: `field=${field}; expected=non-empty-string` });
+  }
+  return value;
+}
+
+function declaredStringArray(value: unknown, field: string): readonly string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new LocalAgentError({ code: "run.manifest_invalid", message: `Declared Action field ${field} must be an array of strings; no run was started.`, affectedObject: field, recoveryAction: "repair anyam.json and rerun anyam check", receipt: `field=${field}; expected=string[]` });
+  }
+  return value.map((item) => item as string);
+}
+
+function declaredResources(value: unknown, field: string): Readonly<Record<string, string | number | boolean>> {
+  if (!isRecord(value) || Object.values(value).some((item) => !["string", "number", "boolean"].includes(typeof item))) {
+    throw new LocalAgentError({ code: "run.manifest_invalid", message: `Declared Action field ${field} must contain only scalar resources; no run was started.`, affectedObject: field, recoveryAction: "repair anyam.json and rerun anyam check", receipt: `field=${field}; expected=scalar-record` });
+  }
+  return value as Readonly<Record<string, string | number | boolean>>;
+}
+
+function localActionContractDigest(action: Omit<LocalDeclaredAction, "contractDigest">): string {
+  return digest(action);
+}
+
+function localVerifierContractDigest(verifier: Omit<LocalDeclaredVerifier, "contractDigest">): string {
+  return digest(verifier);
+}
+
+function localGlobRegExp(pattern: string): RegExp {
+  let expression = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index];
+    if (character === "*" && pattern[index + 1] === "*") {
+      index += 1;
+      if (pattern[index + 1] === "/") index += 1;
+      expression += "(?:.*/)?";
+    } else if (character === "*") {
+      expression += "[^/]*";
+    } else if (character === "?") {
+      expression += "[^/]";
+    } else {
+      expression += character?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") ?? "";
+    }
+  }
+  return new RegExp(`${expression}$`);
+}
+
+async function localWalkFiles(root: string, current = root): Promise<string[]> {
+  const entries = await readdir(current, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    if (entry.name === ".git" || entry.name === "node_modules") continue;
+    const pathname = join(current, entry.name);
+    if (entry.isDirectory()) files.push(...await localWalkFiles(root, pathname));
+    else if (entry.isFile()) files.push(relative(root, pathname).replaceAll("\\", "/"));
+  }
+  return files.sort();
+}
+
+function byteDigest(value: Buffer): string {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+async function localInputDigests(root: string, patterns: readonly string[]): Promise<{ digests: readonly string[]; missing: readonly string[] }> {
+  const allFiles = await localWalkFiles(root);
+  const digests: string[] = [];
+  const missing: string[] = [];
+  const seen = new Set<string>();
+  for (const pattern of patterns) {
+    const matches = allFiles.filter((path) => localGlobRegExp(pattern).test(path));
+    if (matches.length === 0) missing.push(pattern);
+    for (const path of matches) {
+      if (seen.has(path)) continue;
+      seen.add(path);
+      digests.push(`${path}=${byteDigest(await readFile(join(root, path)))}`);
+    }
+  }
+  return { digests, missing };
+}
+
+async function localOutputDigests(root: string, paths: readonly string[]): Promise<{ digests: readonly string[]; missing: readonly string[] }> {
+  const digests: string[] = [];
+  const missing: string[] = [];
+  for (const path of paths) {
+    try {
+      const value = await readFile(join(root, path));
+      await stat(join(root, path));
+      digests.push(`${path}=${byteDigest(value)}`);
+    } catch (error) {
+      if (isNotFound(error)) missing.push(path);
+      else throw error;
+    }
+  }
+  return { digests, missing };
+}
+
+type LocalActionCommandResult = {
+  exitCode: number | undefined;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  outputLimitExceeded: boolean;
+};
+
+async function executeDeclaredAction(directory: string, command: string): Promise<LocalActionCommandResult> {
+  const shell = process.platform === "win32" ? "cmd.exe" : "sh";
+  const args = process.platform === "win32" ? ["/d", "/s", "/c", command] : ["-c", command];
+  try {
+    const result = await execFile(shell, args, {
+      cwd: directory,
+      encoding: "utf8",
+      timeout: LOCAL_ACTION_POLICY.timeoutMs,
+      maxBuffer: LOCAL_ACTION_POLICY.maxOutputBytes,
+    });
+    return { exitCode: 0, stdout: result.stdout, stderr: result.stderr, timedOut: false, outputLimitExceeded: false };
+  } catch (error) {
+    const record = isRecord(error) ? error : {};
+    const rawCode = record.code;
+    const signal = typeof record.signal === "string" ? record.signal : "";
+    const stdout = typeof record.stdout === "string" ? record.stdout : "";
+    const stderr = typeof record.stderr === "string" ? record.stderr : "";
+    return {
+      exitCode: typeof rawCode === "number" ? rawCode : undefined,
+      stdout,
+      stderr,
+      timedOut: record.killed === true || signal === "SIGTERM",
+      outputLimitExceeded: rawCode === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+    };
+  }
 }
 
 function ensureAgent(agent: string | undefined): AgentKind {
@@ -696,8 +869,43 @@ export class LocalAgentManager {
       throw error;
     }
     if (!isRecord(value)) throw new LocalAgentError({ code: "project.invalid", message: "anyam.json must be a JSON object; the agent cannot construct a Context Manifest.", recoveryAction: "repair anyam.json and rerun anyam check", receipt: "anyam.json was read" });
-    const modules = Array.isArray(value.modules) ? value.modules.filter(isRecord) : [];
-    const actions = modules.flatMap((module) => Array.isArray(module.actions) ? module.actions.filter(isRecord).map((action) => stringField(action.id, "")) : []).filter(Boolean);
+    if (!Array.isArray(value.modules) || value.modules.length === 0) throw new LocalAgentError({ code: "run.manifest_invalid", message: "Project Manifest has no declared Modules; no Action run was started.", affectedObject: "modules", recoveryAction: "repair anyam.json and rerun anyam check", receipt: "field=modules; expected=non-empty-array" });
+    const actions: LocalDeclaredAction[] = [];
+    for (const [moduleIndex, moduleValue] of value.modules.entries()) {
+      if (!isRecord(moduleValue)) throw new LocalAgentError({ code: "run.manifest_invalid", message: `Project Manifest module ${moduleIndex} is malformed; no Action run was started.`, affectedObject: `modules[${moduleIndex}]`, recoveryAction: "repair anyam.json and rerun anyam check", receipt: `module-index=${moduleIndex}; expected=object` });
+      const moduleId = declaredString(moduleValue.id, `modules[${moduleIndex}].id`);
+      const moduleRoot = declaredString(moduleValue.root, `modules[${moduleIndex}].root`);
+      if (!Array.isArray(moduleValue.actions) || moduleValue.actions.length === 0) throw new LocalAgentError({ code: "run.manifest_invalid", message: `Project Manifest module ${moduleId} has no declared Actions; no run was started.`, affectedObject: moduleId, recoveryAction: "declare an Action with command, inputs, outputs, network, and resources", receipt: `module=${moduleId}; expected=non-empty-action-array` });
+      for (const [actionIndex, actionValue] of moduleValue.actions.entries()) {
+        if (!isRecord(actionValue)) throw new LocalAgentError({ code: "run.manifest_invalid", message: `Project Manifest Action ${moduleId}[${actionIndex}] is malformed; no run was started.`, affectedObject: `modules[${moduleIndex}].actions[${actionIndex}]`, recoveryAction: "repair anyam.json and rerun anyam check", receipt: `module=${moduleId}; action-index=${actionIndex}; expected=object` });
+        const actionWithoutDigest: Omit<LocalDeclaredAction, "contractDigest"> = {
+          id: declaredString(actionValue.id, `modules[${moduleIndex}].actions[${actionIndex}].id`),
+          moduleId,
+          moduleRoot,
+          command: declaredString(actionValue.command, `modules[${moduleIndex}].actions[${actionIndex}].command`),
+          inputGlobs: declaredStringArray(actionValue.inputs, `modules[${moduleIndex}].actions[${actionIndex}].inputs`),
+          outputPaths: declaredStringArray(actionValue.outputs, `modules[${moduleIndex}].actions[${actionIndex}].outputs`),
+          network: declaredStringArray(actionValue.network, `modules[${moduleIndex}].actions[${actionIndex}].network`),
+          resources: declaredResources(actionValue.resources, `modules[${moduleIndex}].actions[${actionIndex}].resources`),
+        };
+        if (actions.some((candidate) => candidate.id === actionWithoutDigest.id)) throw new LocalAgentError({ code: "run.manifest_invalid", message: `Project Manifest declares duplicate Action ${actionWithoutDigest.id}; no run was started.`, affectedObject: actionWithoutDigest.id, recoveryAction: "give every Action a unique id and rerun anyam check", receipt: `action=${actionWithoutDigest.id}; rule=unique-action-id` });
+        actions.push({ ...actionWithoutDigest, contractDigest: localActionContractDigest(actionWithoutDigest) });
+      }
+    }
+    if (!Array.isArray(value.verifiers)) throw new LocalAgentError({ code: "run.manifest_invalid", message: "Project Manifest has no Verifier declarations; no Action run was started.", affectedObject: "verifiers", recoveryAction: "declare a Verifier for the Action and rerun anyam check", receipt: "field=verifiers; expected=array" });
+    const verifiers: LocalDeclaredVerifier[] = [];
+    for (const [verifierIndex, verifierValue] of value.verifiers.entries()) {
+      if (!isRecord(verifierValue)) throw new LocalAgentError({ code: "run.manifest_invalid", message: `Project Manifest Verifier ${verifierIndex} is malformed; no Action run was started.`, affectedObject: `verifiers[${verifierIndex}]`, recoveryAction: "repair anyam.json and rerun anyam check", receipt: `verifier-index=${verifierIndex}; expected=object` });
+      const verifierWithoutDigest: Omit<LocalDeclaredVerifier, "contractDigest"> = {
+        id: declaredString(verifierValue.id, `verifiers[${verifierIndex}].id`),
+        actionId: declaredString(verifierValue.actionId, `verifiers[${verifierIndex}].actionId`),
+        disclosure: verifierValue.disclosure === "result-only" ? "result-only" : verifierValue.disclosure === "full" ? "full" : (() => { throw new LocalAgentError({ code: "run.manifest_invalid", message: `Verifier ${String(verifierValue.id)} must declare full or result-only disclosure; no run was started.`, affectedObject: `verifiers[${verifierIndex}].disclosure`, recoveryAction: "repair anyam.json and rerun anyam check", receipt: "verifier disclosure enum" }); })(),
+        requiredFor: declaredStringArray(verifierValue.requiredFor, `verifiers[${verifierIndex}].requiredFor`),
+      };
+      if (!actions.some((action) => action.id === verifierWithoutDigest.actionId)) throw new LocalAgentError({ code: "run.manifest_invalid", message: `Verifier ${verifierWithoutDigest.id} references unknown Action ${verifierWithoutDigest.actionId}; no run was started.`, affectedObject: verifierWithoutDigest.id, recoveryAction: "bind the Verifier to a declared Action and rerun anyam check", receipt: `verifier=${verifierWithoutDigest.id}; action=${verifierWithoutDigest.actionId}; reference=missing` });
+      if (verifiers.some((candidate) => candidate.id === verifierWithoutDigest.id)) throw new LocalAgentError({ code: "run.manifest_invalid", message: `Project Manifest declares duplicate Verifier ${verifierWithoutDigest.id}; no run was started.`, affectedObject: verifierWithoutDigest.id, recoveryAction: "give every Verifier a unique id and rerun anyam check", receipt: `verifier=${verifierWithoutDigest.id}; rule=unique-verifier-id` });
+      verifiers.push({ ...verifierWithoutDigest, contractDigest: localVerifierContractDigest(verifierWithoutDigest) });
+    }
     const manifestDigest = digest(value);
     return {
       id: stringField(value.id, `project:local:${basename(this.directory)}`),
@@ -705,7 +913,7 @@ export class LocalAgentManager {
       manifestDigest,
       sourceSpaceIds: stringArray(value.sourceSpaceIds),
       actions,
-      verifiers: Array.isArray(value.verifiers) ? value.verifiers.filter(isRecord).map((verifier) => stringField(verifier.id, "")).filter(Boolean) : [],
+      verifiers,
     };
   }
 
@@ -812,8 +1020,8 @@ export class LocalAgentManager {
       grantId,
       capabilities: AGENT_CAPABILITIES,
       prohibitedOperations: PROHIBITED_OPERATIONS,
-      actions: project.actions,
-      verifiers: project.verifiers,
+      actions: project.actions.map((action) => action.id),
+      verifiers: project.verifiers.map((verifier) => verifier.id),
       authorizationEpoch: state.authorizationEpoch,
       disclosure: "local-owner",
       createdAt: startedAt,
@@ -973,18 +1181,79 @@ export class LocalAgentManager {
     }
     if (name === "run.start") {
       const actionId = stringField(args.actionId, "");
-      if (!project.actions.includes(actionId)) throw new LocalAgentError({ code: "run.action_unknown", message: `Action ${actionId || "missing"} is not declared by the Project; no run was started.`, affectedObject: actionId || "action:missing", recoveryAction: `choose one of ${project.actions.join(", ") || "the actions in anyam.json"}`, receipt: `declared-actions=${project.actions.join(",")}` });
+      const action = project.actions.find((candidate) => candidate.id === actionId);
+      if (!action) throw new LocalAgentError({ code: "run.action_unknown", message: `Action ${actionId || "missing"} is not declared by the Project; no run was started.`, affectedObject: actionId || "action:missing", recoveryAction: `choose one of ${project.actions.map((candidate) => candidate.id).join(", ") || "the actions in anyam.json"}`, receipt: `declared-actions=${project.actions.map((candidate) => candidate.id).join(",")}` });
+      const requestedVerifierId = stringField(args.verifierId, "");
+      const verifier = requestedVerifierId
+        ? project.verifiers.find((candidate) => candidate.id === requestedVerifierId)
+        : project.verifiers.find((candidate) => candidate.actionId === action.id);
+      if (requestedVerifierId && !verifier) throw new LocalAgentError({ code: "run.verifier_unknown", message: `Verifier ${requestedVerifierId} is not declared by the Project; no run was started.`, affectedObject: requestedVerifierId, recoveryAction: `choose one of ${project.verifiers.map((candidate) => candidate.id).join(", ") || "the verifiers in anyam.json"}`, receipt: `declared-verifiers=${project.verifiers.map((candidate) => candidate.id).join(",")}` });
+      if (verifier && verifier.actionId !== action.id) throw new LocalAgentError({ code: "run.verifier_mismatch", message: `Verifier ${verifier.id} is bound to Action ${verifier.actionId}, not ${action.id}; no run was started.`, affectedObject: verifier.id, recoveryAction: "select the Verifier bound to the requested Action", receipt: `verifier=${verifier.id}; action=${action.id}; reference=mismatch` });
+      let source: Awaited<ReturnType<typeof inspectGitSource>>;
+      try {
+        source = await inspectGitSource(this.directory);
+      } catch (error) {
+        if (error instanceof LocalGitSourceError) throw new LocalAgentError({ code: error.code, message: `${error.message} No Action run was started.`, affectedObject: change.id, recoveryAction: error.recoveryAction, receipt: `run=${action.id}; git-code=${error.code}` });
+        throw error;
+      }
+      if (!source.clean) throw new LocalAgentError({ code: "run.source_dirty", message: `Action ${action.id} requires a clean committed source revision; no run was started. budget=git.worktree; limit=clean source tree; asked=${source.changedPaths.length} changed paths.`, affectedObject: source.repositoryId, recoveryAction: "commit or discard changes before starting the Action", receipt: `git-status=dirty; changed-paths=${source.changedPaths.length}` });
       const startedAt = nowIso(this.now);
-      const report = await runLocalCheck(this.directory);
+      const inputs = await localInputDigests(this.directory, action.inputGlobs);
+      const toolchainDigest = digest({ node: process.version, platform: process.platform, arch: process.arch, execPath: process.execPath });
+      const environmentDigest = digest({ cwd: this.directory, nodeEnv: process.env.NODE_ENV ?? "", shell: process.platform === "win32" ? "cmd.exe" : "sh" });
+      const commandResult: LocalActionCommandResult = inputs.missing.length === 0 ? await executeDeclaredAction(this.directory, action.command) : { exitCode: undefined, stdout: "", stderr: "", timedOut: false, outputLimitExceeded: false };
+      const outputs = commandResult.exitCode === 0 && !commandResult.timedOut && !commandResult.outputLimitExceeded ? await localOutputDigests(this.directory, action.outputPaths) : { digests: [], missing: [] };
+      const failureReason = inputs.missing.length > 0
+        ? `missing-input-patterns=${inputs.missing.join(",")}`
+        : commandResult.timedOut
+          ? `budget=action.timeout; limit=${LOCAL_ACTION_POLICY.timeoutMs}ms; asked=command exceeded the execution boundary`
+          : commandResult.outputLimitExceeded
+            ? `budget=action.output; limit=${LOCAL_ACTION_POLICY.maxOutputBytes}bytes; asked=stdout or stderr exceeded the execution boundary`
+            : commandResult.exitCode !== 0
+              ? `exit-code=${commandResult.exitCode ?? "unknown"}`
+              : outputs.missing.length > 0
+                ? `missing-output-paths=${outputs.missing.join(",")}`
+                : undefined;
+      const status = failureReason ? "failed" : "passed";
       const completedAt = nowIso(this.now);
+      const inputDigests = inputs.digests;
+      const outputDigests = outputs.digests;
+      const stdoutDigest = digest(commandResult.stdout);
+      const stderrDigest = digest(commandResult.stderr);
+      const outputDigest = digest({ outputDigests, stdoutDigest, stderrDigest, exitCode: commandResult.exitCode });
       const runId = `run:${randomUUID()}`;
       const evidenceId = `evidence:${randomUUID()}`;
-      const evidenceDigest = digest({ report, actionId, sessionId: active.session.id });
-      const observation: LocalRunObservation = { id: runId, actionId, status: report.status, evidenceId, evidenceDigest, startedAt, completedAt, receipt: `${LOCAL_AGENT_POLICY.receipt}; action=${actionId}; blockers=${report.blockers.length}` };
+      const evidenceDigest = digest({ actionId, verifierId: verifier?.id ?? "verifier:missing", sourceRevision: gitCommitIdentity(source.commitId), sourceSnapshot: `git:snapshot:${source.commitId}`, inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, status, actorId: active.session.actorId, grantId: active.grant.id });
+      const observation: LocalRunObservation = {
+        id: runId,
+        actionId,
+        status,
+        evidenceId,
+        evidenceDigest,
+        startedAt,
+        completedAt,
+        sourceRevision: gitCommitIdentity(source.commitId),
+        sourceSnapshot: `git:snapshot:${source.commitId}`,
+        actionContractDigest: action.contractDigest,
+        verifierId: verifier?.id ?? "verifier:missing",
+        ...(verifier ? { verifierContractDigest: verifier.contractDigest } : {}),
+        ...(commandResult.exitCode !== undefined ? { exitCode: commandResult.exitCode } : {}),
+        stdoutDigest,
+        stderrDigest,
+        inputDigests,
+        outputDigests,
+        outputDigest,
+        toolchainDigest,
+        environmentDigest,
+        actorId: active.session.actorId,
+        grantId: active.grant.id,
+        taskId: active.session.taskId,
+        receipt: `${LOCAL_ACTION_POLICY.receipt}; action=${actionId}; verifier=${verifier?.id ?? "verifier:missing"}; source=${gitCommitIdentity(source.commitId)}; inputs=${inputDigests.length}; outputs=${outputDigests.length}; ${failureReason ?? "status=passed"}`,
+      };
       active.state.runs[runId] = observation;
-      this.record(active.state, { operation: "run.completed", outcome: "observed", sessionId: active.session.id, grantId: active.grant.id, taskId: active.session.taskId, projectId: active.session.projectId, changeId: change.id, workspaceId: change.workspaceId, actorId: active.session.actorId, agent: active.session.agent, details: { runId, evidenceId, status: report.status, blockerCount: report.blockers.length } });
+      this.record(active.state, { operation: "run.completed", outcome: "observed", sessionId: active.session.id, grantId: active.grant.id, taskId: active.session.taskId, projectId: active.session.projectId, changeId: change.id, workspaceId: change.workspaceId, actorId: active.session.actorId, agent: active.session.agent, details: { runId, evidenceId, actionId, verifierId: verifier?.id ?? "verifier:missing", status, sourceRevision: gitCommitIdentity(source.commitId), inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, toolchainDigest, environmentDigest, exitCode: commandResult.exitCode, failureReason } });
       await this.writeState(active.state);
-      return { run: observation, report, evidence: { id: evidenceId, digest: evidenceDigest, status: report.status }, canonicalWrite: false };
+      return { run: observation, evidence: { id: evidenceId, digest: evidenceDigest, status, actionId, verifierId: verifier?.id ?? "verifier:missing", sourceRevision: gitCommitIdentity(source.commitId), actionContractDigest: action.contractDigest, ...(verifier ? { verifierContractDigest: verifier.contractDigest } : {}), inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, toolchainDigest, environmentDigest, exitCode: commandResult.exitCode, actorId: active.session.actorId, grantId: active.grant.id, receipt: observation.receipt }, canonicalWrite: false };
     }
     if (name === "run.inspect") {
       const runId = stringField(args.runId, "");

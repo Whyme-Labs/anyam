@@ -108,7 +108,10 @@ async function run(): Promise<Record<string, unknown>> {
     method: "PUT",
     path: `/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}`,
     token,
-    headers: { "content-type": "application/javascript+module" },
+    // The direct script-upload endpoint rejects the module-specific MIME type
+    // even though the Version Upload API accepts it inside multipart data.
+    // Use the provider's plain JavaScript content type for this seed request.
+    headers: { "content-type": "application/javascript" },
     body: Buffer.from(healthyBytes),
   });
   if (!seeded.ok) throw new Error(`seed Worker upload returned HTTP ${seeded.status}: ${responseErrors(seeded)}`);

@@ -44,3 +44,9 @@ test("qualification scripts fail deterministically when their named inputs are m
     assert.equal(typeof body.recoveryAction, "string", `${script} must name a recovery action`);
   }
 });
+
+test("worker-target qualification uses a Cloudflare-accepted seed upload content type", async () => {
+  const source = await (await import("node:fs/promises")).readFile("scripts/qualify-worker-target.ts", "utf8");
+  assert.match(source, /headers:\s*\{\s*"content-type":\s*"application\/javascript"\s*\}/);
+  assert.doesNotMatch(source, /headers:\s*\{\s*"content-type":\s*"application\/javascript\+module"\s*\}/);
+});

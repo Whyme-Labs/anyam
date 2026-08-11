@@ -3,9 +3,12 @@
 This package is the first deployable edge slice for a customer-operated Anyam
 Realm. It exposes credential-free health and bootstrap metadata plus the
 official Cloudflare Workers OAuth Provider boundary for an MCP resource. The
-qualification Worker now verifies and durably enrolls a first owner through a
-customer-controlled passkey adapter. It does not yet issue an Anyam Capability
-Grant, transfer Git objects, perform Landing, or mutate a Target.
+qualification Worker verifies and durably enrolls a first owner through a
+customer-controlled passkey adapter. Its owner-authenticated Authority Plane
+vertical slice now records Project, Workspace, Change, Revision, Run, Evidence,
+Artifact, Landing, Release, Target, and Promotion state in the Realm
+coordinator. It does not yet transfer Git objects or execute a qualified Target
+promotion.
 
 Cloudflare Access Managed OAuth is optional. The Worker owns the OAuth/MCP
 protocol surface; Anyam owns the Realm identity, consent, capability policy,
@@ -68,6 +71,45 @@ The current Wrangler configuration uses a SQLite-backed Durable Object export,
 which is the current Cloudflare configuration shape for new Durable Object
 classes. D1, R2, Queue, and Workflow entries are provider bindings; Anyam's
 Realm and Project coordinators remain the source of authority above them.
+
+## Authority Plane vertical slice
+
+After an owner completes the passkey login ceremony, the public edge exposes:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/authority/state` | Read the durable Authority Plane summary |
+| `POST /api/authority/command` | Apply one idempotent Authority command |
+
+The command envelope is:
+
+```json
+{
+  "protocol": "anyam.authority-command/v1",
+  "command": "project.create",
+  "idempotencyKey": "client-generated-key",
+  "expectedVersion": 0,
+  "payload": {}
+}
+```
+
+The current command names are `project.create`, `workspace.create`,
+`change.create`, `revision.publish`, `run.record`, `evidence.record`,
+`artifact.record`, `landing.apply`, `release.create`, `target.configure`, and
+`promotion.request`. Commands are serialized by the Realm Durable Object,
+persisted as a credential-free snapshot, guarded by optional version checks,
+deduplicated by idempotency key, and appended to the audit ledger. Only
+`landing.apply` changes the canonical Project Revision pointer. A
+`promotion.request` records an explicit `blocked` result until its Target
+adapter is separately qualified; it never changes the Target pointer or claims
+that deployment occurred.
+
+This is an owner-only vertical slice. General project membership, capability
+grants, Git Smart HTTP object transfer, and live provider Target adapters are
+subsequent boundaries. The binding-shaped Worker test exercises the complete
+Project-to-Promotion path; the Wrangler smoke receipt remains
+`wrangler=dry-run; deployment=not-performed` until a customer deployment is
+run and independently observed.
 
 ## Binding contract
 

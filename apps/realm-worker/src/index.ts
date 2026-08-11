@@ -4,6 +4,18 @@ import { DurableObject, WorkflowEntrypoint, type WorkflowEvent, type WorkflowSte
 
 import { handleCustomerRealmRequest } from "../../../src/cloudflare/realm-worker.ts";
 import {
+  AUTHORITY_COMMAND_PROTOCOL,
+  AUTHORITY_PLANE_PROTOCOL,
+  AuthorityPlaneCoordinator,
+  AuthorityPlaneError,
+  authorityStateSummary,
+  emptyAuthorityPlaneSnapshot,
+  type AuthorityCommand,
+  type AuthorityCommandName,
+  type AuthorityPlaneSnapshot,
+  type AuthoritySession,
+} from "../../../src/cloudflare/authority-plane.ts";
+import {
   CUSTOMER_PROVIDER_OPERATION_PROTOCOL,
   CustomerProviderDurableObjectOperationStore,
   CustomerProviderOperationError,
@@ -19,6 +31,7 @@ import { createAnyamRealmOAuthProvider, type AnyamRealmOAuthEnv } from "./oauth-
 import { handleAnyamRealmOwnerRequest } from "./passkey-owner.ts";
 import { createCloudflareCustomerProviderAdapters } from "./customer-provider-adapters.ts";
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "./coordinator-protocol.ts";
+import { handleAuthorityRequest } from "./authority-edge.ts";
 
 export type Env = AnyamRealmOAuthEnv;
 
@@ -27,6 +40,7 @@ const REALM_RECOVERY_STATUS_KEY = "anyam/realm-identity/recovery-status/v1";
 const REALM_PASSKEY_CHALLENGE_PREFIX = "anyam/realm-passkey-challenge/v1:";
 const REALM_OAUTH_CONSENT_PREFIX = "anyam/realm-oauth-consent/v1:";
 const REALM_OAUTH_GRANT_PREFIX = "anyam/realm-oauth-grant/v1:";
+const REALM_AUTHORITY_SNAPSHOT_KEY = "anyam/realm-authority/snapshot/v1";
 const REALM_COORDINATOR_PROTOCOL = "anyam.realm-coordinator/v1" as const;
 const REALM_QUALIFICATION_PROJECT_ID = "project:realm-qualification";
 const REALM_QUALIFICATION_SOURCE_SPACE_ID = "source:realm-qualification";
@@ -242,6 +256,10 @@ function identitySummary(identity: RealmIdentityPolicy): Record<string, unknown>
 }
 
 function coordinatorError(error: unknown): Response {
+  if (error instanceof AuthorityPlaneError) {
+    const status = error.code === "not_found" ? 404 : error.code === "stale_state" || error.code === "conflict" || error.code === "idempotency_conflict" ? 409 : error.code === "blocked" ? 409 : error.code === "indeterminate" ? 503 : 422;
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: error.code, message: error.message, recoveryAction: error.recoveryAction, receipt: error.receipt }, status);
+  }
   if (error instanceof CustomerProviderOperationError) {
     const status = error.code === "not-found" ? 404 : error.code === "idempotency-conflict" || error.code === "stale-state" ? 409 : error.code === "unauthorized" ? 403 : 422;
     return coordinatorJson({ protocol: CUSTOMER_PROVIDER_OPERATION_PROTOCOL, ...error.toJSON() }, status);
@@ -350,6 +368,63 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     };
   }
 
+  private authorityOwnerSession(humanSessionId: string): AuthoritySession {
+    const identity = this.requireIdentity();
+    const session = identity.validateSession(humanSessionId);
+    const snapshot = identity.getRecoverySnapshot();
+    const isOwner = Object.values(snapshot.relationships).some((relationship) => relationship.principalId === session.principalId && relationship.role === "owner" && relationship.status === "active" && relationship.resource.realmId === snapshot.realm.id);
+    if (!isOwner) {
+      throw new RealmIdentityError({
+        code: "authority.owner_denied",
+        message: "The Authority Plane vertical slice is owner-only until project membership and capability policy are qualified.",
+        recoveryAction: "authenticate an active Realm owner session before issuing an Authority command",
+        receipt: `principal=${session.principalId}; owner=false; authorityCommand=not-accepted`,
+      });
+    }
+    return {
+      realmId: snapshot.realm.id,
+      principalId: session.principalId,
+      actorId: session.actorId,
+      sessionId: session.id,
+      clientId: session.clientId,
+      authorizationEpoch: snapshot.realm.authorizationEpoch,
+    };
+  }
+
+  private async authoritySnapshot(): Promise<AuthorityPlaneSnapshot> {
+    const stored = await this.ctx.storage.get<AuthorityPlaneSnapshot>(REALM_AUTHORITY_SNAPSHOT_KEY);
+    return stored ?? emptyAuthorityPlaneSnapshot(this.requireIdentity().realm.id);
+  }
+
+  private async authorityState(humanSessionId: string): Promise<Response> {
+    const session = this.authorityOwnerSession(humanSessionId);
+    const snapshot = await this.authoritySnapshot();
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", authority: authorityStateSummary(snapshot), session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; persistence=durable-object-storage; version=${snapshot.version}; credentialFree=true; canonicalWrite=landing-only` });
+  }
+
+  private async authorityCommand(body: CoordinatorRequestBody): Promise<Response> {
+    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const command = coordinatorString(body, "command") as AuthorityCommandName;
+    const allowed: readonly AuthorityCommandName[] = ["project.create", "workspace.create", "change.create", "revision.publish", "run.record", "evidence.record", "artifact.record", "landing.apply", "release.create", "target.configure", "promotion.request"];
+    if (!allowed.includes(command)) throw new AuthorityPlaneError({ code: "invalid_request", message: `Authority command ${command} is not supported by this vertical slice.`, recoveryAction: `use one of ${allowed.join(", ")} and retry; no authority transition was accepted`, receipt: `command=${command}; transition=not-applied` });
+    const payload = body.payload;
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new AuthorityPlaneError({ code: "invalid_request", message: "Authority command payload must be a JSON object.", recoveryAction: "send the command-specific payload as an object; no authority transition was accepted", receipt: `command=${command}; payload=object-required; transition=not-applied` });
+    const envelope: AuthorityCommand = {
+      protocol: body.protocol === undefined ? AUTHORITY_COMMAND_PROTOCOL : coordinatorString(body, "protocol") as typeof AUTHORITY_COMMAND_PROTOCOL,
+      command,
+      idempotencyKey: coordinatorString(body, "idempotencyKey"),
+      ...(typeof body.expectedVersion === "number" ? { expectedVersion: body.expectedVersion } : {}),
+      payload: payload as Record<string, unknown>,
+    };
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      const current = await this.authoritySnapshot();
+      const coordinator = new AuthorityPlaneCoordinator(current);
+      const result = coordinator.execute(envelope, session);
+      await this.ctx.storage.put(REALM_AUTHORITY_SNAPSHOT_KEY, coordinator.snapshot());
+      return coordinatorJson({ ...result, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, credentialFree: true, canonicalWrite: "landing-only" }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
+    });
+  }
+
   private providerInput(body: CoordinatorRequestBody, authorization: CustomerProviderOwnerAuthorization): {
     realmId: string;
     installationId: string;
@@ -393,6 +468,9 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (request.headers.get(REALM_COORDINATOR_INTERNAL_HEADER) !== REALM_COORDINATOR_INTERNAL_VALUE) return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, code: "coordinator.internal_only", recoveryAction: "invoke the coordinator through the bound Realm Worker; direct mutation requests are not a public API", receipt: "coordinator=internal-binding-required; mutation=not-accepted" }, 403);
       const body = await coordinatorBody(request);
       const identity = this.requireIdentity();
+
+      if (url.pathname === "/authority/state/internal") return await this.authorityState(coordinatorString(body, "sessionId"));
+      if (url.pathname === "/authority/command/internal") return await this.authorityCommand(body);
 
       if (url.pathname === "/identity/passkey-challenge/issue") {
         return await this.ctx.blockConcurrencyWhile(async () => {
@@ -907,6 +985,9 @@ export default {
     // enforces HTTPS issuer metadata for MCP/OAuth requests.
     const ownerResponse = await handleAnyamRealmOwnerRequest(request, env);
     if (ownerResponse) return ownerResponse;
+
+    const authorityResponse = await handleAuthorityRequest(request, env);
+    if (authorityResponse) return authorityResponse;
 
     const url = new URL(request.url);
     if (!isAnyamOAuthPath(url.pathname)) return handleCustomerRealmRequest(request, env);

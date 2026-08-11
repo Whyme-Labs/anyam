@@ -1,0 +1,505 @@
+import {
+  CONTRACT_VERSIONS,
+  createProject,
+  createProjectRevision,
+  deriveProjectView,
+  opaqueId,
+  type ActorRef,
+  type Artifact,
+  type Change,
+  type ChangeRevision,
+  type DisclosureClassification,
+  type Evidence,
+  type Landing,
+  type Project,
+  type ProjectRevision,
+  type ProjectView,
+  type Release,
+  type Run,
+  type SourceSpace,
+  type Target,
+  type Workspace,
+  type WorkspaceMount,
+} from "../kernel/contracts.ts";
+import type { PromotionRecord } from "../delivery/promotion.ts";
+
+export const AUTHORITY_PLANE_PROTOCOL = "anyam.authority-plane/v1" as const;
+export const AUTHORITY_COMMAND_PROTOCOL = "anyam.authority-command/v1" as const;
+
+export type AuthorityCommandName =
+  | "project.create"
+  | "workspace.create"
+  | "change.create"
+  | "revision.publish"
+  | "run.record"
+  | "evidence.record"
+  | "artifact.record"
+  | "landing.apply"
+  | "release.create"
+  | "target.configure"
+  | "promotion.request";
+
+export type AuthoritySession = {
+  realmId: string;
+  principalId: string;
+  actorId: string;
+  sessionId: string;
+  clientId: string;
+  authorizationEpoch: number;
+};
+
+export type AuthorityAuditEvent = {
+  id: string;
+  command: AuthorityCommandName;
+  idempotencyKey: string;
+  actor: ActorRef;
+  outcome: "succeeded" | "blocked" | "indeterminate";
+  stateVersion: number;
+  occurredAt: string;
+  receipt: string;
+};
+
+type IdempotencyRecord = {
+  fingerprint: string;
+  result: AuthorityCommandResult;
+};
+
+export type AuthorityPlaneSnapshot = {
+  protocol: typeof AUTHORITY_PLANE_PROTOCOL;
+  realmId: string;
+  version: number;
+  projects: Record<string, Project>;
+  sourceSpaces: Record<string, SourceSpace>;
+  projectRevisions: Record<string, ProjectRevision>;
+  projectViews: Record<string, ProjectView>;
+  workspaces: Record<string, Workspace>;
+  changes: Record<string, Change>;
+  changeRevisions: Record<string, ChangeRevision>;
+  runs: Record<string, Run>;
+  evidence: Record<string, Evidence>;
+  artifacts: Record<string, Artifact>;
+  landings: Record<string, Landing>;
+  releases: Record<string, Release>;
+  targets: Record<string, Target>;
+  promotions: Record<string, PromotionRecord>;
+  canonicalByProject: Record<string, string>;
+  idempotency: Record<string, IdempotencyRecord>;
+  audit: AuthorityAuditEvent[];
+};
+
+export type AuthorityCommand = {
+  protocol: typeof AUTHORITY_COMMAND_PROTOCOL;
+  command: AuthorityCommandName;
+  idempotencyKey: string;
+  expectedVersion?: number;
+  payload: Record<string, unknown>;
+};
+
+export type AuthorityCommandResult = {
+  protocol: typeof AUTHORITY_PLANE_PROTOCOL;
+  command: AuthorityCommandName;
+  status: "succeeded" | "blocked" | "indeterminate";
+  version: number;
+  value: Record<string, unknown>;
+  receipt: string;
+  recoveryAction?: string;
+};
+
+export class AuthorityPlaneError extends Error {
+  readonly code:
+    | "invalid_request"
+    | "idempotency_conflict"
+    | "stale_state"
+    | "not_found"
+    | "conflict"
+    | "blocked"
+    | "indeterminate";
+  readonly recoveryAction: string;
+  readonly receipt: string;
+
+  constructor(input: {
+    code: AuthorityPlaneError["code"];
+    message: string;
+    recoveryAction: string;
+    receipt: string;
+  }) {
+    super(input.message);
+    this.name = "AuthorityPlaneError";
+    this.code = input.code;
+    this.recoveryAction = input.recoveryAction;
+    this.receipt = input.receipt;
+  }
+}
+
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function requiredString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new AuthorityPlaneError({
+      code: "invalid_request",
+      message: `${field} is required.`,
+      recoveryAction: `provide a non-empty ${field} and retry; no authority transition was accepted`,
+      receipt: `${field}=required; transition=not-applied`,
+    });
+  }
+  return value.trim();
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function stringArray(value: unknown, field: string, allowEmpty = false): string[] {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0) || value.some((entry) => typeof entry !== "string" || entry.trim().length === 0)) {
+    throw new AuthorityPlaneError({
+      code: "invalid_request",
+      message: `${field} must be an array of non-empty strings.`,
+      recoveryAction: `provide a valid ${field} array and retry; no authority transition was accepted`,
+      receipt: `${field}=string-array-required; transition=not-applied`,
+    });
+  }
+  return [...new Set((value as string[]).map((entry) => entry.trim()))];
+}
+
+function record<T>(value: unknown, field: string): Record<string, T> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new AuthorityPlaneError({
+      code: "invalid_request",
+      message: `${field} must be an object.`,
+      recoveryAction: `provide a JSON object for ${field} and retry; no authority transition was accepted`,
+      receipt: `${field}=object-required; transition=not-applied`,
+    });
+  }
+  return value as Record<string, T>;
+}
+
+function fingerprint(command: AuthorityCommand): string {
+  return JSON.stringify({
+    protocol: command.protocol,
+    command: command.command,
+    idempotencyKey: command.idempotencyKey,
+    expectedVersion: command.expectedVersion,
+    payload: command.payload,
+  });
+}
+
+function actorRef(session: AuthoritySession): ActorRef {
+  return {
+    principalId: session.principalId,
+    actorId: session.actorId,
+    sessionId: session.sessionId,
+    clientId: session.clientId,
+  };
+}
+
+function now(): string {
+  return new Date().toISOString();
+}
+
+export function emptyAuthorityPlaneSnapshot(realmId: string): AuthorityPlaneSnapshot {
+  return {
+    protocol: AUTHORITY_PLANE_PROTOCOL,
+    realmId,
+    version: 0,
+    projects: {},
+    sourceSpaces: {},
+    projectRevisions: {},
+    projectViews: {},
+    workspaces: {},
+    changes: {},
+    changeRevisions: {},
+    runs: {},
+    evidence: {},
+    artifacts: {},
+    landings: {},
+    releases: {},
+    targets: {},
+    promotions: {},
+    canonicalByProject: {},
+    idempotency: {},
+    audit: [],
+  };
+}
+
+export class AuthorityPlaneCoordinator {
+  private state: AuthorityPlaneSnapshot;
+
+  constructor(snapshot: AuthorityPlaneSnapshot) {
+    this.state = clone(snapshot);
+  }
+
+  snapshot(): AuthorityPlaneSnapshot {
+    return clone(this.state);
+  }
+
+  execute(command: AuthorityCommand, session: AuthoritySession): AuthorityCommandResult {
+    if (command.protocol !== AUTHORITY_COMMAND_PROTOCOL) {
+      throw new AuthorityPlaneError({
+        code: "invalid_request",
+        message: `Unsupported authority command protocol ${command.protocol}.`,
+        recoveryAction: "send an anyam.authority-command/v1 envelope; no authority transition was accepted",
+        receipt: `protocol=${command.protocol}; transition=not-applied`,
+      });
+    }
+    if (session.realmId !== this.state.realmId) {
+      throw new AuthorityPlaneError({
+        code: "invalid_request",
+        message: "The authenticated session belongs to a different Realm.",
+        recoveryAction: "route the command through the Durable Object bound to the authenticated Realm",
+        receipt: `sessionRealm=${session.realmId}; stateRealm=${this.state.realmId}; transition=not-applied`,
+      });
+    }
+    const idempotencyKey = requiredString(command.idempotencyKey, "idempotencyKey");
+    const existing = this.state.idempotency[idempotencyKey];
+    const requestFingerprint = fingerprint({ ...command, idempotencyKey });
+    if (existing) {
+      if (existing.fingerprint !== requestFingerprint) {
+        throw new AuthorityPlaneError({
+          code: "idempotency_conflict",
+          message: `Idempotency key ${idempotencyKey} was already used for a different Authority command.`,
+          recoveryAction: "reuse the original command payload or choose a new idempotency key; authoritative state was unchanged",
+          receipt: `idempotencyKey=${idempotencyKey}; conflict=true; stateVersion=${this.state.version}; overwritten=false`,
+        });
+      }
+      return clone(existing.result);
+    }
+    if (command.expectedVersion !== undefined && command.expectedVersion !== this.state.version) {
+      throw new AuthorityPlaneError({
+        code: "stale_state",
+        message: `Authority state changed before ${command.command} was accepted.`,
+        recoveryAction: "read the current authority state and retry the same intent with its version and a fresh idempotency key",
+        receipt: `expectedVersion=${command.expectedVersion}; actualVersion=${this.state.version}; overwritten=false`,
+      });
+    }
+
+    const next = clone(this.state);
+    const result = this.apply(next, command, session);
+    next.version += 1;
+    result.version = next.version;
+    next.idempotency[idempotencyKey] = { fingerprint: requestFingerprint, result: clone(result) };
+    next.audit.push({
+      id: opaqueId("authority-audit"),
+      command: command.command,
+      idempotencyKey,
+      actor: actorRef(session),
+      outcome: result.status,
+      stateVersion: next.version,
+      occurredAt: now(),
+      receipt: result.receipt,
+    });
+    this.state = next;
+    return clone(result);
+  }
+
+  private apply(next: AuthorityPlaneSnapshot, command: AuthorityCommand, session: AuthoritySession): AuthorityCommandResult {
+    const payload = command.payload;
+    const actor = actorRef(session);
+    const success = (value: Record<string, unknown>, receipt: string): AuthorityCommandResult => ({ protocol: AUTHORITY_PLANE_PROTOCOL, command: command.command, status: "succeeded", version: next.version, value, receipt });
+    const blocked = (value: Record<string, unknown>, receipt: string, recoveryAction: string): AuthorityCommandResult => ({ protocol: AUTHORITY_PLANE_PROTOCOL, command: command.command, status: "blocked", version: next.version, value, receipt, recoveryAction });
+    const indeterminate = (value: Record<string, unknown>, receipt: string, recoveryAction: string): AuthorityCommandResult => ({ protocol: AUTHORITY_PLANE_PROTOCOL, command: command.command, status: "indeterminate", version: next.version, value, receipt, recoveryAction });
+    const projectId = optionalString(payload.projectId);
+    const project = projectId ? next.projects[projectId] : undefined;
+
+    switch (command.command) {
+      case "project.create": {
+        const id = optionalString(payload.projectId) ?? opaqueId("project");
+        if (next.projects[id]) throw new AuthorityPlaneError({ code: "conflict", message: `Project ${id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Project identity", receipt: `project=${id}; exists=true; transition=not-applied` });
+        const sourcesValue = payload.sourceSpaces;
+        if (!Array.isArray(sourcesValue) || sourcesValue.length === 0) throw new AuthorityPlaneError({ code: "invalid_request", message: "sourceSpaces must contain at least one declared Source Space.", recoveryAction: "declare each Source Space with an immutable snapshot identifier", receipt: "sourceSpaces=non-empty-required; transition=not-applied" });
+        const sourceSpaces: SourceSpace[] = sourcesValue.map((entry, index) => {
+          if (entry === null || typeof entry !== "object" || Array.isArray(entry)) throw new AuthorityPlaneError({ code: "invalid_request", message: `sourceSpaces[${index}] must be an object.`, recoveryAction: "declare Source Space objects with id, name, classification, and snapshotId", receipt: `sourceSpaces[${index}]=object-required; transition=not-applied` });
+          const source = entry as Record<string, unknown>;
+          const sourceId = requiredString(source.id, `sourceSpaces[${index}].id`);
+          const classification = requiredString(source.classification, `sourceSpaces[${index}].classification`) as SourceSpace["classification"];
+          if (!["public", "internal", "restricted", "result-only"].includes(classification)) throw new AuthorityPlaneError({ code: "invalid_request", message: `Source Space ${sourceId} has an unsupported classification.`, recoveryAction: "choose public, internal, restricted, or result-only", receipt: `sourceSpace=${sourceId}; classification=${classification}; transition=not-applied` });
+          const sourceSpace: SourceSpace = { protocol: CONTRACT_VERSIONS.sourceSpace, id: sourceId, name: requiredString(source.name, `sourceSpaces[${index}].name`), classification };
+          if (next.sourceSpaces[sourceId]) throw new AuthorityPlaneError({ code: "conflict", message: `Source Space ${sourceId} already exists.`, recoveryAction: "use a new Source Space identity", receipt: `sourceSpace=${sourceId}; exists=true; transition=not-applied` });
+          next.sourceSpaces[sourceId] = sourceSpace;
+          return sourceSpace;
+        });
+        const createdProject = createProject({ id, name: requiredString(payload.name, "name"), referenceType: optionalString(payload.referenceType) ?? "git", sourceSpaceIds: sourceSpaces.map((source) => source.id) });
+        const sourceSpaceSnapshots = Object.fromEntries(sourcesValue.map((entry) => { const source = entry as Record<string, unknown>; return [requiredString(source.id, "sourceSpace.id"), requiredString(source.snapshotId, "sourceSpace.snapshotId")]; }));
+        const requestedProjectRevisionId = optionalString(payload.projectRevisionId);
+        const initialRevision = createProjectRevision({ ...(requestedProjectRevisionId ? { id: requestedProjectRevisionId } : {}), projectId: id, sourceSpaceSnapshots });
+        next.projects[id] = createdProject;
+        next.projectRevisions[initialRevision.id] = initialRevision;
+        next.canonicalByProject[id] = initialRevision.id;
+        return success({ project: createdProject, canonicalRevision: initialRevision, sourceSpaces }, `project=${id}; canonicalRevision=${initialRevision.id}; sourceTransfer=not-performed; authority=coordinator`);
+      }
+      case "workspace.create": {
+        const currentProject = project ?? (() => { throw new AuthorityPlaneError({ code: "not_found", message: `Project ${requiredString(payload.projectId, "projectId")} does not exist.`, recoveryAction: "create or import the Project before creating a Workspace", receipt: `project=${payload.projectId ?? "missing"}; workspace=not-created` }); })();
+        const revisionId = requiredString(payload.projectRevisionId, "projectRevisionId");
+        const revision = next.projectRevisions[revisionId];
+        if (!revision || revision.projectId !== currentProject.id) throw new AuthorityPlaneError({ code: "not_found", message: `Project Revision ${revisionId} is not available for Project ${currentProject.id}.`, recoveryAction: "read the current canonical Project Revision and retry", receipt: `project=${currentProject.id}; revision=${revisionId}; workspace=not-created` });
+        const sourceIds = stringArray(payload.sourceSpaceIds ?? currentProject.sourceSpaceIds, "sourceSpaceIds");
+        const sourceSpaces = sourceIds.map((id) => next.sourceSpaces[id]).filter((value): value is SourceSpace => value !== undefined);
+        const requestedClassification = optionalString(payload.classification) as ProjectView["classification"] | undefined;
+        const view = deriveProjectView({ project: currentProject, revision, sourceSpaces, allowedSourceSpaceIds: sourceIds, projectionId: optionalString(payload.projectionId) ?? opaqueId("projection"), ...(requestedClassification ? { classification: requestedClassification } : {}) });
+        const mountsValue = payload.mounts;
+        const mounts: WorkspaceMount[] = mountsValue === undefined
+          ? sourceIds.map((sourceSpaceId) => ({ sourceSpaceId, snapshotId: revision.sourceSpaceSnapshots[sourceSpaceId]!, mountPath: sourceSpaceId.replaceAll(":", "-") }))
+          : stringArray(mountsValue, "mounts").map((mountPath, index) => ({ sourceSpaceId: sourceIds[index]!, snapshotId: revision.sourceSpaceSnapshots[sourceIds[index]!]!, mountPath }));
+        const requestedWorkspaceChangeId = optionalString(payload.changeId);
+        const workspace: Workspace = { protocol: CONTRACT_VERSIONS.workspace, id: optionalString(payload.workspaceId) ?? opaqueId("workspace"), projectId: currentProject.id, projectRevisionId: revision.id, projectViewId: view.id, mounts, state: "active", ...(requestedWorkspaceChangeId ? { changeId: requestedWorkspaceChangeId } : {}), actorId: session.actorId };
+        if (next.workspaces[workspace.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Workspace ${workspace.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Workspace identity", receipt: `workspace=${workspace.id}; exists=true; transition=not-applied` });
+        next.projectViews[view.id] = view;
+        next.workspaces[workspace.id] = workspace;
+        return success({ workspace, view }, `workspace=${workspace.id}; base=${revision.id}; actor=${session.actorId}; sourceTransfer=not-performed`);
+      }
+      case "change.create": {
+        const currentProject = project ?? (() => { throw new AuthorityPlaneError({ code: "not_found", message: `Project ${requiredString(payload.projectId, "projectId")} does not exist.`, recoveryAction: "create the Project before creating a Change", receipt: `project=${payload.projectId ?? "missing"}; change=not-created` }); })();
+        const baseRevisionId = optionalString(payload.baseProjectRevisionId) ?? next.canonicalByProject[currentProject.id];
+        if (!baseRevisionId || !next.projectRevisions[baseRevisionId]) throw new AuthorityPlaneError({ code: "not_found", message: "The Change base Project Revision is unavailable.", recoveryAction: "read the canonical Project Revision and retry the Change creation", receipt: `project=${currentProject.id}; baseRevision=missing; change=not-created` });
+        const workspaceId = optionalString(payload.workspaceId);
+        if (workspaceId && (!next.workspaces[workspaceId] || next.workspaces[workspaceId].projectId !== currentProject.id)) throw new AuthorityPlaneError({ code: "not_found", message: `Workspace ${workspaceId} is not available for Project ${currentProject.id}.`, recoveryAction: "create a Workspace for this Project before creating the Change", receipt: `workspace=${workspaceId}; change=not-created` });
+        const change: Change = { protocol: CONTRACT_VERSIONS.change, id: optionalString(payload.changeId) ?? opaqueId("change"), projectId: currentProject.id, intentId: requiredString(payload.intentId, "intentId"), baseProjectRevisionId: baseRevisionId, status: "active", latestRevisionId: null, ...(workspaceId ? { workspaceId } : {}), author: actor };
+        if (next.changes[change.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Change ${change.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Change identity", receipt: `change=${change.id}; exists=true; transition=not-applied` });
+        next.changes[change.id] = change;
+        if (workspaceId) next.workspaces[workspaceId] = { ...next.workspaces[workspaceId]!, changeId: change.id };
+        return success({ change }, `change=${change.id}; base=${baseRevisionId}; canonicalWrite=false`);
+      }
+      case "revision.publish": {
+        const changeId = requiredString(payload.changeId, "changeId");
+        const change = next.changes[changeId];
+        if (!change) throw new AuthorityPlaneError({ code: "not_found", message: `Change ${changeId} does not exist.`, recoveryAction: "create the Change before publishing a Revision", receipt: `change=${changeId}; revision=not-created` });
+        if (change.status === "landed" || change.status === "abandoned") throw new AuthorityPlaneError({ code: "conflict", message: `Change ${changeId} is ${change.status} and cannot publish another Revision.`, recoveryAction: "create a new Change from the current canonical Project Revision", receipt: `change=${changeId}; status=${change.status}; revision=not-created` });
+        const workspaceId = optionalString(payload.workspaceId) ?? change.workspaceId;
+        if (workspaceId && (!next.workspaces[workspaceId] || next.workspaces[workspaceId].changeId !== changeId)) throw new AuthorityPlaneError({ code: "conflict", message: `Workspace ${workspaceId} is not assigned to Change ${changeId}.`, recoveryAction: "publish from the assigned Change Workspace", receipt: `change=${changeId}; workspace=${workspaceId}; revision=not-created` });
+        const sourceSnapshots = record<string>(payload.sourceSpaceSnapshots ?? next.projectRevisions[change.baseProjectRevisionId]?.sourceSpaceSnapshots, "sourceSpaceSnapshots");
+        const sequence = Object.values(next.changeRevisions).filter((revision) => revision.changeId === changeId).length + 1;
+        const projectRevisionId = optionalString(payload.projectRevisionId) ?? opaqueId("candidate-revision");
+        const revisionKind = optionalString(payload.kind) as ChangeRevision["kind"] | undefined;
+        const revision: ChangeRevision = { protocol: CONTRACT_VERSIONS.change, id: optionalString(payload.revisionId) ?? opaqueId("change-revision"), changeId, projectRevisionId, projectViewId: requiredString(payload.projectViewId ?? (workspaceId ? next.workspaces[workspaceId]?.projectViewId : undefined), "projectViewId"), sequence, parentRevisionId: change.latestRevisionId ?? undefined, declaredEffects: stringArray(payload.declaredEffects ?? [], "declaredEffects", true), baseProjectRevisionId: change.baseProjectRevisionId, ...(workspaceId ? { workspaceId } : {}), sourceSpaceSnapshots: { ...sourceSnapshots }, affectedSourceSpaceIds: Object.keys(sourceSnapshots), author: actor, ...(revisionKind ? { kind: revisionKind } : {}) };
+        if (next.changeRevisions[revision.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Change Revision ${revision.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Revision identity", receipt: `revision=${revision.id}; exists=true; transition=not-applied` });
+        next.changeRevisions[revision.id] = revision;
+        next.changes[changeId] = { ...change, latestRevisionId: revision.id, status: "submitted" };
+        return success({ revision, change: next.changes[changeId] }, `change=${changeId}; revision=${revision.id}; sequence=${sequence}; canonicalWrite=false`);
+      }
+      case "run.record": {
+        const runChangeRevisionId = optionalString(payload.changeRevisionId);
+        const runWorkspaceId = optionalString(payload.workspaceId);
+        const run: Run = { protocol: CONTRACT_VERSIONS.run, id: optionalString(payload.runId) ?? opaqueId("run"), actionId: requiredString(payload.actionId, "actionId"), projectRevisionId: requiredString(payload.projectRevisionId, "projectRevisionId"), projectViewId: requiredString(payload.projectViewId, "projectViewId"), runnerId: requiredString(payload.runnerId, "runnerId"), status: (optionalString(payload.status) ?? "succeeded") as Run["status"], outputDigest: optionalString(payload.outputDigest), ...(runChangeRevisionId ? { changeRevisionId: runChangeRevisionId } : {}), ...(runWorkspaceId ? { workspaceId: runWorkspaceId } : {}), ...(Array.isArray(payload.inputDigests) ? { inputDigests: stringArray(payload.inputDigests, "inputDigests", true) } : {}), ...(Array.isArray(payload.outputDigests) ? { outputDigests: stringArray(payload.outputDigests, "outputDigests", true) } : {}), actor };
+        if (!["queued", "running", "succeeded", "failed", "indeterminate"].includes(run.status)) throw new AuthorityPlaneError({ code: "invalid_request", message: `Run status ${run.status} is unsupported.`, recoveryAction: "record queued, running, succeeded, failed, or indeterminate", receipt: `run=${run.id}; status=${run.status}; transition=not-applied` });
+        if (next.runs[run.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Run ${run.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Run identity", receipt: `run=${run.id}; exists=true; transition=not-applied` });
+        next.runs[run.id] = run;
+        const status = run.status === "indeterminate" ? "indeterminate" : "succeeded";
+        return status === "indeterminate" ? indeterminate({ run }, `run=${run.id}; status=indeterminate; evidence=not-yet-valid`, "reconcile the Runner attempt and record a determinate Run before creating Evidence") : success({ run }, `run=${run.id}; status=${run.status}; runner=${run.runnerId}`);
+      }
+      case "evidence.record": {
+        const runId = requiredString(payload.runId, "runId");
+        const run = next.runs[runId];
+        if (!run) throw new AuthorityPlaneError({ code: "not_found", message: `Run ${runId} does not exist.`, recoveryAction: "record the Run before attaching Evidence", receipt: `run=${runId}; evidence=not-created` });
+        if (run.status !== "succeeded") throw new AuthorityPlaneError({ code: "conflict", message: `Run ${runId} is ${run.status}; Evidence cannot assert success from it.`, recoveryAction: "record a successful determinate Run or preserve the failure as an explicit non-passing result", receipt: `run=${runId}; status=${run.status}; evidence=not-created` });
+        const evidenceChangeRevisionId = optionalString(payload.changeRevisionId ?? run.changeRevisionId);
+        const evidenceTargetId = optionalString(payload.targetId);
+        const evidenceWorkspaceId = optionalString(payload.workspaceId ?? run.workspaceId);
+        const disclosure = payload.disclosure as Record<string, unknown> | undefined;
+        const evidence: Evidence = { protocol: CONTRACT_VERSIONS.evidence, version: "v1", id: optionalString(payload.evidenceId) ?? opaqueId("evidence"), key: requiredString(payload.key, "key"), criterion: requiredString(payload.criterion, "criterion"), outcome: (optionalString(payload.outcome) ?? "passed") as Evidence["outcome"], validityKey: requiredString(payload.validityKey, "validityKey"), actionId: requiredString(payload.actionId, "actionId"), verifierId: requiredString(payload.verifierId, "verifierId"), toolchainDigest: requiredString(payload.toolchainDigest, "toolchainDigest"), dependencyDigest: requiredString(payload.dependencyDigest, "dependencyDigest"), environmentDigest: requiredString(payload.environmentDigest, "environmentDigest"), inputDigests: stringArray(payload.inputDigests, "inputDigests", true), effectDigests: stringArray(payload.effectDigests, "effectDigests", true), outputDigest: requiredString(payload.outputDigest, "outputDigest"), createdAt: now(), producer: { kind: "run", id: runId, version: CONTRACT_VERSIONS.run }, projectRevisionId: requiredString(payload.projectRevisionId ?? run.projectRevisionId, "projectRevisionId"), projectViewId: requiredString(payload.projectViewId ?? run.projectViewId, "projectViewId"), ...(evidenceChangeRevisionId ? { changeRevisionId: evidenceChangeRevisionId } : {}), runId, actor, runnerId: requiredString(payload.runnerId ?? run.runnerId, "runnerId"), policyVersion: requiredString(payload.policyVersion, "policyVersion"), authorizationEpoch: String(payload.authorizationEpoch ?? session.authorizationEpoch), capabilityGrantId: requiredString(payload.capabilityGrantId, "capabilityGrantId"), disclosure: { projectionId: requiredString(disclosure?.projectionId, "disclosure.projectionId"), classification: requiredString(disclosure?.classification, "disclosure.classification") as DisclosureClassification }, receipt: requiredString(payload.receipt, "receipt"), invalidators: stringArray(payload.invalidators, "invalidators", true), owner: requiredString(payload.owner, "owner"), ...(evidenceTargetId ? { targetId: evidenceTargetId } : {}), ...(evidenceWorkspaceId ? { workspaceId: evidenceWorkspaceId } : {}) };
+        if (!["passed", "failed", "stale", "indeterminate"].includes(evidence.outcome)) throw new AuthorityPlaneError({ code: "invalid_request", message: `Evidence outcome ${evidence.outcome} is unsupported.`, recoveryAction: "record passed, failed, stale, or indeterminate Evidence", receipt: `evidence=${evidence.id}; outcome=${evidence.outcome}; transition=not-applied` });
+        if (next.evidence[evidence.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Evidence ${evidence.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Evidence identity", receipt: `evidence=${evidence.id}; exists=true; transition=not-applied` });
+        next.evidence[evidence.id] = evidence;
+        return success({ evidence }, `evidence=${evidence.id}; outcome=${evidence.outcome}; run=${runId}`);
+      }
+      case "artifact.record": {
+        const artifactChangeRevisionId = optionalString(payload.changeRevisionId);
+        const artifactRunId = optionalString(payload.runId);
+        const artifactActionId = optionalString(payload.actionId);
+        const artifactOutputPath = optionalString(payload.outputPath);
+        const artifactProvenanceDigest = optionalString(payload.provenanceDigest);
+        const artifactDisclosure = payload.disclosure as Record<string, unknown> | undefined;
+        const artifact: Artifact = { protocol: CONTRACT_VERSIONS.artifact, id: optionalString(payload.artifactId) ?? opaqueId("artifact"), type: requiredString(payload.type, "type"), digest: requiredString(payload.digest, "digest"), projectRevisionId: requiredString(payload.projectRevisionId, "projectRevisionId"), ...(artifactChangeRevisionId ? { changeRevisionId: artifactChangeRevisionId } : {}), ...(artifactRunId ? { runId: artifactRunId } : {}), ...(artifactActionId ? { actionId: artifactActionId } : {}), ...(artifactOutputPath ? { outputPath: artifactOutputPath } : {}), ...(artifactProvenanceDigest ? { provenanceDigest: artifactProvenanceDigest } : {}), ...(artifactDisclosure ? { disclosure: { projectionId: requiredString(artifactDisclosure.projectionId, "disclosure.projectionId"), classification: requiredString(artifactDisclosure.classification, "disclosure.classification") as DisclosureClassification } } : {}) };
+        if (next.artifacts[artifact.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Artifact ${artifact.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Artifact identity", receipt: `artifact=${artifact.id}; exists=true; transition=not-applied` });
+        next.artifacts[artifact.id] = artifact;
+        return success({ artifact }, `artifact=${artifact.id}; digest=${artifact.digest}; immutable=true`);
+      }
+      case "landing.apply": {
+        const changeRevisionId = requiredString(payload.changeRevisionId, "changeRevisionId");
+        const revision = next.changeRevisions[changeRevisionId];
+        if (!revision) throw new AuthorityPlaneError({ code: "not_found", message: `Change Revision ${changeRevisionId} does not exist.`, recoveryAction: "publish the Change Revision before Landing", receipt: `changeRevision=${changeRevisionId}; landing=not-created` });
+        const change = next.changes[revision.changeId];
+        if (!change) throw new AuthorityPlaneError({ code: "not_found", message: `Change ${revision.changeId} does not exist for Change Revision ${changeRevisionId}.`, recoveryAction: "restore the stable Change record before Landing", receipt: `changeRevision=${changeRevisionId}; landing=not-created` });
+        const projectId = change.projectId;
+        const expected = optionalString(payload.expectedCanonicalProjectRevisionId);
+        const actual = next.canonicalByProject[projectId];
+        if (expected !== undefined && expected !== actual) throw new AuthorityPlaneError({ code: "stale_state", message: `Canonical Project Revision changed before Landing ${changeRevisionId}.`, recoveryAction: "read the current canonical Project Revision, rebase or compose the Change, and retry with a new idempotency key", receipt: `project=${projectId}; expectedCanonical=${expected}; actualCanonical=${actual}; landing=not-created` });
+        if (actual !== change.baseProjectRevisionId) throw new AuthorityPlaneError({ code: "conflict", message: `Change ${change.id} was based on ${change.baseProjectRevisionId}, not the current canonical Project Revision ${actual}.`, recoveryAction: "publish a rebase or conflict-resolution Revision before Landing", receipt: `change=${change.id}; base=${change.baseProjectRevisionId}; canonical=${actual}; landing=not-created` });
+        if (change.status !== "submitted" || change.latestRevisionId !== revision.id) throw new AuthorityPlaneError({ code: "conflict", message: `Change ${change.id} is not ready to Land at Change Revision ${revision.id}.`, recoveryAction: "publish the latest Revision and submit the Change before Landing", receipt: `change=${change.id}; status=${change.status}; latest=${change.latestRevisionId ?? "none"}; requested=${revision.id}; landing=not-created` });
+        const requestedLandedRevisionId = optionalString(payload.projectRevisionId);
+        const nextProjectRevision = createProjectRevision({ ...(requestedLandedRevisionId ? { id: requestedLandedRevisionId } : {}), projectId, sourceSpaceSnapshots: revision.sourceSpaceSnapshots ?? next.projectRevisions[change.baseProjectRevisionId]!.sourceSpaceSnapshots, parentProjectRevisionId: actual, landedChangeRevisionId: revision.id });
+        const landing: Landing = { protocol: CONTRACT_VERSIONS.landing, id: optionalString(payload.landingId) ?? opaqueId("landing"), projectId, changeId: change.id, changeRevisionId: revision.id, previousProjectRevisionId: actual, projectRevisionId: nextProjectRevision.id, receipt: `landing=accepted; canonicalMutation=coordinator-only; previous=${actual}; next=${nextProjectRevision.id}` };
+        next.projectRevisions[nextProjectRevision.id] = nextProjectRevision;
+        next.canonicalByProject[projectId] = nextProjectRevision.id;
+        next.landings[landing.id] = landing;
+        next.changes[change.id] = { ...change, status: "landed" };
+        if (change.workspaceId && next.workspaces[change.workspaceId]) next.workspaces[change.workspaceId] = { ...next.workspaces[change.workspaceId]!, state: "closed" };
+        return success({ landing, canonicalRevision: nextProjectRevision, change: next.changes[change.id] }, `landing=${landing.id}; canonicalMutation=accepted; sourceWrite=landing-only`);
+      }
+      case "release.create": {
+        const projectRevisionId = requiredString(payload.projectRevisionId, "projectRevisionId");
+        const projectRevision = next.projectRevisions[projectRevisionId];
+        if (!projectRevision) throw new AuthorityPlaneError({ code: "not_found", message: `Project Revision ${projectRevisionId} does not exist.`, recoveryAction: "land or restore the exact Project Revision before creating a Release", receipt: `projectRevision=${projectRevisionId}; release=not-created` });
+        const artifactIds = stringArray(payload.artifactIds, "artifactIds");
+        const evidenceIds = stringArray(payload.evidenceIds, "evidenceIds");
+        const artifacts = artifactIds.map((id) => next.artifacts[id]);
+        const evidence = evidenceIds.map((id) => next.evidence[id]);
+        if (artifacts.some((item) => !item) || evidence.some((item) => !item)) throw new AuthorityPlaneError({ code: "not_found", message: "Release references an Artifact or Evidence record that is not present.", recoveryAction: "restore the complete immutable lineage before creating the Release", receipt: `projectRevision=${projectRevisionId}; artifacts=${artifactIds.length}; evidence=${evidenceIds.length}; release=not-created` });
+        if (evidence.some((item) => item!.projectRevisionId !== projectRevisionId || item!.outcome !== "passed")) throw new AuthorityPlaneError({ code: "conflict", message: "Release Evidence must be passed and bound to the exact Project Revision.", recoveryAction: "rerun the verifier against the exact Project Revision and attach fresh passed Evidence", receipt: `projectRevision=${projectRevisionId}; evidence=exact-passed-required; release=not-created` });
+        const releaseName = optionalString(payload.name);
+        const releaseChangeRevisionId = optionalString(payload.changeRevisionId);
+        const releaseProvenanceDigest = optionalString(payload.provenanceDigest);
+        const release: Release = { protocol: CONTRACT_VERSIONS.release, id: optionalString(payload.releaseId) ?? opaqueId("release"), projectRevisionId, artifactIds, evidenceIds, configurationDigests: stringArray(payload.configurationDigests ?? [], "configurationDigests", true), stateAssumptions: stringArray(payload.stateAssumptions ?? [], "stateAssumptions", true), policyVersion: requiredString(payload.policyVersion, "policyVersion"), status: "ready", ...(releaseName ? { name: releaseName } : {}), ...(releaseChangeRevisionId ? { changeRevisionId: releaseChangeRevisionId } : {}), ...(releaseProvenanceDigest ? { provenanceDigest: releaseProvenanceDigest } : {}), receipt: `release=ready; projectRevision=${projectRevisionId}; artifacts=${artifactIds.length}; evidence=${evidenceIds.length}` };
+        if (next.releases[release.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Release ${release.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Release identity", receipt: `release=${release.id}; exists=true; transition=not-applied` });
+        next.releases[release.id] = release;
+        return success({ release }, `release=${release.id}; status=ready; providerPromotion=not-performed`);
+      }
+      case "target.configure": {
+        const target: Target = { protocol: CONTRACT_VERSIONS.target, id: optionalString(payload.targetId) ?? opaqueId("target"), projectId: requiredString(payload.projectId, "projectId"), name: requiredString(payload.name, "name"), adapterId: requiredString(payload.adapterId, "adapterId"), acceptedArtifactTypes: stringArray(payload.acceptedArtifactTypes, "acceptedArtifactTypes"), requiredEvidenceKeys: stringArray(payload.requiredEvidenceKeys ?? [], "requiredEvidenceKeys", true), state: "configured" };
+        if (!next.projects[target.projectId]) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${target.projectId} does not exist.`, recoveryAction: "create the Project before configuring its Target", receipt: `target=${target.id}; project=${target.projectId}; target=not-configured` });
+        if (next.targets[target.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Target ${target.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Target identity", receipt: `target=${target.id}; exists=true; transition=not-applied` });
+        next.targets[target.id] = target;
+        return success({ target }, `target=${target.id}; state=configured; providerAdapter=${target.adapterId}; qualification=not-performed`);
+      }
+      case "promotion.request": {
+        const releaseId = requiredString(payload.releaseId, "releaseId");
+        const targetId = requiredString(payload.targetId, "targetId");
+        const release = next.releases[releaseId];
+        const target = next.targets[targetId];
+        if (!release || !target) throw new AuthorityPlaneError({ code: "not_found", message: "Promotion requires an existing Release and Target.", recoveryAction: "create a ready Release and configure its Target before requesting Promotion", receipt: `release=${releaseId}; target=${targetId}; promotion=not-created` });
+        const releaseProjectId = next.projectRevisions[release.projectRevisionId]?.projectId;
+        if (!releaseProjectId || target.projectId !== releaseProjectId) throw new AuthorityPlaneError({ code: "conflict", message: `Target ${targetId} is not bound to the Release Project.`, recoveryAction: "request Promotion against the Target belonging to the Release Project", receipt: `target=${targetId}; release=${releaseId}; promotion=not-created` });
+        const promotion: PromotionRecord = { protocol: CONTRACT_VERSIONS.promotion, id: optionalString(payload.promotionId) ?? opaqueId("promotion"), projectId: target.projectId, targetId, releaseId, releaseDigest: optionalString(payload.releaseDigest) ?? `declared:${release.id}`, previousReleaseId: null, expectedCurrentReleaseId: optionalString(payload.expectedCurrentReleaseId) ?? null, state: "blocked", attempt: 0, kind: "promotion", idempotencyKey: command.idempotencyKey, actor, createdAt: now(), updatedAt: now(), receipt: `promotion=blocked; target=${targetId}; release=${releaseId}; providerAdapter=${target.adapterId}; canonicalWrite=false`, recoveryAction: "qualify and bind the Target adapter, then request Promotion again after inspecting the immutable Release lineage" };
+        if (next.promotions[promotion.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Promotion ${promotion.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Promotion identity", receipt: `promotion=${promotion.id}; exists=true; transition=not-applied` });
+        next.promotions[promotion.id] = promotion;
+        return blocked({ promotion, target, release }, promotion.receipt, promotion.recoveryAction!);
+      }
+    }
+  }
+}
+
+export function authorityStateSummary(snapshot: AuthorityPlaneSnapshot): Record<string, unknown> {
+  return {
+    protocol: AUTHORITY_PLANE_PROTOCOL,
+    realmId: snapshot.realmId,
+    version: snapshot.version,
+    canonicalByProject: { ...snapshot.canonicalByProject },
+    counts: {
+      projects: Object.keys(snapshot.projects).length,
+      workspaces: Object.keys(snapshot.workspaces).length,
+      changes: Object.keys(snapshot.changes).length,
+      revisions: Object.keys(snapshot.changeRevisions).length,
+      runs: Object.keys(snapshot.runs).length,
+      evidence: Object.keys(snapshot.evidence).length,
+      artifacts: Object.keys(snapshot.artifacts).length,
+      landings: Object.keys(snapshot.landings).length,
+      releases: Object.keys(snapshot.releases).length,
+      targets: Object.keys(snapshot.targets).length,
+      promotions: Object.keys(snapshot.promotions).length,
+      audit: snapshot.audit.length,
+    },
+    credentialFree: true,
+    canonicalWrite: "landing-only",
+    recovery: "snapshot-and-idempotency-record-persisted-by-coordinator",
+  };
+}

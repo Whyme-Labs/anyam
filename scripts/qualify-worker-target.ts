@@ -127,7 +127,7 @@ async function run(): Promise<Record<string, unknown>> {
   // Cloudflare can briefly return 404 for the workers.dev route immediately
   // after a successful deployment. These are qualification-only defaults, not
   // Anyam production limits; retain the receipt so they can be remeasured.
-  const healthRetry = {
+  const routeReadinessRetry = {
     maxAttempts: positiveInteger("ANYAM_WORKER_TARGET_HEALTH_RETRY_ATTEMPTS", 10),
     delayMs: nonNegativeNumber("ANYAM_WORKER_TARGET_HEALTH_RETRY_DELAY_MS", 1000),
     retryStatuses: [404] as const,
@@ -167,7 +167,7 @@ async function run(): Promise<Record<string, unknown>> {
     artifactReader: createMapWorkerArtifactReader(contents),
     previewUrlForVersion: (versionId) => `https://${versionId.slice(0, 8)}-${scriptName}.${previewSubdomain}.workers.dev/?anyam_preview=1`,
     healthUrl,
-    healthRetry,
+    routeReadinessRetry,
   });
   const target = createWorkerTarget({
     target: {
@@ -189,7 +189,7 @@ async function run(): Promise<Record<string, unknown>> {
   if (healthyPromotion.state !== "healthy") throw new Error(`healthy promotion did not reach healthy state: ${healthyPromotion.state}; receipt=${healthyPromotion.receipt}; recoveryAction=${healthyPromotion.recoveryAction}`);
   const failingPromotion = await coordinator.promote({ releaseId: second.immutable.release.id, idempotencyKey: "qualification:failing", actor: { principalId: "principal:qualification", actorId: "actor:qualification", sessionId: "session:qualification", clientId: "client:qualification" } });
   if (failingPromotion.state !== "rolled-back" || failingPromotion.health?.state !== "unhealthy" || failingPromotion.rollbackHealth?.state !== "healthy") throw new Error(`failed health did not preserve the known-good Release: state=${failingPromotion.state}; health=${failingPromotion.health?.state}; rollbackHealth=${failingPromotion.rollbackHealth?.state}`);
-  return { protocol, status: "succeeded", scriptName, accountId, healthyPromotion: { state: healthyPromotion.state, releaseDigest: healthyPromotion.releaseDigest }, failingPromotion: { state: failingPromotion.state, health: failingPromotion.health?.state, rollbackHealth: failingPromotion.rollbackHealth?.state }, targetReleaseId: coordinator.getTarget().currentReleaseId, healthReadiness: { retryStatuses: healthRetry.retryStatuses, maxAttempts: healthRetry.maxAttempts, delayMs: healthRetry.delayMs, receipt: "qualification-tripwire; provider-route-readiness; remeasure-before-production" }, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true };
+  return { protocol, status: "succeeded", scriptName, accountId, healthyPromotion: { state: healthyPromotion.state, releaseDigest: healthyPromotion.releaseDigest }, failingPromotion: { state: failingPromotion.state, health: failingPromotion.health?.state, rollbackHealth: failingPromotion.rollbackHealth?.state }, targetReleaseId: coordinator.getTarget().currentReleaseId, routeReadiness: { retryStatuses: routeReadinessRetry.retryStatuses, maxAttempts: routeReadinessRetry.maxAttempts, delayMs: routeReadinessRetry.delayMs, receipt: "qualification-tripwire; preview-and-production-route-readiness; remeasure-before-production" }, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true };
 }
 
 async function cleanup(): Promise<{ status: "succeeded" | "blocked"; receipt: string }> {

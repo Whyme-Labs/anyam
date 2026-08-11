@@ -44,11 +44,12 @@ The adapter uses the Workers Versions and Deployments APIs:
 - A configured preview URL and health URL are observed through `fetch`; URL
   construction remains outside the kernel because the customer owns the
   `workers.dev` subdomain or custom domain.
-- A caller may provide an explicit, measured readiness policy for the
-  production health observation. The qualification uses a 404-only retry
-  tripwire because the live provider can return a route-not-ready 404 just
-  after a successful deployment. The final observation is still the real
-  production URL; this policy never turns a non-2xx response into healthy.
+- A caller may provide an explicit, measured route-readiness policy for
+  preview and production observations. The qualification uses a 404-only
+  retry tripwire because the live provider can return a route-not-ready 404
+  just after a successful version upload or deployment. The final observation
+  is still the real provider URL; this policy never turns a non-2xx response
+  into healthy.
 
 Rollback is another provider deployment to the previous Release's tagged
 version. It does not rewrite source or change the Anyam Target by itself. The
@@ -103,7 +104,7 @@ Write permission, a script name beginning with
 6. deletes the disposable Worker in a `finally` cleanup path.
 
 The script prints credential-free receipts and never claims production SLOs,
-provider limits, or universal Cloudflare support. Its health-readiness values
+provider limits, or universal Cloudflare support. Its route-readiness values
 are qualification-only observations and must be remeasured before becoming a
 production policy. The deterministic test in
 `test/cloudflare-worker-target.test.ts` exercises the same adapter and

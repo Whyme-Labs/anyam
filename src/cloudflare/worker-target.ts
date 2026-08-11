@@ -115,16 +115,13 @@ export type CloudflareWorkerTargetAdapterConfig = {
   previewUrlForVersion: (versionId: string) => string;
   healthUrl: string | ((input: { target: WorkerTarget; deploymentId?: string; providerVersionId: string }) => string);
   /**
-   * Some provider routes are reachable only after the deployment response has
-   * returned. This policy is deliberately opt-in and status-specific: it is
-   * a readiness observation, not a replacement for a real production health
-   * check. The caller must provide the measurement-backed tripwire.
+   * Some provider routes are reachable only after a version upload or
+   * deployment response has returned. This policy is deliberately opt-in and
+   * status-specific: it is a readiness observation, not a replacement for a
+   * real preview or production health check. The caller must provide the
+   * measurement-backed tripwire.
    */
-  healthRetry?: {
-    maxAttempts: number;
-    delayMs: number;
-    retryStatuses: readonly number[];
-  };
+  routeReadinessRetry?: CloudflareWorkerRouteReadinessRetry;
   fetch?: typeof fetch;
   now?: () => string;
   healthHeaders?: Readonly<Record<string, string>>;
@@ -133,6 +130,12 @@ export type CloudflareWorkerTargetAdapterConfig = {
 
 export type CloudflareWorkerArtifactReader = {
   read(artifact: Artifact): Promise<Uint8Array>;
+};
+
+export type CloudflareWorkerRouteReadinessRetry = {
+  maxAttempts: number;
+  delayMs: number;
+  retryStatuses: readonly number[];
 };
 
 export class CloudflareWorkerArtifactError extends Error {
@@ -271,6 +274,11 @@ function providerErrors(response: CloudflareWorkerApiResponse<unknown>): string 
   return [...response.errors, ...response.messages].map((error) => `${error.code ?? "unknown"}:${error.message}`).join(" | ") || `http-${response.status}`;
 }
 
+function routeReadinessReceipt(retry: CloudflareWorkerRouteReadinessRetry | undefined, attempts: number): string {
+  if (!retry) return `routeReadinessAttempts=${attempts}`;
+  return `routeReadinessAttempts=${attempts}; routeReadinessMaxAttempts=${retry.maxAttempts}; routeReadinessDelayMs=${retry.delayMs}; routeReadinessStatuses=${retry.retryStatuses.join(",")}`;
+}
+
 function failure(input: {
   operation: CloudflareWorkerTargetOperation;
   code: string;
@@ -343,15 +351,15 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     required(config.accountId, "accountId");
     required(config.scriptName, "scriptName");
     if (typeof config.previewUrlForVersion !== "function") throw new Error("previewUrlForVersion is required");
-    if (config.healthRetry) {
-      if (!Number.isInteger(config.healthRetry.maxAttempts) || config.healthRetry.maxAttempts < 1) {
-        throw new Error(`healthRetry.maxAttempts must be a positive integer; received ${config.healthRetry.maxAttempts}`);
+    if (config.routeReadinessRetry) {
+      if (!Number.isInteger(config.routeReadinessRetry.maxAttempts) || config.routeReadinessRetry.maxAttempts < 1) {
+        throw new Error(`routeReadinessRetry.maxAttempts must be a positive integer; received ${config.routeReadinessRetry.maxAttempts}`);
       }
-      if (!Number.isFinite(config.healthRetry.delayMs) || config.healthRetry.delayMs < 0) {
-        throw new Error(`healthRetry.delayMs must be a non-negative finite number; received ${config.healthRetry.delayMs}`);
+      if (!Number.isFinite(config.routeReadinessRetry.delayMs) || config.routeReadinessRetry.delayMs < 0) {
+        throw new Error(`routeReadinessRetry.delayMs must be a non-negative finite number; received ${config.routeReadinessRetry.delayMs}`);
       }
-      if (config.healthRetry.retryStatuses.length === 0) {
-        throw new Error("healthRetry.retryStatuses must contain at least one HTTP status");
+      if (config.routeReadinessRetry.retryStatuses.length === 0) {
+        throw new Error("routeReadinessRetry.retryStatuses must contain at least one HTTP status");
       }
     }
     this.now = config.now ?? (() => new Date().toISOString());
@@ -368,7 +376,7 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     const version = await this.ensureVersion(input, "preview");
     if (isFailure(version)) return version;
     const previewUrl = this.config.previewUrlForVersion(version.id);
-    const previewResponse = await this.fetchHealth(previewUrl);
+    const previewResponse = await this.fetchHealth(previewUrl, this.config.routeReadinessRetry);
     if (isFailure(previewResponse)) return previewResponse;
     if (previewResponse.status < 200 || previewResponse.status >= 300) {
       return failure({
@@ -377,11 +385,11 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
         message: `Cloudflare Worker preview returned HTTP ${previewResponse.status}.`,
         retryable: true,
         recoveryAction: "inspect the preview Worker response and publish a new verified Release only after the preview is healthy",
-        receipt: `providerVersionId=${version.id}; previewUrl=${previewUrl}; httpStatus=${previewResponse.status}; bodyDigest=${previewResponse.bodyDigest}; providerOperationId=preview:${version.id}; credentialMaterialStored=false`,
+        receipt: `providerVersionId=${version.id}; previewUrl=${previewUrl}; httpStatus=${previewResponse.status}; bodyDigest=${previewResponse.bodyDigest}; providerOperationId=preview:${version.id}; ${routeReadinessReceipt(this.config.routeReadinessRetry, previewResponse.attempts)}; credentialMaterialStored=false`,
       });
     }
     const previewOperationId = `preview:${version.id}`;
-    const receipt = `provider=cloudflare-workers; operation=preview; providerOperationId=${previewOperationId}; providerVersionId=${version.id}; previewUrl=${previewUrl}; previewHttpStatus=${previewResponse.status}; releaseDigest=${input.release.releaseDigest}; artifactDigest=${input.release.artifacts.map((artifact) => artifact.digest).join(",")}; credentialMaterialStored=false`;
+    const receipt = `provider=cloudflare-workers; operation=preview; providerOperationId=${previewOperationId}; providerVersionId=${version.id}; previewUrl=${previewUrl}; previewHttpStatus=${previewResponse.status}; releaseDigest=${input.release.releaseDigest}; artifactDigest=${input.release.artifacts.map((artifact) => artifact.digest).join(",")}; ${routeReadinessReceipt(this.config.routeReadinessRetry, previewResponse.attempts)}; credentialMaterialStored=false`;
     return {
       status: "succeeded",
       value: {
@@ -439,14 +447,11 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     const healthUrl = typeof this.config.healthUrl === "string"
       ? this.config.healthUrl
       : this.config.healthUrl({ target: input.target, ...(input.deploymentId ? { deploymentId: input.deploymentId } : {}), providerVersionId: version.id });
-    const response = await this.fetchHealth(healthUrl, this.config.healthRetry);
+    const response = await this.fetchHealth(healthUrl, this.config.routeReadinessRetry);
     if (isFailure(response)) return response;
     const state: HealthObservation["state"] = response.status >= 200 && response.status < 300 ? "healthy" : "unhealthy";
     const operationId = `health:${version.id}:${digest({ status: response.status, bodyDigest: response.bodyDigest })}`;
-    const retryReceipt = this.config.healthRetry
-      ? `; healthAttempts=${response.attempts}; healthRetryMaxAttempts=${this.config.healthRetry.maxAttempts}; healthRetryDelayMs=${this.config.healthRetry.delayMs}; healthRetryStatuses=${this.config.healthRetry.retryStatuses.join(",")}`
-      : "; healthAttempts=1";
-    const receipt = `provider=cloudflare-workers; operation=health; providerOperationId=${operationId}; providerVersionId=${version.id}; deploymentId=${input.deploymentId ?? "not-provided"}; url=${healthUrl}; httpStatus=${response.status}; bodyDigest=${response.bodyDigest}; releaseDigest=${input.release.releaseDigest}${retryReceipt}; credentialMaterialStored=false`;
+    const receipt = `provider=cloudflare-workers; operation=health; providerOperationId=${operationId}; providerVersionId=${version.id}; deploymentId=${input.deploymentId ?? "not-provided"}; url=${healthUrl}; httpStatus=${response.status}; bodyDigest=${response.bodyDigest}; releaseDigest=${input.release.releaseDigest}; ${routeReadinessReceipt(this.config.routeReadinessRetry, response.attempts)}; credentialMaterialStored=false`;
     return {
       status: "succeeded",
       value: {
@@ -584,7 +589,7 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     return version;
   }
 
-  private async fetchHealth(url: string, retry?: CloudflareWorkerTargetAdapterConfig["healthRetry"]): Promise<{ status: number; bodyDigest: string; attempts: number } | DeliveryAdapterFailure> {
+  private async fetchHealth(url: string, retry?: CloudflareWorkerRouteReadinessRetry): Promise<{ status: number; bodyDigest: string; attempts: number } | DeliveryAdapterFailure> {
     const maxAttempts = retry?.maxAttempts ?? 1;
     const retryStatuses = new Set(retry?.retryStatuses ?? []);
     for (let attempts = 1; attempts <= maxAttempts; attempts += 1) {

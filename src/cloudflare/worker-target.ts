@@ -120,8 +120,14 @@ export type CloudflareWorkerTargetAdapterConfig = {
    * status-specific: it is a readiness observation, not a replacement for a
    * real preview or production health check. The caller must provide the
    * measurement-backed tripwire.
-   */
+  */
   routeReadinessRetry?: CloudflareWorkerRouteReadinessRetry;
+  /**
+   * Rollback verification may observe the candidate still serving briefly
+   * after the rollback deployment is accepted. Keep this policy separate so
+   * an expected candidate 503 is never retried into a false success.
+   */
+  rollbackRouteReadinessRetry?: CloudflareWorkerRouteReadinessRetry;
   fetch?: typeof fetch;
   now?: () => string;
   healthHeaders?: Readonly<Record<string, string>>;
@@ -279,6 +285,18 @@ function routeReadinessReceipt(retry: CloudflareWorkerRouteReadinessRetry | unde
   return `routeReadinessAttempts=${attempts}; routeReadinessMaxAttempts=${retry.maxAttempts}; routeReadinessDelayMs=${retry.delayMs}; routeReadinessStatuses=${retry.retryStatuses.join(",")}`;
 }
 
+function validateRouteReadinessRetry(retry: CloudflareWorkerRouteReadinessRetry, name: string): void {
+  if (!Number.isInteger(retry.maxAttempts) || retry.maxAttempts < 1) {
+    throw new Error(`${name}.maxAttempts must be a positive integer; received ${retry.maxAttempts}`);
+  }
+  if (!Number.isFinite(retry.delayMs) || retry.delayMs < 0) {
+    throw new Error(`${name}.delayMs must be a non-negative finite number; received ${retry.delayMs}`);
+  }
+  if (retry.retryStatuses.length === 0) {
+    throw new Error(`${name}.retryStatuses must contain at least one HTTP status`);
+  }
+}
+
 function failure(input: {
   operation: CloudflareWorkerTargetOperation;
   code: string;
@@ -352,16 +370,9 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     required(config.scriptName, "scriptName");
     if (typeof config.previewUrlForVersion !== "function") throw new Error("previewUrlForVersion is required");
     if (config.routeReadinessRetry) {
-      if (!Number.isInteger(config.routeReadinessRetry.maxAttempts) || config.routeReadinessRetry.maxAttempts < 1) {
-        throw new Error(`routeReadinessRetry.maxAttempts must be a positive integer; received ${config.routeReadinessRetry.maxAttempts}`);
-      }
-      if (!Number.isFinite(config.routeReadinessRetry.delayMs) || config.routeReadinessRetry.delayMs < 0) {
-        throw new Error(`routeReadinessRetry.delayMs must be a non-negative finite number; received ${config.routeReadinessRetry.delayMs}`);
-      }
-      if (config.routeReadinessRetry.retryStatuses.length === 0) {
-        throw new Error("routeReadinessRetry.retryStatuses must contain at least one HTTP status");
-      }
+      validateRouteReadinessRetry(config.routeReadinessRetry, "routeReadinessRetry");
     }
+    if (config.rollbackRouteReadinessRetry) validateRouteReadinessRetry(config.rollbackRouteReadinessRetry, "rollbackRouteReadinessRetry");
     this.now = config.now ?? (() => new Date().toISOString());
     this.fetcher = config.fetch ?? fetch;
     this.contractDigest = config.contractDigest ?? digest({
@@ -447,11 +458,14 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     const healthUrl = typeof this.config.healthUrl === "string"
       ? this.config.healthUrl
       : this.config.healthUrl({ target: input.target, ...(input.deploymentId ? { deploymentId: input.deploymentId } : {}), providerVersionId: version.id });
-    const response = await this.fetchHealth(healthUrl, this.config.routeReadinessRetry);
+    const routeReadinessRetry = input.phase === "rollback"
+      ? this.config.rollbackRouteReadinessRetry ?? this.config.routeReadinessRetry
+      : this.config.routeReadinessRetry;
+    const response = await this.fetchHealth(healthUrl, routeReadinessRetry);
     if (isFailure(response)) return response;
     const state: HealthObservation["state"] = response.status >= 200 && response.status < 300 ? "healthy" : "unhealthy";
     const operationId = `health:${version.id}:${digest({ status: response.status, bodyDigest: response.bodyDigest })}`;
-    const receipt = `provider=cloudflare-workers; operation=health; providerOperationId=${operationId}; providerVersionId=${version.id}; deploymentId=${input.deploymentId ?? "not-provided"}; url=${healthUrl}; httpStatus=${response.status}; bodyDigest=${response.bodyDigest}; releaseDigest=${input.release.releaseDigest}; ${routeReadinessReceipt(this.config.routeReadinessRetry, response.attempts)}; credentialMaterialStored=false`;
+    const receipt = `provider=cloudflare-workers; operation=health; providerOperationId=${operationId}; providerVersionId=${version.id}; deploymentId=${input.deploymentId ?? "not-provided"}; phase=${input.phase ?? "candidate"}; url=${healthUrl}; httpStatus=${response.status}; bodyDigest=${response.bodyDigest}; releaseDigest=${input.release.releaseDigest}; ${routeReadinessReceipt(routeReadinessRetry, response.attempts)}; credentialMaterialStored=false`;
     return {
       status: "succeeded",
       value: {

@@ -108,6 +108,8 @@ export type WorkerAdapterInput = {
 
 export type WorkerHealthInput = WorkerAdapterInput & {
   deploymentId?: string;
+  /** Distinguishes candidate health from verification after a rollback. */
+  phase?: "candidate" | "rollback";
 };
 
 export type WorkerRollbackInput = WorkerAdapterInput & {
@@ -836,7 +838,7 @@ export class WorkerPromotionCoordinator {
       this.degrade(promotion, `Target ${this.target.id} has no declared health-check capability after applying Release ${release.release.id}.`, "qualify a health checker before changing the authoritative Target pointer", `target=${this.target.id}; capability=healthCheck; enabled=false`);
       return clone(promotion);
     }
-    const health = await this.invoke("health", () => this.adapter.health({ promotionId: promotion.id, attempt: promotion.attempt, release: clone(release), target: clone(this.target), deploymentId: deployment.value.deploymentId }));
+    const health = await this.invoke("health", () => this.adapter.health({ promotionId: promotion.id, attempt: promotion.attempt, release: clone(release), target: clone(this.target), deploymentId: deployment.value.deploymentId, phase: "candidate" }));
     if (health.status === "failed") {
       await this.recoverAfterHealthFailure(promotion, release, `health adapter failure: ${health.message}`, health.receipt);
       return clone(promotion);
@@ -908,6 +910,7 @@ export class WorkerPromotionCoordinator {
       release: clone(previous),
       target: clone(this.target),
       deploymentId: rollback.value.deploymentId,
+      phase: "rollback",
     }));
     if (rollbackHealth.status === "failed") {
       promotion.recoveryAction = `Target remains degraded; rollback health could not be verified: ${rollbackHealth.recoveryAction}`;

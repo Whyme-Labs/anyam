@@ -132,6 +132,10 @@ async function run(): Promise<Record<string, unknown>> {
     delayMs: nonNegativeNumber("ANYAM_WORKER_TARGET_HEALTH_RETRY_DELAY_MS", 1000),
     retryStatuses: [404] as const,
   };
+  const rollbackRouteReadinessRetry = {
+    ...routeReadinessRetry,
+    retryStatuses: [404, 503] as const,
+  };
   const transport = createCloudflareWorkerRestTransport({});
   const healthyBytes = workerModule(false);
   const failingBytes = workerModule(true);
@@ -168,6 +172,7 @@ async function run(): Promise<Record<string, unknown>> {
     previewUrlForVersion: (versionId) => `https://${versionId.slice(0, 8)}-${scriptName}.${previewSubdomain}.workers.dev/?anyam_preview=1`,
     healthUrl,
     routeReadinessRetry,
+    rollbackRouteReadinessRetry,
   });
   const target = createWorkerTarget({
     target: {
@@ -191,7 +196,7 @@ async function run(): Promise<Record<string, unknown>> {
   if (failingPromotion.state !== "rolled-back" || failingPromotion.health?.state !== "unhealthy" || failingPromotion.rollbackHealth?.state !== "healthy") {
     throw new Error(`failed health did not preserve the known-good Release: state=${failingPromotion.state}; health=${failingPromotion.health?.state}; rollbackHealth=${failingPromotion.rollbackHealth?.state}; receipt=${failingPromotion.receipt}; recoveryAction=${failingPromotion.recoveryAction ?? "not-provided"}`);
   }
-  return { protocol, status: "succeeded", scriptName, accountId, healthyPromotion: { state: healthyPromotion.state, releaseDigest: healthyPromotion.releaseDigest }, failingPromotion: { state: failingPromotion.state, health: failingPromotion.health?.state, rollbackHealth: failingPromotion.rollbackHealth?.state }, targetReleaseId: coordinator.getTarget().currentReleaseId, routeReadiness: { retryStatuses: routeReadinessRetry.retryStatuses, maxAttempts: routeReadinessRetry.maxAttempts, delayMs: routeReadinessRetry.delayMs, receipt: "qualification-tripwire; preview-and-production-route-readiness; remeasure-before-production" }, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true };
+  return { protocol, status: "succeeded", scriptName, accountId, healthyPromotion: { state: healthyPromotion.state, releaseDigest: healthyPromotion.releaseDigest }, failingPromotion: { state: failingPromotion.state, health: failingPromotion.health?.state, rollbackHealth: failingPromotion.rollbackHealth?.state }, targetReleaseId: coordinator.getTarget().currentReleaseId, routeReadiness: { candidate: { retryStatuses: routeReadinessRetry.retryStatuses, maxAttempts: routeReadinessRetry.maxAttempts, delayMs: routeReadinessRetry.delayMs }, rollback: { retryStatuses: rollbackRouteReadinessRetry.retryStatuses, maxAttempts: rollbackRouteReadinessRetry.maxAttempts, delayMs: rollbackRouteReadinessRetry.delayMs }, receipt: "qualification-tripwire; preview-and-production-route-readiness; rollback-503-is-transient-only-after-known-good-release; remeasure-before-production" }, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true };
 }
 
 async function cleanup(): Promise<{ status: "succeeded" | "blocked"; receipt: string }> {

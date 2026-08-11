@@ -50,6 +50,10 @@ The adapter uses the Workers Versions and Deployments APIs:
   just after a successful version upload or deployment. The final observation
   is still the real provider URL; this policy never turns a non-2xx response
   into healthy.
+- Rollback health may use a separate policy for transient provider traffic
+  responses (including 503) because the previous known-good version can take
+  time to receive traffic after the rollback deployment is accepted. Candidate
+  health never uses that rollback-only 503 policy.
 
 Rollback is another provider deployment to the previous Release's tagged
 version. It does not rewrite source or change the Anyam Target by itself. The

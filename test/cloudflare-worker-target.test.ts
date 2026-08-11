@@ -140,7 +140,7 @@ test("Cloudflare Worker Target uploads digest-bound versions, promotes after pre
   try {
     const api = new InMemoryCloudflareWorkerApi();
     const issued: Array<{ operation: CloudflareWorkerTargetOperation; audience: string }> = [];
-    const productionHealthStates: readonly [number, number, number, number] = [404, 200, 503, 200];
+    const productionHealthStates: readonly [number, number, number, number, number] = [404, 200, 503, 503, 200];
     let productionHealthIndex = 0;
     let previewRequestCount = 0;
     const firstArtifact = first.release.artifacts[0];
@@ -167,6 +167,7 @@ test("Cloudflare Worker Target uploads digest-bound versions, promotes after pre
       previewUrlForVersion: (versionId) => `https://${versionId}.preview.workers.dev`,
       healthUrl: "https://anyam-target-test.workers.dev/health",
       routeReadinessRetry: { maxAttempts: 2, delayMs: 0, retryStatuses: [404] },
+      rollbackRouteReadinessRetry: { maxAttempts: 2, delayMs: 0, retryStatuses: [404, 503] },
       fetch: async (url) => {
         const requestedUrl = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
         if (requestedUrl.includes("preview")) {
@@ -200,11 +201,14 @@ test("Cloudflare Worker Target uploads digest-bound versions, promotes after pre
     const firstPromotion = await coordinator.promote({ releaseId: first.release.release.id, idempotencyKey: "ship:cloudflare:first", actor });
     assert.equal(firstPromotion.state, "healthy");
     assert.match(firstPromotion.health?.receipt ?? "", /routeReadinessAttempts=2/);
+    assert.match(firstPromotion.health?.receipt ?? "", /phase=candidate/);
     assert.equal(previewRequestCount, 2);
     const secondPromotion = await coordinator.promote({ releaseId: second.release.release.id, idempotencyKey: "ship:cloudflare:second", actor });
     assert.equal(secondPromotion.state, "rolled-back");
     assert.equal(secondPromotion.health?.state, "unhealthy");
     assert.equal(secondPromotion.rollbackHealth?.state, "healthy");
+    assert.match(secondPromotion.rollbackHealth?.receipt ?? "", /phase=rollback/);
+    assert.match(secondPromotion.rollbackHealth?.receipt ?? "", /routeReadinessAttempts=2/);
     assert.equal(coordinator.getTarget().currentReleaseId, first.release.release.id);
     assert.equal(coordinator.getTarget().state, "healthy");
     assert.equal(api.versions.length, 2);

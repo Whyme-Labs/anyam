@@ -15,8 +15,8 @@ const workers = [
   {
     id: "realm",
     config: "apps/realm-worker/wrangler.example.jsonc",
-    sources: ["apps/realm-worker/src/index.ts", "apps/realm-worker/src/passkey-owner.ts", "src/cloudflare/realm-worker.ts"],
-    routes: ["/health", "/mcp", "/authorize", "/owner/login"],
+    sources: ["apps/realm-worker/src/index.ts", "apps/realm-worker/src/passkey-owner.ts", "apps/realm-worker/src/authority-edge.ts", "src/cloudflare/realm-worker.ts"],
+    routes: ["/health", "/mcp", "/authorize", "/owner/login", "/api/projects/"],
   },
   {
     id: "public-gateway",

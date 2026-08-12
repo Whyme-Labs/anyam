@@ -193,3 +193,99 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
   assert.equal(((finalState.authority as Record<string, unknown>).canonicalByProject as Record<string, string>)[project.id], landedRevision);
   assert.equal(((finalState.authority as Record<string, unknown>).counts as Record<string, number>).audit, 11);
 });
+
+test("Realm Worker exposes an authenticated project-scoped REST read through the Coordinator", async () => {
+  const oauthKv = new MemoryKV();
+  const ownerSessionId = "session:project-read-test";
+  const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+  const namespace = {
+    idFromName: (_name: string): string => "project-read-test-do",
+    get: (_id: string) => ({
+      fetch: async (request: Request): Promise<Response> => {
+        const path = new URL(request.url).pathname;
+        const body = await request.json() as Record<string, unknown>;
+        calls.push({ path, body });
+        if (request.headers.get(REALM_COORDINATOR_INTERNAL_HEADER) !== REALM_COORDINATOR_INTERNAL_VALUE) return new Response(JSON.stringify({ code: "internal_binding_required" }), { status: 403 });
+        if (body.sessionId !== ownerSessionId) return new Response(JSON.stringify({ code: "session.invalid", receipt: "session=invalid; project=not-disclosed" }), { status: 403 });
+        if (body.projectId !== "project:video-player") return new Response(JSON.stringify({ code: "not_found", receipt: `project=${String(body.projectId)}; discoverable=false` }), { status: 404 });
+        return new Response(JSON.stringify({
+          protocol: "anyam.authority-plane/v1",
+          status: "ready",
+          project: { protocol: "anyam.project/v1", id: "project:video-player", name: "Video Player", referenceType: "git", sourceSpaceIds: ["source:public"] },
+          canonicalRevision: { protocol: "anyam.kernel/v1", id: "project-revision:video-player:1", projectId: "project:video-player", sourceSpaceSnapshots: { "source:public": "git:public-1" } },
+          sourceSpaces: [{ protocol: "anyam.source-space/v1", id: "source:public", name: "public", classification: "public" }],
+          counts: { workspaces: 1, changes: 2, revisions: 3, runs: 4, evidence: 4, artifacts: 1, releases: 1, targets: 1, promotions: 1 },
+          receipt: "authority=coordinator; operation=project.inspect; project=project:video-player; readOnly=true; credentialFree=true; canonicalWrite=false",
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    }),
+  };
+  const env = {
+    ANYAM_HOSTING_MODE: "customer-operated",
+    ANYAM_INSTALLATION_ID: "project-read-test",
+    ANYAM_PROTOCOL_VERSION: "anyam.customer-realm-worker/v1",
+    ANYAM_REALM_RP_ID: "realm-test.example",
+    REALM_COORDINATOR: namespace,
+    OAUTH_KV: oauthKv,
+    ANYAM_METADATA_DB: {},
+    ANYAM_EXPORTS: {},
+    ANYAM_EVENTS: {},
+    ANYAM_WORKFLOW: {},
+  } as unknown as AnyamRealmOAuthEnv;
+  const hostSessionId = "host-session:project-read-test";
+  oauthKv.values.set(`anyam:passkey:session:${hostSessionId}`, JSON.stringify({
+    protocol: "anyam.passkey-owner/v1",
+    sessionId: hostSessionId,
+    realmId: "realm:project-read-test",
+    userId: "owner:project-read-test",
+    displayName: "Project Read Test Owner",
+    credentialId: "credential:project-read-test",
+    kernelSessionId: ownerSessionId,
+    actorId: "actor:project-read-test",
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    createdAt: new Date().toISOString(),
+  }));
+  const cookie = { cookie: `anyam_owner_session=${encodeURIComponent(hostSessionId)}` };
+  const unauthenticated = await handleAuthorityRequest(new Request("https://realm.example/api/projects/project%3Avideo-player"), env);
+  assert.ok(unauthenticated);
+  assert.equal(unauthenticated.status, 401);
+  assert.equal((await unauthenticated.json() as Record<string, unknown>).code, "owner_authentication_required");
+  assert.equal(calls.length, 0);
+
+  const response = await handleAuthorityRequest(new Request("https://realm.example/api/projects/project%3Avideo-player", { headers: cookie }), env);
+  assert.ok(response);
+  assert.equal(response.status, 200);
+  const value = await response.json() as Record<string, unknown>;
+  assert.equal((value.project as Record<string, unknown>).id, "project:video-player");
+  assert.equal((value.canonicalRevision as Record<string, unknown>).id, "project-revision:video-player:1");
+  assert.equal((value.counts as Record<string, unknown>).changes, 2);
+  assert.match(String(value.receipt), /readOnly=true/);
+  assert.match(String(value.receipt), /canonicalWrite=false/);
+  assert.equal(JSON.stringify(value).includes("kernel-session"), false);
+  assert.equal(JSON.stringify(value).includes("credential:project-read-test"), false);
+  assert.deepEqual(calls[0], { path: "/authority/project/internal", body: { sessionId: ownerSessionId, projectId: "project:video-player" } });
+
+  const hidden = await handleAuthorityRequest(new Request("https://realm.example/api/projects/project%3Aprivate", { headers: cookie }), env);
+  assert.ok(hidden);
+  assert.equal(hidden.status, 404);
+  const hiddenBody = await hidden.json() as Record<string, unknown>;
+  assert.equal(hiddenBody.code, "project_not_found");
+  assert.equal(JSON.stringify(hiddenBody).includes("project:private"), false);
+  assert.match(String(hiddenBody.receipt), /credentialFree=true/);
+  assert.match(String(hiddenBody.receipt), /canonicalWrite=false/);
+
+  const malformed = await handleAuthorityRequest(new Request("https://realm.example/api/projects/%E0%A4%A", { headers: cookie }), env);
+  assert.ok(malformed);
+  assert.equal(malformed.status, 400);
+  assert.equal((await malformed.json() as Record<string, unknown>).code, "invalid_project_path");
+
+  const unsupported = await handleAuthorityRequest(new Request("https://realm.example/api/projects/project%3Avideo-player", { method: "POST", headers: cookie }), env);
+  assert.ok(unsupported);
+  assert.equal(unsupported.status, 405);
+  assert.equal((await unsupported.json() as Record<string, unknown>).code, "method_not_allowed");
+
+  const missingId = await handleAuthorityRequest(new Request("https://realm.example/api/projects", { headers: cookie }), env);
+  assert.ok(missingId);
+  assert.equal(missingId.status, 404);
+  assert.equal((await missingId.json() as Record<string, unknown>).code, "project_route_not_found");
+});

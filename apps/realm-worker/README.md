@@ -80,6 +80,16 @@ After an owner completes the passkey login ceremony, the public edge exposes:
 | --- | --- |
 | `GET /api/authority/state` | Read the durable Authority Plane summary |
 | `POST /api/authority/command` | Apply one idempotent Authority command |
+| `GET /api/projects/{projectId}` | Read one project-scoped summary through the Authority Coordinator |
+
+`GET /api/projects/{projectId}` is an owner-authenticated, read-only surface.
+The Project identifier is URL-decoded as one path segment and is forwarded to
+the Coordinator's `project.inspect` boundary; the edge does not read or
+assemble Authority state itself. The response includes the Project, canonical
+Project Revision, visible Source Spaces, scoped counts, and a credential-free
+receipt. Unknown Projects are deliberately reported as an undiscoverable
+not-found result. This route does not create a Project, transfer source, issue
+credentials, land a Change, or promote a Release.
 
 The command envelope is:
 

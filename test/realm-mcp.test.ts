@@ -93,6 +93,7 @@ test("remote MCP fails closed for malformed requests, unknown methods, mutations
   const hiddenError = (await body(hidden)).error as Record<string, unknown>;
   assert.equal(hiddenError.code, -32004);
   assert.match(JSON.stringify(hiddenError), /not available/);
+  assert.equal(JSON.stringify(hiddenError).includes("project:private"), false);
 
   const noScope = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: "scope", method: "tools/list" }), fixture.env, { ...props, scopes: ["source.read"] });
   assert.equal(((await body(noScope)).error as Record<string, unknown>).code, -32001);

@@ -144,7 +144,8 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
     } catch (error) {
       const detail = error instanceof Error ? error.message : "mcp_project_inspect_failed";
       const notFound = detail.includes("not_found");
-      return mcpError(id, notFound ? -32004 : -32602, notFound ? "Project is not available in this Realm." : "project.inspect arguments are invalid or the coordinator rejected the read.", { code: notFound ? "mcp.project_not_found" : "mcp.project_inspect_failed", recoveryAction: notFound ? "verify the Project identifier without probing undiscoverable resources" : "inspect the coordinator receipt and retry the same read", receipt: `mcp=project.inspect; detail=${detail}; credentialFree=true; canonicalWrite=false` });
+      const errorClass = notFound ? "not_found" : detail.includes("session.") || detail.includes("session_") ? "session_rejected" : "coordinator_rejected";
+      return mcpError(id, notFound ? -32004 : -32602, notFound ? "Project is not available in this Realm." : "project.inspect arguments are invalid or the coordinator rejected the read.", { code: notFound ? "mcp.project_not_found" : "mcp.project_inspect_failed", recoveryAction: notFound ? "verify the Project identifier without probing undiscoverable resources" : "inspect the coordinator receipt and retry the same read", receipt: `mcp=project.inspect; errorClass=${errorClass}; credentialFree=true; canonicalWrite=false` });
     }
   }
   return mcpError(id, -32601, `Method ${rpc.method} is not available.`, { code: "mcp.method_not_found", recoveryAction: "use initialize, tools/list, or tools/call", receipt: `mcp=method-not-found; method=${rpc.method}; canonicalWrite=false` });

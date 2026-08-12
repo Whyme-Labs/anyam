@@ -276,6 +276,32 @@ test("Realm Worker exposes an authenticated project-scoped REST read through the
           ],
           receipt: "authority=coordinator; operation=project.list; projectCount=2; ordering=project-id-code-unit-ascending; readOnly=true; credentialFree=true; canonicalWrite=false",
         }), { status: 200, headers: { "content-type": "application/json" } });
+        if (path === "/authority/changes/internal") {
+          const changes = [
+            {
+              change: { protocol: "anyam.change/v1", id: "change:alpha", projectId: "project:alpha", intentId: "intent:alpha", baseProjectRevisionId: "project-revision:alpha:1", status: "active", latestRevisionId: null },
+              project: { protocol: "anyam.project/v1", id: "project:alpha", name: "Alpha", referenceType: "git" },
+              revisionCount: 0,
+              revisions: [],
+            },
+            {
+              change: { protocol: "anyam.change/v1", id: "change:video-player", projectId: "project:video-player", intentId: "intent:codec", baseProjectRevisionId: "project-revision:video-player:1", status: "submitted", latestRevisionId: "change-revision:video-player:2", workspaceId: "workspace:video-player" },
+              project: { protocol: "anyam.project/v1", id: "project:video-player", name: "Video Player", referenceType: "git" },
+              revisionCount: 2,
+              revisions: [
+                { protocol: "anyam.change/v1", id: "change-revision:video-player:1", changeId: "change:video-player", projectRevisionId: "candidate:video-player:1", projectViewId: "project-view:video-player:1", sequence: 1, baseProjectRevisionId: "project-revision:video-player:1", workspaceId: "workspace:video-player", declaredEffects: ["source.modify", "api.modify"], kind: "implementation" },
+                { protocol: "anyam.change/v1", id: "change-revision:video-player:2", changeId: "change:video-player", projectRevisionId: "candidate:video-player:2", projectViewId: "project-view:video-player:1", sequence: 2, parentRevisionId: "change-revision:video-player:1", baseProjectRevisionId: "project-revision:video-player:1", workspaceId: "workspace:video-player", declaredEffects: ["source.modify"], kind: "rebase" },
+              ],
+            },
+          ];
+          if (body.changeId !== undefined) {
+            const found = changes.find((entry) => entry.change.id === body.changeId);
+            if (!found || (body.projectId !== undefined && found.change.projectId !== body.projectId) || (body.workspaceId !== undefined && found.change.workspaceId !== body.workspaceId)) return new Response(JSON.stringify({ code: "not_found", receipt: "change=hidden; discoverable=false" }), { status: 404 });
+            return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", change: found.change, project: found.project, revisions: found.revisions, receipt: `authority=coordinator; operation=change.inspect; change=${found.change.id}; revisionCount=${found.revisionCount}; readOnly=true; credentialFree=true; canonicalWrite=false` }), { status: 200, headers: { "content-type": "application/json" } });
+          }
+          const filtered = changes.filter((entry) => (body.projectId === undefined || entry.change.projectId === body.projectId) && (body.workspaceId === undefined || entry.change.workspaceId === body.workspaceId));
+          return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", changes: filtered.map(({ revisions, ...summary }) => summary), receipt: `authority=coordinator; operation=change.list; changeCount=${filtered.length}; ordering=change-id-code-unit-ascending; readOnly=true; credentialFree=true; canonicalWrite=false` }), { status: 200, headers: { "content-type": "application/json" } });
+        }
         if (body.projectId !== "project:video-player") return new Response(JSON.stringify({ code: "not_found", receipt: `project=${String(body.projectId)}; discoverable=false` }), { status: 404 });
         return new Response(JSON.stringify({
           protocol: "anyam.authority-plane/v1",
@@ -376,4 +402,66 @@ test("Realm Worker exposes an authenticated project-scoped REST read through the
   assert.ok(listUnsupported);
   assert.equal(listUnsupported.status, 405);
   assert.equal((await listUnsupported.json() as Record<string, unknown>).code, "method_not_allowed");
+
+  const callsBeforeUnauthenticatedChangeList = calls.length;
+  const unauthenticatedChangeList = await handleAuthorityRequest(new Request("https://realm.example/api/changes"), env);
+  assert.ok(unauthenticatedChangeList);
+  assert.equal(unauthenticatedChangeList.status, 401);
+  assert.equal((await unauthenticatedChangeList.json() as Record<string, unknown>).code, "owner_authentication_required");
+  assert.equal(calls.length, callsBeforeUnauthenticatedChangeList);
+
+  const changeListResponse = await handleAuthorityRequest(new Request("https://realm.example/api/changes?projectId=project%3Avideo-player&workspaceId=workspace%3Avideo-player", { headers: cookie }), env);
+  assert.ok(changeListResponse);
+  assert.equal(changeListResponse.status, 200);
+  const changeListBody = await changeListResponse.json() as Record<string, unknown>;
+  assert.deepEqual((changeListBody.changes as Array<Record<string, unknown>>).map((entry) => (entry.change as Record<string, unknown>).id), ["change:video-player"]);
+  assert.match(String(changeListBody.receipt), /ordering=change-id-code-unit-ascending/);
+  assert.equal(JSON.stringify(changeListBody).includes("sourceSpaceSnapshots"), false);
+  assert.equal(JSON.stringify(changeListBody).includes("kernel-session"), false);
+  assert.equal(JSON.stringify(changeListBody).includes("credential:project-read-test"), false);
+  assert.deepEqual(calls.at(-1), { path: "/authority/changes/internal", body: { sessionId: ownerSessionId, projectId: "project:video-player", workspaceId: "workspace:video-player" } });
+
+  const changeInspectResponse = await handleAuthorityRequest(new Request("https://realm.example/api/changes/change%3Avideo-player?projectId=project%3Avideo-player", { headers: cookie }), env);
+  assert.ok(changeInspectResponse);
+  assert.equal(changeInspectResponse.status, 200);
+  const changeInspectBody = await changeInspectResponse.json() as Record<string, unknown>;
+  assert.equal((changeInspectBody.change as Record<string, unknown>).id, "change:video-player");
+  assert.deepEqual((changeInspectBody.revisions as Array<Record<string, unknown>>).map((revision) => revision.sequence), [1, 2]);
+  assert.equal(JSON.stringify(changeInspectBody).includes("sourceSpaceSnapshots"), false);
+  assert.equal(JSON.stringify(changeInspectBody).includes("\"author\":"), false);
+  assert.equal(JSON.stringify(changeInspectBody).includes("credential:"), false);
+  assert.deepEqual(calls.at(-1), { path: "/authority/changes/internal", body: { sessionId: ownerSessionId, changeId: "change:video-player", projectId: "project:video-player" } });
+
+  const hiddenChange = await handleAuthorityRequest(new Request("https://realm.example/api/changes/change%3Aprivate", { headers: cookie }), env);
+  assert.ok(hiddenChange);
+  assert.equal(hiddenChange.status, 404);
+  const hiddenChangeBody = await hiddenChange.json() as Record<string, unknown>;
+  assert.equal(hiddenChangeBody.code, "change_not_found");
+  assert.equal(JSON.stringify(hiddenChangeBody).includes("change:private"), false);
+  assert.match(String(hiddenChangeBody.receipt), /credentialFree=true/);
+
+  const malformedChangePath = await handleAuthorityRequest(new Request("https://realm.example/api/changes/%E0%A4%A", { headers: cookie }), env);
+  assert.ok(malformedChangePath);
+  assert.equal(malformedChangePath.status, 400);
+  assert.equal((await malformedChangePath.json() as Record<string, unknown>).code, "invalid_change_path");
+
+  const extraChangePath = await handleAuthorityRequest(new Request("https://realm.example/api/changes/change%3Avideo-player/revisions", { headers: cookie }), env);
+  assert.ok(extraChangePath);
+  assert.equal(extraChangePath.status, 400);
+  assert.equal((await extraChangePath.json() as Record<string, unknown>).code, "invalid_change_path");
+
+  const malformedChangeQuery = await handleAuthorityRequest(new Request("https://realm.example/api/changes?projectId=project%3Avideo-player&projectId=project%3Aalpha", { headers: cookie }), env);
+  assert.ok(malformedChangeQuery);
+  assert.equal(malformedChangeQuery.status, 400);
+  assert.equal((await malformedChangeQuery.json() as Record<string, unknown>).code, "invalid_change_query");
+
+  const unsupportedChangeQuery = await handleAuthorityRequest(new Request("https://realm.example/api/changes?intentId=intent%3Acodec", { headers: cookie }), env);
+  assert.ok(unsupportedChangeQuery);
+  assert.equal(unsupportedChangeQuery.status, 400);
+  assert.equal((await unsupportedChangeQuery.json() as Record<string, unknown>).code, "invalid_change_query");
+
+  const unsupportedChange = await handleAuthorityRequest(new Request("https://realm.example/api/changes/change%3Avideo-player", { method: "POST", headers: cookie }), env);
+  assert.ok(unsupportedChange);
+  assert.equal(unsupportedChange.status, 405);
+  assert.equal((await unsupportedChange.json() as Record<string, unknown>).code, "method_not_allowed");
 });

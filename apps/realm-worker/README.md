@@ -82,6 +82,8 @@ After an owner completes the passkey login ceremony, the public edge exposes:
 | `POST /api/authority/command` | Apply one idempotent Authority command |
 | `GET /api/projects` | Discover owner-visible Project summaries through the Authority Coordinator |
 | `GET /api/projects/{projectId}` | Read one project-scoped summary through the Authority Coordinator |
+| `GET /api/changes` | Discover owner-visible Change summaries through the Authority Coordinator |
+| `GET /api/changes/{changeId}` | Read one Change and its immutable Revision summaries through the Authority Coordinator |
 
 `GET /api/projects` and `GET /api/projects/{projectId}` are owner-authenticated,
 read-only surfaces. The list is sorted by Project identifier using code-unit
@@ -115,6 +117,15 @@ Revision source snapshots, author/actor identity, origin metadata, source
 objects, credentials, and mutation authority are omitted. The Coordinator
 owns one query boundary for both operations and reports the deterministic
 Change-identifier ordering in its receipt.
+
+The owner-authenticated REST surface exposes the same Change query boundary at
+`GET /api/changes` and `GET /api/changes/{changeId}`. The list accepts optional
+single-valued `projectId` and `workspaceId` query filters; the item route may
+use the same filters to assert the requested scope. Both routes URL-decode one
+safe Change identifier, reject malformed or duplicate filters, preserve the
+Coordinator's deterministic ordering, and return only the safe Change and
+Revision summaries. They do not create Changes, publish Revisions, transfer
+source, issue task grants, land, or promote anything.
 
 The command envelope is:
 

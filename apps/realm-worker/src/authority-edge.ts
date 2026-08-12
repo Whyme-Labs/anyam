@@ -33,6 +33,42 @@ function projectIdFromPath(pathname: string): { projectId?: string; malformed: b
   }
 }
 
+function changeIdFromPath(pathname: string): { changeId?: string; malformed: boolean } {
+  const segments = pathname.split("/");
+  if (segments[1] !== "api" || segments[2] !== "changes") return { malformed: false };
+  if (segments.length === 3) return { malformed: false };
+  if (segments.length !== 4 || !segments[3]) return { malformed: true };
+  try {
+    const changeId = decodeURIComponent(segments[3]);
+    if (!changeId || changeId.includes("/") || changeId.includes("\\") || changeId === "." || changeId === "..") return { malformed: true };
+    return { changeId, malformed: false };
+  } catch {
+    return { malformed: true };
+  }
+}
+
+function changeFiltersFromUrl(url: URL): { filters?: { projectId?: string; workspaceId?: string }; malformedParameter?: string } {
+  const supported = new Set(["projectId", "workspaceId"]);
+  for (const key of url.searchParams.keys()) {
+    if (!supported.has(key)) return { malformedParameter: key };
+  }
+  const read = (key: "projectId" | "workspaceId"): string | undefined => {
+    const values = url.searchParams.getAll(key);
+    if (values.length === 0) return undefined;
+    if (values.length !== 1) throw new Error(`${key}_duplicate`);
+    const value = values[0];
+    if (!value || value.includes("/") || value.includes("\\") || value === "." || value === "..") throw new Error(`${key}_malformed`);
+    return value;
+  };
+  try {
+    const projectId = read("projectId");
+    const workspaceId = read("workspaceId");
+    return { filters: { ...(projectId ? { projectId } : {}), ...(workspaceId ? { workspaceId } : {}) } };
+  } catch (error) {
+    return { malformedParameter: error instanceof Error ? error.message.replace(/_(duplicate|malformed)$/, "") : "unknown" };
+  }
+}
+
 async function projectRead(request: Request, env: AnyamRealmOAuthEnv, projectId: string): Promise<Response> {
   const sessionId = await anyamRealmOwnerSessionId(request, env);
   if (!sessionId) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "owner_authentication_required", recoveryAction: "Authenticate the Realm owner through /owner/login before inspecting a Project.", receipt: "ownerSession=missing-or-invalid; projectRead=not-accepted; canonicalWrite=false" }, 401);
@@ -60,6 +96,41 @@ async function projectList(request: Request, env: AnyamRealmOAuthEnv): Promise<R
   }
 }
 
+function changeQueryError(): Response {
+  return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "invalid_change_query", recoveryAction: "Use only one non-empty projectId and/or workspaceId query parameter, each as one safe identifier.", receipt: "changeRead=not-accepted; parameter=unsupported-or-malformed; canonicalWrite=false" }, 400);
+}
+
+async function changeRead(request: Request, env: AnyamRealmOAuthEnv, changeId: string): Promise<Response> {
+  const sessionId = await anyamRealmOwnerSessionId(request, env);
+  if (!sessionId) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "owner_authentication_required", recoveryAction: "Authenticate the Realm owner through /owner/login before inspecting a Change.", receipt: "ownerSession=missing-or-invalid; changeRead=not-accepted; canonicalWrite=false" }, 401);
+  if (request.method !== "GET") return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "method_not_allowed", recoveryAction: "Use GET /api/changes/{changeId} for the read-only Change summary.", receipt: `changeRead=read-only; method=get-required; canonicalWrite=false` }, 405);
+  const parsed = changeFiltersFromUrl(new URL(request.url));
+  if (parsed.malformedParameter) return changeQueryError();
+  try {
+    return json(await requestAnyamRealmCoordinator(env, "/authority/changes/internal", { sessionId, changeId, ...parsed.filters }));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const status = detail.includes("not_found") ? 404 : detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : detail.includes("invalid_request") ? 400 : 503;
+    const errorClass = status === 404 ? "not_found" : status === 403 ? "session_rejected" : status === 400 ? "invalid_request" : "coordinator_rejected";
+    return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: status === 404 ? "change_not_found" : status === 400 ? "invalid_change_query" : "authority_coordinator_rejected", recoveryAction: status === 404 ? "Verify the Change identifier without probing undiscoverable resources." : status === 400 ? "Correct the Change read parameters and retry; no read was exposed." : "Inspect the Durable Object receipt and retry the same read only when safe.", receipt: `authority=coordinator-rejected; operation=change.inspect; errorClass=${errorClass}; credentialFree=true; canonicalWrite=false` }, status);
+  }
+}
+
+async function changeList(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
+  const sessionId = await anyamRealmOwnerSessionId(request, env);
+  if (!sessionId) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "owner_authentication_required", recoveryAction: "Authenticate the Realm owner through /owner/login before listing Changes.", receipt: "ownerSession=missing-or-invalid; changeList=not-accepted; canonicalWrite=false" }, 401);
+  if (request.method !== "GET") return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "method_not_allowed", recoveryAction: "Use GET /api/changes for the read-only Change discovery surface.", receipt: "changeList=read-only; method=get-required; canonicalWrite=false" }, 405);
+  const parsed = changeFiltersFromUrl(new URL(request.url));
+  if (parsed.malformedParameter) return changeQueryError();
+  try {
+    return json(await requestAnyamRealmCoordinator(env, "/authority/changes/internal", { sessionId, ...parsed.filters }));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const errorClass = detail.includes("session.") || detail.includes("session_") ? "session_rejected" : detail.includes("invalid_request") ? "invalid_request" : "coordinator_rejected";
+    return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: errorClass === "invalid_request" ? "invalid_change_query" : "authority_coordinator_rejected", recoveryAction: errorClass === "invalid_request" ? "Correct the Change discovery filters and retry; no read was exposed." : "Inspect the Durable Object receipt and retry the same discovery read only when safe.", receipt: `authority=coordinator-rejected; operation=change.list; errorClass=${errorClass}; credentialFree=true; canonicalWrite=false` }, errorClass === "session_rejected" ? 403 : errorClass === "invalid_request" ? 400 : 503);
+  }
+}
+
 /**
  * Public Authority Plane edge. The host-only owner session is the current
  * authenticated principal boundary; the Durable Object revalidates the
@@ -68,8 +139,10 @@ async function projectList(request: Request, env: AnyamRealmOAuthEnv): Promise<R
 export async function handleAuthorityRequest(request: Request, env: AnyamRealmOAuthEnv): Promise<Response | undefined> {
   const url = new URL(request.url);
   const projectRoute = projectIdFromPath(url.pathname);
+  const changeRoute = changeIdFromPath(url.pathname);
   const isProjectRoute = url.pathname === "/api/projects" || url.pathname.startsWith("/api/projects/");
-  if (!url.pathname.startsWith("/api/authority") && !isProjectRoute) return undefined;
+  const isChangeRoute = url.pathname === "/api/changes" || url.pathname.startsWith("/api/changes/");
+  if (!url.pathname.startsWith("/api/authority") && !isProjectRoute && !isChangeRoute) return undefined;
 
   const health = customerRealmWorkerHealth(env);
   if (health.status !== "ready") {
@@ -80,6 +153,12 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
     if (projectRoute.malformed) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "invalid_project_path", recoveryAction: "Use GET /api/projects/{projectId} with one URL-encoded Project identifier.", receipt: "projectRead=not-accepted; path=malformed; canonicalWrite=false" }, 400);
     if (!projectRoute.projectId) return projectList(request, env);
     return projectRead(request, env, projectRoute.projectId);
+  }
+
+  if (isChangeRoute) {
+    if (changeRoute.malformed) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "invalid_change_path", recoveryAction: "Use GET /api/changes/{changeId} with one URL-encoded Change identifier.", receipt: "changeRead=not-accepted; path=malformed; canonicalWrite=false" }, 400);
+    if (changeRoute.changeId) return changeRead(request, env, changeRoute.changeId);
+    return changeList(request, env);
   }
 
   const sessionId = await anyamRealmOwnerSessionId(request, env);

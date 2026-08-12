@@ -95,6 +95,7 @@ After an owner completes the passkey login ceremony, the public edge exposes:
 | `POST /api/artifacts` | Record one typed immutable Artifact bound to a Project/Change/Run lineage through the Authority Coordinator |
 | `POST /api/landings` | Request one typed single-Change Landing through the Authority Coordinator's compare-and-swap canonical boundary |
 | `POST /api/releases` | Create one typed immutable Release from the current canonical Project Revision, exact Artifacts, and passed Evidence |
+| `POST /api/targets` | Configure one typed immutable Target adapter bound to a Project; qualification and Promotion remain separate |
 | `POST /api/owner/agent/delegations` | Owner-authenticated, resource-bounded Agent Task delegation for one active Project/Workspace/Change; no credentials are issued |
 | `POST /api/owner/agent/delegations/revoke` | Owner-authenticated revocation of one enrolled Agent and its delegated authority; the owner Session remains active |
 | `POST /api/owner/agent/delegations/credentials` | Explicit exchange of an exact delegated Agent Session/Task/Grant for short-lived `realm-api`, Git, and/or MCP credentials; token material appears only in this response |
@@ -269,6 +270,23 @@ and raw Coordinator receipts are omitted. Release creation has
 `canonicalWrite=false`; it does not transfer source, advance canonical state,
 configure a Target, or request Promotion. Agents do not receive a Release
 mutation on the MCP surface.
+
+The owner-authenticated REST surface also exposes typed `POST /api/targets`.
+It requires the owner host session, one `Idempotency-Key` header, and a closed
+`target.configure` JSON body containing the Project, optional Target identity,
+adapter identity, accepted Artifact types, and required Evidence keys. The
+Coordinator verifies that the Project exists before recording the immutable
+Project-bound Target configuration. Replays return the original safe result;
+changed payloads, duplicate Target identities, stale expected versions, and
+cross-Project references fail closed before mutation.
+
+The response is a credential-free Target projection containing only the Target
+protocol, identity, Project binding, adapter configuration, accepted Artifact
+types, required Evidence keys, and configuration state. Provider qualification,
+Release creation, and Promotion remain separate operations. Target configuration
+does not transfer source, mutate the canonical Project Revision, or claim that
+the adapter is healthy. Agents do not receive a Target mutation on the MCP
+surface.
 
 The typed bootstrap mutations are the preferred REST entry point for starting
 work. Each route requires an owner host session, `POST`, a JSON object containing

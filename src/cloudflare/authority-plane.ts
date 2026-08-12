@@ -543,7 +543,7 @@ export class AuthorityPlaneCoordinator {
         if (!next.projects[target.projectId]) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${target.projectId} does not exist.`, recoveryAction: "create the Project before configuring its Target", receipt: `target=${target.id}; project=${target.projectId}; target=not-configured` });
         if (next.targets[target.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Target ${target.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Target identity", receipt: `target=${target.id}; exists=true; transition=not-applied` });
         next.targets[target.id] = target;
-        return success({ target }, `target=${target.id}; state=configured; providerAdapter=${target.adapterId}; qualification=not-performed`);
+        return success({ target }, `target=${target.id}; state=configured; providerAdapter=${target.adapterId}; qualification=not-performed; canonicalWrite=false`);
       }
       case "promotion.request": {
         const releaseId = requiredString(payload.releaseId, "releaseId");

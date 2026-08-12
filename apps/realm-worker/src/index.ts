@@ -402,6 +402,31 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", authority: authorityStateSummary(snapshot), session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; persistence=durable-object-storage; version=${snapshot.version}; credentialFree=true; canonicalWrite=landing-only` });
   }
 
+  private async authorityProject(body: CoordinatorRequestBody): Promise<Response> {
+    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const projectId = coordinatorString(body, "projectId");
+    const snapshot = await this.authoritySnapshot();
+    const project = snapshot.projects[projectId];
+    if (!project) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${projectId} is not available in this Realm.`, recoveryAction: "verify the Project identifier without probing undiscoverable resources", receipt: `project=${projectId}; operation=project.inspect; discoverable=false` });
+    const canonicalId = snapshot.canonicalByProject[projectId];
+    const canonicalRevision = canonicalId ? snapshot.projectRevisions[canonicalId] : undefined;
+    if (!canonicalRevision) throw new AuthorityPlaneError({ code: "indeterminate", message: `Project ${projectId} has no readable canonical Project Revision.`, recoveryAction: "reconcile the Authority snapshot before exposing the Project summary", receipt: `project=${projectId}; canonicalRevision=missing; operation=project.inspect` });
+    const sourceSpaces = project.sourceSpaceIds.map((sourceSpaceId) => snapshot.sourceSpaces[sourceSpaceId]).filter((sourceSpace): sourceSpace is NonNullable<typeof sourceSpace> => sourceSpace !== undefined);
+    const projectIds = (value: { projectId?: string } | undefined): boolean => value?.projectId === projectId;
+    const counts = {
+      workspaces: Object.values(snapshot.workspaces).filter(projectIds).length,
+      changes: Object.values(snapshot.changes).filter(projectIds).length,
+      revisions: Object.values(snapshot.changeRevisions).filter((revision) => snapshot.changes[revision.changeId]?.projectId === projectId).length,
+      runs: Object.values(snapshot.runs).filter((run) => snapshot.projectRevisions[run.projectRevisionId]?.projectId === projectId).length,
+      evidence: Object.values(snapshot.evidence).filter((evidence) => snapshot.projectRevisions[evidence.projectRevisionId]?.projectId === projectId).length,
+      artifacts: Object.values(snapshot.artifacts).filter((artifact) => snapshot.projectRevisions[artifact.projectRevisionId]?.projectId === projectId).length,
+      releases: Object.values(snapshot.releases).filter((release) => snapshot.projectRevisions[release.projectRevisionId]?.projectId === projectId).length,
+      targets: Object.values(snapshot.targets).filter(projectIds).length,
+      promotions: Object.values(snapshot.promotions).filter(projectIds).length,
+    };
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", project, canonicalRevision, sourceSpaces, counts, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=project.inspect; project=${projectId}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+  }
+
   private async authorityCommand(body: CoordinatorRequestBody): Promise<Response> {
     const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const command = coordinatorString(body, "command") as AuthorityCommandName;
@@ -470,6 +495,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       const identity = this.requireIdentity();
 
       if (url.pathname === "/authority/state/internal") return await this.authorityState(coordinatorString(body, "sessionId"));
+      if (url.pathname === "/authority/project/internal") return await this.authorityProject(body);
       if (url.pathname === "/authority/command/internal") return await this.authorityCommand(body);
 
       if (url.pathname === "/identity/passkey-challenge/issue") {

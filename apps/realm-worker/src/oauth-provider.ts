@@ -19,6 +19,7 @@ import {
   requestAnyamRealmCoordinator,
   handleAnyamRealmOwnerRequest,
 } from "./passkey-owner.ts";
+import { handleAnyamRealmMcpRequest } from "./mcp-handler.ts";
 
 export const ANYAM_REALM_OAUTH_PROTOCOL = "anyam.realm-oauth/v1" as const;
 export const ANYAM_REALM_OAUTH_RESOURCE_PATH = "/mcp" as const;
@@ -35,6 +36,10 @@ export type AnyamRealmOAuthProps = {
   readonly displayName: string;
   readonly realmId: string;
   readonly scopes: readonly string[];
+  /** Opaque kernel session used by the authenticated MCP handler to cross the
+   * Durable Object boundary. It is encrypted inside the provider grant and is
+   * never returned as credential material. */
+  readonly kernelSessionId?: string;
   readonly authorizationReceipt: string;
 };
 
@@ -259,9 +264,9 @@ async function authorizeRequest(request: Request, env: AnyamRealmOAuthEnv, adapt
           displayName: authorization.displayName,
           realmId: authorization.realmId,
           scopes: grantedScopes,
+          ...(authorization.props ?? {}),
           authorizationReceipt: authorization.authorizationReceipt,
           anyamGrantId: localGrantId,
-          ...(authorization.props ?? {}),
         } satisfies AnyamRealmOAuthProps & { anyamGrantId: string },
         revokeExistingGrants: false,
       });
@@ -307,23 +312,9 @@ async function authorizeRequest(request: Request, env: AnyamRealmOAuthEnv, adapt
   return oauthConsentPage({ consentId, csrfToken, clientName: client.clientName ?? client.clientId, requestedScopes: oauthRequest.scope, allowedScopes });
 }
 
-/**
- * This is intentionally an authenticated qualification handler, not the full
- * Anyam MCP tool surface. The OAuth provider owns bearer validation and
- * audience checks; Anyam still owns the operation-level capability policy.
- */
 export class AnyamRealmOAuthQualificationHandler extends WorkerEntrypoint<AnyamRealmOAuthEnv, AnyamRealmOAuthProps> {
-  override async fetch(): Promise<Response> {
-    return jsonResponse({
-      protocol: ANYAM_REALM_OAUTH_PROTOCOL,
-      status: "authenticated",
-      userId: this.ctx.props.userId,
-      displayName: this.ctx.props.displayName,
-      realmId: this.ctx.props.realmId,
-      scopes: this.ctx.props.scopes,
-      authorizationReceipt: this.ctx.props.authorizationReceipt,
-      receipt: "oauthProvider=validated; audience=validated; operationPolicy=next-boundary",
-    });
+  override async fetch(request: Request): Promise<Response> {
+    return handleAnyamRealmMcpRequest(request, this.env, this.ctx.props);
   }
 }
 

@@ -94,6 +94,7 @@ After an owner completes the passkey login ceremony, the public edge exposes:
 | `POST /api/evidence` | Record typed Evidence for one successful determinate Run through the Authority Coordinator |
 | `POST /api/artifacts` | Record one typed immutable Artifact bound to a Project/Change/Run lineage through the Authority Coordinator |
 | `POST /api/landings` | Request one typed single-Change Landing through the Authority Coordinator's compare-and-swap canonical boundary |
+| `POST /api/releases` | Create one typed immutable Release from the current canonical Project Revision, exact Artifacts, and passed Evidence |
 | `POST /api/owner/agent/delegations` | Owner-authenticated, resource-bounded Agent Task delegation for one active Project/Workspace/Change; no credentials are issued |
 | `POST /api/owner/agent/delegations/revoke` | Owner-authenticated revocation of one enrolled Agent and its delegated authority; the owner Session remains active |
 | `POST /api/owner/agent/delegations/credentials` | Explicit exchange of an exact delegated Agent Session/Task/Grant for short-lived `realm-api`, Git, and/or MCP credentials; token material appears only in this response |
@@ -249,6 +250,25 @@ Action, and Workspace relationships before recording the immutable Artifact.
 The response is a credential-free Artifact projection that omits output paths,
 provenance digests, actor/session data, and raw receipts; Artifact storage,
 Landing, Release creation, and Target Promotion remain separate.
+
+The owner-authenticated REST surface also exposes typed `POST /api/releases`.
+It requires the owner host session, one `Idempotency-Key` header, and a closed
+`release.create` JSON body containing the Project, current canonical Project
+Revision, non-empty Artifact and Evidence identifiers, and policy version. The
+Coordinator verifies that the Project Revision belongs to the Project and is
+still canonical, every Artifact and passed Evidence is bound to that exact
+revision, and an optional Change Revision belongs to the same lineage. A
+stale `expectedVersion`, idempotency reuse with a changed payload, missing
+lineage, or cross-Project reference fails before mutation.
+
+The response is a credential-free Release projection containing only the
+Release identity, Project and Project Revision lineage, Artifact/Evidence
+identifiers, policy version, status, and optional safe name/Change Revision.
+Configuration digests, state assumptions, provenance, actor/session metadata,
+and raw Coordinator receipts are omitted. Release creation has
+`canonicalWrite=false`; it does not transfer source, advance canonical state,
+configure a Target, or request Promotion. Agents do not receive a Release
+mutation on the MCP surface.
 
 The typed bootstrap mutations are the preferred REST entry point for starting
 work. Each route requires an owner host session, `POST`, a JSON object containing

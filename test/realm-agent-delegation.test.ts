@@ -165,6 +165,17 @@ test("revokes all delegated authority without revoking the human session", () =>
   assert.equal(freshHumanTask.status, "active");
 });
 
+test("expired delegated Grants reject explicit credential exchange without materializing a credential", () => {
+  const { realm, brokerSession, advance } = createRealm("realm:expired-credential");
+  const { grant: parentGrant } = createHumanParent(realm, brokerSession);
+  const agent = realm.registerAgent({ principalId: brokerSession.principalId, id: "agent:codex", name: "Codex", runtime: "codex-cli", modelProvider: "openai", allowedCredentialClasses: ["git", "mcp"] });
+  const delegated = realm.delegateAgent({ ...delegationInput(realm, parentGrant.id, agent.id), humanSessionId: brokerSession.id });
+
+  advance(11 * 60 * 1000);
+  assert.throws(() => realm.issueCredential({ class: "git", principalId: delegated.session.principalId, actorId: delegated.actor.actorId, clientId: delegated.session.clientId, sessionId: delegated.session.id, taskId: delegated.task.id, grantId: delegated.grant.id, resource: delegated.grant.resource }), (error: unknown) => error instanceof RealmIdentityError && error.code === "credential.grant_inactive");
+  assert.equal(Object.keys(realm.snapshot().credentials).length, 0);
+});
+
 test("parent Session revocation cascades to delegated agent Sessions, Tasks, Grants, and credentials", () => {
   const { realm, brokerSession } = createRealm("realm:revoke-parent");
   const { grant: parentGrant } = createHumanParent(realm, brokerSession);

@@ -495,6 +495,11 @@ type QualificationOperation = "delegate" | "credentials" | "revoke" | "recovery/
 
 type AgentDelegationOperation = "delegate" | "revoke";
 
+function credentialMaterialField(body: Record<string, unknown>): string | undefined {
+  const forbidden = ["token", "tokens", "credentials", "providerToken", "providerTokens", "accessToken", "refreshToken", "apiKey", "secret", "password"];
+  return Object.keys(body).find((key) => key !== "credentialClasses" && (forbidden.includes(key) || /(?:token|secret|password|api[_-]?key|credential)/iu.test(key)));
+}
+
 async function qualificationRequest(request: Request, env: AnyamRealmOAuthEnv, operation: QualificationOperation): Promise<Response> {
   const ownerState = await ownerKernelSession(request, env);
   if (ownerState instanceof Response) return ownerState;
@@ -536,6 +541,47 @@ async function agentDelegationRequest(request: Request, env: AnyamRealmOAuthEnv,
     const status = detail.includes("not_found") ? 404 : detail.includes("owner_denied") || detail.includes("agent_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : detail.includes("idempotency_conflict") || detail.includes("conflict") || detail.includes("exists") ? 409 : 422;
     const code = status === 404 ? "delegation_resource_not_found" : status === 403 ? "delegation_not_authorized" : status === 409 ? "delegation_conflict" : "delegation_rejected";
     return json({ code, recoveryAction: status === 404 ? "Verify the Project, Workspace, Change, and Source Space identifiers without probing hidden resources." : status === 403 ? "Re-authenticate the Realm owner and retry only an Agent owned by that Realm." : status === 409 ? "Reuse the active delegation or revoke it explicitly before requesting a different authority set." : "Inspect the coordinator receipt, correct the bounded delegation request, and retry; no credentials were issued.", receipt: `agentDelegation=${operation}; operation=not-accepted; credentialMaterialStored=false; canonicalWrite=false` }, status);
+  }
+}
+
+async function agentCredentialExchangeRequest(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
+  const ownerState = await ownerKernelSession(request, env);
+  if (ownerState instanceof Response) return ownerState;
+  let body: Record<string, unknown>;
+  try {
+    body = await readJson(request);
+  } catch {
+    return json({ code: "invalid_request", recoveryAction: "Send the exact Agent, Session, Task, Grant, Project, Workspace, Change, Source Space, and credentialClasses fields as one JSON object.", receipt: "credentialExchange=request=json-object-required; credentialMaterialStored=false" }, 422);
+  }
+  const forbiddenField = credentialMaterialField(body);
+  if (forbiddenField) return json({ code: "credential_exchange_material_rejected", recoveryAction: "Remove provider credentials and token material; request only the exact approved credential classes.", receipt: `field=${forbiddenField}; credentialExchange=not-created; credentialMaterialStored=false` }, 422);
+  try {
+    const coordinator = await realmCoordinatorRequest(env, "/identity/agent/delegation/credentials", { ...body, humanSessionId: ownerState.session.kernelSessionId });
+    if (coordinator.status !== "credentials-issued" || !Array.isArray(coordinator.credentials) || !coordinator.identity || typeof coordinator.identity !== "object" || (coordinator.identity as Record<string, unknown>).credentialFree !== true) throw new Error("credential_exchange_invalid_coordinator_response");
+    const credentials = coordinator.credentials.map((value) => {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("credential_exchange_invalid_credential_projection");
+      const credential = value as Record<string, unknown>;
+      if (typeof credential.id !== "string" || typeof credential.class !== "string" || typeof credential.audience !== "string" || typeof credential.token !== "string" || typeof credential.expiresAt !== "string") throw new Error("credential_exchange_invalid_credential_projection");
+      return { id: credential.id, class: credential.class, audience: credential.audience, token: credential.token, expiresAt: credential.expiresAt };
+    });
+    if (credentials.length === 0) throw new Error("credential_exchange_empty_response");
+    return json({
+      protocol: typeof coordinator.protocol === "string" ? coordinator.protocol : "anyam.realm-coordinator/v1",
+      status: coordinator.status,
+      agentId: body.agentId,
+      agentSessionId: body.agentSessionId,
+      taskId: body.taskId,
+      grantId: body.grantId,
+      resource: { realmId: realmId(env), projectId: body.projectId, workspaceId: body.workspaceId, changeId: body.changeId, sourceSpaceIds: body.sourceSpaceIds },
+      credentialClasses: credentials.map((credential) => credential.class),
+      credentials,
+      identity: coordinator.identity,
+      receipt: `${typeof coordinator.receipt === "string" ? coordinator.receipt : "credentialExchange=delegated-agent"}; ownerSession=validated; credentialMaterialStored=false`,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const status = detail.includes("not_found") ? 404 : detail.includes("session.") || detail.includes("session_") || detail.includes("owner_denied") ? 403 : 422;
+    return json({ code: status === 404 ? "credential_exchange_resource_not_found" : status === 403 ? "credential_exchange_not_authorized" : "credential_exchange_rejected", recoveryAction: status === 404 ? "Verify the exact Project, Workspace, Change, and Source Space identifiers without probing hidden resources." : status === 403 ? "Re-authenticate the Realm owner and retry the exact delegated Agent chain." : "Inspect the safe coordinator receipt, correct the exact delegation identifiers or audience, and retry; no credential was issued.", receipt: `credentialExchange=not-accepted; credentialMaterialStored=false; canonicalWrite=false` }, status);
   }
 }
 
@@ -798,6 +844,7 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
         oauthGrantRevoke: "/api/owner/oauth/grants/revoke",
         agentDelegation: "/api/owner/agent/delegations",
         agentDelegationRevoke: "/api/owner/agent/delegations/revoke",
+        agentCredentialExchange: "/api/owner/agent/delegations/credentials",
         qualificationDelegate: "/api/owner/qualification/delegate",
         qualificationCredentials: "/api/owner/qualification/credentials",
         qualificationRevoke: "/api/owner/qualification/revoke",
@@ -822,6 +869,7 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
     if (url.pathname === "/api/owner/oauth/grants/revoke" && request.method === "POST") return await revokeOAuthGrant(request, env);
     if (url.pathname === "/api/owner/agent/delegations" && request.method === "POST") return await agentDelegationRequest(request, env, "delegate");
     if (url.pathname === "/api/owner/agent/delegations/revoke" && request.method === "POST") return await agentDelegationRequest(request, env, "revoke");
+    if (url.pathname === "/api/owner/agent/delegations/credentials" && request.method === "POST") return await agentCredentialExchangeRequest(request, env);
     if (url.pathname === "/api/owner/qualification/delegate" && request.method === "POST") return await qualificationRequest(request, env, "delegate");
     if (url.pathname === "/api/owner/qualification/credentials" && request.method === "POST") return await qualificationRequest(request, env, "credentials");
     if (url.pathname === "/api/owner/qualification/revoke" && request.method === "POST") return await qualificationRequest(request, env, "revoke");

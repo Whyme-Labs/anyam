@@ -121,3 +121,26 @@ budget, or expiry is rejected as an idempotency conflict. Responses contain no
 credential values, provider credentials, source objects, or canonical-write
 authority. Git/MCP/Realm API credential exchange and MCP mutation tools remain
 separate follow-up boundaries.
+
+## Explicit generic credential exchange
+
+The generic delegation now has a separate owner-authenticated exchange route:
+
+- `POST /api/owner/agent/delegations/credentials` requires the exact Agent,
+  Agent Session, Task, Grant, Project, Workspace, Change, and mounted Source
+  Space set returned by delegation.
+- The Coordinator rechecks the owner relationship, human-to-Agent session and
+  parent Grant chain, active Task/Grant state, exact resource identity, and
+  Source Space equality before calling `RealmIdentityPolicy.issueCredential`.
+- Requested classes must be a non-empty subset of both the enrolled Agent and
+  delegated Grant audiences. The current generic boundary permits only
+  `realm-api`, `git`, and `mcp`; deployment, runner, integration, and promotion
+  audiences remain separate authority.
+- Token material is returned only in the explicit exchange response. The
+  persisted Realm snapshot stores only credential digests and the audit event
+  records `tokenStored=false`; generic delegation and error receipts remain
+  credential-free. Provider tokens are rejected rather than forwarded.
+
+Git and MCP credentials are separate audience credentials. An MCP credential
+authorizes the already-qualified MCP resource boundary; it does not itself add
+mutation tools or canonical-write authority.

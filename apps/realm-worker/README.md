@@ -88,6 +88,7 @@ After an owner completes the passkey login ceremony, the public edge exposes:
 | `GET /api/workspaces/{workspaceId}` | Read one Workspace summary through the Authority Coordinator |
 | `POST /api/owner/agent/delegations` | Owner-authenticated, resource-bounded Agent Task delegation for one active Project/Workspace/Change; no credentials are issued |
 | `POST /api/owner/agent/delegations/revoke` | Owner-authenticated revocation of one enrolled Agent and its delegated authority; the owner Session remains active |
+| `POST /api/owner/agent/delegations/credentials` | Explicit exchange of an exact delegated Agent Session/Task/Grant for short-lived `realm-api`, Git, and/or MCP credentials; token material appears only in this response |
 
 `GET /api/projects` and `GET /api/projects/{projectId}` are owner-authenticated,
 read-only surfaces. The list is sorted by Project identifier using code-unit
@@ -161,6 +162,16 @@ expose MCP mutation tools, source objects, provider credentials, landing, or
 promotion authority. Revocation closes delegated authority without revoking
 the human owner Session.
 
+The explicit credential exchange is `POST /api/owner/agent/delegations/credentials`.
+It requires the exact identifiers and Project/Workspace/Change/Source Space set
+returned by delegation, revalidates the owner-to-Agent Session/Task/Grant chain,
+and accepts only credential classes approved by both the enrolled Agent and the
+delegated Grant. It calls the Realm identity kernel for issuance, so credentials
+are audience-bound and short-lived; token material is returned only by this
+explicit endpoint, while the durable snapshot, audit receipts, and delegation
+responses remain credential-free. Git and MCP credentials are separate
+audiences, and receiving an MCP credential does not grant MCP mutation authority.
+
 The command envelope is:
 
 ```json
@@ -222,6 +233,7 @@ The Worker exposes a customer-owned WebAuthn adapter boundary:
 | `POST /api/owner/session/revoke` | Revokes the current opaque owner session and expires its cookie |
 | `POST /api/owner/agent/delegations` | Creates or reuses one owner-authenticated, non-promotional Agent Task delegation for a real Project/Workspace/Change; credentials are not issued implicitly |
 | `POST /api/owner/agent/delegations/revoke` | Revokes one owner-owned Agent and closes its delegated authority without revoking the owner Session |
+| `POST /api/owner/agent/delegations/credentials` | Explicitly exchanges the exact generic delegation for short-lived, audience-bound `realm-api`, Git, and/or MCP credentials; provider, deployment, runner, and promotion credentials are rejected |
 | `POST /api/owner/qualification/delegate` | Owner-session-protected qualification delegation for an isolated agent Workspace; credentials are not issued implicitly |
 | `POST /api/owner/qualification/credentials` | Explicitly exchanges the exact delegated agent Session/Task/Grant for short-lived Git and/or MCP credentials |
 | `POST /api/owner/qualification/revoke` | Revokes the qualification agent, delegated Sessions, Tasks, Grants, credentials, and Workspace task |

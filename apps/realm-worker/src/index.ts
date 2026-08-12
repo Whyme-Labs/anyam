@@ -183,6 +183,20 @@ function delegationCredentialClasses(body: CoordinatorRequestBody): CredentialCl
   return [...new Set(values)];
 }
 
+function credentialExchangeClasses(body: CoordinatorRequestBody): CredentialClass[] {
+  const values = coordinatorStringArray(body, "credentialClasses") as CredentialClass[];
+  const allowed = new Set(GENERIC_AGENT_CREDENTIAL_CLASSES);
+  const unsupported = values.find((value) => !allowed.has(value));
+  if (unsupported) throw new RealmIdentityError({ code: "credential_exchange.class_denied", message: `The explicit exchange cannot issue the ${unsupported} credential audience.`, recoveryAction: "request only realm-api, git, or mcp classes already approved by the Agent and delegated Grant", receipt: `credentialClass=${unsupported}; credentialExchange=not-created; credentialMaterialStored=false` });
+  return [...new Set(values)];
+}
+
+function rejectCredentialMaterial(body: CoordinatorRequestBody): void {
+  const forbidden = ["token", "tokens", "credentials", "providerToken", "providerTokens", "accessToken", "refreshToken", "apiKey", "secret", "password"] as const;
+  const field = Object.keys(body).find((key) => key !== "credentialClasses" && (forbidden.includes(key as typeof forbidden[number]) || /(?:token|secret|password|api[_-]?key|credential)/iu.test(key)));
+  if (field) throw new RealmIdentityError({ code: "credential_exchange.material_rejected", message: "Credential exchange accepts credential classes, not provider credentials or token material.", recoveryAction: "remove token or provider-credential fields and request only the exact approved credential classes", receipt: `field=${field}; credentialMaterial=not-accepted; credentialExchange=not-created` });
+}
+
 function delegationBudget(body: CoordinatorRequestBody): Record<string, string | number> {
   const value = body.budget;
   if (value === undefined) return {};
@@ -487,6 +501,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       credentialClasses: [...grant.allowedCredentialClasses],
       credentials: "not-issued",
       credentialExchange: "explicit-later",
+      credentialExchangePath: "/api/owner/agent/delegations/credentials",
       canonicalWrite: false,
       credentialMaterialStored: false,
       receipt: `kernelMembership=verified; delegation=${input.status}; project=${grant.resource.projectId ?? "missing"}; workspace=${grant.resource.workspaceId ?? "missing"}; change=${grant.resource.changeId ?? "missing"}; credentials=not-issued; exchange=explicit; canonicalWrite=false; credentialMaterialStored=false`,
@@ -987,6 +1002,93 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
             const usableParentGrant = parentGrant ?? next.createCapabilityGrant({ principalId: humanSession.principalId, actorId: humanSession.actorId, clientId: humanSession.clientId, sessionId: humanSession.id, taskId: task.id, resource: bounded.resource, sourceSpaceIds: bounded.sourceSpaceIds, actions: parentActions, effects, allowedModelProviders: [modelProvider], allowedCredentialClasses, budget, expiresAt });
             const delegated = next.delegateAgent({ humanSessionId: humanSession.id, parentGrantId: usableParentGrant.id, agentId: agent!.id, purpose, resource: bounded.resource, sourceSpaceIds: bounded.sourceSpaceIds, actions, effects, allowedCredentialClasses, budget, expiresAt, workspaceId: bounded.workspaceId, changeId: bounded.changeId, consentAt: new Date().toISOString() });
             return coordinatorJson({ ...this.safeDelegation(next, { agentId: agent!.id, sessionId: delegated.session.id, taskId: delegated.task.id, grantId: delegated.grant.id, status: "delegated" }), identity: identitySummary(next) });
+          });
+        });
+      }
+
+      if (url.pathname === "/identity/agent/delegation/credentials") {
+        const humanSessionId = coordinatorString(body, "humanSessionId");
+        const agentId = coordinatorString(body, "agentId");
+        const agentSessionId = coordinatorString(body, "agentSessionId");
+        const taskId = coordinatorString(body, "taskId");
+        const grantId = coordinatorString(body, "grantId");
+        rejectCredentialMaterial(body);
+        const classes = credentialExchangeClasses(body);
+        return await this.ctx.blockConcurrencyWhile(async () => {
+          const authority = await this.authoritySnapshot();
+          const bounded = this.delegationAuthority(body, authority);
+          return await this.transitionIdentity((next) => {
+            const humanSession = next.validateSession(humanSessionId);
+            const identityState = next.getRecoverySnapshot();
+            const ownerRelationship = Object.values(identityState.relationships).some((relationship) => relationship.status === "active" && relationship.role === "owner" && relationship.principalId === humanSession.principalId && relationship.resource.realmId === identityState.realm.id);
+            const agent = identityState.agents[agentId];
+            const agentSession = next.validateSession(agentSessionId);
+            const state = next.getRecoverySnapshot();
+            const task = state.tasks[taskId];
+            const grant = state.grants[grantId];
+            const parentGrant = grant?.parentGrantId ? state.grants[grant.parentGrantId] : undefined;
+            const parentTask = parentGrant ? state.tasks[parentGrant.taskId] : undefined;
+            const sameList = (left: readonly string[], right: readonly string[]): boolean => left.length === right.length && left.every((value) => right.includes(value));
+            const sameResource = (left: Record<string, unknown>, right: Record<string, unknown>): boolean => ["realmId", "organizationId", "projectId", "sourceSpaceId", "workspaceId", "changeId", "runId", "releaseId", "targetId"].every((key) => (left[key] ?? undefined) === (right[key] ?? undefined));
+            const grantResource = grant ? grant.resource as Record<string, unknown> : {};
+            const exactResource = sameResource(grantResource, bounded.resource as Record<string, unknown>);
+            const exactChain = ownerRelationship
+              && agent !== undefined
+              && agent.principalId === humanSession.principalId
+              && agent.status === "active"
+              && agentSession.actorKind === "agent"
+              && agentSession.agentId === agentId
+              && agentSession.principalId === humanSession.principalId
+              && agentSession.clientId === agent.clientId
+              && agentSession.delegatedByActorId === humanSession.actorId
+              && agentSession.delegatedBySessionId === humanSession.id
+              && task !== undefined
+              && task.status === "active"
+              && task.principalId === humanSession.principalId
+              && task.actorId === agentSession.actorId
+              && task.sessionId === agentSession.id
+              && task.agentId === agentId
+              && task.workspaceId === bounded.workspaceId
+              && task.changeId === bounded.changeId
+              && grant !== undefined
+              && grant.status === "active"
+              && grant.principalId === humanSession.principalId
+              && grant.actorId === agentSession.actorId
+              && grant.clientId === agent.clientId
+              && grant.sessionId === agentSession.id
+              && grant.taskId === task.id
+              && grant.agentId === agentId
+              && sameList(grant.sourceSpaceIds, bounded.sourceSpaceIds)
+              && exactResource
+              && parentGrant !== undefined
+              && parentGrant.status === "active"
+              && parentGrant.principalId === humanSession.principalId
+              && parentGrant.actorId === humanSession.actorId
+              && parentGrant.clientId === humanSession.clientId
+              && parentGrant.sessionId === humanSession.id
+              && parentTask !== undefined
+              && parentTask.status === "active"
+              && parentTask.principalId === humanSession.principalId
+              && parentTask.actorId === humanSession.actorId
+              && parentTask.sessionId === humanSession.id;
+            if (!exactChain) throw new RealmIdentityError({ code: "credential_exchange.chain_invalid", message: "Credential exchange requires the exact active owner-to-Agent Session, Task, Grant, Project, Workspace, Change, and Source Space chain returned by delegation.", recoveryAction: "reuse the exact delegation identifiers and resource without changing the audience or scope; no credential was issued", receipt: "credentialExchange=delegated-chain-required; transition=not-applied; credentialMaterialStored=false" });
+            const approvedByAgent = classes.every((credentialClass) => agent.allowedCredentialClasses.includes(credentialClass));
+            const approvedByGrant = classes.every((credentialClass) => grant.allowedCredentialClasses.includes(credentialClass));
+            if (!approvedByAgent || !approvedByGrant) throw new RealmIdentityError({ code: "credential_exchange.audience_denied", message: "The requested credential audience is not approved by both the enrolled Agent and its delegated Grant.", recoveryAction: "request only the exact credential classes returned by delegation; provider, runner, deployment, and promotion audiences are separate authority", receipt: `agentAudience=${approvedByAgent}; grantAudience=${approvedByGrant}; credentialExchange=not-created; credentialMaterialStored=false` });
+            const credentials = classes.map((credentialClass) => next.issueCredential({ class: credentialClass, principalId: humanSession.principalId, actorId: agentSession.actorId, clientId: agentSession.clientId, sessionId: agentSession.id, taskId: task.id, grantId: grant.id, resource: bounded.resource }));
+            return coordinatorJson({
+              protocol: REALM_COORDINATOR_PROTOCOL,
+              status: "credentials-issued",
+              agentId,
+              agentSessionId,
+              taskId,
+              grantId,
+              resource: { ...bounded.resource, sourceSpaceIds: [...bounded.sourceSpaceIds] },
+              credentialClasses: classes,
+              credentials: credentials.map((credential) => ({ id: credential.id, class: credential.class, audience: credential.audience, token: credential.token, expiresAt: credential.expiresAt })),
+              identity: identitySummary(next),
+              receipt: `kernelMembership=verified; credentialExchange=delegated-agent; classes=${classes.join(",")}; project=${bounded.projectId}; workspace=${bounded.workspaceId}; change=${bounded.changeId}; tokenMaterial=returned-explicitly; credentialMaterialStored=false; canonicalWrite=false`,
+            });
           });
         });
       }

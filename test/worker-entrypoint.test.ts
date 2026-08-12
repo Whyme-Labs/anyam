@@ -554,6 +554,7 @@ test("Realm Worker owner delegation edge keeps task authority bounded and creden
   const kernelSessionId = "session:agent-delegation";
   const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
   let delegationCount = 0;
+  let delegationRevoked = false;
   const namespace = {
     idFromName: (_name: string): string => "agent-delegation-do",
     get: (_id: string) => ({
@@ -583,7 +584,28 @@ test("Realm Worker owner delegation edge keeps task authority bounded and creden
             receipt: `delegation=${status}; credentials=not-issued; canonicalWrite=false; credentialMaterialStored=false`,
           }), { status: 200, headers: { "content-type": "application/json" } });
         }
-        if (path === "/identity/agent/delegation/revoke") return new Response(JSON.stringify({ protocol: "anyam.realm-coordinator/v1", status: "delegation-revoked", agentId: body.agentId, revokedSessionCount: 1, revokedGrantCount: 1, revokedCredentialCount: 0, canonicalWrite: false, credentialMaterialStored: false, receipt: "agent=agent:codex; status=revoked; humanSessionUntouched=true; credentialMaterialStored=false" }), { status: 200, headers: { "content-type": "application/json" } });
+        if (path === "/identity/agent/delegation/credentials") {
+          if (delegationRevoked || body.agentSessionId === "session:expired") return new Response(JSON.stringify({ code: "credential_exchange.chain_invalid", receipt: "credentialExchange=delegated-chain-required; credentialMaterialStored=false" }), { status: 422 });
+          if (body.workspaceId === "workspace:wrong") return new Response(JSON.stringify({ code: "credential_exchange.chain_invalid", receipt: "resource=exact-match-required; credentialExchange=not-created" }), { status: 422 });
+          if (Array.isArray(body.credentialClasses) && body.credentialClasses.includes("promotion")) return new Response(JSON.stringify({ code: "credential_exchange.audience_denied", receipt: "credentialExchange=not-created; credentialMaterialStored=false" }), { status: 422 });
+          return new Response(JSON.stringify({
+            protocol: "anyam.realm-coordinator/v1",
+            status: "credentials-issued",
+            agentId: body.agentId,
+            agentSessionId: body.agentSessionId,
+            taskId: body.taskId,
+            grantId: body.grantId,
+            resource: { realmId: "realm:agent-delegation", projectId: body.projectId, workspaceId: body.workspaceId, changeId: body.changeId, sourceSpaceIds: body.sourceSpaceIds },
+            credentialClasses: body.credentialClasses,
+            credentials: [{ id: "credential:explicit-git", class: "git", audience: "aud:anyam:git", token: "opaque-git-token", expiresAt: "2026-08-12T13:00:00.000Z" }],
+            identity: { credentialFree: true },
+            receipt: "credentialExchange=delegated-agent; tokenMaterial=returned-explicitly; credentialMaterialStored=false; canonicalWrite=false",
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (path === "/identity/agent/delegation/revoke") {
+          delegationRevoked = true;
+          return new Response(JSON.stringify({ protocol: "anyam.realm-coordinator/v1", status: "delegation-revoked", agentId: body.agentId, revokedSessionCount: 1, revokedGrantCount: 1, revokedCredentialCount: 0, canonicalWrite: false, credentialMaterialStored: false, receipt: "agent=agent:codex; status=revoked; humanSessionUntouched=true; credentialMaterialStored=false" }), { status: 200, headers: { "content-type": "application/json" } });
+        }
         return new Response(JSON.stringify({ code: "not_found" }), { status: 404 });
       },
     }),
@@ -647,6 +669,37 @@ test("Realm Worker owner delegation edge keeps task authority bounded and creden
   assert.equal(repeated.status, 200);
   assert.equal((await repeated.json() as Record<string, unknown>).status, "already-delegated");
 
+  const exchangeBody = { agentId: "agent:codex", agentSessionId: "session:agent-child", taskId: "task:agent-child", grantId: "grant:agent-child", projectId: requestBody.projectId, workspaceId: requestBody.workspaceId, changeId: requestBody.changeId, sourceSpaceIds: requestBody.sourceSpaceIds, credentialClasses: ["git"] };
+  const exchange = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/agent/delegations/credentials", { method: "POST", headers: { ...cookie, "content-type": "application/json" }, body: JSON.stringify(exchangeBody) }), env);
+  assert.ok(exchange);
+  assert.equal(exchange.status, 200);
+  const exchangeBodyResult = await exchange.json() as Record<string, unknown>;
+  assert.equal(exchangeBodyResult.status, "credentials-issued");
+  assert.equal((exchangeBodyResult.credentials as Array<Record<string, unknown>>)[0]?.token, "opaque-git-token");
+  assert.equal((exchangeBodyResult.identity as Record<string, unknown>).credentialFree, true);
+  assert.equal(String(exchangeBodyResult.receipt).includes("tokenMaterial=returned-explicitly"), true);
+  assert.equal(Object.prototype.hasOwnProperty.call(calls.at(-1)?.body ?? {}, "token"), false);
+
+  const wrongResource = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/agent/delegations/credentials", { method: "POST", headers: { ...cookie, "content-type": "application/json" }, body: JSON.stringify({ ...exchangeBody, workspaceId: "workspace:wrong" }) }), env);
+  assert.ok(wrongResource);
+  assert.equal(wrongResource.status, 422);
+  assert.equal((await wrongResource.json() as Record<string, unknown>).code, "credential_exchange_rejected");
+
+  const deniedAudience = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/agent/delegations/credentials", { method: "POST", headers: { ...cookie, "content-type": "application/json" }, body: JSON.stringify({ ...exchangeBody, credentialClasses: ["promotion"] }) }), env);
+  assert.ok(deniedAudience);
+  assert.equal(deniedAudience.status, 422);
+  assert.equal((await deniedAudience.json() as Record<string, unknown>).code, "credential_exchange_rejected");
+
+  const expired = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/agent/delegations/credentials", { method: "POST", headers: { ...cookie, "content-type": "application/json" }, body: JSON.stringify({ ...exchangeBody, agentSessionId: "session:expired" }) }), env);
+  assert.ok(expired);
+  assert.equal(expired.status, 422);
+  assert.equal((await expired.json() as Record<string, unknown>).code, "credential_exchange_rejected");
+
+  const providerMaterial = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/agent/delegations/credentials", { method: "POST", headers: { ...cookie, "content-type": "application/json" }, body: JSON.stringify({ ...exchangeBody, providerToken: "must-not-forward" }) }), env);
+  assert.ok(providerMaterial);
+  assert.equal(providerMaterial.status, 422);
+  assert.equal((await providerMaterial.json() as Record<string, unknown>).code, "credential_exchange_material_rejected");
+
   const hidden = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/agent/delegations", { method: "POST", headers: { ...cookie, "content-type": "application/json" }, body: JSON.stringify({ ...requestBody, projectId: "project:hidden" }) }), env);
   assert.ok(hidden);
   assert.equal(hidden.status, 404);
@@ -664,4 +717,9 @@ test("Realm Worker owner delegation edge keeps task authority bounded and creden
   assert.equal(revokedBody.status, "delegation-revoked");
   assert.equal(revokedBody.canonicalWrite, false);
   assert.match(String(revokedBody.receipt), /humanSessionUntouched=true/);
+
+  const afterRevoke = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/agent/delegations/credentials", { method: "POST", headers: { ...cookie, "content-type": "application/json" }, body: JSON.stringify(exchangeBody) }), env);
+  assert.ok(afterRevoke);
+  assert.equal(afterRevoke.status, 422);
+  assert.equal((await afterRevoke.json() as Record<string, unknown>).code, "credential_exchange_rejected");
 });

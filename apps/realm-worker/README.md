@@ -84,6 +84,8 @@ After an owner completes the passkey login ceremony, the public edge exposes:
 | `GET /api/projects/{projectId}` | Read one project-scoped summary through the Authority Coordinator |
 | `GET /api/changes` | Discover owner-visible Change summaries through the Authority Coordinator |
 | `GET /api/changes/{changeId}` | Read one Change and its immutable Revision summaries through the Authority Coordinator |
+| `GET /api/workspaces` | Discover owner-visible Workspace summaries through the Authority Coordinator |
+| `GET /api/workspaces/{workspaceId}` | Read one Workspace summary through the Authority Coordinator |
 
 `GET /api/projects` and `GET /api/projects/{projectId}` are owner-authenticated,
 read-only surfaces. The list is sorted by Project identifier using code-unit
@@ -126,6 +128,15 @@ safe Change identifier, reject malformed or duplicate filters, preserve the
 Coordinator's deterministic ordering, and return only the safe Change and
 Revision summaries. They do not create Changes, publish Revisions, transfer
 source, issue task grants, land, or promote anything.
+
+The owner-authenticated REST surface also exposes the qualified Workspace
+summary at `GET /api/workspaces` and `GET /api/workspaces/{workspaceId}`. The
+list accepts one optional `projectId` filter; the item route may use the same
+filter to assert scope. Both routes decode one safe Workspace identifier,
+reject malformed or duplicate/unsupported filters, preserve Coordinator
+ordering, and return only Project identity, immutable revision/view identities,
+state, optional Change link, and mount count. They do not create Workspaces,
+issue task grants, transfer source, or mutate canonical state.
 
 The command envelope is:
 

@@ -5,7 +5,8 @@ This note records the private-alpha boundary implemented for [Wayfinder ticket
 158](https://github.com/Whyme-Labs/anyam/issues/158), and [ticket
 159](https://github.com/Whyme-Labs/anyam/issues/159), [ticket
 160](https://github.com/Whyme-Labs/anyam/issues/160), and [ticket
-161](https://github.com/Whyme-Labs/anyam/issues/161).
+161](https://github.com/Whyme-Labs/anyam/issues/161), and [ticket
+162](https://github.com/Whyme-Labs/anyam/issues/162).
 
 ## Qualified surface
 
@@ -58,6 +59,15 @@ safe path identifier, rejects duplicate/unsupported/malformed filters, and
 does not assemble state from the Durable Object. The response contract and
 safe-field exclusions match the MCP Change summaries.
 
+The owner-authenticated REST routes `GET /api/workspaces` and
+`GET /api/workspaces/{workspaceId}` reuse the Coordinator Workspace query
+boundary. Discovery accepts one optional `projectId` filter; inspection accepts
+the same filter to assert scope. The edge decodes one safe path identifier,
+rejects duplicate/unsupported/malformed filters, and returns only Project
+identity, immutable revision/view identities, state, optional Change link, and
+mount count. Mount paths, source snapshots, source objects, actor identity,
+sessions, and credentials remain excluded.
+
 ## Deliberate non-capabilities
 
 The surface does not transfer Git objects, issue task grants, expose secret
@@ -80,9 +90,10 @@ notification acknowledgement. It also covers Change discovery/inspection,
 Revision sequence ordering, Project/Workspace filtering, and safe omission of
 source snapshots and actor identity. `test/worker-entrypoint.test.ts` covers
 the binding-shaped Coordinator Workspace and Change list/inspect responses,
-owner-authenticated REST Project and Change reads, malformed paths/filters,
-method errors, hidden resources, and confirms that mounts, source snapshots,
-actor identity, and credentials are not returned by the safe summaries.
+owner-authenticated REST Project, Workspace, and Change reads, malformed
+paths/filters, method errors, hidden resources, and confirms that mounts, source
+snapshots, actor identity, and credentials are not returned by the safe
+summaries.
 
 This is a read-surface qualification, not a claim that the full remote MCP,
 REST, task-grant mutation API, web console, or production-scale service is

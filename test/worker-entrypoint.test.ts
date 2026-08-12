@@ -302,6 +302,27 @@ test("Realm Worker exposes an authenticated project-scoped REST read through the
           const filtered = changes.filter((entry) => (body.projectId === undefined || entry.change.projectId === body.projectId) && (body.workspaceId === undefined || entry.change.workspaceId === body.workspaceId));
           return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", changes: filtered.map(({ revisions, ...summary }) => summary), receipt: `authority=coordinator; operation=change.list; changeCount=${filtered.length}; ordering=change-id-code-unit-ascending; readOnly=true; credentialFree=true; canonicalWrite=false` }), { status: 200, headers: { "content-type": "application/json" } });
         }
+        if (path === "/authority/workspaces/internal") {
+          const workspaces = [
+            {
+              workspace: { protocol: "anyam.workspace/v1", id: "workspace:alpha", projectId: "project:alpha", projectRevisionId: "project-revision:alpha:1", projectViewId: "project-view:alpha:1", state: "active" },
+              project: { protocol: "anyam.project/v1", id: "project:alpha", name: "Alpha", referenceType: "git" },
+              mountCount: 1,
+            },
+            {
+              workspace: { protocol: "anyam.workspace/v1", id: "workspace:video-player", projectId: "project:video-player", projectRevisionId: "project-revision:video-player:1", projectViewId: "project-view:video-player:1", state: "active", changeId: "change:video-player" },
+              project: { protocol: "anyam.project/v1", id: "project:video-player", name: "Video Player", referenceType: "git" },
+              mountCount: 1,
+            },
+          ];
+          if (body.workspaceId !== undefined) {
+            const found = workspaces.find((entry) => entry.workspace.id === body.workspaceId);
+            if (!found || (body.projectId !== undefined && found.workspace.projectId !== body.projectId)) return new Response(JSON.stringify({ code: "not_found", receipt: "workspace=hidden; discoverable=false" }), { status: 404 });
+            return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", ...found, receipt: `authority=coordinator; operation=workspace.inspect; workspace=${found.workspace.id}; readOnly=true; credentialFree=true; canonicalWrite=false` }), { status: 200, headers: { "content-type": "application/json" } });
+          }
+          const filtered = workspaces.filter((entry) => body.projectId === undefined || entry.workspace.projectId === body.projectId);
+          return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", workspaces: filtered, receipt: `authority=coordinator; operation=workspace.list; workspaceCount=${filtered.length}; ordering=workspace-id-code-unit-ascending; readOnly=true; credentialFree=true; canonicalWrite=false` }), { status: 200, headers: { "content-type": "application/json" } });
+        }
         if (body.projectId !== "project:video-player") return new Response(JSON.stringify({ code: "not_found", receipt: `project=${String(body.projectId)}; discoverable=false` }), { status: 404 });
         return new Response(JSON.stringify({
           protocol: "anyam.authority-plane/v1",
@@ -464,4 +485,64 @@ test("Realm Worker exposes an authenticated project-scoped REST read through the
   assert.ok(unsupportedChange);
   assert.equal(unsupportedChange.status, 405);
   assert.equal((await unsupportedChange.json() as Record<string, unknown>).code, "method_not_allowed");
+
+  const callsBeforeUnauthenticatedWorkspaceList = calls.length;
+  const unauthenticatedWorkspaceList = await handleAuthorityRequest(new Request("https://realm.example/api/workspaces"), env);
+  assert.ok(unauthenticatedWorkspaceList);
+  assert.equal(unauthenticatedWorkspaceList.status, 401);
+  assert.equal((await unauthenticatedWorkspaceList.json() as Record<string, unknown>).code, "owner_authentication_required");
+  assert.equal(calls.length, callsBeforeUnauthenticatedWorkspaceList);
+
+  const workspaceListResponse = await handleAuthorityRequest(new Request("https://realm.example/api/workspaces?projectId=project%3Avideo-player", { headers: cookie }), env);
+  assert.ok(workspaceListResponse);
+  assert.equal(workspaceListResponse.status, 200);
+  const workspaceListBody = await workspaceListResponse.json() as Record<string, unknown>;
+  assert.deepEqual((workspaceListBody.workspaces as Array<Record<string, unknown>>).map((entry) => (entry.workspace as Record<string, unknown>).id), ["workspace:video-player"]);
+  assert.match(String(workspaceListBody.receipt), /ordering=workspace-id-code-unit-ascending/);
+  assert.equal(JSON.stringify(workspaceListBody).includes("mounts"), false);
+  assert.equal(JSON.stringify(workspaceListBody).includes("kernel-session"), false);
+  assert.equal(JSON.stringify(workspaceListBody).includes("credential:project-read-test"), false);
+  assert.deepEqual(calls.at(-1), { path: "/authority/workspaces/internal", body: { sessionId: ownerSessionId, projectId: "project:video-player" } });
+
+  const workspaceInspectResponse = await handleAuthorityRequest(new Request("https://realm.example/api/workspaces/workspace%3Avideo-player?projectId=project%3Avideo-player", { headers: cookie }), env);
+  assert.ok(workspaceInspectResponse);
+  assert.equal(workspaceInspectResponse.status, 200);
+  const workspaceInspectBody = await workspaceInspectResponse.json() as Record<string, unknown>;
+  assert.equal((workspaceInspectBody.workspace as Record<string, unknown>).id, "workspace:video-player");
+  assert.equal((workspaceInspectBody.workspace as Record<string, unknown>).mounts, undefined);
+  assert.equal(JSON.stringify(workspaceInspectBody).includes("sourceSpaceSnapshots"), false);
+  assert.equal(JSON.stringify(workspaceInspectBody).includes("credential:"), false);
+  assert.deepEqual(calls.at(-1), { path: "/authority/workspaces/internal", body: { sessionId: ownerSessionId, workspaceId: "workspace:video-player", projectId: "project:video-player" } });
+
+  const hiddenWorkspace = await handleAuthorityRequest(new Request("https://realm.example/api/workspaces/workspace%3Aprivate", { headers: cookie }), env);
+  assert.ok(hiddenWorkspace);
+  assert.equal(hiddenWorkspace.status, 404);
+  const hiddenWorkspaceBody = await hiddenWorkspace.json() as Record<string, unknown>;
+  assert.equal(hiddenWorkspaceBody.code, "workspace_not_found");
+  assert.equal(JSON.stringify(hiddenWorkspaceBody).includes("workspace:private"), false);
+
+  const malformedWorkspacePath = await handleAuthorityRequest(new Request("https://realm.example/api/workspaces/%E0%A4%A", { headers: cookie }), env);
+  assert.ok(malformedWorkspacePath);
+  assert.equal(malformedWorkspacePath.status, 400);
+  assert.equal((await malformedWorkspacePath.json() as Record<string, unknown>).code, "invalid_workspace_path");
+
+  const extraWorkspacePath = await handleAuthorityRequest(new Request("https://realm.example/api/workspaces/workspace%3Avideo-player/mounts", { headers: cookie }), env);
+  assert.ok(extraWorkspacePath);
+  assert.equal(extraWorkspacePath.status, 400);
+  assert.equal((await extraWorkspacePath.json() as Record<string, unknown>).code, "invalid_workspace_path");
+
+  const malformedWorkspaceQuery = await handleAuthorityRequest(new Request("https://realm.example/api/workspaces?projectId=project%3Avideo-player&projectId=project%3Aalpha", { headers: cookie }), env);
+  assert.ok(malformedWorkspaceQuery);
+  assert.equal(malformedWorkspaceQuery.status, 400);
+  assert.equal((await malformedWorkspaceQuery.json() as Record<string, unknown>).code, "invalid_workspace_query");
+
+  const unsupportedWorkspaceQuery = await handleAuthorityRequest(new Request("https://realm.example/api/workspaces?workspaceId=workspace%3Avideo-player", { headers: cookie }), env);
+  assert.ok(unsupportedWorkspaceQuery);
+  assert.equal(unsupportedWorkspaceQuery.status, 400);
+  assert.equal((await unsupportedWorkspaceQuery.json() as Record<string, unknown>).code, "invalid_workspace_query");
+
+  const unsupportedWorkspace = await handleAuthorityRequest(new Request("https://realm.example/api/workspaces/workspace%3Avideo-player", { method: "POST", headers: cookie }), env);
+  assert.ok(unsupportedWorkspace);
+  assert.equal(unsupportedWorkspace.status, 405);
+  assert.equal((await unsupportedWorkspace.json() as Record<string, unknown>).code, "method_not_allowed");
 });

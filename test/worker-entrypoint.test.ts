@@ -5,7 +5,7 @@ import providerTarget from "../apps/provider-qualification-target/src/index.ts";
 import replayArchiveWorker, { type Env as ReplayArchiveEnv } from "../apps/replay-archive-workload-qualification/src/index.ts";
 import { handleAuthorityRequest } from "../apps/realm-worker/src/authority-edge.ts";
 import { handleAnyamRealmOwnerRequest } from "../apps/realm-worker/src/passkey-owner.ts";
-import { AUTHORITY_COMMAND_PROTOCOL, AuthorityPlaneCoordinator, authorityStateSummary, emptyAuthorityPlaneSnapshot, type AuthorityCommand } from "../src/cloudflare/authority-plane.ts";
+import { AUTHORITY_COMMAND_PROTOCOL, AuthorityPlaneError, AuthorityPlaneCoordinator, authorityStateSummary, emptyAuthorityPlaneSnapshot, type AuthorityCommand } from "../src/cloudflare/authority-plane.ts";
 import type { AnyamRealmOAuthEnv } from "../apps/realm-worker/src/oauth-provider.ts";
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "../apps/realm-worker/src/coordinator-protocol.ts";
 
@@ -137,8 +137,13 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
           return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", changes: summaries.map(({ revisions, ...summary }) => ({ ...summary, revisionCount: revisions.length })), receipt: `authority=coordinator; operation=change.list; changeCount=${summaries.length}; ordering=change-id-code-unit-ascending; readOnly=true; credentialFree=true; canonicalWrite=false` }));
         }
         const command = { ...body, protocol: body.protocol, command: body.command, idempotencyKey: body.idempotencyKey, payload: body.payload } as unknown as AuthorityCommand;
-        const result = authority.execute(command, { realmId: "realm:authority-test", principalId: "owner:authority-test", actorId: "actor:authority-test", sessionId: ownerSessionId, clientId: "client:anyam-web", authorizationEpoch: 1 });
-        return new Response(JSON.stringify(result), { status: result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503, headers: { "content-type": "application/json" } });
+        try {
+          const result = authority.execute(command, { realmId: "realm:authority-test", principalId: "owner:authority-test", actorId: "actor:authority-test", sessionId: ownerSessionId, clientId: "client:anyam-web", authorizationEpoch: 1 });
+          return new Response(JSON.stringify(result), { status: result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503, headers: { "content-type": "application/json" } });
+        } catch (error) {
+          if (error instanceof AuthorityPlaneError) return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", code: error.code, message: error.message, recoveryAction: error.recoveryAction, receipt: error.receipt }), { status: error.code === "not_found" ? 404 : error.code === "stale_state" || error.code === "conflict" || error.code === "idempotency_conflict" ? 409 : 422, headers: { "content-type": "application/json" } });
+          throw error;
+        }
       },
     }),
   };
@@ -178,6 +183,16 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
     assert.ok(response.status === 200 || response.status === 409, JSON.stringify(value));
     return value;
   };
+  const bootstrap = async (pathname: string, idempotencyKey: string, payload: Record<string, unknown>, method = "POST"): Promise<{ response: Response; value: Record<string, unknown> }> => {
+    const init: RequestInit = {
+      method,
+      headers: { cookie: `anyam_owner_session=${encodeURIComponent(hostSessionId)}`, "content-type": "application/json", "idempotency-key": idempotencyKey },
+    };
+    if (method !== "GET") init.body = JSON.stringify(payload);
+    const response = await handleAuthorityRequest(new Request(`https://realm.example${pathname}`, init), env);
+    assert.ok(response);
+    return { response, value: await response.json() as Record<string, unknown> };
+  };
   const state = async (): Promise<Record<string, unknown>> => {
     const response = await handleAuthorityRequest(new Request("https://realm.example/api/authority/state", { headers: { cookie: `anyam_owner_session=${encodeURIComponent(hostSessionId)}` } }), env);
     assert.ok(response);
@@ -185,11 +200,18 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
     return await response.json() as Record<string, unknown>;
   };
 
-  const projectResult = await command("project.create", "idem:project", { projectId: "project:authority-test", name: "Authority Test", referenceType: "git", sourceSpaces: [{ id: "source:authority-test", name: "public", classification: "public", snapshotId: "git:base" }] });
-  const project = (projectResult.value as Record<string, unknown>).project as { id: string };
-  const canonicalBefore = ((projectResult.value as Record<string, unknown>).canonicalRevision as { id: string }).id;
-  const workspaceResult = await command("workspace.create", "idem:workspace", { projectId: project.id, projectRevisionId: canonicalBefore, sourceSpaceIds: ["source:authority-test"], mounts: ["source"] });
-  const workspace = (workspaceResult.value as Record<string, unknown>).workspace as { id: string; projectViewId: string };
+  const projectBootstrap = await bootstrap("/api/projects", "idem:typed-project", { projectId: "project:typed-authority-test", name: "Typed Authority Test", referenceType: "git", sourceSpaces: [{ id: "source:typed-authority-test", name: "public", classification: "public", snapshotId: "git:base" }] });
+  assert.equal(projectBootstrap.response.status, 200);
+  assert.equal(projectBootstrap.value.status, "succeeded");
+  assert.equal(projectBootstrap.value.canonicalWrite, "initialization-only");
+  assert.equal(JSON.stringify(projectBootstrap.value).includes("sourceSpaceSnapshots"), false);
+  const project = projectBootstrap.value.project as { id: string };
+  const canonicalBefore = (projectBootstrap.value.canonicalRevision as { id: string }).id;
+  const workspaceBootstrap = await bootstrap(`/api/projects/${encodeURIComponent(project.id)}/workspaces`, "idem:typed-workspace", { projectRevisionId: canonicalBefore, sourceSpaceIds: ["source:typed-authority-test"], mounts: ["source"] });
+  assert.equal(workspaceBootstrap.response.status, 200);
+  assert.equal(workspaceBootstrap.value.status, "succeeded");
+  assert.equal(JSON.stringify(workspaceBootstrap.value).includes("mounts"), false);
+  const workspace = workspaceBootstrap.value.workspace as { id: string; projectViewId: string };
   const workspaceListResponse = await namespace.get("authority-test-do").fetch(new Request("https://realm-coordinator/authority/workspaces/internal", { method: "POST", headers: { [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE, "content-type": "application/json" }, body: JSON.stringify({ sessionId: ownerSessionId, projectId: project.id }) }));
   assert.equal(workspaceListResponse.status, 200);
   const workspaceList = await workspaceListResponse.json() as Record<string, unknown>;
@@ -202,8 +224,11 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
   const workspaceInspect = await workspaceInspectResponse.json() as Record<string, unknown>;
   assert.equal(((workspaceInspect.workspace as Record<string, unknown>).id), workspace.id);
   assert.equal(JSON.stringify(workspaceInspect).includes("credential:"), false);
-  const changeResult = await command("change.create", "idem:change", { projectId: project.id, intentId: "intent:authority-test", baseProjectRevisionId: canonicalBefore, workspaceId: workspace.id });
-  const change = (changeResult.value as Record<string, unknown>).change as { id: string };
+  const changeBootstrap = await bootstrap(`/api/projects/${encodeURIComponent(project.id)}/changes`, "idem:typed-change", { intentId: "intent:typed-authority-test", baseProjectRevisionId: canonicalBefore, workspaceId: workspace.id });
+  assert.equal(changeBootstrap.response.status, 200);
+  assert.equal(changeBootstrap.value.status, "succeeded");
+  assert.equal(JSON.stringify(changeBootstrap.value).includes("\"author\":"), false);
+  const change = changeBootstrap.value.change as { id: string };
   const revisionResult = await command("revision.publish", "idem:revision", { changeId: change.id, workspaceId: workspace.id, projectViewId: workspace.projectViewId, projectRevisionId: "candidate:authority-test", sourceSpaceSnapshots: { "source:authority-test": "git:candidate" }, declaredEffects: ["source.modify"] });
   const revision = (revisionResult.value as Record<string, unknown>).revision as { id: string };
   const changeListResponse = await namespace.get("authority-test-do").fetch(new Request("https://realm-coordinator/authority/changes/internal", { method: "POST", headers: { [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE, "content-type": "application/json" }, body: JSON.stringify({ sessionId: ownerSessionId, projectId: project.id, workspaceId: workspace.id }) }));
@@ -238,8 +263,25 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
   const promotionResult = await command("promotion.request", "idem:promotion", { releaseId: "release:authority-test", targetId: "target:authority-test" });
   assert.equal(promotionResult.status, "blocked");
   assert.match(String(promotionResult.receipt), /canonicalWrite=false/);
-  const repeatedProject = await command("project.create", "idem:project", { projectId: "project:authority-test", name: "Authority Test", referenceType: "git", sourceSpaces: [{ id: "source:authority-test", name: "public", classification: "public", snapshotId: "git:base" }] });
-  assert.equal(((repeatedProject.value as Record<string, unknown>).project as { id: string }).id, project.id);
+  const repeatedProject = await bootstrap("/api/projects", "idem:typed-project", { projectId: "project:typed-authority-test", name: "Typed Authority Test", referenceType: "git", sourceSpaces: [{ id: "source:typed-authority-test", name: "public", classification: "public", snapshotId: "git:base" }] });
+  assert.equal(repeatedProject.response.status, 200);
+  assert.equal((repeatedProject.value.project as { id: string }).id, project.id);
+  const conflictingProject = await bootstrap("/api/projects", "idem:typed-project", { projectId: "project:typed-authority-test", name: "Changed Name", referenceType: "git", sourceSpaces: [{ id: "source:typed-authority-test", name: "public", classification: "public", snapshotId: "git:base" }] });
+  assert.equal(conflictingProject.response.status, 409);
+  assert.equal(conflictingProject.value.code, "bootstrap_conflict");
+  const missingProjectWorkspace = await bootstrap("/api/projects/project%3Amissing/workspaces", "idem:typed-missing-workspace", { projectRevisionId: canonicalBefore, sourceSpaceIds: ["source:typed-authority-test"] });
+  assert.equal(missingProjectWorkspace.response.status, 404);
+  assert.equal(missingProjectWorkspace.value.code, "bootstrap_resource_not_found");
+  const malformedPath = await bootstrap("/api/projects/project%3Atyped-authority-test/unknown", "idem:typed-malformed", {}, "POST");
+  assert.equal(malformedPath.response.status, 400);
+  const missingIdempotency = await handleAuthorityRequest(new Request("https://realm.example/api/projects", { method: "POST", headers: { cookie: `anyam_owner_session=${encodeURIComponent(hostSessionId)}`, "content-type": "application/json" }, body: JSON.stringify({ name: "Missing key", sourceSpaces: [{ id: "source:missing-key", name: "public", classification: "public", snapshotId: "git:missing-key" }] }) }), env);
+  assert.ok(missingIdempotency);
+  assert.equal(missingIdempotency.status, 422);
+  const unknownField = await bootstrap("/api/projects", "idem:typed-unknown-field", { name: "Unknown field", command: "project.create", sourceSpaces: [{ id: "source:unknown-field", name: "public", classification: "public", snapshotId: "git:unknown-field" }] });
+  assert.equal(unknownField.response.status, 422);
+  const unauthenticated = await handleAuthorityRequest(new Request("https://realm.example/api/projects", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": "idem:unauthenticated" }, body: JSON.stringify({ name: "Nope", sourceSpaces: [{ id: "source:nope", name: "public", classification: "public", snapshotId: "git:nope" }] }) }), env);
+  assert.ok(unauthenticated);
+  assert.equal(unauthenticated.status, 401);
   const finalState = await state();
   assert.equal(((finalState.authority as Record<string, unknown>).canonicalByProject as Record<string, string>)[project.id], landedRevision);
   assert.equal(((finalState.authority as Record<string, unknown>).counts as Record<string, number>).audit, 11);
@@ -420,7 +462,7 @@ test("Realm Worker exposes an authenticated project-scoped REST read through the
   assert.match(String(listBody.receipt), /projectCount=2/);
   assert.deepEqual(calls.at(-1), { path: "/authority/projects/internal", body: { sessionId: ownerSessionId } });
 
-  const listUnsupported = await handleAuthorityRequest(new Request("https://realm.example/api/projects", { method: "POST", headers: cookie }), env);
+  const listUnsupported = await handleAuthorityRequest(new Request("https://realm.example/api/projects", { method: "PUT", headers: cookie }), env);
   assert.ok(listUnsupported);
   assert.equal(listUnsupported.status, 405);
   assert.equal((await listUnsupported.json() as Record<string, unknown>).code, "method_not_allowed");

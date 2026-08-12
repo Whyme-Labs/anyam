@@ -80,6 +80,9 @@ After an owner completes the passkey login ceremony, the public edge exposes:
 | --- | --- |
 | `GET /api/authority/state` | Read the durable Authority Plane summary |
 | `POST /api/authority/command` | Apply one idempotent Authority command |
+| `POST /api/projects` | Create a Project and its initial canonical Project Revision through the typed bootstrap boundary |
+| `POST /api/projects/{projectId}/workspaces` | Create an isolated Workspace bound to a Project Revision and Source Space set |
+| `POST /api/projects/{projectId}/changes` | Create a Change bound to a Project, optional Workspace, and base Project Revision |
 | `GET /api/projects` | Discover owner-visible Project summaries through the Authority Coordinator |
 | `GET /api/projects/{projectId}` | Read one project-scoped summary through the Authority Coordinator |
 | `GET /api/changes` | Discover owner-visible Change summaries through the Authority Coordinator |
@@ -140,6 +143,58 @@ reject malformed or duplicate/unsupported filters, preserve Coordinator
 ordering, and return only Project identity, immutable revision/view identities,
 state, optional Change link, and mount count. They do not create Workspaces,
 issue task grants, transfer source, or mutate canonical state.
+
+The typed bootstrap mutations are the preferred REST entry point for starting
+work. Each route requires an owner host session, `POST`, a JSON object containing
+only its documented fields, and one `Idempotency-Key` header. The Project path
+binds the Project identity for Workspace and Change creation; callers cannot
+smuggle a different Project through the body. `expectedVersion` is optional and
+is checked by the same serialized Coordinator command boundary when supplied.
+Replay of the same key and payload returns the original safe result; reusing a
+key for a different payload is a conflict. Malformed fields, paths, missing
+resources, and owner authentication failures are explicit fail-closed errors.
+
+Typed bootstrap responses are credential-free projections. They return only the
+Project, canonical revision identity, Source Space metadata, Workspace/view
+identity, or Change summary needed to continue the flow. They omit source-space
+snapshots, Workspace mounts, author/actor metadata, source objects, provider
+credentials, and raw Coordinator receipts. Project creation reports
+`canonicalWrite=initialization-only`: it establishes the initial canonical
+revision as setup. Later source transfer, Change Revision publication, Landing,
+Release creation, and Target Promotion remain separate operations, and only
+Landing can advance the canonical Project Revision pointer.
+
+The request bodies are deliberately smaller than the internal Authority
+envelope:
+
+```http
+POST /api/projects
+Idempotency-Key: project-create-1
+Content-Type: application/json
+
+{"projectId":"project:atlas","name":"Atlas","referenceType":"git","sourceSpaces":[{"id":"source:public","name":"public","classification":"public","snapshotId":"git:base"}]}
+```
+
+```http
+POST /api/projects/project%3Aatlas/workspaces
+Idempotency-Key: workspace-create-1
+Content-Type: application/json
+
+{"projectRevisionId":"project-revision:atlas:1","sourceSpaceIds":["source:public"],"mounts":["source"]}
+```
+
+```http
+POST /api/projects/project%3Aatlas/changes
+Idempotency-Key: change-create-1
+Content-Type: application/json
+
+{"intentId":"intent:atlas-feature","baseProjectRevisionId":"project-revision:atlas:1","workspaceId":"workspace:atlas"}
+```
+
+These routes intentionally do not accept `protocol`, `command`, `payload`,
+`sessionId`, actor identity, or credential fields from callers. The edge adds
+the internal command protocol and the validated owner session only after the
+typed body and path have passed validation.
 
 The owner-authenticated Agent delegation surface accepts an explicit
 Project/Workspace/Change resource, mounted Source Space IDs, agent identity

@@ -84,7 +84,7 @@ function configuredRelyingPartyId(env: AnyamRealmOAuthEnv, request: Request): st
   return env.ANYAM_REALM_RP_ID?.trim() || new URL(request.url).hostname;
 }
 
-export async function requestAnyamRealmCoordinator(env: AnyamRealmOAuthEnv, path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+export async function requestAnyamRealmCoordinator(env: AnyamRealmOAuthEnv, path: string, body: Record<string, unknown>, options: { allowBlocked?: boolean } = {}): Promise<Record<string, unknown>> {
   const binding = env.REALM_COORDINATOR as unknown as DurableObjectNamespace | undefined;
   if (!binding || typeof binding.idFromName !== "function") throw new Error("realm_coordinator_unavailable");
   const stub = binding.get(binding.idFromName(realmId(env)));
@@ -94,7 +94,7 @@ export async function requestAnyamRealmCoordinator(env: AnyamRealmOAuthEnv, path
     body: JSON.stringify(body),
   }));
   const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
-  if (!response.ok) {
+  if (!response.ok && !(options.allowBlocked && response.status === 409 && payload.status === "blocked")) {
     const code = typeof payload.code === "string" ? payload.code : "realm_coordinator_rejected";
     const message = typeof payload.message === "string" ? payload.message : "coordinator rejected the request";
     const recoveryAction = typeof payload.recoveryAction === "string" ? payload.recoveryAction : "inspect the coordinator receipt and retry the same operation only when safe";

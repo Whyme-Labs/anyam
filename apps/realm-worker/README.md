@@ -96,6 +96,7 @@ After an owner completes the passkey login ceremony, the public edge exposes:
 | `POST /api/landings` | Request one typed single-Change Landing through the Authority Coordinator's compare-and-swap canonical boundary |
 | `POST /api/releases` | Create one typed immutable Release from the current canonical Project Revision, exact Artifacts, and passed Evidence |
 | `POST /api/targets` | Configure one typed immutable Target adapter bound to a Project; qualification and Promotion remain separate |
+| `POST /api/promotions` | Request one typed Promotion of an immutable Release to a configured Target; provider execution, health, and rollback remain separate |
 | `POST /api/owner/agent/delegations` | Owner-authenticated, resource-bounded Agent Task delegation for one active Project/Workspace/Change; no credentials are issued |
 | `POST /api/owner/agent/delegations/revoke` | Owner-authenticated revocation of one enrolled Agent and its delegated authority; the owner Session remains active |
 | `POST /api/owner/agent/delegations/credentials` | Explicit exchange of an exact delegated Agent Session/Task/Grant for short-lived `realm-api`, Git, and/or MCP credentials; token material appears only in this response |
@@ -287,6 +288,21 @@ Release creation, and Promotion remain separate operations. Target configuration
 does not transfer source, mutate the canonical Project Revision, or claim that
 the adapter is healthy. Agents do not receive a Target mutation on the MCP
 surface.
+
+The owner-authenticated REST surface also exposes typed `POST /api/promotions`.
+It requires the owner host session, one `Idempotency-Key` header, and a closed
+`promotion.request` JSON body containing the exact Project, Release, and Target
+bindings. An optional Release digest, Promotion identity, and expected current
+Release identity are carried as immutable request declarations; the Coordinator
+does not infer or mutate provider Target state in this boundary. Exact Project
+lineage, idempotency replay, expected Authority version, and hidden-resource
+checks fail closed before a Promotion record is created.
+
+The route returns a credential-free safe projection even when the Coordinator
+records the request as `blocked`: it exposes only the Promotion state and safe
+Project/Release/Target identities, never actor/session data, provider receipts,
+health observations, or credentials. Provider qualification, preview/apply,
+health verification, rollback, and MCP Promotion mutation remain separate.
 
 The typed bootstrap mutations are the preferred REST entry point for starting
 work. Each route requires an owner host session, `POST`, a JSON object containing

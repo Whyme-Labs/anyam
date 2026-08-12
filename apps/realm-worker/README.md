@@ -89,6 +89,8 @@ After an owner completes the passkey login ceremony, the public edge exposes:
 | `GET /api/changes/{changeId}` | Read one Change and its immutable Revision summaries through the Authority Coordinator |
 | `GET /api/workspaces` | Discover owner-visible Workspace summaries through the Authority Coordinator |
 | `GET /api/workspaces/{workspaceId}` | Read one Workspace summary through the Authority Coordinator |
+| `POST /api/runs` | Record one typed declared-Action Run through the Authority Coordinator |
+| `POST /api/evidence` | Record typed Evidence for one successful determinate Run through the Authority Coordinator |
 | `POST /api/owner/agent/delegations` | Owner-authenticated, resource-bounded Agent Task delegation for one active Project/Workspace/Change; no credentials are issued |
 | `POST /api/owner/agent/delegations/revoke` | Owner-authenticated revocation of one enrolled Agent and its delegated authority; the owner Session remains active |
 | `POST /api/owner/agent/delegations/credentials` | Explicit exchange of an exact delegated Agent Session/Task/Grant for short-lived `realm-api`, Git, and/or MCP credentials; token material appears only in this response |
@@ -179,6 +181,25 @@ reject malformed or duplicate/unsupported filters, preserve Coordinator
 ordering, and return only Project identity, immutable revision/view identities,
 state, optional Change link, and mount count. They do not create Workspaces,
 issue task grants, transfer source, or mutate canonical state.
+
+The owner-authenticated REST surface exposes typed `POST /api/runs` and
+`POST /api/evidence` recording routes. Each requires the owner host session,
+one `Idempotency-Key` header, and a JSON object accepted by the same closed
+Run/Evidence contracts used by MCP; a body idempotency key, when supplied,
+must match the header. The Run payload binds Project, Project Revision,
+Project View, Workspace, Change Revision, Action, Runner, and output digests.
+The Evidence payload additionally binds the exact successful Run and its
+Action, Runner, output digest, and disclosure policy. The Coordinator rejects
+hidden or mismatched resources before mutation, and passing Evidence cannot be
+attached to a failed or indeterminate Run.
+
+Responses are credential-free redacted projections with `canonicalWrite=false`.
+They omit actor/session metadata, source snapshots, raw receipts, logs,
+prompts, credentials, and private verifier inputs. Identical requests replay
+the original safe result; changing a payload under the same key is a conflict.
+These routes record already-derived facts only: execution, source transfer,
+Artifact storage, Landing, Release creation, and Target Promotion remain
+separate operations.
 
 The typed bootstrap mutations are the preferred REST entry point for starting
 work. Each route requires an owner host session, `POST`, a JSON object containing

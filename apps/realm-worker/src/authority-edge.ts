@@ -3,6 +3,7 @@ import { AUTHORITY_COMMAND_PROTOCOL, AUTHORITY_PLANE_PROTOCOL } from "../../../s
 import { anyamRealmOwnerSessionId, requestAnyamRealmCoordinator } from "./passkey-owner.ts";
 import type { AnyamRealmOAuthEnv } from "./oauth-provider.ts";
 import { bootstrapCommand, bootstrapPath, projectBootstrapValue, type BootstrapMutation, type BootstrapPath } from "./bootstrap-contract.ts";
+import { EVIDENCE_RECORD_COMMAND, evidenceRecordCommand, evidenceRecordValue, RunEvidenceInputError, RUN_RECORD_COMMAND, runRecordCommand, runRecordValue } from "./run-evidence-contract.ts";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
@@ -223,6 +224,50 @@ async function workspaceList(request: Request, env: AnyamRealmOAuthEnv): Promise
   }
 }
 
+type RestRecordOperation = typeof RUN_RECORD_COMMAND | typeof EVIDENCE_RECORD_COMMAND;
+
+function recordInput(operation: RestRecordOperation, body: Record<string, unknown>, idempotencyKey: string): ReturnType<typeof runRecordCommand> | ReturnType<typeof evidenceRecordCommand> {
+  if (body.idempotencyKey !== undefined && body.idempotencyKey !== idempotencyKey) throw new RunEvidenceInputError("The body idempotencyKey does not match the Idempotency-Key header.", "send one Idempotency-Key header and omit body.idempotencyKey, or make both values identical; no transition was accepted", `operation=${operation}; idempotencyKey=transport-mismatch; transition=not-applied`);
+  const typedBody = { ...body, idempotencyKey };
+  return operation === RUN_RECORD_COMMAND ? runRecordCommand(typedBody) : evidenceRecordCommand(typedBody);
+}
+
+function recordError(operation: RestRecordOperation, status: number, code: string, recoveryAction: string, receipt: string): Response {
+  return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction, receipt: `operation=${operation}; ${receipt}; credentialFree=true; canonicalWrite=false` }, status);
+}
+
+async function recordMutation(request: Request, env: AnyamRealmOAuthEnv, operation: RestRecordOperation): Promise<Response> {
+  const sessionId = await anyamRealmOwnerSessionId(request, env);
+  if (!sessionId) return recordError(operation, 401, "owner_authentication_required", "Authenticate the Realm owner through /owner/login before recording a Run or Evidence.", "ownerSession=missing-or-invalid; transition=not-applied");
+  if (request.method !== "POST") return recordError(operation, 405, "method_not_allowed", `Use POST /api/${operation === RUN_RECORD_COMMAND ? "runs" : "evidence"} with one Idempotency-Key header.`, "method=post-required; transition=not-applied");
+  const idempotencyKey = request.headers.get("idempotency-key")?.trim();
+  if (!idempotencyKey) return recordError(operation, 422, "invalid_request", "Send one non-empty Idempotency-Key header; no transition was accepted.", "idempotencyKey=required; transition=not-applied");
+  let body: Record<string, unknown>;
+  try {
+    body = await readBody(request);
+  } catch {
+    return recordError(operation, 422, "invalid_request", `Send a JSON object containing only the documented ${operation} fields; no transition was accepted.`, "body=object-required; transition=not-applied");
+  }
+  let command: ReturnType<typeof runRecordCommand> | ReturnType<typeof evidenceRecordCommand>;
+  try {
+    command = recordInput(operation, body, idempotencyKey);
+  } catch (error) {
+    if (error instanceof RunEvidenceInputError) return recordError(operation, 422, "invalid_request", error.recoveryAction, error.receipt);
+    return recordError(operation, 422, "invalid_request", "Correct the typed request and retry; no transition was accepted.", "arguments=invalid; transition=not-applied");
+  }
+  try {
+    const result = await requestAnyamRealmCoordinator(env, "/authority/command/internal", { protocol: AUTHORITY_COMMAND_PROTOCOL, command: command.command, idempotencyKey: command.idempotencyKey, ...(command.expectedVersion === undefined ? {} : { expectedVersion: command.expectedVersion }), payload: command.payload, sessionId });
+    return json(operation === RUN_RECORD_COMMAND ? runRecordValue(result, idempotencyKey, "rest") : evidenceRecordValue(result, idempotencyKey, "rest"));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const status = detail.includes("not_found") ? 404 : detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : detail.includes("invalid_request") ? 422 : detail.includes("idempotency_conflict") || detail.includes("stale_state") || detail.includes("conflict") ? 409 : 503;
+    const errorClass = status === 404 ? "not_found" : status === 403 ? "session_rejected" : status === 422 ? "invalid_request" : status === 409 ? "conflict" : "coordinator_rejected";
+    const code = status === 404 ? `${operation.replace(".", "_")}_not_found` : status === 403 ? "owner_session_rejected" : status === 422 ? "invalid_request" : status === 409 ? `${operation.replace(".", "_")}_conflict` : "authority_coordinator_rejected";
+    const recoveryAction = status === 404 ? "Verify the Project, Project Revision, Project View, Workspace, Change Revision, and Run identifiers without probing hidden resources." : status === 409 ? "Read the current Authority version, reuse the original idempotency payload, or reconcile the exact Run/Evidence relationship before retrying." : status === 403 ? "Authenticate the Realm owner again and retry the same typed request." : "Inspect the Durable Object receipt and retry only the same idempotent request when safe.";
+    return recordError(operation, status, code, recoveryAction, `authority=coordinator-rejected; errorClass=${errorClass}`);
+  }
+}
+
 /**
  * Public Authority Plane edge. The host-only owner session is the current
  * authenticated principal boundary; the Durable Object revalidates the
@@ -237,11 +282,23 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   const isProjectRoute = url.pathname === "/api/projects" || url.pathname.startsWith("/api/projects/");
   const isChangeRoute = url.pathname === "/api/changes" || url.pathname.startsWith("/api/changes/");
   const isWorkspaceRoute = url.pathname === "/api/workspaces" || url.pathname.startsWith("/api/workspaces/");
-  if (!url.pathname.startsWith("/api/authority") && !isProjectRoute && !isChangeRoute && !isWorkspaceRoute) return undefined;
+  const isRunRoute = url.pathname === "/api/runs" || url.pathname.startsWith("/api/runs/");
+  const isEvidenceRoute = url.pathname === "/api/evidence" || url.pathname.startsWith("/api/evidence/");
+  if (!url.pathname.startsWith("/api/authority") && !isProjectRoute && !isChangeRoute && !isWorkspaceRoute && !isRunRoute && !isEvidenceRoute) return undefined;
 
   const health = customerRealmWorkerHealth(env);
   if (health.status !== "ready") {
     return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "customer_realm_configuration_invalid", missingConfiguration: health.missingConfiguration, recoveryAction: health.recoveryAction, receipt: `${health.receipt}; authority=blocked; productReady=false` }, 503);
+  }
+
+  if (isRunRoute) {
+    if (url.pathname !== "/api/runs") return recordError(RUN_RECORD_COMMAND, 400, "invalid_run_path", "Use POST /api/runs with the Project binding in the typed JSON body.", "path=malformed; transition=not-applied");
+    return recordMutation(request, env, RUN_RECORD_COMMAND);
+  }
+
+  if (isEvidenceRoute) {
+    if (url.pathname !== "/api/evidence") return recordError(EVIDENCE_RECORD_COMMAND, 400, "invalid_evidence_path", "Use POST /api/evidence with the Project and Run bindings in the typed JSON body.", "path=malformed; transition=not-applied");
+    return recordMutation(request, env, EVIDENCE_RECORD_COMMAND);
   }
 
   if (bootstrap.mutation && (url.pathname !== "/api/projects" || request.method !== "GET")) return bootstrapMutation(request, env, bootstrap);

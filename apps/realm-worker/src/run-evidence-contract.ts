@@ -261,12 +261,14 @@ function mutationResult(result: Record<string, unknown>, operation: string, idem
   return { status: valueString(result.status, "status"), version: valueInteger(result.version, "version"), value };
 }
 
-export function runRecordValue(result: Record<string, unknown>, idempotencyKey: string): Record<string, unknown> {
+export type RecordSurface = "mcp" | "rest";
+
+export function runRecordValue(result: Record<string, unknown>, idempotencyKey: string, surface: RecordSurface = "mcp"): Record<string, unknown> {
   const parsed = mutationResult(result, RUN_RECORD_COMMAND, idempotencyKey);
-  return { protocol: AUTHORITY_PLANE_PROTOCOL, status: parsed.status, version: parsed.version, idempotencyKey, credentialFree: true, canonicalWrite: false, run: safeRun(parsed.value.run), receipt: `operation=${RUN_RECORD_COMMAND}; typedMcp=true; credentialFree=true; canonicalWrite=false; authorityResult=projected` };
+  return { protocol: AUTHORITY_PLANE_PROTOCOL, status: parsed.status, version: parsed.version, idempotencyKey, credentialFree: true, canonicalWrite: false, run: safeRun(parsed.value.run), receipt: `operation=${RUN_RECORD_COMMAND}; typedSurface=${surface}; credentialFree=true; canonicalWrite=false; authorityResult=projected` };
 }
 
-export function evidenceRecordValue(result: Record<string, unknown>, idempotencyKey: string): Record<string, unknown> {
+export function evidenceRecordValue(result: Record<string, unknown>, idempotencyKey: string, surface: RecordSurface = "mcp"): Record<string, unknown> {
   const parsed = mutationResult(result, EVIDENCE_RECORD_COMMAND, idempotencyKey);
-  return { protocol: AUTHORITY_PLANE_PROTOCOL, status: parsed.status, version: parsed.version, idempotencyKey, credentialFree: true, canonicalWrite: false, evidence: safeEvidence(parsed.value.evidence), receipt: `operation=${EVIDENCE_RECORD_COMMAND}; typedMcp=true; credentialFree=true; canonicalWrite=false; authorityResult=projected` };
+  return { protocol: AUTHORITY_PLANE_PROTOCOL, status: parsed.status, version: parsed.version, idempotencyKey, credentialFree: true, canonicalWrite: false, evidence: safeEvidence(parsed.value.evidence), receipt: `operation=${EVIDENCE_RECORD_COMMAND}; typedSurface=${surface}; credentialFree=true; canonicalWrite=false; authorityResult=projected` };
 }

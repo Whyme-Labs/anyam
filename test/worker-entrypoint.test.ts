@@ -183,6 +183,16 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
     assert.ok(response.status === 200 || response.status === 409, JSON.stringify(value));
     return value;
   };
+  const record = async (pathname: string, idempotencyKey: string, payload: Record<string, unknown>, method = "POST"): Promise<{ response: Response; value: Record<string, unknown> }> => {
+    const init: RequestInit = {
+      method,
+      headers: { cookie: `anyam_owner_session=${encodeURIComponent(hostSessionId)}`, "content-type": "application/json", "idempotency-key": idempotencyKey },
+    };
+    if (method !== "GET") init.body = JSON.stringify(payload);
+    const response = await handleAuthorityRequest(new Request(`https://realm.example${pathname}`, init), env);
+    assert.ok(response);
+    return { response, value: await response.json() as Record<string, unknown> };
+  };
   const bootstrap = async (pathname: string, idempotencyKey: string, payload: Record<string, unknown>, method = "POST"): Promise<{ response: Response; value: Record<string, unknown> }> => {
     const init: RequestInit = {
       method,
@@ -246,10 +256,55 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
   assert.equal(JSON.stringify(changeInspect).includes("sourceSpaceSnapshots"), false);
   const beforeLanding = await state();
   assert.equal(((beforeLanding.authority as Record<string, unknown>).canonicalByProject as Record<string, string>)[project.id], canonicalBefore);
-  const runResult = await command("run.record", "idem:run", { projectId: project.id, runId: "run:authority-test", actionId: "action:unit", projectRevisionId: "candidate:authority-test", projectViewId: workspace.projectViewId, runnerId: "runner:binding-shaped", status: "succeeded", outputDigest: "sha256:run", changeRevisionId: revision.id, workspaceId: workspace.id });
-  assert.equal(runResult.status, "succeeded");
-  const evidenceResult = await command("evidence.record", "idem:evidence", { projectId: project.id, evidenceId: "evidence:authority-test", runId: "run:authority-test", key: "unit", criterion: "unit tests pass", validityKey: "valid:unit", actionId: "action:unit", verifierId: "verifier:unit", toolchainDigest: "sha256:toolchain", dependencyDigest: "sha256:deps", environmentDigest: "sha256:env", inputDigests: [], effectDigests: [], outputDigest: "sha256:run", projectRevisionId: "candidate:authority-test", projectViewId: workspace.projectViewId, changeRevisionId: revision.id, runnerId: "runner:binding-shaped", policyVersion: "policy:authority-test", capabilityGrantId: "grant:authority-test", disclosure: { projectionId: "projection:authority-test", classification: "project" }, receipt: "verifier=fixture; passed=true", invalidators: [], owner: "owner:authority-test", workspaceId: workspace.id });
-  assert.equal(evidenceResult.status, "succeeded");
+  const runPayload = { projectId: project.id, runId: "run:authority-test", actionId: "action:unit", projectRevisionId: "candidate:authority-test", projectViewId: workspace.projectViewId, runnerId: "runner:binding-shaped", status: "succeeded", outputDigest: "sha256:run", changeRevisionId: revision.id, workspaceId: workspace.id };
+  const runRest = await record("/api/runs", "idem:run", runPayload);
+  assert.equal(runRest.response.status, 200);
+  assert.equal(runRest.value.status, "succeeded");
+  assert.equal(runRest.value.credentialFree, true);
+  assert.equal(runRest.value.canonicalWrite, false);
+  assert.equal(((runRest.value.run as Record<string, unknown>).actor), undefined);
+  assert.equal(JSON.stringify(runRest.value).includes("kernel-session"), false);
+  assert.match(String(runRest.value.receipt), /typedSurface=rest/);
+  const runReplayRest = await record("/api/runs", "idem:run", runPayload);
+  assert.deepEqual(runReplayRest.value, runRest.value);
+  const evidencePayload = { projectId: project.id, evidenceId: "evidence:authority-test", runId: "run:authority-test", key: "unit", criterion: "unit tests pass", outcome: "passed", validityKey: "valid:unit", actionId: "action:unit", verifierId: "verifier:unit", toolchainDigest: "sha256:toolchain", dependencyDigest: "sha256:deps", environmentDigest: "sha256:env", inputDigests: [], effectDigests: [], outputDigest: "sha256:run", projectRevisionId: "candidate:authority-test", projectViewId: workspace.projectViewId, changeRevisionId: revision.id, runnerId: "runner:binding-shaped", policyVersion: "policy:authority-test", authorizationEpoch: "1", capabilityGrantId: "grant:authority-test", disclosure: { projectionId: "projection:authority-test", classification: "project" }, receipt: "verifier=fixture; passed=true", invalidators: [], owner: "owner:authority-test", workspaceId: workspace.id };
+  const evidenceRest = await record("/api/evidence", "idem:evidence", evidencePayload);
+  assert.equal(evidenceRest.response.status, 200, JSON.stringify(evidenceRest.value));
+  assert.equal(evidenceRest.value.status, "succeeded");
+  assert.equal(evidenceRest.value.credentialFree, true);
+  assert.equal(evidenceRest.value.canonicalWrite, false);
+  assert.equal(((evidenceRest.value.evidence as Record<string, unknown>).receipt), undefined);
+  assert.equal(JSON.stringify(evidenceRest.value).includes("sha256:deps"), false);
+  assert.match(String(evidenceRest.value.receipt), /typedSurface=rest/);
+  const evidenceReplayRest = await record("/api/evidence", "idem:evidence", evidencePayload);
+  assert.deepEqual(evidenceReplayRest.value, evidenceRest.value);
+  const malformedRun = await record("/api/runs", "idem:rest-malformed", { ...runPayload, unsupported: true });
+  assert.equal(malformedRun.response.status, 422);
+  assert.equal(malformedRun.value.code, "invalid_request");
+  const missingRunKey = await handleAuthorityRequest(new Request("https://realm.example/api/runs", { method: "POST", headers: { cookie: `anyam_owner_session=${encodeURIComponent(hostSessionId)}`, "content-type": "application/json" }, body: JSON.stringify(runPayload) }), env);
+  assert.ok(missingRunKey);
+  assert.equal(missingRunKey.status, 422);
+  assert.equal((await missingRunKey.json() as Record<string, unknown>).code, "invalid_request");
+  const wrongRunMethod = await record("/api/runs", "idem:rest-method", runPayload, "PUT");
+  assert.equal(wrongRunMethod.response.status, 405);
+  assert.equal(wrongRunMethod.value.code, "method_not_allowed");
+  const malformedRunJson = await handleAuthorityRequest(new Request("https://realm.example/api/runs", { method: "POST", headers: { cookie: `anyam_owner_session=${encodeURIComponent(hostSessionId)}`, "content-type": "application/json", "idempotency-key": "idem:rest-json" }, body: "{" }), env);
+  assert.ok(malformedRunJson);
+  assert.equal(malformedRunJson.status, 422);
+  assert.equal((await malformedRunJson.json() as Record<string, unknown>).code, "invalid_request");
+  const hiddenRun = await record("/api/runs", "idem:rest-hidden", { ...runPayload, projectId: "project:hidden" });
+  assert.equal(hiddenRun.response.status, 404);
+  assert.equal(hiddenRun.value.code, "run_record_not_found");
+  assert.equal(JSON.stringify(hiddenRun.value).includes("project:hidden"), false);
+  const evidenceMismatch = await record("/api/evidence", "idem:rest-mismatch", { ...evidencePayload, evidenceId: "evidence:rest-mismatch", actionId: "action:other" });
+  assert.equal(evidenceMismatch.response.status, 409);
+  assert.equal(evidenceMismatch.value.code, "evidence_record_conflict");
+  const failedRun = await record("/api/runs", "idem:rest-failed", { ...runPayload, runId: "run:rest-failed", status: "failed" });
+  assert.equal(failedRun.response.status, 200);
+  assert.equal((failedRun.value.run as Record<string, unknown>).status, "failed");
+  const failedEvidence = await record("/api/evidence", "idem:rest-failed-evidence", { ...evidencePayload, evidenceId: "evidence:rest-failed", runId: "run:rest-failed" });
+  assert.equal(failedEvidence.response.status, 409);
+  assert.equal(failedEvidence.value.code, "evidence_record_conflict");
   const artifactResult = await command("artifact.record", "idem:artifact", { artifactId: "artifact:authority-test", type: "cli.archive", digest: "sha256:artifact", projectRevisionId: "candidate:authority-test", runId: "run:authority-test" });
   assert.equal(artifactResult.status, "succeeded");
   const landingResult = await command("landing.apply", "idem:landing", { changeRevisionId: revision.id, projectRevisionId: "candidate:authority-test", expectedCanonicalProjectRevisionId: canonicalBefore });
@@ -284,7 +339,7 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
   assert.equal(unauthenticated.status, 401);
   const finalState = await state();
   assert.equal(((finalState.authority as Record<string, unknown>).canonicalByProject as Record<string, string>)[project.id], landedRevision);
-  assert.equal(((finalState.authority as Record<string, unknown>).counts as Record<string, number>).audit, 11);
+  assert.equal(((finalState.authority as Record<string, unknown>).counts as Record<string, number>).audit, 12);
 });
 
 test("Realm Worker exposes an authenticated project-scoped REST read through the Coordinator", async () => {

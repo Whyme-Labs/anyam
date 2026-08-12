@@ -402,10 +402,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", authority: authorityStateSummary(snapshot), session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; persistence=durable-object-storage; version=${snapshot.version}; credentialFree=true; canonicalWrite=landing-only` });
   }
 
-  private async authorityProject(body: CoordinatorRequestBody): Promise<Response> {
-    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
-    const projectId = coordinatorString(body, "projectId");
-    const snapshot = await this.authoritySnapshot();
+  private authorityProjectSummary(snapshot: AuthorityPlaneSnapshot, projectId: string) {
     const project = snapshot.projects[projectId];
     if (!project) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${projectId} is not available in this Realm.`, recoveryAction: "verify the Project identifier without probing undiscoverable resources", receipt: `project=${projectId}; operation=project.inspect; discoverable=false` });
     const canonicalId = snapshot.canonicalByProject[projectId];
@@ -424,7 +421,22 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       targets: Object.values(snapshot.targets).filter(projectIds).length,
       promotions: Object.values(snapshot.promotions).filter(projectIds).length,
     };
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", project, canonicalRevision, sourceSpaces, counts, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=project.inspect; project=${projectId}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+    return { project, canonicalRevision, sourceSpaces, counts };
+  }
+
+  private async authorityProject(body: CoordinatorRequestBody): Promise<Response> {
+    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const projectId = coordinatorString(body, "projectId");
+    const snapshot = await this.authoritySnapshot();
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", ...this.authorityProjectSummary(snapshot, projectId), session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=project.inspect; project=${projectId}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+  }
+
+  private async authorityProjects(body: CoordinatorRequestBody): Promise<Response> {
+    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const snapshot = await this.authoritySnapshot();
+    const projectIds = Object.keys(snapshot.projects).sort();
+    const projects = projectIds.map((projectId) => this.authorityProjectSummary(snapshot, projectId));
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", projects, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=project.list; projectCount=${projects.length}; ordering=project-id-code-unit-ascending; readOnly=true; credentialFree=true; canonicalWrite=false` });
   }
 
   private async authorityCommand(body: CoordinatorRequestBody): Promise<Response> {
@@ -496,6 +508,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
 
       if (url.pathname === "/authority/state/internal") return await this.authorityState(coordinatorString(body, "sessionId"));
       if (url.pathname === "/authority/project/internal") return await this.authorityProject(body);
+      if (url.pathname === "/authority/projects/internal") return await this.authorityProjects(body);
       if (url.pathname === "/authority/command/internal") return await this.authorityCommand(body);
 
       if (url.pathname === "/identity/passkey-challenge/issue") {

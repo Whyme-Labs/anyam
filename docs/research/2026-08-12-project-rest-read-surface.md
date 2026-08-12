@@ -32,3 +32,8 @@ malformed paths, unsupported methods, and credential-free responses.
 This is a read-only private-alpha surface. REST mutations, task-grant
 delegation, source transfer, public visibility, and a web console remain
 separate Wayfinder boundaries.
+
+The follow-on discovery boundary is now qualified alongside the item route:
+`GET /api/projects` calls the dedicated Coordinator `project.list` query,
+returns the same summary shape in stable Project-identifier order, and does
+not add an unmeasured pagination or quota tripwire.

@@ -80,7 +80,13 @@ After an owner completes the passkey login ceremony, the public edge exposes:
 | --- | --- |
 | `GET /api/authority/state` | Read the durable Authority Plane summary |
 | `POST /api/authority/command` | Apply one idempotent Authority command |
+| `GET /api/projects` | Discover owner-visible Project summaries through the Authority Coordinator |
 | `GET /api/projects/{projectId}` | Read one project-scoped summary through the Authority Coordinator |
+
+`GET /api/projects` and `GET /api/projects/{projectId}` are owner-authenticated,
+read-only surfaces. The list is sorted by Project identifier using code-unit
+ordering and does not invent a pagination or quota limit before a workload
+receipt exists. Both routes use the same Project summary shape.
 
 `GET /api/projects/{projectId}` is an owner-authenticated, read-only surface.
 The Project identifier is URL-decoded as one path segment and is forwarded to

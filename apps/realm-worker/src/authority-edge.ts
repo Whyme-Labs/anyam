@@ -47,6 +47,19 @@ async function projectRead(request: Request, env: AnyamRealmOAuthEnv, projectId:
   }
 }
 
+async function projectList(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
+  const sessionId = await anyamRealmOwnerSessionId(request, env);
+  if (!sessionId) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "owner_authentication_required", recoveryAction: "Authenticate the Realm owner through /owner/login before listing Projects.", receipt: "ownerSession=missing-or-invalid; projectList=not-accepted; canonicalWrite=false" }, 401);
+  if (request.method !== "GET") return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "method_not_allowed", recoveryAction: "Use GET /api/projects for the read-only Project discovery surface.", receipt: "projectList=read-only; method=get-required; canonicalWrite=false" }, 405);
+  try {
+    return json(await requestAnyamRealmCoordinator(env, "/authority/projects/internal", { sessionId }));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const errorClass = detail.includes("session.") || detail.includes("session_") ? "session_rejected" : detail.includes("indeterminate") ? "indeterminate" : "coordinator_rejected";
+    return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "authority_coordinator_rejected", recoveryAction: "Inspect the Durable Object receipt and retry the same discovery read only when safe.", receipt: `authority=coordinator-rejected; operation=project.list; errorClass=${errorClass}; credentialFree=true; canonicalWrite=false` }, errorClass === "session_rejected" ? 403 : 503);
+  }
+}
+
 /**
  * Public Authority Plane edge. The host-only owner session is the current
  * authenticated principal boundary; the Durable Object revalidates the
@@ -65,7 +78,7 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
 
   if (isProjectRoute) {
     if (projectRoute.malformed) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "invalid_project_path", recoveryAction: "Use GET /api/projects/{projectId} with one URL-encoded Project identifier.", receipt: "projectRead=not-accepted; path=malformed; canonicalWrite=false" }, 400);
-    if (!projectRoute.projectId) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "project_route_not_found", recoveryAction: "Use GET /api/projects/{projectId}.", receipt: `projectRoute=${url.pathname}; transition=not-started; canonicalWrite=false` }, 404);
+    if (!projectRoute.projectId) return projectList(request, env);
     return projectRead(request, env, projectRoute.projectId);
   }
 

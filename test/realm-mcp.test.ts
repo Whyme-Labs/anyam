@@ -17,6 +17,25 @@ function env(): { env: AnyamRealmMcpEnv; calls: Array<{ path: string; body: Reco
         calls.push({ path, body });
         if (request.headers.get(REALM_COORDINATOR_INTERNAL_HEADER) !== REALM_COORDINATOR_INTERNAL_VALUE) return new Response(JSON.stringify({ code: "internal_binding_required" }), { status: 403 });
         if (body.sessionId !== "kernel-session:owner") return new Response(JSON.stringify({ code: "session.invalid", receipt: "session=invalid; project=not-disclosed" }), { status: 403 });
+        if (path === "/authority/projects/internal") return new Response(JSON.stringify({
+          protocol: "anyam.authority-plane/v1",
+          status: "ready",
+          projects: [
+            {
+              project: { protocol: "anyam.project/v1", id: "project:alpha", name: "Alpha", referenceType: "git", sourceSpaceIds: ["source:public"] },
+              canonicalRevision: { protocol: "anyam.kernel/v1", id: "project-revision:alpha:1", projectId: "project:alpha", sourceSpaceSnapshots: { "source:public": "git:alpha-1" } },
+              sourceSpaces: [{ protocol: "anyam.source-space/v1", id: "source:public", name: "public", classification: "public" }],
+              counts: { workspaces: 0, changes: 0, revisions: 0, runs: 0, evidence: 0, artifacts: 0, releases: 0, targets: 0, promotions: 0 },
+            },
+            {
+              project: { protocol: "anyam.project/v1", id: "project:video-player", name: "Video Player", referenceType: "git", sourceSpaceIds: ["source:public"] },
+              canonicalRevision: { protocol: "anyam.kernel/v1", id: "project-revision:video-player:1", projectId: "project:video-player", sourceSpaceSnapshots: { "source:public": "git:public-1" } },
+              sourceSpaces: [{ protocol: "anyam.source-space/v1", id: "source:public", name: "public", classification: "public" }],
+              counts: { workspaces: 1, changes: 2, revisions: 3, runs: 4, evidence: 4, artifacts: 1, releases: 1, targets: 1, promotions: 1 },
+            },
+          ],
+          receipt: "authority=coordinator; operation=project.list; projectCount=2; ordering=project-id-code-unit-ascending; readOnly=true; credentialFree=true; canonicalWrite=false",
+        }), { status: 200, headers: { "content-type": "application/json" } });
         if (path !== "/authority/project/internal") return new Response(JSON.stringify({ code: "not_found" }), { status: 404 });
         if (body.projectId !== "project:video-player") return new Response(JSON.stringify({ code: "not_found", receipt: `project=${String(body.projectId)}; discoverable=false` }), { status: 404 });
         return new Response(JSON.stringify({
@@ -61,18 +80,30 @@ test("remote MCP exposes an authenticated read-only project tool through the coo
 
   const listed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 2, method: "tools/list" }), fixture.env, props);
   const listedBody = await body(listed);
-  const firstTool = (((listedBody.result as Record<string, unknown>).tools as Array<Record<string, unknown>>)[0]);
-  assert.equal(firstTool?.name, "project.inspect");
+  const tools = (listedBody.result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
+  assert.deepEqual(tools.map((tool) => tool.name), ["project.list", "project.inspect"]);
 
-  const inspected = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "project.inspect", arguments: { projectId: "project:video-player" } } }), fixture.env, props);
+  const discovered = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "project.list", arguments: {} } }), fixture.env, props);
+  const discoveredBody = await body(discovered);
+  const discoveredResult = discoveredBody.result as Record<string, unknown>;
+  const discoveredContent = discoveredResult.structuredContent as Record<string, unknown>;
+  assert.equal(discoveredResult.isError, false);
+  assert.deepEqual((discoveredContent.projects as Array<Record<string, unknown>>).map((entry) => (entry.project as Record<string, unknown>).id), ["project:alpha", "project:video-player"]);
+  assert.match(String(discoveredContent.receipt), /projectCount=2/);
+  assert.equal(JSON.stringify(discoveredBody).includes("kernel-session"), false);
+  assert.equal(JSON.stringify(discoveredBody).includes("credential:"), false);
+  assert.equal(fixture.calls[0]?.path, "/authority/projects/internal");
+  assert.equal(fixture.calls[0]?.body.sessionId, "kernel-session:owner");
+
+  const inspected = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "project.inspect", arguments: { projectId: "project:video-player" } } }), fixture.env, props);
   const inspectedBody = await body(inspected);
   const result = inspectedBody.result as Record<string, unknown>;
   assert.equal(result.isError, false);
   assert.equal((result.structuredContent as Record<string, unknown>).project && ((result.structuredContent as Record<string, unknown>).project as Record<string, unknown>).id, "project:video-player");
   assert.match(String((result.structuredContent as Record<string, unknown>).receipt), /read-only/);
   assert.equal(JSON.stringify(inspectedBody).includes("kernel-session"), false);
-  assert.equal(fixture.calls[0]?.path, "/authority/project/internal");
-  assert.equal(fixture.calls[0]?.body.sessionId, "kernel-session:owner");
+  assert.equal(fixture.calls[1]?.path, "/authority/project/internal");
+  assert.equal(fixture.calls[1]?.body.sessionId, "kernel-session:owner");
 });
 
 test("remote MCP fails closed for malformed requests, unknown methods, mutations, and undiscoverable projects", async () => {

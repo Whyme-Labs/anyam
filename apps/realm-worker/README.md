@@ -92,6 +92,7 @@ After an owner completes the passkey login ceremony, the public edge exposes:
 | `GET /api/workspaces/{workspaceId}` | Read one Workspace summary through the Authority Coordinator |
 | `POST /api/runs` | Record one typed declared-Action Run through the Authority Coordinator |
 | `POST /api/evidence` | Record typed Evidence for one successful determinate Run through the Authority Coordinator |
+| `POST /api/artifacts` | Record one typed immutable Artifact bound to a Project/Change/Run lineage through the Authority Coordinator |
 | `POST /api/owner/agent/delegations` | Owner-authenticated, resource-bounded Agent Task delegation for one active Project/Workspace/Change; no credentials are issued |
 | `POST /api/owner/agent/delegations/revoke` | Owner-authenticated revocation of one enrolled Agent and its delegated authority; the owner Session remains active |
 | `POST /api/owner/agent/delegations/credentials` | Explicit exchange of an exact delegated Agent Session/Task/Grant for short-lived `realm-api`, Git, and/or MCP credentials; token material appears only in this response |
@@ -163,7 +164,10 @@ accepting it. Both tools require an idempotency key, return credential-free
 redacted projections, and never transfer source objects or advance canonical
 state. Raw receipts, actor metadata, source snapshots, credentials, logs, and
 model prompts are omitted from the MCP result. Landing, Artifact, Release, and
-Target Promotion remain separate operations.
+Target Promotion remain separate operations. `artifact.record` is exposed
+under the same `run.invoke` scope and binds an immutable Artifact to its exact
+Project Revision or Change Revision and, when supplied, Run, Action, and
+Workspace.
 
 The owner-authenticated REST surface exposes the same Change query boundary at
 `GET /api/changes` and `GET /api/changes/{changeId}`. The list accepts optional
@@ -217,6 +221,15 @@ the original safe result; changing a payload under the same key is a conflict.
 These routes record already-derived facts only: execution, source transfer,
 Artifact storage, Landing, Release creation, and Target Promotion remain
 separate operations.
+
+The owner-authenticated REST surface also exposes typed `POST /api/artifacts`.
+It requires the owner host session, one `Idempotency-Key` header, a closed
+`artifact.record` JSON body, and an explicit disclosure policy. The Coordinator
+checks the Project Revision or exact Change Revision plus any supplied Run,
+Action, and Workspace relationships before recording the immutable Artifact.
+The response is a credential-free Artifact projection that omits output paths,
+provenance digests, actor/session data, and raw receipts; Artifact storage,
+Landing, Release creation, and Target Promotion remain separate.
 
 The typed bootstrap mutations are the preferred REST entry point for starting
 work. Each route requires an owner host session, `POST`, a JSON object containing

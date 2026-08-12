@@ -157,6 +157,18 @@ export type PromotionRecord = {
   rollbackProviderOperationId?: string;
   recoveryAction?: string;
   rollbackOfPromotionId?: string;
+  /** Idempotency identity used by the trusted Authority-to-provider handoff. */
+  executionIdempotencyKey?: string;
+  /** Durable checkpoint for provider reconciliation and recovery. */
+  reconciliationCheckpoint?: PromotionReconciliationCheckpoint;
+};
+
+export type PromotionReconciliationCheckpoint = {
+  idempotencyKey: string;
+  attempt: number;
+  stage: "preview" | "apply" | "health" | "rollback" | "complete" | "reconcile";
+  providerOperationIds: readonly string[];
+  receipt: string;
 };
 
 export type PromotionEvent = {

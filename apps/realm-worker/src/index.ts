@@ -15,6 +15,7 @@ import {
   type AuthorityPlaneSnapshot,
   type AuthoritySession,
 } from "../../../src/cloudflare/authority-plane.ts";
+import { PROMOTION_EXECUTION_PROTOCOL, type PromotionExecutionResult } from "../../../src/cloudflare/promotion-execution.ts";
 import {
   CUSTOMER_PROVIDER_OPERATION_PROTOCOL,
   CustomerProviderDurableObjectOperationStore,
@@ -669,6 +670,37 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", changes, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=change.list; changeCount=${changes.length}; ordering=change-id-code-unit-ascending;${projectId ? ` project=${projectId};` : ""}${workspaceId ? ` workspace=${workspaceId};` : ""} readOnly=true; credentialFree=true; canonicalWrite=false` });
   }
 
+  private async authorityPromotionExecute(body: CoordinatorRequestBody): Promise<Response> {
+    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const promotionId = coordinatorString(body, "promotionId");
+    const executionIdempotencyKey = coordinatorString(body, "executionIdempotencyKey");
+    const expectedVersion = body.expectedVersion === undefined ? undefined : typeof body.expectedVersion === "number" && Number.isSafeInteger(body.expectedVersion) && body.expectedVersion >= 0 ? body.expectedVersion : (() => { throw new AuthorityPlaneError({ code: "invalid_request", message: "expectedVersion must be a non-negative safe integer.", recoveryAction: "read the Authority version and retry with a safe expectedVersion", receipt: "expectedVersion=non-negative-safe-integer-required; promotionExecution=not-accepted" }); })();
+    const executorBinding = this.env.ANYAM_PROMOTION_EXECUTOR;
+    if (!executorBinding || typeof executorBinding.fetch !== "function") {
+      throw new AuthorityPlaneError({ code: "blocked", message: "No trusted Promotion executor service is bound to this customer-operated Realm.", recoveryAction: "bind the qualified Target execution service before requesting provider Promotion execution", receipt: `promotion=${promotionId}; providerExecutor=not-bound; credentialFree=true; canonicalWrite=false` });
+    }
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      const current = await this.authoritySnapshot();
+      const coordinator = new AuthorityPlaneCoordinator(current);
+      const executor = {
+        execute: async (context: Readonly<import("../../../src/cloudflare/promotion-execution.ts").PromotionExecutionContext>): Promise<PromotionExecutionResult> => {
+          const response = await executorBinding.fetch(new Request("https://anyam-promotion-executor/execute", {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-anyam-promotion-protocol": PROMOTION_EXECUTION_PROTOCOL },
+            body: JSON.stringify(context),
+          }));
+          if (!response.ok) throw new Error(`promotion-executor-http-${response.status}`);
+          const payload: unknown = await response.json().catch(() => undefined);
+          if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new Error("promotion-executor-result-not-object");
+          return payload as PromotionExecutionResult;
+        },
+      };
+      const result = await coordinator.executePromotion({ promotionId, executionIdempotencyKey, ...(expectedVersion === undefined ? {} : { expectedVersion }), executor, session });
+      await this.ctx.storage.put(REALM_AUTHORITY_SNAPSHOT_KEY, coordinator.snapshot());
+      return coordinatorJson({ ...result, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, credentialFree: true, canonicalWrite: false }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
+    });
+  }
+
   private async authorityCommand(body: CoordinatorRequestBody): Promise<Response> {
     const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const command = coordinatorString(body, "command") as AuthorityCommandName;
@@ -741,6 +773,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/projects/internal") return await this.authorityProjects(body);
       if (url.pathname === "/authority/workspaces/internal") return await this.authorityWorkspaces(body);
       if (url.pathname === "/authority/changes/internal") return await this.authorityChanges(body);
+      if (url.pathname === "/authority/promotion/execute/internal") return await this.authorityPromotionExecute(body);
       if (url.pathname === "/authority/command/internal") return await this.authorityCommand(body);
 
       if (url.pathname === "/identity/passkey-challenge/issue") {

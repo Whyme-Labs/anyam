@@ -22,6 +22,15 @@ import {
   type WorkspaceMount,
 } from "../kernel/contracts.ts";
 import type { PromotionRecord } from "../delivery/promotion.ts";
+import {
+  PROMOTION_EXECUTION_PROTOCOL,
+  createPromotionExecutionContext,
+  normalizePromotionExecutionResult,
+  targetAfterPromotion,
+  type PromotionExecutionRequest,
+  type PromotionExecutionResult,
+  PromotionExecutionValidationError,
+} from "./promotion-execution.ts";
 
 export const AUTHORITY_PLANE_PROTOCOL = "anyam.authority-plane/v1" as const;
 export const AUTHORITY_COMMAND_PROTOCOL = "anyam.authority-command/v1" as const;
@@ -37,7 +46,8 @@ export type AuthorityCommandName =
   | "landing.apply"
   | "release.create"
   | "target.configure"
-  | "promotion.request";
+  | "promotion.request"
+  | "promotion.execute";
 
 export type AuthoritySession = {
   realmId: string;
@@ -291,6 +301,164 @@ export class AuthorityPlaneCoordinator {
     });
     this.state = next;
     return clone(result);
+  }
+
+  /**
+   * Execute one already-recorded Promotion through a trusted provider
+   * capability. The executor is injected by the coordinator boundary; a
+   * caller can supply only the Promotion identity and execution idempotency
+   * key. Provider results are validated against a detached Authority context
+   * before the Target pointer or Promotion state changes.
+   */
+  async executePromotion(input: PromotionExecutionRequest): Promise<AuthorityCommandResult> {
+    if (input.session.realmId !== this.state.realmId) {
+      throw new AuthorityPlaneError({
+        code: "invalid_request",
+        message: "The authenticated session belongs to a different Realm.",
+        recoveryAction: "route Promotion execution through the coordinator bound to the authenticated Realm",
+        receipt: `sessionRealm=${input.session.realmId}; stateRealm=${this.state.realmId}; promotionExecution=not-accepted`,
+      });
+    }
+    const executionIdempotencyKey = requiredString(input.executionIdempotencyKey, "executionIdempotencyKey");
+    const idempotencyKey = `promotion.execute:${executionIdempotencyKey}`;
+    const command: AuthorityCommand = {
+      protocol: AUTHORITY_COMMAND_PROTOCOL,
+      command: "promotion.execute",
+      idempotencyKey,
+      ...(input.expectedVersion === undefined ? {} : { expectedVersion: input.expectedVersion }),
+      payload: { promotionId: input.promotionId, executionIdempotencyKey },
+    };
+    const existing = this.state.idempotency[idempotencyKey];
+    const requestFingerprint = fingerprint(command);
+    if (existing) {
+      if (existing.fingerprint !== requestFingerprint) {
+        throw new AuthorityPlaneError({
+          code: "idempotency_conflict",
+          message: `Execution idempotency key ${executionIdempotencyKey} was already used for a different Promotion handoff.`,
+          recoveryAction: "reuse the original execution payload or choose a new execution idempotency key",
+          receipt: `executionIdempotencyKey=${executionIdempotencyKey}; conflict=true; stateVersion=${this.state.version}; overwritten=false`,
+        });
+      }
+      return clone(existing.result);
+    }
+    if (input.expectedVersion !== undefined && input.expectedVersion !== this.state.version) {
+      throw new AuthorityPlaneError({
+        code: "stale_state",
+        message: `Authority state changed before Promotion ${input.promotionId} execution was accepted.`,
+        recoveryAction: "read the current Authority state and retry with a fresh execution idempotency key",
+        receipt: `expectedVersion=${input.expectedVersion}; actualVersion=${this.state.version}; promotionExecution=not-accepted`,
+      });
+    }
+
+    const promotion = this.state.promotions[input.promotionId];
+    if (!promotion) {
+      throw new AuthorityPlaneError({
+        code: "not_found",
+        message: `Promotion ${input.promotionId} does not exist.`,
+        recoveryAction: "inspect the authoritative Promotion ledger and retry with the recorded Promotion ID",
+        receipt: `promotion=${input.promotionId}; execution=not-started; discoverable=false`,
+      });
+    }
+    if (!["blocked", "failed", "degraded"].includes(promotion.state)) {
+      if (promotion.state === "healthy" || promotion.state === "rolled-back") {
+        const target = this.state.targets[promotion.targetId];
+        const release = this.state.releases[promotion.releaseId];
+        const result: AuthorityCommandResult = {
+          protocol: AUTHORITY_PLANE_PROTOCOL,
+          command: "promotion.execute",
+          status: "succeeded",
+          version: this.state.version,
+          value: { promotion, target, release },
+          receipt: `promotion=${promotion.id}; execution=already-terminal; state=${promotion.state}; providerInvocation=false; credentialFree=true; canonicalWrite=false`,
+        };
+        this.state.idempotency[idempotencyKey] = { fingerprint: requestFingerprint, result: clone(result) };
+        return clone(result);
+      }
+      throw new AuthorityPlaneError({
+        code: "conflict",
+        message: `Promotion ${promotion.id} is ${promotion.state}; it is not ready for a provider handoff.`,
+        recoveryAction: "wait for a recoverable Promotion state or request a new Promotion without changing the existing record",
+        receipt: `promotion=${promotion.id}; state=${promotion.state}; execution=not-started`,
+      });
+    }
+
+    let context;
+    try {
+      context = createPromotionExecutionContext({ snapshot: this.state, promotionId: input.promotionId, executionIdempotencyKey, session: input.session });
+    } catch (error) {
+      if (error instanceof PromotionExecutionValidationError) {
+        throw new AuthorityPlaneError({ code: "conflict", message: error.message, recoveryAction: error.recoveryAction, receipt: `${error.receipt}; promotionExecution=not-accepted` });
+      }
+      throw error;
+    }
+
+    let execution: PromotionExecutionResult;
+    try {
+      execution = await input.executor.execute(clone(context));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      execution = this.indeterminatePromotionExecution(promotion, input.promotionId, executionIdempotencyKey, context.executionDigest, `provider executor threw: ${message}`, "inspect the provider operation by its immutable execution identity before retrying", `promotion=${promotion.id}; providerResult=thrown; message=${message}`);
+    }
+
+    const next = clone(this.state);
+    let normalized: PromotionExecutionResult;
+    try {
+      normalized = normalizePromotionExecutionResult(context, execution);
+    } catch (error) {
+      if (!(error instanceof PromotionExecutionValidationError)) throw error;
+      normalized = this.indeterminatePromotionExecution(promotion, input.promotionId, executionIdempotencyKey, context.executionDigest, `provider result rejected: ${error.message}`, error.recoveryAction, `${error.receipt}; providerResult=untrusted; promotionExecution=indeterminate`);
+    }
+    const target = next.targets[promotion.targetId];
+    if (!target) throw new AuthorityPlaneError({ code: "not_found", message: `Target ${promotion.targetId} disappeared before Promotion execution was recorded.`, recoveryAction: "restore the exact Target record and reconcile the provider operation", receipt: `promotion=${promotion.id}; target=${promotion.targetId}; execution=not-recorded` });
+    const updatedTarget = targetAfterPromotion({ target, result: normalized });
+    const checkpoint = normalized.promotion.reconciliationCheckpoint ?? {
+      idempotencyKey: executionIdempotencyKey,
+      attempt: normalized.promotion.attempt,
+      stage: normalized.status === "indeterminate" ? "reconcile" : "complete",
+      providerOperationIds: [normalized.promotion.providerOperationId, normalized.promotion.rollbackProviderOperationId].filter((value): value is string => Boolean(value)),
+      receipt: `promotion=${promotion.id}; execution=${normalized.status}; checkpoint=authority-recorded; credentialFree=true`,
+    };
+    next.promotions[promotion.id] = { ...normalized.promotion, reconciliationCheckpoint: checkpoint };
+    next.targets[target.id] = { ...updatedTarget, currentReleaseId: normalized.target.currentReleaseId, releaseHistory: [...normalized.target.releaseHistory], lastPromotionId: promotion.id };
+    next.version += 1;
+    const result: AuthorityCommandResult = {
+      protocol: AUTHORITY_PLANE_PROTOCOL,
+      command: "promotion.execute",
+      status: normalized.status,
+      version: next.version,
+      value: { promotion: next.promotions[promotion.id], target: next.targets[target.id], release: next.releases[promotion.releaseId], checkpoint },
+      receipt: `${normalized.receipt}; executionIdempotencyKey=${executionIdempotencyKey}; authorityStateVersion=${next.version}`,
+      ...(normalized.recoveryAction ? { recoveryAction: normalized.recoveryAction } : {}),
+    };
+    next.idempotency[idempotencyKey] = { fingerprint: requestFingerprint, result: clone(result) };
+    next.audit.push({ id: opaqueId("authority-audit"), command: "promotion.execute", idempotencyKey, actor: actorRef(input.session), outcome: normalized.status, stateVersion: next.version, occurredAt: now(), receipt: result.receipt });
+    this.state = next;
+    return clone(result);
+  }
+
+  private indeterminatePromotionExecution(promotion: PromotionRecord, promotionId: string, executionIdempotencyKey: string, executionDigest: string, message: string, recoveryAction: string, receipt: string): PromotionExecutionResult {
+    const updated: PromotionRecord = {
+      ...clone(promotion),
+      state: "degraded",
+      attempt: promotion.attempt + 1,
+      updatedAt: now(),
+      executionIdempotencyKey,
+      recoveryAction,
+      receipt: `promotion=degraded; ${message}; ${receipt}`,
+      reconciliationCheckpoint: { idempotencyKey: executionIdempotencyKey, attempt: promotion.attempt + 1, stage: "reconcile", providerOperationIds: [], receipt: `promotion=${promotionId}; providerResult=indeterminate; credentialFree=true` },
+    };
+    const target = this.state.targets[promotion.targetId];
+    return {
+      protocol: PROMOTION_EXECUTION_PROTOCOL,
+      status: "indeterminate",
+      adapterId: target?.adapterId ?? "unknown",
+      executionDigest,
+      promotion: updated,
+      target: { id: promotion.targetId, projectId: promotion.projectId, state: "degraded", currentReleaseId: target?.currentReleaseId ?? null, releaseHistory: [...(target?.releaseHistory ?? [])] },
+      ...(updated.reconciliationCheckpoint ? { checkpoint: updated.reconciliationCheckpoint } : {}),
+      receipt: updated.receipt,
+      recoveryAction,
+    };
   }
 
   private apply(next: AuthorityPlaneSnapshot, command: AuthorityCommand, session: AuthoritySession): AuthorityCommandResult {
@@ -559,6 +727,14 @@ export class AuthorityPlaneCoordinator {
         if (next.promotions[promotion.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Promotion ${promotion.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Promotion identity", receipt: `promotion=${promotion.id}; exists=true; transition=not-applied` });
         next.promotions[promotion.id] = promotion;
         return blocked({ promotion, target, release }, promotion.receipt, promotion.recoveryAction!);
+      }
+      case "promotion.execute": {
+        throw new AuthorityPlaneError({
+          code: "invalid_request",
+          message: "promotion.execute is an internal provider handoff and cannot be submitted as a public Authority command.",
+          recoveryAction: "use the coordinator's internal Promotion execution boundary; no provider operation was started",
+          receipt: "command=promotion.execute; publicCommand=false; transition=not-applied",
+        });
       }
     }
   }

@@ -43,6 +43,7 @@ export const CONTRACT_VERSIONS = {
   releasePublication: "anyam.release-publication/v1",
   healthObservation: "anyam.health-observation/v1",
   targetAdapter: "anyam.target-adapter/v1",
+  promotionExecution: "anyam.promotion-execution/v1",
   capability: "anyam.capability/v1",
   realm: "anyam.realm/v1",
   principal: "anyam.principal/v1",
@@ -540,6 +541,16 @@ export type Target = {
   acceptedArtifactTypes: readonly string[];
   requiredEvidenceKeys: readonly string[];
   state: TargetState;
+  /**
+   * Anyam-owned delivery pointer. Provider deployments are receipts; this
+   * pointer advances only after the trusted Promotion handoff verifies the
+   * provider result and bound health observation.
+   */
+  currentReleaseId?: string | null;
+  /** Append-only known-good Release identities retained for recovery. */
+  releaseHistory?: readonly string[];
+  /** Last authoritative Promotion that changed or reconciled this Target. */
+  lastPromotionId?: string;
 };
 
 export type CapabilityGrantStatus = "active" | "revoked" | "expired";

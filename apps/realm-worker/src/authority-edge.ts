@@ -10,6 +10,7 @@ import { LANDING_APPLY_COMMAND, landingApplyCommand, landingApplyValue, LandingI
 import { RELEASE_CREATE_COMMAND, releaseCreateCommand, releaseCreateValue, ReleaseCreateInputError } from "./release-contract.ts";
 import { TARGET_CONFIGURE_COMMAND, targetConfigureCommand, targetConfigureValue, TargetConfigureInputError } from "./target-contract.ts";
 import { PROMOTION_REQUEST_COMMAND, promotionRequestCommand, promotionRequestValue, PromotionRequestInputError } from "./promotion-contract.ts";
+import { PROMOTION_EXECUTE_COMMAND, promotionExecutionCommand, promotionExecutionValue, PromotionExecutionInputError } from "./promotion-execution-contract.ts";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
@@ -314,6 +315,10 @@ function promotionError(status: number, code: string, recoveryAction: string, re
   return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction, receipt: `operation=${PROMOTION_REQUEST_COMMAND}; ${receipt}; credentialFree=true; canonicalWrite=false; providerExecution=not-performed` }, status);
 }
 
+function promotionExecutionError(status: number, code: string, recoveryAction: string, receipt: string): Response {
+  return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction, receipt: `operation=${PROMOTION_EXECUTE_COMMAND}; ${receipt}; credentialFree=true; canonicalWrite=false; providerExecution=trusted-handoff` }, status);
+}
+
 async function landingMutation(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
   const sessionId = await anyamRealmOwnerSessionId(request, env);
   if (!sessionId) return landingError(401, "owner_authentication_required", "Authenticate the Realm owner through /owner/login before requesting Landing.", "ownerSession=missing-or-invalid; transition=not-applied");
@@ -447,6 +452,60 @@ async function promotionMutation(request: Request, env: AnyamRealmOAuthEnv): Pro
   }
 }
 
+type PromotionExecutionPath = { matched: boolean; promotionId?: string; malformed: boolean };
+
+function promotionExecutionPath(pathname: string): PromotionExecutionPath {
+  const segments = pathname.split("/");
+  if (segments[1] !== "api" || segments[2] !== "promotions") return { matched: false, malformed: false };
+  if (segments.length !== 5 || segments[4] !== "execute") return { matched: false, malformed: false };
+  if (!segments[3]) return { matched: true, malformed: true };
+  try {
+    const promotionId = decodeURIComponent(segments[3]);
+    if (!promotionId || promotionId.includes("/") || promotionId.includes("\\") || promotionId === "." || promotionId === "..") return { matched: true, malformed: true };
+    return { matched: true, promotionId, malformed: false };
+  } catch {
+    return { matched: true, malformed: true };
+  }
+}
+
+async function promotionExecutionMutation(request: Request, env: AnyamRealmOAuthEnv, path: PromotionExecutionPath): Promise<Response> {
+  if (!path.promotionId || path.malformed) return promotionExecutionError(400, "invalid_promotion_execution_path", "Use POST /api/promotions/{promotionId}/execute with one safe URL-encoded Promotion identifier.", "path=malformed; providerInvocation=false");
+  const sessionId = await anyamRealmOwnerSessionId(request, env);
+  if (!sessionId) return promotionExecutionError(401, "owner_authentication_required", "Authenticate the Realm owner through /owner/login before executing Promotion.", "ownerSession=missing-or-invalid; providerInvocation=false");
+  if (request.method !== "POST") return promotionExecutionError(405, "method_not_allowed", "Use POST /api/promotions/{promotionId}/execute with one Idempotency-Key header.", "method=post-required; providerInvocation=false");
+  const executionIdempotencyKey = request.headers.get("idempotency-key")?.trim();
+  if (!executionIdempotencyKey) return promotionExecutionError(422, "invalid_request", "Send one non-empty Idempotency-Key header; no provider operation was started.", "idempotencyKey=required; providerInvocation=false");
+  let body: Record<string, unknown>;
+  try {
+    body = await readBody(request);
+  } catch {
+    return promotionExecutionError(422, "invalid_request", "Send a JSON object containing only expectedVersion; no provider operation was started.", "body=object-required; providerInvocation=false");
+  }
+  let command: ReturnType<typeof promotionExecutionCommand>;
+  try {
+    command = promotionExecutionCommand(path.promotionId, body, executionIdempotencyKey);
+  } catch (error) {
+    if (error instanceof PromotionExecutionInputError) return promotionExecutionError(422, "invalid_request", error.recoveryAction, error.receipt);
+    return promotionExecutionError(422, "invalid_request", "Correct the typed Promotion execution request and retry; no provider operation was started.", "arguments=invalid; providerInvocation=false");
+  }
+  try {
+    const result = await requestAnyamRealmCoordinator(env, "/authority/promotion/execute/internal", {
+      sessionId,
+      promotionId: command.promotionId,
+      executionIdempotencyKey: command.executionIdempotencyKey,
+      ...(command.expectedVersion === undefined ? {} : { expectedVersion: command.expectedVersion }),
+    }, { allowBlocked: true });
+    const value = promotionExecutionValue(result, executionIdempotencyKey);
+    return json(value, value.status === "succeeded" ? 200 : value.status === "blocked" ? 409 : 503);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const status = detail.includes("not_found") ? 404 : detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : detail.includes("invalid_request") ? 422 : detail.includes("idempotency_conflict") || detail.includes("stale_state") || detail.includes("conflict") || detail.includes("provider-executor") ? 409 : 503;
+    const code = status === 404 ? "promotion_execute_not_found" : status === 403 ? "owner_session_rejected" : status === 422 ? "invalid_request" : status === 409 ? "promotion_execute_conflict" : "authority_coordinator_rejected";
+    const recoveryAction = status === 404 ? "Verify the Promotion identifier without probing hidden resources." : status === 409 ? "Inspect the provider-executor binding and Authority version; retry the same immutable execution only when safe." : status === 403 ? "Authenticate the Realm owner again and retry the same execution request." : "Inspect the Durable Object receipt and reconcile the provider operation before retrying.";
+    return promotionExecutionError(status, code, recoveryAction, `authority=coordinator-rejected; credentialFree=true; canonicalWrite=false`);
+  }
+}
+
 async function revisionMutation(request: Request, env: AnyamRealmOAuthEnv, path: RevisionPublishPath): Promise<Response> {
   const changeId = path.changeId;
   if (!changeId) return revisionError(400, "invalid_revision_path", "Use POST /api/changes/{changeId}/revisions with one safe URL-encoded Change identifier.", "path=malformed; transition=not-applied");
@@ -504,6 +563,7 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   const isReleaseRoute = url.pathname === "/api/releases" || url.pathname.startsWith("/api/releases/");
   const isTargetRoute = url.pathname === "/api/targets" || url.pathname.startsWith("/api/targets/");
   const isPromotionRoute = url.pathname === "/api/promotions" || url.pathname.startsWith("/api/promotions/");
+  const promotionExecutionRoute = promotionExecutionPath(url.pathname);
   const revisionRoute = revisionPublishPath(url.pathname);
   if (!url.pathname.startsWith("/api/authority") && !isProjectRoute && !isChangeRoute && !isWorkspaceRoute && !isRunRoute && !isEvidenceRoute && !isArtifactRoute && !isLandingRoute && !isReleaseRoute && !isTargetRoute && !isPromotionRoute && !revisionRoute.matched) return undefined;
 
@@ -543,7 +603,8 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   }
 
   if (isPromotionRoute) {
-    if (url.pathname !== "/api/promotions") return promotionError(400, "invalid_promotion_path", "Use POST /api/promotions with one typed Promotion request.", "path=malformed; transition=not-applied");
+    if (promotionExecutionRoute.matched) return promotionExecutionMutation(request, env, promotionExecutionRoute);
+    if (url.pathname !== "/api/promotions") return promotionError(400, "invalid_promotion_path", "Use POST /api/promotions or /api/promotions/{promotionId}/execute with one typed request.", "path=malformed; transition=not-applied");
     return promotionMutation(request, env);
   }
 

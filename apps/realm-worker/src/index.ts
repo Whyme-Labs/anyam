@@ -27,12 +27,14 @@ import {
   type CustomerProviderRecoveryBundle,
 } from "../../../src/cloudflare/customer-provider-operation.ts";
 import { CREDENTIAL_AUDIENCES, RealmIdentityError, RealmIdentityPolicy, type Capability, type CredentialClass, type RealmRecoverySnapshot } from "../../../src/identity/realm.ts";
+import type { ResourceRef } from "../../../src/kernel/contracts.ts";
 import { oauthConsentBindingMatches } from "../../../src/identity/oauth-consent.ts";
 import { createAnyamRealmOAuthProvider, type AnyamRealmOAuthEnv } from "./oauth-provider.ts";
 import { handleAnyamRealmOwnerRequest } from "./passkey-owner.ts";
 import { createCloudflareCustomerProviderAdapters } from "./customer-provider-adapters.ts";
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "./coordinator-protocol.ts";
 import { handleAuthorityRequest } from "./authority-edge.ts";
+import { isMcpDeliveryOperation, mcpDeliveryScope, parseMcpDeliveryBinding, MCP_DELIVERY_OPERATIONS, type McpDeliveryOperation } from "./mcp-delivery-grant.ts";
 
 export type Env = AnyamRealmOAuthEnv;
 
@@ -65,7 +67,7 @@ const GENERIC_AGENT_CAPABILITIES: readonly Capability[] = [
   "evidence.read",
   "secret.use",
 ];
-const GENERIC_AGENT_DENIED_CAPABILITIES: readonly Capability[] = ["change.approve", "landing.request", "target.promote", "policy.manage", "identity.manage"];
+const GENERIC_AGENT_DENIED_CAPABILITIES: readonly Capability[] = ["change.approve", "landing.request", "release.create", "target.configure", "promotion.request", "target.promote", "policy.manage", "identity.manage"];
 const GENERIC_AGENT_DENIED_EFFECTS = ["canonical.write", "landing.apply", "production.deploy", "target.promote", "promotion.request"] as const;
 type RealmRecoveryStatus = "active" | "recovery-pending";
 const CUSTOMER_PROVIDER_SURFACES: readonly CustomerProviderSurface[] = ["d1", "r2", "queue", "workflow", "worker"];
@@ -124,6 +126,16 @@ type StoredOAuthGrant = {
   status: "active" | "revoked";
   createdAt: string;
   revokedAt?: string;
+  sessionId: string;
+  actorId: string;
+  authorizationEpoch: number;
+  expiresAt: string;
+  mcpResource?: string;
+  resource?: ResourceRef;
+  sourceSpaceIds: string[];
+  taskId?: string;
+  capabilityGrantId?: string;
+  deliveryActions: string[];
 };
 
 function coordinatorJson(body: unknown, status = 200): Response {
@@ -251,6 +263,86 @@ function storageKey(prefix: string, id: string): string {
 
 function recordExpired(expiresAt: string): boolean {
   return Date.parse(expiresAt) <= Date.now();
+}
+
+function storedOAuthGrantProjection(record: StoredOAuthGrant): Record<string, unknown> {
+  return {
+    protocol: record.protocol,
+    id: record.id,
+    clientId: record.clientId,
+    scopes: [...record.scopes],
+    status: record.status,
+    createdAt: record.createdAt,
+    expiresAt: record.expiresAt,
+    ...(record.revokedAt ? { revokedAt: record.revokedAt } : {}),
+    delivery: record.taskId && record.capabilityGrantId && record.resource
+      ? {
+          bound: true,
+          projectBound: record.resource.projectId !== undefined,
+          workspaceBound: record.resource.workspaceId !== undefined,
+          changeBound: record.resource.changeId !== undefined,
+          sourceSpaceCount: record.sourceSpaceIds.length,
+          actionCount: record.deliveryActions.length,
+        }
+      : { bound: false },
+    credentialMaterialStored: false,
+  };
+}
+
+function authorityString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) throw new RealmIdentityError({ code: "mcp.delivery_payload_invalid", message: "The typed MCP delivery payload is incomplete.", recoveryAction: `send the documented ${field} and retry; no delivery transition was accepted`, receipt: `mcpDelivery=payload-invalid; field=${field}; canonicalWrite=false` });
+  return value.trim();
+}
+
+function authorityPayload(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new RealmIdentityError({ code: "mcp.delivery_payload_invalid", message: "The typed MCP delivery payload is not an object.", recoveryAction: "send the documented typed delivery arguments; no delivery transition was accepted", receipt: "mcpDelivery=payload-invalid; canonicalWrite=false" });
+  return value as Record<string, unknown>;
+}
+
+function changeForRevision(snapshot: AuthorityPlaneSnapshot, changeRevisionId: string): { id: string; projectId: string; workspaceId?: string } {
+  const revision = snapshot.changeRevisions[changeRevisionId];
+  const change = revision ? snapshot.changes[revision.changeId] : undefined;
+  if (!revision || !change) throw new RealmIdentityError({ code: "mcp.delivery_lineage_not_found", message: "The requested delivery lineage is not available in this Realm.", recoveryAction: "use the exact Project, Change Revision, Release, and Target lineage bound to the MCP resource", receipt: "mcpDelivery=lineage-not-found; discoverable=false; canonicalWrite=false" });
+  return { id: change.id, projectId: change.projectId, ...(change.workspaceId ? { workspaceId: change.workspaceId } : revision.workspaceId ? { workspaceId: revision.workspaceId } : {}) };
+}
+
+function validateMcpDeliveryLineage(snapshot: AuthorityPlaneSnapshot, operation: McpDeliveryOperation, binding: NonNullable<ReturnType<typeof parseMcpDeliveryBinding>>, payloadValue: unknown): void {
+  const payload = authorityPayload(payloadValue);
+  const projectId = authorityString(payload.projectId, "projectId");
+  const project = snapshot.projects[binding.projectId];
+  if (!project || projectId !== binding.projectId) throw new RealmIdentityError({ code: "mcp.delivery_resource_denied", message: "The delivery payload is outside the authorized Project resource.", recoveryAction: "use the Project identifier bound to this MCP resource; no delivery transition was accepted", receipt: "mcpDelivery=project-mismatch; discoverable=false; canonicalWrite=false" });
+  const sourceSpaceIds = binding.sourceSpaceIds.length > 0 ? binding.sourceSpaceIds : project.sourceSpaceIds;
+  if (sourceSpaceIds.length === 0 || sourceSpaceIds.some((sourceSpaceId) => !project.sourceSpaceIds.includes(sourceSpaceId))) throw new RealmIdentityError({ code: "mcp.delivery_source_space_denied", message: "The MCP resource does not disclose a current Project Source Space set.", recoveryAction: "reauthorize the MCP resource with Source Spaces that belong to the Project", receipt: "mcpDelivery=source-space-mismatch; discoverable=false; canonicalWrite=false" });
+  if (binding.workspaceId) {
+    const workspace = snapshot.workspaces[binding.workspaceId];
+    if (!workspace || workspace.projectId !== binding.projectId) throw new RealmIdentityError({ code: "mcp.delivery_lineage_not_found", message: "The authorized Workspace is not available for this Project.", recoveryAction: "reauthorize against the current Project Workspace; no delivery transition was accepted", receipt: "mcpDelivery=workspace-mismatch; discoverable=false; canonicalWrite=false" });
+  }
+  if (binding.changeId) {
+    const change = snapshot.changes[binding.changeId];
+    if (!change || change.projectId !== binding.projectId || (binding.workspaceId !== undefined && change.workspaceId !== binding.workspaceId)) throw new RealmIdentityError({ code: "mcp.delivery_lineage_not_found", message: "The authorized Change is not available for this Project and Workspace.", recoveryAction: "reauthorize against the current Project Change lineage; no delivery transition was accepted", receipt: "mcpDelivery=change-mismatch; discoverable=false; canonicalWrite=false" });
+  }
+  const requireChangeLineage = (change: { id: string; projectId: string; workspaceId?: string }): void => {
+    if (binding.changeId !== undefined && change.id !== binding.changeId) throw new RealmIdentityError({ code: "mcp.delivery_resource_denied", message: "The delivery payload is outside the authorized Change resource.", recoveryAction: "use the Change Revision bound to this MCP resource", receipt: "mcpDelivery=change-mismatch; discoverable=false; canonicalWrite=false" });
+    if (binding.workspaceId !== undefined && change.workspaceId !== binding.workspaceId) throw new RealmIdentityError({ code: "mcp.delivery_resource_denied", message: "The delivery payload is outside the authorized Workspace resource.", recoveryAction: "use the Change Revision produced by the authorized Workspace", receipt: "mcpDelivery=workspace-mismatch; discoverable=false; canonicalWrite=false" });
+  };
+  if (operation === "landing.apply") {
+    const changeId = authorityString(payload.changeId, "changeId");
+    const change = snapshot.changes[changeId];
+    if (!change || change.projectId !== binding.projectId) throw new RealmIdentityError({ code: "mcp.delivery_lineage_not_found", message: "The Landing Change is not available for this Project.", recoveryAction: "use the exact Change Revision lineage bound to the MCP resource", receipt: "mcpDelivery=landing-lineage-mismatch; discoverable=false; canonicalWrite=false" });
+    requireChangeLineage({ id: change.id, projectId: change.projectId, ...(change.workspaceId ? { workspaceId: change.workspaceId } : {}) });
+  } else if (operation === "release.create") {
+    if (binding.changeId !== undefined || binding.workspaceId !== undefined) {
+      const changeRevisionId = authorityString(payload.changeRevisionId, "changeRevisionId");
+      requireChangeLineage(changeForRevision(snapshot, changeRevisionId));
+    }
+  } else if (operation === "target.configure") {
+    if (binding.changeId !== undefined || binding.workspaceId !== undefined) throw new RealmIdentityError({ code: "mcp.delivery_resource_denied", message: "Target configuration is a Project-level operation and cannot use a Change- or Workspace-bound MCP resource.", recoveryAction: "authorize a Project-scoped MCP resource for target configuration", receipt: "mcpDelivery=target-resource-too-narrow; canonicalWrite=false" });
+  } else if (operation === "promotion.request" && (binding.changeId !== undefined || binding.workspaceId !== undefined)) {
+    const releaseId = authorityString(payload.releaseId, "releaseId");
+    const release = snapshot.releases[releaseId];
+    if (!release || release.changeRevisionId === undefined) throw new RealmIdentityError({ code: "mcp.delivery_lineage_not_found", message: "The Promotion Release does not preserve a Change Revision lineage for this resource.", recoveryAction: "create the Release with its exact Change Revision before requesting Promotion", receipt: "mcpDelivery=promotion-lineage-missing; discoverable=false; canonicalWrite=false" });
+    requireChangeLineage(changeForRevision(snapshot, release.changeRevisionId));
+  }
 }
 
 function providerSurface(body: CoordinatorRequestBody): CustomerProviderSurface {
@@ -964,14 +1056,61 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
           const key = storageKey(REALM_OAUTH_GRANT_PREFIX, id);
           const existing = await this.ctx.storage.get<StoredOAuthGrant>(key);
           const createdAt = new Date().toISOString();
-          const record: StoredOAuthGrant = { protocol: "anyam.oauth-grant/v1", id, providerGrantId, realmId: identity.realm.id, principalId: session.principalId, clientId, scopes, status: "active", createdAt };
+          const deliveryOperations = MCP_DELIVERY_OPERATIONS.filter((operation) => scopes.includes(mcpDeliveryScope(operation)));
+          const deliveryScopes = deliveryOperations.map((operation) => mcpDeliveryScope(operation)) as Capability[];
+          const requestedResource = body.resource === undefined ? undefined : coordinatorString(body, "resource");
+          const binding = deliveryOperations.length > 0 ? parseMcpDeliveryBinding(requestedResource, identity.realm.id) : undefined;
+          if (deliveryOperations.length > 0 && !binding) throw new RealmIdentityError({ code: "oauth.grant_delivery_binding_required", message: "A delivery-capable MCP OAuth grant must name a project-scoped resource.", recoveryAction: "authorize the MCP client with a resource such as /mcp/projects/<projectId> (optionally narrowed to a Workspace or Change); no grant was recorded", receipt: "oauthGrant=delivery-binding-required; taskGrant=not-created; canonicalWrite=false" });
+          const authority = deliveryOperations.length > 0 ? await this.authoritySnapshot() : undefined;
+          let sourceSpaceIds: string[] = [];
+          if (binding && authority) {
+            const project = authority.projects[binding.projectId];
+            if (!project) throw new RealmIdentityError({ code: "oauth.grant_delivery_resource_not_found", message: "The delivery MCP resource is not available in this Realm.", recoveryAction: "use a discoverable Project resource and restart OAuth authorization", receipt: "oauthGrant=delivery-project-not-found; discoverable=false; taskGrant=not-created" });
+            sourceSpaceIds = binding.sourceSpaceIds.length > 0 ? [...binding.sourceSpaceIds] : [...project.sourceSpaceIds];
+            if (sourceSpaceIds.length === 0 || sourceSpaceIds.some((sourceSpaceId) => !project.sourceSpaceIds.includes(sourceSpaceId))) throw new RealmIdentityError({ code: "oauth.grant_delivery_source_space_invalid", message: "The delivery MCP resource does not disclose a valid Project Source Space set.", recoveryAction: "authorize only Source Spaces that belong to the Project", receipt: "oauthGrant=source-space-disclosure-invalid; taskGrant=not-created; canonicalWrite=false" });
+            const workspace = binding.workspaceId ? authority.workspaces[binding.workspaceId] : undefined;
+            if (binding.workspaceId && (!workspace || workspace.projectId !== binding.projectId)) throw new RealmIdentityError({ code: "oauth.grant_delivery_resource_not_found", message: "The delivery MCP Workspace is not available for this Project.", recoveryAction: "use a discoverable Project Workspace resource and restart OAuth authorization", receipt: "oauthGrant=delivery-workspace-not-found; discoverable=false; taskGrant=not-created" });
+            const change = binding.changeId ? authority.changes[binding.changeId] : undefined;
+            if (binding.changeId && (!change || change.projectId !== binding.projectId || (binding.workspaceId !== undefined && change.workspaceId !== binding.workspaceId))) throw new RealmIdentityError({ code: "oauth.grant_delivery_resource_not_found", message: "The delivery MCP Change is not available for this Project and Workspace.", recoveryAction: "use a discoverable Project Change resource and restart OAuth authorization", receipt: "oauthGrant=delivery-change-not-found; discoverable=false; taskGrant=not-created" });
+          }
+          const record: StoredOAuthGrant = { protocol: "anyam.oauth-grant/v1", id, providerGrantId, realmId: identity.realm.id, principalId: session.principalId, clientId, scopes, status: "active", createdAt, sessionId: session.id, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch, expiresAt: session.expiresAt, ...(binding ? { mcpResource: binding.resource, resource: binding.resourceRef } : {}), sourceSpaceIds, deliveryActions: deliveryOperations };
           if (existing) {
-            if (existing.providerGrantId !== providerGrantId || existing.principalId !== record.principalId || existing.clientId !== clientId || JSON.stringify(existing.scopes) !== JSON.stringify(scopes)) throw new RealmIdentityError({ code: "oauth.grant_conflict", message: `OAuth grant ${id} is already bound to different provider state.`, recoveryAction: "do not reuse a local grant identity; reconcile the provider grant before retrying", receipt: `grant=${id}; conflict=true; authority=unchanged` });
-            return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-recorded", grant: existing, receipt: "oauthGrant=idempotent; revocable=true" });
+            if (existing.providerGrantId !== providerGrantId || existing.principalId !== record.principalId || existing.clientId !== clientId || JSON.stringify(existing.scopes) !== JSON.stringify(scopes) || existing.mcpResource !== record.mcpResource || JSON.stringify(existing.sourceSpaceIds) !== JSON.stringify(record.sourceSpaceIds)) throw new RealmIdentityError({ code: "oauth.grant_conflict", message: `OAuth grant ${id} is already bound to different provider state.`, recoveryAction: "do not reuse a local grant identity; reconcile the provider grant before retrying", receipt: `grant=${id}; conflict=true; authority=unchanged` });
+            return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-recorded", grant: storedOAuthGrantProjection(existing), receipt: "oauthGrant=idempotent; revocable=true; credentialMaterialStored=false" });
+          }
+          if (binding && authority) {
+            const created = await this.transitionIdentity(async (next) => {
+              const ownerGrant = next.createOwnerTaskGrant({ sessionId: session.id, purpose: `Remote MCP delivery OAuth grant ${id}`, resource: binding.resourceRef, sourceSpaceIds, actions: deliveryScopes, effects: deliveryOperations.map((operation) => String(operation)), expiresAt: session.expiresAt });
+              const boundRecord: StoredOAuthGrant = { ...record, taskId: ownerGrant.task.id, capabilityGrantId: ownerGrant.grant.id };
+              await this.ctx.storage.put(key, boundRecord);
+              return boundRecord;
+            });
+            return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-recorded", grant: storedOAuthGrantProjection(created), receipt: "oauthGrant=persisted; taskGrant=owner-bound; resource=project-scoped; revocable=true; credentialMaterialStored=false; canonicalWrite=false" });
           }
           await this.ctx.storage.put(key, record);
-          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-recorded", grant: record, receipt: "oauthGrant=persisted; revocable=true; credentialMaterialStored=false" });
+          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-recorded", grant: storedOAuthGrantProjection(record), receipt: "oauthGrant=persisted; taskGrant=not-required; revocable=true; credentialMaterialStored=false" });
         });
+      }
+
+      if (url.pathname === "/identity/oauth-grant/validate-delivery") {
+        const sessionId = coordinatorString(body, "sessionId");
+        const session = identity.validateSession(sessionId);
+        const id = coordinatorString(body, "grantId");
+        const operation = coordinatorString(body, "operation");
+        const scope = coordinatorString(body, "scope");
+        const resource = coordinatorString(body, "resource");
+        const record = await this.ctx.storage.get<StoredOAuthGrant>(storageKey(REALM_OAUTH_GRANT_PREFIX, id));
+        if (!record || record.realmId !== identity.realm.id || record.principalId !== session.principalId || record.sessionId !== session.id || record.actorId !== session.actorId || record.status !== "active" || record.authorizationEpoch !== session.authorizationEpoch || record.authorizationEpoch !== identity.realm.authorizationEpoch || recordExpired(record.expiresAt) || !record.taskId || !record.capabilityGrantId || !record.resource || !record.mcpResource || record.mcpResource !== resource) throw new RealmIdentityError({ code: "oauth.delivery_grant_inactive", message: "The MCP delivery grant is not a live resource-bound Anyam Task/Grant for this Session.", recoveryAction: "reauthorize the MCP client with the current project-scoped MCP resource; no delivery transition was accepted", receipt: "oauthGrant=taskGrant-invalid-or-stale; credentialFree=true; canonicalWrite=false" });
+        if (!isMcpDeliveryOperation(operation) || mcpDeliveryScope(operation) !== scope || !record.scopes.includes(scope) || !record.deliveryActions.includes(operation)) throw new RealmIdentityError({ code: "oauth.delivery_action_denied", message: "The MCP delivery grant does not authorize this operation-specific delivery action.", recoveryAction: "request the exact delivery scope for this MCP operation and retry", receipt: `oauthGrant=action-denied; operation=${operation}; credentialFree=true; canonicalWrite=false` });
+        const binding = parseMcpDeliveryBinding(record.mcpResource, identity.realm.id);
+        if (!binding || JSON.stringify(binding.resourceRef) !== JSON.stringify(record.resource)) throw new RealmIdentityError({ code: "oauth.delivery_resource_invalid", message: "The MCP delivery resource binding is malformed or stale.", recoveryAction: "reauthorize with a project-scoped MCP resource and retry", receipt: "oauthGrant=resource-binding-invalid; credentialFree=true; canonicalWrite=false" });
+        const authority = await this.authoritySnapshot();
+        validateMcpDeliveryLineage(authority, operation, binding, body.payload);
+        const project = authority.projects[binding.projectId];
+        if (!project || record.sourceSpaceIds.length === 0 || record.sourceSpaceIds.some((sourceSpaceId) => !project.sourceSpaceIds.includes(sourceSpaceId))) throw new RealmIdentityError({ code: "oauth.delivery_source_space_invalid", message: "The MCP delivery grant no longer discloses a current Project Source Space set.", recoveryAction: "reauthorize after reconciling the Project Source Space policy; no delivery transition was accepted", receipt: "oauthGrant=source-space-stale; credentialFree=true; canonicalWrite=false" });
+        const validation = identity.validateTaskGrant({ principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, taskId: record.taskId, grantId: record.capabilityGrantId, resource: record.resource, sourceSpaceIds: record.sourceSpaceIds, action: mcpDeliveryScope(operation), effects: [operation] });
+        if (!validation.valid) throw new RealmIdentityError({ code: validation.code, message: "The MCP delivery Task/Grant is not live for this operation.", recoveryAction: validation.recoveryAction, receipt: validation.receipt });
+        return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "delivery-grant-valid", authorizationEpoch: validation.authorizationEpoch, sourceSpaceCount: validation.sourceSpaceCount, credentialFree: true, canonicalWrite: false, providerExecution: "not-performed", receipt: `${validation.receipt}; oauthGrant=resource-bound; operation=${operation}; scope=${scope}; providerExecution=not-performed` });
       }
 
       if (url.pathname === "/identity/oauth-grant/revoke") {
@@ -993,10 +1132,10 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
           const key = storageKey(REALM_OAUTH_GRANT_PREFIX, id);
           const record = await this.ctx.storage.get<StoredOAuthGrant>(key);
           if (!record || record.principalId !== session.principalId) throw new RealmIdentityError({ code: "oauth.grant_not_found", message: "The OAuth grant cannot be marked revoked by this Principal.", recoveryAction: "re-read the authenticated grant list and retry the same grant identity", receipt: `grant=${id}; mark-revoked=denied` });
-          if (record.status === "revoked") return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-already-revoked", grant: record, receipt: "oauthGrant=already-revoked; providerRevocation=confirmed" });
+          if (record.status === "revoked") return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-already-revoked", grant: storedOAuthGrantProjection(record), receipt: "oauthGrant=already-revoked; providerRevocation=confirmed; credentialMaterialStored=false" });
           const revoked: StoredOAuthGrant = { ...record, status: "revoked", revokedAt: new Date().toISOString() };
           await this.ctx.storage.put(key, revoked);
-          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-revoked", grant: revoked, receipt: "oauthGrant=revoked; providerRevocation=confirmed" });
+          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-revoked", grant: storedOAuthGrantProjection(revoked), receipt: "oauthGrant=revoked; providerRevocation=confirmed; credentialMaterialStored=false" });
         });
       }
 
@@ -1004,7 +1143,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         const sessionId = coordinatorString(body, "sessionId");
         const session = identity.validateSession(sessionId);
         const entries = await this.ctx.storage.list<StoredOAuthGrant>({ prefix: REALM_OAUTH_GRANT_PREFIX });
-        const grants = [...entries.values()].filter((grant) => grant.realmId === identity.realm.id && grant.principalId === session.principalId);
+        const grants = [...entries.values()].filter((grant) => grant.realmId === identity.realm.id && grant.principalId === session.principalId).map(storedOAuthGrantProjection);
         return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grants-listed", grants, receipt: "oauthGrant=list; owner-session=validated; providerGrantTokens=not-returned" });
       }
 

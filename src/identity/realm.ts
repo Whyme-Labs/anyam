@@ -38,6 +38,9 @@ export type Capability =
   | "secret.use"
   | "secret.value.read"
   | "landing.request"
+  | "release.create"
+  | "target.configure"
+  | "promotion.request"
   | "target.read"
   | "target.promote"
   | "extension.install"
@@ -299,6 +302,36 @@ export type CredentialValidationResult =
   | { valid: true; credential: IssuedCredentialRecord }
   | { valid: false; code: "credential.invalid" | "credential.expired" | "credential.revoked" | "credential.stale" | "credential.audience_mismatch" | "credential.resource_mismatch"; explanation: string; receipt: string };
 
+export type TaskGrantValidationInput = {
+  principalId: string;
+  actorId: string;
+  clientId: string;
+  sessionId: string;
+  taskId: string;
+  grantId: string;
+  resource: ResourceRef;
+  sourceSpaceIds: readonly string[];
+  action: Capability;
+  effects?: readonly string[];
+};
+
+export type TaskGrantValidationResult =
+  | {
+      valid: true;
+      taskId: string;
+      grantId: string;
+      expiresAt: string;
+      authorizationEpoch: number;
+      sourceSpaceCount: number;
+      receipt: string;
+    }
+  | {
+      valid: false;
+      code: string;
+      recoveryAction: string;
+      receipt: string;
+    };
+
 export type AuditEvent = {
   protocol: typeof CONTRACT_VERSIONS.audit;
   id: string;
@@ -485,7 +518,7 @@ const ROLE_CAPABILITIES: Readonly<Record<RealmRole, readonly Capability[]>> = {
   maintainer: ["project.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "landing.request", "target.read", "extension.install", "extension.manage", "extension.invoke", "governance.profile.evaluate", "agent.delegate"],
   "release-manager": ["project.inspect", "source.read", "change.inspect", "review.submit_finding", "change.approve", "evidence.read", "target.read", "target.promote", "landing.request", "extension.invoke"],
   "security-reviewer": ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "target.read", "governance.profile.evaluate"],
-  owner: ["project.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "secret.use", "landing.request", "target.read", "target.promote", "extension.install", "extension.manage", "extension.invoke", "governance.profile.manage", "governance.profile.evaluate", "agent.delegate", "policy.manage", "identity.manage"],
+  owner: ["project.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "secret.use", "landing.request", "release.create", "target.configure", "promotion.request", "target.read", "target.promote", "extension.install", "extension.manage", "extension.invoke", "governance.profile.manage", "governance.profile.evaluate", "agent.delegate", "policy.manage", "identity.manage"],
 };
 
 function clone<T>(value: T): T {
@@ -786,6 +819,65 @@ export class RealmIdentityPolicy {
    */
   validateSession(sessionId: string): RealmSession {
     return clone(this.requireSession(sessionId));
+  }
+
+  /**
+   * Create a human-owned Task/Grant for a scoped MCP delivery resource.
+   *
+   * This is intentionally separate from agent delegation: the OAuth resource
+   * grant is a transport credential, while this Task/Grant is the live Realm
+   * authority that must remain active at delivery time.
+   */
+  createOwnerTaskGrant(input: {
+    sessionId: string;
+    purpose: string;
+    resource: ResourceRef;
+    sourceSpaceIds: readonly string[];
+    actions: readonly Capability[];
+    effects?: readonly string[];
+    expiresAt?: string;
+  }): { task: RealmTask; grant: RealmCapabilityGrant } {
+    const session = this.requireSession(input.sessionId);
+    const actor = this.state.actors[session.actorId];
+    if (!actor || actor.kind !== "human") throw new RealmIdentityError({ code: "mcp.delivery_owner_required", message: "MCP delivery authority must be created from an authenticated human Realm Session.", recoveryAction: "authenticate the Realm owner and retry the delivery grant authorization", receipt: "mcpDelivery=owner-session-required; taskGrant=not-created" });
+    if (input.sourceSpaceIds.length === 0) throw new RealmIdentityError({ code: "mcp.delivery_source_spaces_required", message: "MCP delivery authority requires an explicit Source Space disclosure set.", recoveryAction: "authorize a project-scoped MCP resource whose Project exposes at least one Source Space", receipt: "mcpDelivery=source-space-disclosure-required; taskGrant=not-created" });
+    const bindings = Object.values(this.state.relationships).filter((binding) => binding.status === "active" && binding.realmId === this.state.realm.id && binding.principalId === session.principalId && resourceMatches(binding.resource, input.resource));
+    const denied = input.actions.find((action) => bindings.some((binding) => binding.deniedCapabilities.includes(action)));
+    const permitted = input.actions.every((action) => bindings.some((binding) => ROLE_CAPABILITIES[binding.role].includes(action)));
+    if (!permitted || denied) throw new RealmIdentityError({ code: "mcp.delivery_owner_denied", message: "The authenticated Realm owner has no active relationship permitting this delivery resource and operation set.", recoveryAction: "authorize the MCP resource through an owner relationship that permits the requested delivery actions", receipt: `mcpDelivery=owner-policy-denied; actions=${input.actions.length}; taskGrant=not-created` });
+    const effects = [...(input.effects ?? [])];
+    // A typed `landing.apply` command is still a request into the protected
+    // Authority plane; it is not a bearer grant for direct canonical.write.
+    // Keep the stronger effect names reserved for explicit policy decisions.
+    const prohibitedEffect = effects.find((effect) => ["canonical.write", "production.deploy", "target.promote"].includes(effect));
+    if (prohibitedEffect) throw new RealmIdentityError({ code: "mcp.delivery_effect_denied", message: "MCP delivery authority cannot contain canonical-write or production-promotion effects.", recoveryAction: "request only the typed delivery operation; canonical landing, provider execution, and production approval remain separate", receipt: `mcpDelivery=effect-denied; effect=${prohibitedEffect}; taskGrant=not-created` });
+    const task = this.createTask({ principalId: session.principalId, actorId: session.actorId, sessionId: session.id, purpose: input.purpose, ...(input.resource.workspaceId ? { workspaceId: input.resource.workspaceId } : {}), ...(input.resource.changeId ? { changeId: input.resource.changeId } : {}) });
+    const grant = this.createCapabilityGrant({ principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, taskId: task.id, resource: input.resource, sourceSpaceIds: [...input.sourceSpaceIds], actions: [...input.actions], effects, allowedCredentialClasses: [], ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}) });
+    return { task, grant };
+  }
+
+  /**
+   * Validate the live Principal→Actor→Session→Task→Grant chain for one
+   * operation. The returned value is deliberately credential-free and does
+   * not include mutable task or grant records.
+   */
+  validateTaskGrant(input: TaskGrantValidationInput): TaskGrantValidationResult {
+    try {
+      const session = this.requireSession(input.sessionId);
+      const task = this.state.tasks[input.taskId];
+      const grant = this.state.grants[input.grantId];
+      if (!task || !grant || task.realmId !== this.state.realm.id || grant.realmId !== this.state.realm.id || task.status !== "active" || grant.taskId !== task.id || task.principalId !== input.principalId || task.actorId !== input.actorId || task.sessionId !== session.id || grant.principalId !== input.principalId || grant.actorId !== input.actorId || grant.clientId !== input.clientId || grant.sessionId !== session.id) return { valid: false, code: "mcp.delivery_task_grant_invalid", recoveryAction: "reauthorize the MCP client so Anyam can create a fresh resource-bound Task and Grant", receipt: "mcpDelivery=task-grant-chain-invalid; canonicalWrite=false" };
+      if (!this.grantChainIsActive(grant)) return { valid: false, code: "mcp.delivery_task_grant_inactive", recoveryAction: "reauthorize after revocation, expiry, or a Realm authorization-policy change", receipt: `mcpDelivery=task-grant-inactive; epoch=${this.state.realm.authorizationEpoch}; canonicalWrite=false` };
+      if (!resourceMatches(grant.resource, input.resource)) return { valid: false, code: "mcp.delivery_resource_denied", recoveryAction: "use the exact project, Workspace, and Change resource bound to this MCP grant", receipt: "mcpDelivery=resource-mismatch; canonicalWrite=false" };
+      if (input.sourceSpaceIds.length === 0 || !listIsSubset(input.sourceSpaceIds, grant.sourceSpaceIds)) return { valid: false, code: "mcp.delivery_source_space_denied", recoveryAction: "reauthorize with the exact disclosed Project Source Spaces; no hidden Source Space was disclosed", receipt: "mcpDelivery=source-space-mismatch; canonicalWrite=false" };
+      if (!grant.actions.includes(input.action)) return { valid: false, code: "mcp.delivery_action_denied", recoveryAction: "request the operation-specific delivery scope during OAuth authorization", receipt: `mcpDelivery=action-denied; operation=${input.action}; canonicalWrite=false` };
+      const missingEffect = (input.effects ?? []).find((effect) => !grant.effects.includes(effect));
+      if (missingEffect) return { valid: false, code: "mcp.delivery_effect_denied", recoveryAction: "reauthorize the MCP client for the exact typed delivery effect", receipt: `mcpDelivery=effect-denied; effect=${missingEffect}; canonicalWrite=false` };
+      return { valid: true, taskId: task.id, grantId: grant.id, expiresAt: grant.expiresAt, authorizationEpoch: this.state.realm.authorizationEpoch, sourceSpaceCount: grant.sourceSpaceIds.length, receipt: `mcpDelivery=task-grant-live; epoch=${this.state.realm.authorizationEpoch}; sourceSpaces=${grant.sourceSpaceIds.length}; canonicalWrite=false` };
+    } catch (error) {
+      if (error instanceof RealmIdentityError) return { valid: false, code: error.code, recoveryAction: error.recoveryAction ?? "reauthorize the MCP client through the authenticated Realm owner session", receipt: `${error.receipt ?? "mcpDelivery=task-grant-validation-failed"}; canonicalWrite=false` };
+      return { valid: false, code: "mcp.delivery_task_grant_invalid", recoveryAction: "reauthorize the MCP client and retry the same typed operation", receipt: "mcpDelivery=task-grant-validation-failed; canonicalWrite=false" };
+    }
   }
 
   private grantChainIsActive(grant: RealmCapabilityGrant, seen = new Set<string>()): boolean {

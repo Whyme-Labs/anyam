@@ -269,3 +269,60 @@ test("records principal, Actor, client, model, Session, Task, Grant, Workspace, 
   assert.equal(event.promotionId, "promotion:test");
   assert.equal(event.authorityClass, "promotion");
 });
+
+test("binds MCP delivery to a live human-owned Task and Grant", () => {
+  const { realm, principal, passkeySession } = createRealm();
+  realm.addRelationship({
+    principalId: principal.id,
+    kind: "organization-member",
+    subjectId: principal.id,
+    role: "owner",
+    resource: { realmId: realm.realm.id, projectId: "project:video-player" },
+  });
+  const resource = { realmId: realm.realm.id, projectId: "project:video-player", workspaceId: "workspace:mcp", changeId: "change:mcp" };
+  const actions = ["landing.request", "release.create", "target.configure", "promotion.request"] as const;
+  const delivery = realm.createOwnerTaskGrant({
+    sessionId: passkeySession.id,
+    purpose: "Remote MCP delivery qualification",
+    resource,
+    sourceSpaceIds: ["public-player"],
+    actions,
+    effects: ["landing.apply", "release.create", "target.configure", "promotion.request"],
+    expiresAt: "2026-08-03T00:30:00.000Z",
+  });
+  assert.equal(delivery.grant.allowedCredentialClasses.length, 0);
+  const valid = realm.validateTaskGrant({
+    principalId: principal.id,
+    actorId: passkeySession.actorId,
+    clientId: passkeySession.clientId,
+    sessionId: passkeySession.id,
+    taskId: delivery.task.id,
+    grantId: delivery.grant.id,
+    resource,
+    sourceSpaceIds: ["public-player"],
+    action: "landing.request",
+    effects: ["landing.apply"],
+  });
+  assert.equal(valid.valid, true);
+  if (valid.valid) {
+    assert.equal(valid.taskId, delivery.task.id);
+    assert.equal(valid.grantId, delivery.grant.id);
+    assert.equal(valid.sourceSpaceCount, 1);
+    assert.match(valid.receipt, /task-grant-live/);
+  }
+  realm.revokeGrant(delivery.grant.id);
+  const revoked = realm.validateTaskGrant({
+    principalId: principal.id,
+    actorId: passkeySession.actorId,
+    clientId: passkeySession.clientId,
+    sessionId: passkeySession.id,
+    taskId: delivery.task.id,
+    grantId: delivery.grant.id,
+    resource,
+    sourceSpaceIds: ["public-player"],
+    action: "landing.request",
+    effects: ["landing.apply"],
+  });
+  assert.equal(revoked.valid, false);
+  if (!revoked.valid) assert.equal(revoked.code, "mcp.delivery_task_grant_inactive");
+});

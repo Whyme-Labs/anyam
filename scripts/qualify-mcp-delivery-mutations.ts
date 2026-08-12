@@ -42,10 +42,17 @@ function fixture(): { env: AnyamRealmMcpEnv; calls: JsonObject[] } {
     get: () => ({
       fetch: async (request: Request): Promise<Response> => {
         const body = await request.json() as JsonObject;
-        calls.push(body);
+        const path = new URL(request.url).pathname;
+        calls.push({ ...body, path });
         if (request.headers.get(REALM_COORDINATOR_INTERNAL_HEADER) !== REALM_COORDINATOR_INTERNAL_VALUE) return safeResponse({ code: "internal_binding_required" }, 403);
         if (body.sessionId !== sessionId) return safeResponse({ code: "session.invalid" }, 403);
-        if (new URL(request.url).pathname !== "/authority/command/internal") return safeResponse({ code: "not_found" }, 404);
+        if (path === "/identity/oauth-grant/validate-delivery") {
+          if (body.grantId === "grant:mcp:revoked" || body.grantId === "grant:mcp:expired" || body.grantId === "grant:mcp:stale-epoch" || body.grantId === "grant:mcp:denied") return safeResponse({ code: "oauth.delivery_grant_inactive", receipt: "oauthGrant=taskGrant-invalid-or-stale; credentialFree=true; canonicalWrite=false" }, 403);
+          if (body.resource !== "https://qualification.example/mcp/projects/project:qualification?sourceSpaceId=source:public") return safeResponse({ code: "oauth.delivery_resource_denied", receipt: "mcpDelivery=resource-mismatch; discoverable=false; canonicalWrite=false" }, 404);
+          if ((body.payload as JsonObject | undefined)?.projectId === "project:cross") return safeResponse({ code: "oauth.delivery_resource_denied", receipt: "mcpDelivery=project-mismatch; discoverable=false; canonicalWrite=false" }, 404);
+          return safeResponse({ protocol: "anyam.realm-coordinator/v1", status: "delivery-grant-valid", credentialFree: true, canonicalWrite: false, providerExecution: "not-performed", receipt: "mcpDelivery=task-grant-live; oauthGrant=resource-bound; sourceSpaces=1; canonicalWrite=false" });
+        }
+        if (path !== "/authority/command/internal") return safeResponse({ code: "not_found" }, 404);
         const command = String(body.command);
         const payload = body.payload as JsonObject;
         const key = `${command}:${String(body.idempotencyKey)}`;
@@ -83,7 +90,7 @@ function assertCredentialFree(value: unknown): void {
   assert.equal(/(?:cfat_|bearer\s+|access[_-]?token|secret|password|kernel-session|grant:mcp-delivery)/iu.test(encoded), false, encoded);
 }
 
-const props: AnyamRealmMcpProps = { scopes: ["landing.request", "release.create", "target.configure", "promotion.request"], kernelSessionId: sessionId, anyamGrantId: grantId };
+const props: AnyamRealmMcpProps = { scopes: ["landing.request", "release.create", "target.configure", "promotion.request"], kernelSessionId: sessionId, anyamGrantId: grantId, mcpResource: "https://qualification.example/mcp/projects/project:qualification?sourceSpaceId=source:public" };
 const operations = [
   { name: "landing.apply", resource: "landing", args: { idempotencyKey: "qualification:landing", projectId: "project:qualification", changeId: "change:qualification", changeRevisionId: "change-revision:qualification:1", expectedCanonicalProjectRevisionId: "project-revision:qualification:1", projectRevisionId: "project-revision:qualification:2" } },
   { name: "release.create", resource: "release", args: { idempotencyKey: "qualification:release", projectId: "project:qualification", releaseId: "release:qualification", projectRevisionId: "project-revision:qualification:2", artifactIds: ["artifact:qualification"], evidenceIds: ["evidence:qualification"], policyVersion: "policy:qualification" } },
@@ -124,7 +131,18 @@ try {
   assert.equal((missingGrant.error as JsonObject).code, -32001);
   assert.match(String(((missingGrant.error as JsonObject).data as JsonObject).receipt), /grant=missing/);
   assertCredentialFree(missingGrant);
-  console.log(JSON.stringify({ protocol, status: "succeeded", tools, operations: results.map((result) => ({ operation: (result.receipt as string).match(/operation=([^;]+)/)?.[1], status: result.status, canonicalWrite: result.canonicalWrite, credentialFree: result.credentialFree })), replay: "deterministic", malformed: "rejected-before-coordinator", hidden: "not-disclosed", missingGrant: "blocked", credentialValues: "not-printed", providerExecution: "not-performed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true, receipt: "scope-filtered; grant-bound; typed-contracts; idempotent; credential-free" }, null, 2));
+  for (const blockedGrant of ["grant:mcp:revoked", "grant:mcp:expired", "grant:mcp:stale-epoch", "grant:mcp:denied"] as const) {
+    const blocked = await json(await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: `blocked-${blockedGrant}`, method: "tools/call", params: { name: "landing.apply", arguments: { ...operations[0].args, idempotencyKey: `qualification-${blockedGrant}` } } }), fixtureState.env, { ...props, anyamGrantId: blockedGrant }));
+    assert.equal((blocked.error as JsonObject).code, -32001);
+    assert.match(String(((blocked.error as JsonObject).data as JsonObject).receipt), /taskGrant=not-live/);
+    assert.equal(fixtureState.calls.at(-1)?.path, "/identity/oauth-grant/validate-delivery");
+    assertCredentialFree(blocked);
+  }
+  const crossProject = await json(await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 40, method: "tools/call", params: { name: "landing.apply", arguments: { ...operations[0].args, idempotencyKey: "qualification-cross-project", projectId: "project:cross" } } }), fixtureState.env, props));
+  assert.equal((crossProject.error as JsonObject).code, -32004);
+  assert.equal(fixtureState.calls.at(-1)?.path, "/identity/oauth-grant/validate-delivery");
+  assertCredentialFree(crossProject);
+  console.log(JSON.stringify({ protocol, status: "succeeded", tools, operations: results.map((result) => ({ operation: (result.receipt as string).match(/operation=([^;]+)/)?.[1], status: result.status, canonicalWrite: result.canonicalWrite, credentialFree: result.credentialFree })), replay: "deterministic", malformed: "rejected-before-coordinator", hidden: "not-disclosed", missingGrant: "blocked", staleAndDeniedGrants: "blocked-before-authority", crossProject: "blocked-before-authority", credentialValues: "not-printed", providerExecution: "not-performed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true, receipt: "scope-filtered; grant-bound; typed-contracts; idempotent; credential-free" }, null, 2));
 } catch (error) {
   console.log(JSON.stringify({ protocol, status: "blocked", error: error instanceof Error ? error.message : String(error), credentialValues: "not-printed", canonicalWrite: false, providerExecution: "not-performed", recoveryAction: "inspect the typed MCP fixture boundary and retry the same bounded qualification", receipt: "providerInvocation=fixture-only; no live delivery transition claimed" }, null, 2));
   process.exitCode = 2;

@@ -18,6 +18,14 @@ function env(): { env: AnyamRealmMcpEnv; calls: Array<{ path: string; body: Reco
         calls.push({ path, body });
         if (request.headers.get(REALM_COORDINATOR_INTERNAL_HEADER) !== REALM_COORDINATOR_INTERNAL_VALUE) return new Response(JSON.stringify({ code: "internal_binding_required" }), { status: 403 });
         if (body.sessionId !== "kernel-session:owner") return new Response(JSON.stringify({ code: "session.invalid", receipt: "session=invalid; project=not-disclosed" }), { status: 403 });
+        if (path === "/identity/oauth-grant/validate-delivery") {
+          if (body.grantId === "grant:mcp:revoked") return new Response(JSON.stringify({ code: "oauth.delivery_grant_inactive", receipt: "oauthGrant=taskGrant-invalid-or-stale; credentialFree=true; canonicalWrite=false" }), { status: 403 });
+          if (body.grantId === "grant:mcp:expired") return new Response(JSON.stringify({ code: "oauth.delivery_grant_inactive", receipt: "oauthGrant=expired; credentialFree=true; canonicalWrite=false" }), { status: 403 });
+          if (body.grantId === "grant:mcp:stale-epoch") return new Response(JSON.stringify({ code: "oauth.delivery_grant_inactive", receipt: "oauthGrant=authorization-epoch-stale; credentialFree=true; canonicalWrite=false" }), { status: 403 });
+          if ((body.payload as Record<string, unknown> | undefined)?.projectId === "project:cross") return new Response(JSON.stringify({ code: "oauth.delivery_resource_denied", receipt: "mcpDelivery=project-mismatch; discoverable=false; canonicalWrite=false" }), { status: 404 });
+          if (body.grantId === "grant:mcp:denied") return new Response(JSON.stringify({ code: "oauth.delivery_action_denied", receipt: "oauthGrant=action-denied; credentialFree=true; canonicalWrite=false" }), { status: 403 });
+          return new Response(JSON.stringify({ protocol: "anyam.realm-coordinator/v1", status: "delivery-grant-valid", credentialFree: true, canonicalWrite: false, providerExecution: "not-performed", receipt: "mcpDelivery=task-grant-live; oauthGrant=resource-bound; sourceSpaces=1; canonicalWrite=false" }), { status: 200, headers: { "content-type": "application/json" } });
+        }
         if (path === "/authority/command/internal") {
           if (body.protocol !== "anyam.authority-command/v1" || typeof body.command !== "string" || typeof body.idempotencyKey !== "string" || body.payload === null || typeof body.payload !== "object" || Array.isArray(body.payload)) return new Response(JSON.stringify({ code: "invalid_request", receipt: "command=typed-required; credentialFree=true" }), { status: 422 });
           const key = `${String(body.command)}:${String(body.idempotencyKey)}`;
@@ -401,6 +409,7 @@ test("remote MCP exposes authenticated typed delivery mutations with grant-bound
     scopes: ["landing.request", "release.create", "target.configure", "promotion.request"],
     kernelSessionId: "kernel-session:owner",
     anyamGrantId: "grant:mcp:delivery",
+    mcpResource: "https://realm.example/mcp/projects/project:mcp?sourceSpaceId=source:public",
   };
   const listed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }), fixture.env, deliveryProps);
   const tools = ((await body(listed)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
@@ -469,6 +478,16 @@ test("remote MCP exposes authenticated typed delivery mutations with grant-bound
   const missingGrantError = (await body(missingGrant)).error as Record<string, unknown>;
   assert.equal(missingGrantError.code, -32001);
   assert.match(String((missingGrantError.data as Record<string, unknown>).receipt), /grant=missing/);
+
+  for (const [id, receipt] of [["grant:mcp:revoked", /taskGrant=not-live/], ["grant:mcp:expired", /taskGrant=not-live/], ["grant:mcp:stale-epoch", /taskGrant=not-live/], ["grant:mcp:denied", /taskGrant=not-live/]] as const) {
+    const blocked = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: `blocked-${id}`, method: "tools/call", params: { name: "landing.apply", arguments: { ...cases[0].args, idempotencyKey: `mcp-${id}` } } }), fixture.env, { ...deliveryProps, anyamGrantId: id });
+    const blockedBody = await body(blocked);
+    assert.equal((blockedBody.error as Record<string, unknown>).code, -32001);
+    assert.match(String(((blockedBody.error as Record<string, unknown>).data as Record<string, unknown>).receipt), receipt);
+    assert.equal(fixture.calls.at(-1)?.path, "/identity/oauth-grant/validate-delivery");
+  }
+  const crossProject = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 29, method: "tools/call", params: { name: "landing.apply", arguments: { ...cases[0].args, idempotencyKey: "mcp-cross-project", projectId: "project:cross" } } }), fixture.env, deliveryProps);
+  assert.equal(((await body(crossProject)).error as Record<string, unknown>).code, -32004);
 
   const noScope = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 24, method: "tools/list" }), fixture.env, { ...deliveryProps, scopes: ["project.read"] });
   assert.deepEqual((((await body(noScope)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>).map((tool) => tool.name), ["project.list", "project.inspect"]);

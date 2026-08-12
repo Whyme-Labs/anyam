@@ -7,6 +7,7 @@ import { landingApplyCommand, landingApplyValue, LANDING_APPLY_COMMAND } from ".
 import { releaseCreateCommand, releaseCreateValue, RELEASE_CREATE_COMMAND } from "./release-contract.ts";
 import { targetConfigureCommand, targetConfigureValue, TARGET_CONFIGURE_COMMAND } from "./target-contract.ts";
 import { promotionRequestCommand, promotionRequestValue, PROMOTION_REQUEST_COMMAND } from "./promotion-contract.ts";
+import { MCP_DELIVERY_SCOPE_BY_OPERATION } from "./mcp-delivery-grant.ts";
 
 export const ANYAM_MCP_PROTOCOL_VERSION = "2025-06-18" as const;
 export const ANYAM_MCP_PROTOCOL = "anyam.remote-mcp/v1" as const;
@@ -35,18 +36,15 @@ const MCP_RELEASE_SCOPE = "release.create";
 const MCP_TARGET_SCOPE = "target.configure";
 const MCP_PROMOTION_SCOPE = "promotion.request";
 const MCP_BOOTSTRAP_TOOLS = new Set([MCP_PROJECT_CREATE_TOOL, MCP_WORKSPACE_CREATE_TOOL, MCP_CHANGE_CREATE_TOOL]);
-const MCP_DELIVERY_SCOPE_BY_TOOL: Record<string, string> = {
-  [LANDING_APPLY_COMMAND]: MCP_LANDING_SCOPE,
-  [RELEASE_CREATE_COMMAND]: MCP_RELEASE_SCOPE,
-  [TARGET_CONFIGURE_COMMAND]: MCP_TARGET_SCOPE,
-  [PROMOTION_REQUEST_COMMAND]: MCP_PROMOTION_SCOPE,
-};
+const MCP_DELIVERY_SCOPE_BY_TOOL: Record<string, string> = { ...MCP_DELIVERY_SCOPE_BY_OPERATION };
 
 export type AnyamRealmMcpProps = {
   readonly scopes: readonly string[];
   readonly kernelSessionId?: string;
   /** Provider-issued grant handle carried in the encrypted OAuth grant. */
   readonly anyamGrantId?: string;
+  /** Canonical OAuth resource indicator; required for delivery mutations. */
+  readonly mcpResource?: string;
 };
 
 export type AnyamRealmMcpEnv = {
@@ -462,6 +460,14 @@ async function mcpDeliveryMutation(
       `mcp=${operation}; grant=missing; kernelSession=${props.kernelSessionId ? "present" : "missing"}; transition=not-applied`,
     );
   }
+  if (!props.mcpResource || props.mcpResource.trim().length === 0) {
+    throw new McpDeliveryError(
+      "auth",
+      "The MCP delivery mutation is not bound to a project-scoped OAuth resource.",
+      "reauthorize the MCP client with a resource such as /mcp/projects/<projectId>; no transition was accepted",
+      `mcp=${operation}; grant=resource-missing; transition=not-applied; canonicalWrite=false`,
+    );
+  }
   const requiredScope = MCP_DELIVERY_SCOPE_BY_TOOL[operation];
   if (!requiredScope || !props.scopes.includes(requiredScope)) {
     throw new McpDeliveryError(
@@ -473,6 +479,25 @@ async function mcpDeliveryMutation(
   }
 
   const input = mcpDeliveryInput(operation, argumentsValue);
+  try {
+    await requestMcpCoordinator(env, "/identity/oauth-grant/validate-delivery", {
+      sessionId: props.kernelSessionId,
+      grantId: props.anyamGrantId,
+      operation,
+      scope: requiredScope,
+      resource: props.mcpResource,
+      payload: input.payload,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const kind: McpDeliveryErrorKind = detail.includes("not_found") || detail.includes("discoverable") ? "not_found" : detail.includes("conflict") || detail.includes("mismatch") ? "conflict" : detail.includes("invalid_request") ? "invalid_request" : detail.includes("oauth.") || detail.includes("grant") || detail.includes("session") ? "auth" : "coordinator";
+    throw new McpDeliveryError(
+      kind,
+      "The MCP delivery Task/Grant is not live for this operation.",
+      kind === "not_found" ? "verify the Project, Workspace, Change, Source Space, and delivery resource without probing hidden identifiers" : kind === "conflict" ? "use the exact Project, Workspace, Change, and typed delivery lineage bound to this MCP grant" : kind === "auth" ? "reauthorize the MCP client through the authenticated Realm owner session and current project-scoped resource" : "inspect the Coordinator receipt and retry only the same typed operation when safe",
+      `mcp=${operation}; taskGrant=not-live; errorClass=${kind}; credentialFree=true; canonicalWrite=false; providerExecution=not-performed`,
+    );
+  }
   let result: Record<string, unknown>;
   try {
     result = await requestMcpCoordinator(env, "/authority/command/internal", {

@@ -50,6 +50,8 @@ export type AnyamRealmOAuthProps = {
   readonly kernelSessionId?: string;
   /** Opaque local grant handle used to bind delivery mutations to the live OAuth grant. */
   readonly anyamGrantId?: string;
+  /** The canonical OAuth resource indicator; delivery grants require a project-scoped path. */
+  readonly mcpResource?: string;
   readonly authorizationReceipt: string;
 };
 
@@ -173,6 +175,12 @@ function oauthAuthRequestRecord(request: AuthRequest): Record<string, unknown> {
   };
 }
 
+function singularOAuthResource(resource: AuthRequest["resource"]): string | undefined {
+  if (typeof resource === "string" && resource.trim().length > 0) return resource.trim();
+  if (Array.isArray(resource) && resource.length === 1 && typeof resource[0] === "string" && resource[0].trim().length > 0) return resource[0].trim();
+  return undefined;
+}
+
 function oauthConsentPage(input: { consentId: string; csrfToken: string; clientName: string; requestedScopes: readonly string[]; allowedScopes: readonly string[] }): Response {
   const allowed = new Set(input.allowedScopes);
   const scopeRows = input.requestedScopes.map((scope) => `<li><code>${escapeHtml(scope)}</code>${allowed.has(scope) ? "" : " <em>(not available)</em>"}</li>`).join("");
@@ -261,6 +269,7 @@ async function authorizeRequest(request: Request, env: AnyamRealmOAuthEnv, adapt
 
     const grantedScopes = intersectOAuthScopes(consumed.authRequest.scope, intersectOAuthScopes(authorization.scopes, consumed.allowedScopes));
     if (grantedScopes.length === 0) return oauthConsentDenied(consumed.authRequest);
+    const mcpResource = singularOAuthResource(consumed.authRequest.resource);
     const localGrantId = `grant:${crypto.randomUUID()}`;
     const userSubject = toOAuthSubject(authorization.userId);
     let completed: { redirectTo: string };
@@ -279,6 +288,7 @@ async function authorizeRequest(request: Request, env: AnyamRealmOAuthEnv, adapt
           ...(authorization.props ?? {}),
           authorizationReceipt: authorization.authorizationReceipt,
           anyamGrantId: localGrantId,
+          ...(mcpResource ? { mcpResource } : {}),
         } satisfies AnyamRealmOAuthProps & { anyamGrantId: string },
         revokeExistingGrants: false,
       });
@@ -289,7 +299,7 @@ async function authorizeRequest(request: Request, env: AnyamRealmOAuthEnv, adapt
     const providerGrant = (await provider.listUserGrants(userSubject)).items.find((grant) => grant.metadata?.anyamGrantId === localGrantId);
     if (!providerGrant) return jsonResponse({ code: "oauth_grant_persistence_unverified", recoveryAction: "Provider authorization completed without a discoverable grant mapping; retry only after checking provider grant storage.", receipt: `${ANYAM_REALM_OAUTH_CONSENT_RECEIPT}; providerGrant=unmapped; localGrant=${localGrantId}` }, 503);
     try {
-      await requestAnyamRealmCoordinator(env, "/identity/oauth-grant/record", { sessionId: authorization.sessionId, grantId: localGrantId, providerGrantId: providerGrant.id, clientId: client.clientId, scopes: grantedScopes });
+      await requestAnyamRealmCoordinator(env, "/identity/oauth-grant/record", { sessionId: authorization.sessionId, grantId: localGrantId, providerGrantId: providerGrant.id, clientId: client.clientId, scopes: grantedScopes, ...(mcpResource ? { resource: mcpResource } : {}) });
     } catch (error) {
       await provider.revokeGrant(providerGrant.id, userSubject).catch(() => undefined);
       const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";

@@ -241,8 +241,10 @@ snapshots, actors, sessions, credentials, and raw Coordinator receipts are
 omitted. A successful response is marked `canonicalWrite="landing-only"`;
 replays return the original safe result and changed payloads conflict. This
 route performs no Git object transfer and does not create a Release or
-promote a Target. Agents do not receive a `landing.apply` MCP tool in this
-surface; protected Landing remains an owner/trusted-authority boundary.
+promote a Target. The remote MCP surface exposes the same typed
+`landing.apply` command only when the live OAuth grant includes
+`landing.request`; the MCP projection is `canonicalWrite=false` and remains
+provider-execution-free.
 
 The owner-authenticated REST surface also exposes typed `POST /api/artifacts`.
 It requires the owner host session, one `Idempotency-Key` header, a closed
@@ -269,8 +271,8 @@ identifiers, policy version, status, and optional safe name/Change Revision.
 Configuration digests, state assumptions, provenance, actor/session metadata,
 and raw Coordinator receipts are omitted. Release creation has
 `canonicalWrite=false`; it does not transfer source, advance canonical state,
-configure a Target, or request Promotion. Agents do not receive a Release
-mutation on the MCP surface.
+configure a Target, or request Promotion. The remote MCP surface exposes the
+same typed `release.create` command only with the live `release.create` scope.
 
 The owner-authenticated REST surface also exposes typed `POST /api/targets`.
 It requires the owner host session, one `Idempotency-Key` header, and a closed
@@ -286,8 +288,8 @@ protocol, identity, Project binding, adapter configuration, accepted Artifact
 types, required Evidence keys, and configuration state. Provider qualification,
 Release creation, and Promotion remain separate operations. Target configuration
 does not transfer source, mutate the canonical Project Revision, or claim that
-the adapter is healthy. Agents do not receive a Target mutation on the MCP
-surface.
+the adapter is healthy. The remote MCP surface exposes the same typed
+`target.configure` command only with the live `target.configure` scope.
 
 The owner-authenticated REST surface also exposes typed `POST /api/promotions`.
 It requires the owner host session, one `Idempotency-Key` header, and a closed
@@ -302,7 +304,33 @@ The route returns a credential-free safe projection even when the Coordinator
 records the request as `blocked`: it exposes only the Promotion state and safe
 Project/Release/Target identities, never actor/session data, provider receipts,
 health observations, or credentials. Provider qualification, preview/apply,
-health verification, rollback, and MCP Promotion mutation remain separate.
+health verification, rollback, and provider execution remain separate. The
+remote MCP surface exposes the same typed `promotion.request` command only
+with the live `promotion.request` scope; it records the Authority request but
+does not execute or reconcile a provider promotion.
+
+## Authenticated MCP delivery mutations
+
+The remote `/mcp` resource exposes four delivery mutations when the encrypted
+OAuth grant contains both the matching delivery scope and the provider-issued
+`anyamGrantId` handle:
+
+| Tool | Scope | Boundary |
+|---|---|---|
+| `landing.apply` | `landing.request` | Authority Landing request; no Git transfer |
+| `release.create` | `release.create` | immutable Release record; no provider build |
+| `target.configure` | `target.configure` | Project-bound Target configuration; no qualification |
+| `promotion.request` | `promotion.request` | Authority Promotion request; no apply/health/rollback |
+
+Each tool reuses the closed REST-compatible command parser and the
+Coordinator's Project/Change/Artifact/Evidence/Release/Target lineage checks.
+The request carries the authenticated kernel session, expected version when
+provided, and idempotency key; the OAuth grant handle is validated at the
+provider boundary and is never forwarded to the Coordinator or returned to
+the agent. Results use the safe MCP projections with `canonicalWrite=false`,
+`credentialFree=true`, and `providerExecution=not-performed`. Replays return
+the same projection, changed payloads are conflicts, hidden resources are not
+disclosed, and malformed fields fail before a Coordinator call.
 
 The typed bootstrap mutations are the preferred REST entry point for starting
 work. Each route requires an owner host session, `POST`, a JSON object containing
@@ -373,9 +401,10 @@ The response is credential-free: it includes only safe Agent, Session, Task,
 and Grant metadata plus explicit `credentials=not-issued` and
 `canonicalWrite=false` receipts. Git/MCP/Realm API credential exchange remains
 a separate follow-up operation. The generic delegation endpoint does not
-expose MCP mutation tools, source objects, provider credentials, landing, or
-promotion authority. Revocation closes delegated authority without revoking
-the human owner Session.
+expose source objects, provider credentials, or provider execution authority;
+delivery mutations require the separate live OAuth grant scopes described
+above. Revocation closes delegated authority without revoking the human owner
+Session.
 
 The explicit credential exchange is `POST /api/owner/agent/delegations/credentials`.
 It requires the exact identifiers and Project/Workspace/Change/Source Space set

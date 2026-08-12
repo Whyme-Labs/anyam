@@ -148,7 +148,7 @@ function safeRelease(value: unknown): Record<string, unknown> {
   };
 }
 
-export function promotionRequestValue(result: Record<string, unknown>, idempotencyKey: string): Record<string, unknown> {
+export function promotionRequestValue(result: Record<string, unknown>, idempotencyKey: string, surface: "rest" | "mcp" = "rest"): Record<string, unknown> {
   const value = record(result.value, "value");
   const recoveryAction = optionalStringValue(result.recoveryAction, "recoveryAction");
   return {
@@ -162,6 +162,6 @@ export function promotionRequestValue(result: Record<string, unknown>, idempoten
     target: safeTarget(value.target),
     release: safeRelease(value.release),
     ...(recoveryAction ? { recoveryAction } : {}),
-    receipt: `operation=${PROMOTION_REQUEST_COMMAND}; typedSurface=rest; credentialFree=true; canonicalWrite=false; providerExecution=not-performed; authorityResult=projected`,
+    receipt: `operation=${PROMOTION_REQUEST_COMMAND}; typedSurface=${surface}; credentialFree=true; canonicalWrite=false; providerExecution=not-performed; authorityResult=projected`,
   };
 }

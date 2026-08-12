@@ -5,6 +5,7 @@ import providerTarget from "../apps/provider-qualification-target/src/index.ts";
 import replayArchiveWorker, { type Env as ReplayArchiveEnv } from "../apps/replay-archive-workload-qualification/src/index.ts";
 import { handleAuthorityRequest } from "../apps/realm-worker/src/authority-edge.ts";
 import { handleAnyamRealmOwnerRequest } from "../apps/realm-worker/src/passkey-owner.ts";
+import { handleAnyamRealmMcpRequest, type AnyamRealmMcpEnv, type AnyamRealmMcpProps } from "../apps/realm-worker/src/mcp-handler.ts";
 import { AUTHORITY_COMMAND_PROTOCOL, AuthorityPlaneError, AuthorityPlaneCoordinator, authorityStateSummary, emptyAuthorityPlaneSnapshot, type AuthorityCommand } from "../src/cloudflare/authority-plane.ts";
 import type { AnyamRealmOAuthEnv } from "../apps/realm-worker/src/oauth-provider.ts";
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "../apps/realm-worker/src/coordinator-protocol.ts";
@@ -847,6 +848,20 @@ test("Realm Worker exposes an authenticated project-scoped REST read through the
   assert.ok(unsupportedWorkspace);
   assert.equal(unsupportedWorkspace.status, 405);
   assert.equal((await unsupportedWorkspace.json() as Record<string, unknown>).code, "method_not_allowed");
+});
+
+test("Realm Worker MCP entrypoint scope-filters authenticated delivery tools", async () => {
+  const env = { ANYAM_INSTALLATION_ID: "mcp-entrypoint-test", REALM_COORDINATOR: {} } as unknown as AnyamRealmMcpEnv;
+  const props: AnyamRealmMcpProps = { scopes: ["landing.request", "release.create", "target.configure", "promotion.request"], kernelSessionId: "session:mcp-entrypoint", anyamGrantId: "grant:mcp-entrypoint" };
+  const listed = await handleAnyamRealmMcpRequest(new Request("https://realm.example/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }), env, props);
+  assert.equal(listed.status, 200);
+  const listedBody = await listed.json() as { result: { tools: Array<{ name: string }> } };
+  assert.deepEqual(listedBody.result.tools.map((tool) => tool.name), ["landing.apply", "release.create", "target.configure", "promotion.request"]);
+
+  const missingGrant = await handleAnyamRealmMcpRequest(new Request("https://realm.example/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }) }), env, { scopes: ["project.read", ...props.scopes], kernelSessionId: "session:mcp-entrypoint" });
+  assert.equal(missingGrant.status, 200);
+  const missingGrantBody = await missingGrant.json() as { result: { tools: Array<{ name: string }> } };
+  assert.deepEqual(missingGrantBody.result.tools.map((tool) => tool.name), ["project.list", "project.inspect"]);
 });
 
 test("Realm Worker owner delegation edge keeps task authority bounded and credential-free", async () => {

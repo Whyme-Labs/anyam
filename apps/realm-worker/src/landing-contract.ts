@@ -167,18 +167,19 @@ function safeChange(value: unknown): Record<string, unknown> {
   };
 }
 
-export function landingApplyValue(result: Record<string, unknown>, idempotencyKey: string): Record<string, unknown> {
+export function landingApplyValue(result: Record<string, unknown>, idempotencyKey: string, surface: "rest" | "mcp" = "rest"): Record<string, unknown> {
   const value = recordValue(result.value, "value");
+  const canonicalWrite = surface === "mcp" ? false : "landing-only";
   return {
     protocol: AUTHORITY_PLANE_PROTOCOL,
     status: valueString(result.status, "status"),
     version: typeof result.version === "number" && Number.isSafeInteger(result.version) ? result.version : (() => { throw new Error("coordinator_version_malformed"); })(),
     idempotencyKey,
     credentialFree: true,
-    canonicalWrite: "landing-only",
+    canonicalWrite,
     landing: safeLanding(value.landing),
     canonicalRevision: safeCanonicalRevision(value.canonicalRevision),
     change: safeChange(value.change),
-    receipt: `operation=${LANDING_APPLY_COMMAND}; typedSurface=rest; credentialFree=true; canonicalWrite=landing-only; authorityResult=projected`,
+    receipt: `operation=${LANDING_APPLY_COMMAND}; typedSurface=${surface}; credentialFree=true; canonicalWrite=${canonicalWrite === false ? "false" : "landing-only"}; authorityResult=projected`,
   };
 }

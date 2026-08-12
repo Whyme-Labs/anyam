@@ -66,6 +66,30 @@ function env(): { env: AnyamRealmMcpEnv; calls: Array<{ path: string; body: Reco
             value = {
               artifact: { protocol: "anyam.artifact/v1", id: typeof payload.artifactId === "string" ? payload.artifactId : "artifact:mcp:1", type: String(payload.type), digest: String(payload.digest), projectRevisionId: String(payload.projectRevisionId), changeRevisionId: payload.changeRevisionId, runId: payload.runId, actionId: payload.actionId, outputPath: payload.outputPath, provenanceDigest: payload.provenanceDigest, disclosure: payload.disclosure },
             };
+          } else if (body.command === "landing.apply") {
+            if (payload.projectId === "project:missing") return new Response(JSON.stringify({ code: "not_found", receipt: "landing=hidden; discoverable=false" }), { status: 404 });
+            value = {
+              landing: { protocol: "anyam.landing/v1", id: typeof payload.landingId === "string" ? payload.landingId : "landing:mcp:1", projectId: String(payload.projectId), changeId: String(payload.changeId), changeRevisionId: String(payload.changeRevisionId), previousProjectRevisionId: "project-revision:mcp:1", projectRevisionId: String(payload.projectRevisionId ?? "project-revision:mcp:2") },
+              canonicalRevision: { protocol: "anyam.kernel/v1", id: String(payload.projectRevisionId ?? "project-revision:mcp:2"), projectId: String(payload.projectId) },
+              change: { protocol: "anyam.change/v1", id: String(payload.changeId), projectId: String(payload.projectId), intentId: "intent:mcp", baseProjectRevisionId: "project-revision:mcp:1", status: "landed", latestRevisionId: String(payload.changeRevisionId) },
+            };
+          } else if (body.command === "release.create") {
+            if (payload.projectId === "project:missing") return new Response(JSON.stringify({ code: "not_found", receipt: "release=hidden; discoverable=false" }), { status: 404 });
+            value = {
+              release: { protocol: "anyam.release/v1", id: typeof payload.releaseId === "string" ? payload.releaseId : "release:mcp:1", projectId: String(payload.projectId), projectRevisionId: String(payload.projectRevisionId), artifactIds: payload.artifactIds, evidenceIds: payload.evidenceIds, policyVersion: String(payload.policyVersion), status: "ready", name: payload.name, changeRevisionId: payload.changeRevisionId },
+            };
+          } else if (body.command === "target.configure") {
+            if (payload.projectId === "project:missing") return new Response(JSON.stringify({ code: "not_found", receipt: "target=hidden; discoverable=false" }), { status: 404 });
+            value = {
+              target: { protocol: "anyam.target/v1", id: typeof payload.targetId === "string" ? payload.targetId : "target:mcp:1", projectId: String(payload.projectId), name: String(payload.name), adapterId: String(payload.adapterId), acceptedArtifactTypes: payload.acceptedArtifactTypes, requiredEvidenceKeys: payload.requiredEvidenceKeys ?? [], state: "configured" },
+            };
+          } else if (body.command === "promotion.request") {
+            if (payload.projectId === "project:missing") return new Response(JSON.stringify({ code: "not_found", receipt: "promotion=hidden; discoverable=false" }), { status: 404 });
+            value = {
+              promotion: { protocol: "anyam.promotion/v1", id: typeof payload.promotionId === "string" ? payload.promotionId : "promotion:mcp:1", projectId: String(payload.projectId), targetId: String(payload.targetId), releaseId: String(payload.releaseId), releaseDigest: String(payload.releaseDigest ?? "sha256:mcp-release"), previousReleaseId: null, expectedCurrentReleaseId: payload.expectedCurrentReleaseId ?? null, state: "requested", attempt: 1, kind: "request" },
+              target: { protocol: "anyam.target/v1", id: String(payload.targetId), projectId: String(payload.projectId), name: "MCP Target", adapterId: "fixture", state: "configured" },
+              release: { protocol: "anyam.release/v1", id: String(payload.releaseId), projectRevisionId: "project-revision:mcp:2", status: "ready" },
+            };
           } else return new Response(JSON.stringify({ code: "invalid_request", receipt: "command=unsupported; credentialFree=true" }), { status: 422 });
           const result = { protocol: "anyam.authority-plane/v1", status: "succeeded", version: 1, value, receipt: `authority=coordinator; operation=${String(body.command)}; credentialFree=true; canonicalWrite=false` };
           idempotency.set(key, { fingerprint, result });
@@ -371,6 +395,85 @@ test("remote MCP exposes scope-filtered typed bootstrap mutations with idempoten
   assert.deepEqual((((await body(changeWriteOnly)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>).map((tool) => tool.name), ["change.create", "change.publish_revision"]);
 });
 
+test("remote MCP exposes authenticated typed delivery mutations with grant-bound safe projections", async () => {
+  const fixture = env();
+  const deliveryProps: AnyamRealmMcpProps = {
+    scopes: ["landing.request", "release.create", "target.configure", "promotion.request"],
+    kernelSessionId: "kernel-session:owner",
+    anyamGrantId: "grant:mcp:delivery",
+  };
+  const listed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }), fixture.env, deliveryProps);
+  const tools = ((await body(listed)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
+  assert.deepEqual(tools.map((tool) => tool.name), ["landing.apply", "release.create", "target.configure", "promotion.request"]);
+
+  const cases = [
+    {
+      name: "landing.apply",
+      args: { idempotencyKey: "mcp-landing-1", projectId: "project:mcp", changeId: "change:mcp", changeRevisionId: "change-revision:mcp:1", expectedCanonicalProjectRevisionId: "project-revision:mcp:1", projectRevisionId: "project-revision:mcp:2" },
+      resource: "landing",
+    },
+    {
+      name: "release.create",
+      args: { idempotencyKey: "mcp-release-1", projectId: "project:mcp", releaseId: "release:mcp:1", projectRevisionId: "project-revision:mcp:2", artifactIds: ["artifact:mcp:1"], evidenceIds: ["evidence:mcp:1"], policyVersion: "policy:mcp" },
+      resource: "release",
+    },
+    {
+      name: "target.configure",
+      args: { idempotencyKey: "mcp-target-1", projectId: "project:mcp", targetId: "target:mcp:1", name: "MCP Target", adapterId: "fixture", acceptedArtifactTypes: ["cli.archive"] },
+      resource: "target",
+    },
+    {
+      name: "promotion.request",
+      args: { idempotencyKey: "mcp-promotion-1", projectId: "project:mcp", promotionId: "promotion:mcp:1", releaseId: "release:mcp:1", targetId: "target:mcp:1", releaseDigest: "sha256:mcp-release" },
+      resource: "promotion",
+    },
+  ] as const;
+
+  for (const [index, entry] of cases.entries()) {
+    const response = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: index + 2, method: "tools/call", params: { name: entry.name, arguments: entry.args } }), fixture.env, deliveryProps);
+    const result = (await body(response)).result as Record<string, unknown>;
+    const content = result.structuredContent as Record<string, unknown>;
+    assert.equal(result.isError, false);
+    assert.equal(content.protocol, "anyam.remote-mcp/v1");
+    assert.equal(content.canonicalWrite, false);
+    assert.equal(content.credentialFree, true);
+    assert.ok(content[entry.resource]);
+    assert.match(String(content.receipt), /typedSurface=mcp/);
+    assert.match(String(content.receipt), /grant=validated/);
+    assert.match(String(content.receipt), /providerExecution=not-performed/);
+    assert.equal(JSON.stringify(result).includes("grant:mcp:delivery"), false);
+    assert.equal(JSON.stringify(result).includes("kernel-session"), false);
+    assert.equal(fixture.calls.at(-1)?.body.command, entry.name);
+
+    const replay = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: index + 10, method: "tools/call", params: { name: entry.name, arguments: entry.args } }), fixture.env, deliveryProps);
+    assert.deepEqual(((await body(replay)).result as Record<string, unknown>).structuredContent, content);
+  }
+
+  const conflict = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 20, method: "tools/call", params: { name: "release.create", arguments: { ...cases[1].args, policyVersion: "policy:other" } } }), fixture.env, deliveryProps);
+  const conflictError = (await body(conflict)).error as Record<string, unknown>;
+  assert.equal(conflictError.code, -32009);
+  assert.equal((conflictError.data as Record<string, unknown>).code, "mcp.release_create_conflict");
+  assert.equal(JSON.stringify(conflictError).includes("policy:other"), false);
+
+  const hidden = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 21, method: "tools/call", params: { name: "target.configure", arguments: { ...cases[2].args, idempotencyKey: "mcp-target-hidden", projectId: "project:missing" } } }), fixture.env, deliveryProps);
+  const hiddenError = (await body(hidden)).error as Record<string, unknown>;
+  assert.equal(hiddenError.code, -32004);
+  assert.equal(JSON.stringify(hiddenError).includes("project:missing"), false);
+
+  const malformedBefore = fixture.calls.length;
+  const malformed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 22, method: "tools/call", params: { name: "landing.apply", arguments: { ...cases[0].args, unsupported: true } } }), fixture.env, deliveryProps);
+  assert.equal((((await body(malformed)).error as Record<string, unknown>).code), -32602);
+  assert.equal(fixture.calls.length, malformedBefore);
+
+  const missingGrant = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 23, method: "tools/call", params: { name: "landing.apply", arguments: cases[0].args } }), fixture.env, { scopes: deliveryProps.scopes, kernelSessionId: "kernel-session:owner" });
+  const missingGrantError = (await body(missingGrant)).error as Record<string, unknown>;
+  assert.equal(missingGrantError.code, -32001);
+  assert.match(String((missingGrantError.data as Record<string, unknown>).receipt), /grant=missing/);
+
+  const noScope = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 24, method: "tools/list" }), fixture.env, { ...deliveryProps, scopes: ["project.read"] });
+  assert.deepEqual((((await body(noScope)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>).map((tool) => tool.name), ["project.list", "project.inspect"]);
+});
+
 test("remote MCP exposes typed Run and Evidence recording under run.invoke with safe idempotent projections", async () => {
   const fixture = env();
   const runProps: AnyamRealmMcpProps = { scopes: ["run.invoke"], kernelSessionId: "kernel-session:owner" };
@@ -451,8 +554,8 @@ test("remote MCP fails closed for malformed requests, unknown methods, mutations
 
   const mutation = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: "mutate", method: "tools/call", params: { name: "landing.apply", arguments: {} } }), fixture.env, props);
   const mutationError = (await body(mutation)).error as Record<string, unknown>;
-  assert.equal(mutationError.code, -32003);
-  assert.match(String(mutationError.data && (mutationError.data as Record<string, unknown>).receipt), /canonicalWrite=false/);
+  assert.equal(mutationError.code, -32001);
+  assert.match(String(mutationError.data && (mutationError.data as Record<string, unknown>).receipt), /scope=missing/);
 
   const hidden = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: "hidden", method: "tools/call", params: { name: "project.inspect", arguments: { projectId: "project:private" } } }), fixture.env, props);
   const hiddenError = (await body(hidden)).error as Record<string, unknown>;

@@ -32,6 +32,10 @@ export const ANYAM_REALM_OAUTH_SCOPES = [
   "source.read",
   "change.write",
   "run.invoke",
+  "landing.request",
+  "release.create",
+  "target.configure",
+  "promotion.request",
 ] as const;
 
 export type AnyamRealmOAuthProps = {
@@ -44,6 +48,8 @@ export type AnyamRealmOAuthProps = {
    * Durable Object boundary. It is encrypted inside the provider grant and is
    * never returned as credential material. */
   readonly kernelSessionId?: string;
+  /** Opaque local grant handle used to bind delivery mutations to the live OAuth grant. */
+  readonly anyamGrantId?: string;
   readonly authorizationReceipt: string;
 };
 

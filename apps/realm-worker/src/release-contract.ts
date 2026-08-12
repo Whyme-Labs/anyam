@@ -168,7 +168,7 @@ function safeRelease(value: unknown): Record<string, unknown> {
   };
 }
 
-export function releaseCreateValue(result: Record<string, unknown>, idempotencyKey: string): Record<string, unknown> {
+export function releaseCreateValue(result: Record<string, unknown>, idempotencyKey: string, surface: "rest" | "mcp" = "rest"): Record<string, unknown> {
   const value = record(result.value, "value");
   return {
     protocol: AUTHORITY_PLANE_PROTOCOL,
@@ -178,6 +178,6 @@ export function releaseCreateValue(result: Record<string, unknown>, idempotencyK
     credentialFree: true,
     canonicalWrite: false,
     release: safeRelease(value.release),
-    receipt: `operation=${RELEASE_CREATE_COMMAND}; typedSurface=rest; credentialFree=true; canonicalWrite=false; authorityResult=projected`,
+    receipt: `operation=${RELEASE_CREATE_COMMAND}; typedSurface=${surface}; credentialFree=true; canonicalWrite=false; authorityResult=projected`,
   };
 }

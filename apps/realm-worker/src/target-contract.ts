@@ -127,7 +127,7 @@ function safeTarget(value: unknown): Record<string, unknown> {
   };
 }
 
-export function targetConfigureValue(result: Record<string, unknown>, idempotencyKey: string): Record<string, unknown> {
+export function targetConfigureValue(result: Record<string, unknown>, idempotencyKey: string, surface: "rest" | "mcp" = "rest"): Record<string, unknown> {
   const value = record(result.value, "value");
   return {
     protocol: AUTHORITY_PLANE_PROTOCOL,
@@ -137,6 +137,6 @@ export function targetConfigureValue(result: Record<string, unknown>, idempotenc
     credentialFree: true,
     canonicalWrite: false,
     target: safeTarget(value.target),
-    receipt: `operation=${TARGET_CONFIGURE_COMMAND}; typedSurface=rest; credentialFree=true; canonicalWrite=false; authorityResult=projected`,
+    receipt: `operation=${TARGET_CONFIGURE_COMMAND}; typedSurface=${surface}; credentialFree=true; canonicalWrite=false; authorityResult=projected`,
   };
 }

@@ -1,4 +1,4 @@
-# Remote MCP read and typed-bootstrap qualification
+# Remote MCP read, bootstrap, and delivery-mutation qualification
 
 This note records the private-alpha boundary implemented for [Wayfinder ticket
 155](https://github.com/Whyme-Labs/anyam/issues/155), [ticket
@@ -6,8 +6,9 @@ This note records the private-alpha boundary implemented for [Wayfinder ticket
 159](https://github.com/Whyme-Labs/anyam/issues/159), [ticket
 160](https://github.com/Whyme-Labs/anyam/issues/160), and [ticket
 161](https://github.com/Whyme-Labs/anyam/issues/161), and [ticket
-162](https://github.com/Whyme-Labs/anyam/issues/162), and [ticket
-166](https://github.com/Whyme-Labs/anyam/issues/166).
+162](https://github.com/Whyme-Labs/anyam/issues/162), [ticket
+166](https://github.com/Whyme-Labs/anyam/issues/166), and [ticket
+180](https://github.com/Whyme-Labs/anyam/issues/180).
 
 ## Qualified surface
 
@@ -19,12 +20,15 @@ single JSON-RPC 2.0 request at a time. The qualified methods are:
 - `tools/call` for `project.list` and `project.inspect`
 - `tools/call` for `workspace.list` and `workspace.inspect` when the OAuth grant includes `workspace.inspect`
 - `tools/call` for typed `project.create`, `workspace.create`, and `change.create` when their explicit write scopes are granted
+- `tools/call` for typed `landing.apply`, `release.create`, `target.configure`, and `promotion.request` when their matching delivery scope and live OAuth grant handle are present
 - `notifications/initialized` as a no-content acknowledgement
 
-The write tools are deliberately narrow bootstrap mutations: `project.create`
+The write tools are deliberately narrow typed mutations: `project.create`
 requires `project.write`, `workspace.create` requires `workspace.write`, and
-`change.create` requires `change.write`. They do not turn MCP into a general
-source-transfer or promotion channel.
+`change.create` requires `change.write`; delivery mutations require
+`landing.request`, `release.create`, `target.configure`, or
+`promotion.request` respectively. They do not transfer source objects or
+execute provider operations.
 
 `project.inspect` requires an explicit `projectId`. The authenticated handler
 uses the encrypted OAuth grant property `kernelSessionId` to call the existing
@@ -101,12 +105,31 @@ credentials, and raw Coordinator receipts are omitted. Hidden or missing
 resources are reported without echoing their identifiers. Malformed arguments
 fail before a Coordinator call.
 
+## Typed delivery-mutation boundary
+
+The four delivery tools reuse the closed REST-compatible command contracts and
+the same serialized Coordinator boundary. The grant must contain the
+operation-specific scope and a non-empty provider-issued `anyamGrantId`; the
+handler also requires the authenticated `kernelSessionId`. The Coordinator
+receives only the typed command, payload, idempotency key, optional expected
+version, and authenticated session—not bearer tokens or grant handles.
+
+`landing.apply` validates Project, Change, Change Revision, and canonical
+Project Revision lineage. `release.create` validates the canonical Project
+Revision plus Artifact and passed Evidence bindings. `target.configure`
+validates the Project binding. `promotion.request` validates the Project,
+Release, and Target bindings. All four return credential-free safe projections
+with `canonicalWrite=false`, `typedSurface=mcp`, and
+`providerExecution=not-performed`. Replays are deterministic; changed payloads
+conflict; stale versions and hidden resources fail closed; malformed fields
+are rejected before the Coordinator call.
+
 ## Deliberate non-capabilities
 
 The surface does not transfer Git objects, issue task grants, expose secret
-values, publish Change Revisions, write canonical refs, Land Changes, create
-Releases, or Promote Releases. Mutation-shaped tool names outside the three
-typed bootstrap operations return a typed JSON-RPC error with
+values, publish Change Revisions, write canonical refs, or execute provider
+Landing, Release, Target, or Promotion operations. Mutation-shaped tool names
+outside the documented typed operations return a typed JSON-RPC error with
 `canonicalWrite=false`. Unknown methods and malformed requests fail closed
 with actionable recovery text.
 
@@ -133,10 +156,10 @@ paths/filters, method errors, hidden resources, and confirms that mounts, source
 snapshots, actor identity, and credentials are not returned by the safe
 summaries.
 
-This is a private-alpha read plus typed-bootstrap qualification, not a claim
-that the full remote MCP, REST, source-transfer, revision-publication,
-task-grant mutation API, web console, or production-scale service is complete.
-Those remain explicit Wayfinder fog.
+This is a private-alpha read, bootstrap, and typed delivery-mutation
+qualification, not a claim that the full remote MCP, REST, source transfer,
+provider execution/health/rollback, task-grant lifecycle API, web console, or
+production-scale service is complete. Those remain explicit Wayfinder fog.
 
 ## Generic owner delegation boundary
 
@@ -158,8 +181,8 @@ Repeated identical active requests return `already-delegated`; a request that
 would change an active delegation's resource, actions, effects, audiences,
 budget, or expiry is rejected as an idempotency conflict. Responses contain no
 credential values, provider credentials, source objects, or canonical-write
-authority. Git/MCP/Realm API credential exchange and MCP mutation beyond typed
-bootstrap remain separate follow-up boundaries.
+authority. Git/MCP/Realm API credential exchange and provider delivery
+execution remain separate follow-up boundaries.
 
 ## Explicit generic credential exchange
 
@@ -181,5 +204,7 @@ The generic delegation now has a separate owner-authenticated exchange route:
   credential-free. Provider tokens are rejected rather than forwarded.
 
 Git and MCP credentials are separate audience credentials. An MCP credential
-authorizes the already-qualified MCP resource boundary; it does not itself add
-mutation tools or canonical-write authority.
+authorizes the already-qualified MCP resource boundary; delivery mutation
+tools additionally require their operation scope, live grant handle, and
+authenticated kernel session. None grants canonical-write authority or
+provider execution.

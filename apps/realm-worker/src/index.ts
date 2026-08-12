@@ -424,6 +424,31 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return { project, canonicalRevision, sourceSpaces, counts };
   }
 
+  private authorityWorkspaceSummary(snapshot: AuthorityPlaneSnapshot, workspaceId: string) {
+    const workspace = snapshot.workspaces[workspaceId];
+    if (!workspace) throw new AuthorityPlaneError({ code: "not_found", message: `Workspace ${workspaceId} is not available in this Realm.`, recoveryAction: "verify the Workspace identifier without probing undiscoverable resources", receipt: `workspace=${workspaceId}; operation=workspace.inspect; discoverable=false` });
+    const project = snapshot.projects[workspace.projectId];
+    if (!project) throw new AuthorityPlaneError({ code: "indeterminate", message: `Workspace ${workspaceId} refers to a Project that is not readable.`, recoveryAction: "reconcile the Authority snapshot before exposing the Workspace summary", receipt: `workspace=${workspaceId}; project=missing; operation=workspace.inspect` });
+    return {
+      workspace: {
+        protocol: workspace.protocol,
+        id: workspace.id,
+        projectId: workspace.projectId,
+        projectRevisionId: workspace.projectRevisionId,
+        projectViewId: workspace.projectViewId,
+        state: workspace.state,
+        ...(workspace.changeId ? { changeId: workspace.changeId } : {}),
+      },
+      project: {
+        protocol: project.protocol,
+        id: project.id,
+        name: project.name,
+        referenceType: project.referenceType,
+      },
+      mountCount: workspace.mounts.length,
+    };
+  }
+
   private async authorityProject(body: CoordinatorRequestBody): Promise<Response> {
     const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const projectId = coordinatorString(body, "projectId");
@@ -437,6 +462,22 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const projectIds = Object.keys(snapshot.projects).sort();
     const projects = projectIds.map((projectId) => this.authorityProjectSummary(snapshot, projectId));
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", projects, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=project.list; projectCount=${projects.length}; ordering=project-id-code-unit-ascending; readOnly=true; credentialFree=true; canonicalWrite=false` });
+  }
+
+  private async authorityWorkspaces(body: CoordinatorRequestBody): Promise<Response> {
+    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const projectId = body.projectId === undefined ? undefined : coordinatorString(body, "projectId");
+    const workspaceId = body.workspaceId === undefined ? undefined : coordinatorString(body, "workspaceId");
+    const snapshot = await this.authoritySnapshot();
+    if (projectId !== undefined && !snapshot.projects[projectId]) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${projectId} is not available in this Realm.`, recoveryAction: "verify the Project identifier without probing undiscoverable resources", receipt: `project=${projectId}; operation=workspace.list; discoverable=false` });
+    if (workspaceId !== undefined) {
+      const summary = this.authorityWorkspaceSummary(snapshot, workspaceId);
+      if (projectId !== undefined && summary.workspace.projectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Workspace ${workspaceId} is not available for Project ${projectId}.`, recoveryAction: "verify the Workspace identifier within the requested Project without probing undiscoverable resources", receipt: `workspace=${workspaceId}; project=${projectId}; operation=workspace.inspect; discoverable=false` });
+      return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", ...summary, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=workspace.inspect; workspace=${workspaceId}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+    }
+    const workspaceIds = Object.keys(snapshot.workspaces).filter((id) => projectId === undefined || snapshot.workspaces[id]?.projectId === projectId).sort();
+    const workspaces = workspaceIds.map((id) => this.authorityWorkspaceSummary(snapshot, id));
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", workspaces, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=workspace.list; workspaceCount=${workspaces.length}; ordering=workspace-id-code-unit-ascending;${projectId ? ` project=${projectId};` : ""} readOnly=true; credentialFree=true; canonicalWrite=false` });
   }
 
   private async authorityCommand(body: CoordinatorRequestBody): Promise<Response> {
@@ -509,6 +550,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/state/internal") return await this.authorityState(coordinatorString(body, "sessionId"));
       if (url.pathname === "/authority/project/internal") return await this.authorityProject(body);
       if (url.pathname === "/authority/projects/internal") return await this.authorityProjects(body);
+      if (url.pathname === "/authority/workspaces/internal") return await this.authorityWorkspaces(body);
       if (url.pathname === "/authority/command/internal") return await this.authorityCommand(body);
 
       if (url.pathname === "/identity/passkey-challenge/issue") {

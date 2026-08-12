@@ -110,6 +110,18 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
         const body = request.method === "POST" ? await request.json() as Record<string, unknown> : {};
         if (body.sessionId !== ownerSessionId) return new Response(JSON.stringify({ code: "session.invalid" }), { status: 403 });
         if (new URL(request.url).pathname === "/authority/state/internal") return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", authority: authorityStateSummary(authority.snapshot()) }));
+        if (new URL(request.url).pathname === "/authority/workspaces/internal") {
+          const snapshot = authority.snapshot();
+          const workspaceIds = Object.keys(snapshot.workspaces).filter((id) => body.workspaceId === undefined || id === body.workspaceId).filter((id) => body.projectId === undefined || snapshot.workspaces[id]?.projectId === body.projectId).sort();
+          const workspaces = workspaceIds.map((id) => {
+            const workspace = snapshot.workspaces[id]!;
+            const project = snapshot.projects[workspace.projectId]!;
+            return { workspace: { protocol: workspace.protocol, id: workspace.id, projectId: workspace.projectId, projectRevisionId: workspace.projectRevisionId, projectViewId: workspace.projectViewId, state: workspace.state, ...(workspace.changeId ? { changeId: workspace.changeId } : {}) }, project: { protocol: project.protocol, id: project.id, name: project.name, referenceType: project.referenceType }, mountCount: workspace.mounts.length };
+          });
+          if (body.workspaceId !== undefined && workspaces.length === 0) return new Response(JSON.stringify({ code: "not_found", receipt: "workspace=hidden; discoverable=false" }), { status: 404 });
+          if (body.workspaceId !== undefined) return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", ...workspaces[0], receipt: "authority=coordinator; operation=workspace.inspect; readOnly=true; credentialFree=true; canonicalWrite=false" }));
+          return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", workspaces, receipt: `authority=coordinator; operation=workspace.list; workspaceCount=${workspaces.length}; ordering=workspace-id-code-unit-ascending; readOnly=true; credentialFree=true; canonicalWrite=false` }));
+        }
         const command = { ...body, protocol: body.protocol, command: body.command, idempotencyKey: body.idempotencyKey, payload: body.payload } as unknown as AuthorityCommand;
         const result = authority.execute(command, { realmId: "realm:authority-test", principalId: "owner:authority-test", actorId: "actor:authority-test", sessionId: ownerSessionId, clientId: "client:anyam-web", authorizationEpoch: 1 });
         return new Response(JSON.stringify(result), { status: result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503, headers: { "content-type": "application/json" } });
@@ -164,6 +176,18 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
   const canonicalBefore = ((projectResult.value as Record<string, unknown>).canonicalRevision as { id: string }).id;
   const workspaceResult = await command("workspace.create", "idem:workspace", { projectId: project.id, projectRevisionId: canonicalBefore, sourceSpaceIds: ["source:authority-test"], mounts: ["source"] });
   const workspace = (workspaceResult.value as Record<string, unknown>).workspace as { id: string; projectViewId: string };
+  const workspaceListResponse = await namespace.get("authority-test-do").fetch(new Request("https://realm-coordinator/authority/workspaces/internal", { method: "POST", headers: { [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE, "content-type": "application/json" }, body: JSON.stringify({ sessionId: ownerSessionId, projectId: project.id }) }));
+  assert.equal(workspaceListResponse.status, 200);
+  const workspaceList = await workspaceListResponse.json() as Record<string, unknown>;
+  assert.deepEqual((workspaceList.workspaces as Array<Record<string, unknown>>).map((entry) => (entry.workspace as Record<string, unknown>).id), [workspace.id]);
+  assert.equal(JSON.stringify(workspaceList).includes("mounts"), false);
+  assert.equal(JSON.stringify(workspaceList).includes("actorId"), false);
+  assert.match(String(workspaceList.receipt), /ordering=workspace-id-code-unit-ascending/);
+  const workspaceInspectResponse = await namespace.get("authority-test-do").fetch(new Request("https://realm-coordinator/authority/workspaces/internal", { method: "POST", headers: { [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE, "content-type": "application/json" }, body: JSON.stringify({ sessionId: ownerSessionId, workspaceId: workspace.id }) }));
+  assert.equal(workspaceInspectResponse.status, 200);
+  const workspaceInspect = await workspaceInspectResponse.json() as Record<string, unknown>;
+  assert.equal(((workspaceInspect.workspace as Record<string, unknown>).id), workspace.id);
+  assert.equal(JSON.stringify(workspaceInspect).includes("credential:"), false);
   const changeResult = await command("change.create", "idem:change", { projectId: project.id, intentId: "intent:authority-test", baseProjectRevisionId: canonicalBefore, workspaceId: workspace.id });
   const change = (changeResult.value as Record<string, unknown>).change as { id: string };
   const revisionResult = await command("revision.publish", "idem:revision", { changeId: change.id, workspaceId: workspace.id, projectViewId: workspace.projectViewId, projectRevisionId: "candidate:authority-test", sourceSpaceSnapshots: { "source:authority-test": "git:candidate" }, declaredEffects: ["source.modify"] });

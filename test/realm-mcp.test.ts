@@ -36,6 +36,28 @@ function env(): { env: AnyamRealmMcpEnv; calls: Array<{ path: string; body: Reco
           ],
           receipt: "authority=coordinator; operation=project.list; projectCount=2; ordering=project-id-code-unit-ascending; readOnly=true; credentialFree=true; canonicalWrite=false",
         }), { status: 200, headers: { "content-type": "application/json" } });
+        if (path === "/authority/workspaces/internal") {
+          const workspaces = [
+            {
+              workspace: { protocol: "anyam.workspace/v1", id: "workspace:alpha", projectId: "project:alpha", projectRevisionId: "project-revision:alpha:1", projectViewId: "project-view:alpha:1", state: "active" },
+              project: { protocol: "anyam.project/v1", id: "project:alpha", name: "Alpha", referenceType: "git" },
+              mountCount: 1,
+            },
+            {
+              workspace: { protocol: "anyam.workspace/v1", id: "workspace:video-player", projectId: "project:video-player", projectRevisionId: "project-revision:video-player:1", projectViewId: "project-view:video-player:1", state: "active", changeId: "change:video-player" },
+              project: { protocol: "anyam.project/v1", id: "project:video-player", name: "Video Player", referenceType: "git" },
+              mountCount: 1,
+            },
+          ];
+          if (body.workspaceId !== undefined) {
+            const found = workspaces.find((entry) => entry.workspace.id === body.workspaceId);
+            if (!found) return new Response(JSON.stringify({ code: "not_found", receipt: "workspace=hidden; discoverable=false" }), { status: 404 });
+            if (body.projectId !== undefined && found.workspace.projectId !== body.projectId) return new Response(JSON.stringify({ code: "not_found", receipt: "workspace=hidden; discoverable=false" }), { status: 404 });
+            return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", ...found, receipt: `authority=coordinator; operation=workspace.inspect; workspace=${found.workspace.id}; readOnly=true; credentialFree=true; canonicalWrite=false` }), { status: 200, headers: { "content-type": "application/json" } });
+          }
+          const filtered = body.projectId === undefined ? workspaces : workspaces.filter((entry) => entry.workspace.projectId === body.projectId);
+          return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", workspaces: filtered, receipt: `authority=coordinator; operation=workspace.list; workspaceCount=${filtered.length}; ordering=workspace-id-code-unit-ascending; readOnly=true; credentialFree=true; canonicalWrite=false` }), { status: 200, headers: { "content-type": "application/json" } });
+        }
         if (path !== "/authority/project/internal") return new Response(JSON.stringify({ code: "not_found" }), { status: 404 });
         if (body.projectId !== "project:video-player") return new Response(JSON.stringify({ code: "not_found", receipt: `project=${String(body.projectId)}; discoverable=false` }), { status: 404 });
         return new Response(JSON.stringify({
@@ -60,7 +82,7 @@ function env(): { env: AnyamRealmMcpEnv; calls: Array<{ path: string; body: Reco
 }
 
 const props: AnyamRealmMcpProps = {
-  scopes: ["project.read"],
+  scopes: ["project.read", "workspace.inspect"],
   kernelSessionId: "kernel-session:owner",
 };
 
@@ -81,7 +103,7 @@ test("remote MCP exposes an authenticated read-only project tool through the coo
   const listed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 2, method: "tools/list" }), fixture.env, props);
   const listedBody = await body(listed);
   const tools = (listedBody.result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
-  assert.deepEqual(tools.map((tool) => tool.name), ["project.list", "project.inspect"]);
+  assert.deepEqual(tools.map((tool) => tool.name), ["project.list", "project.inspect", "workspace.list", "workspace.inspect"]);
 
   const discovered = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "project.list", arguments: {} } }), fixture.env, props);
   const discoveredBody = await body(discovered);
@@ -95,6 +117,19 @@ test("remote MCP exposes an authenticated read-only project tool through the coo
   assert.equal(fixture.calls[0]?.path, "/authority/projects/internal");
   assert.equal(fixture.calls[0]?.body.sessionId, "kernel-session:owner");
 
+  const workspaces = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: "workspaces", method: "tools/call", params: { name: "workspace.list", arguments: { projectId: "project:video-player" } } }), fixture.env, props);
+  const workspacesBody = await body(workspaces);
+  const workspacesResult = workspacesBody.result as Record<string, unknown>;
+  const workspaceContent = workspacesResult.structuredContent as Record<string, unknown>;
+  assert.equal(workspacesResult.isError, false);
+  assert.deepEqual((workspaceContent.workspaces as Array<Record<string, unknown>>).map((entry) => (entry.workspace as Record<string, unknown>).id), ["workspace:video-player"]);
+  assert.match(String(workspaceContent.receipt), /workspaceCount=1/);
+  assert.equal(JSON.stringify(workspacesBody).includes("kernel-session"), false);
+  assert.equal(JSON.stringify(workspacesBody).includes("credential:"), false);
+  assert.equal(JSON.stringify(workspacesBody).includes("sourceSpace"), false);
+  assert.equal(fixture.calls[1]?.path, "/authority/workspaces/internal");
+  assert.deepEqual(fixture.calls[1]?.body, { sessionId: "kernel-session:owner", projectId: "project:video-player" });
+
   const inspected = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "project.inspect", arguments: { projectId: "project:video-player" } } }), fixture.env, props);
   const inspectedBody = await body(inspected);
   const result = inspectedBody.result as Record<string, unknown>;
@@ -102,8 +137,19 @@ test("remote MCP exposes an authenticated read-only project tool through the coo
   assert.equal((result.structuredContent as Record<string, unknown>).project && ((result.structuredContent as Record<string, unknown>).project as Record<string, unknown>).id, "project:video-player");
   assert.match(String((result.structuredContent as Record<string, unknown>).receipt), /read-only/);
   assert.equal(JSON.stringify(inspectedBody).includes("kernel-session"), false);
-  assert.equal(fixture.calls[1]?.path, "/authority/project/internal");
-  assert.equal(fixture.calls[1]?.body.sessionId, "kernel-session:owner");
+  assert.equal(fixture.calls[2]?.path, "/authority/project/internal");
+  assert.equal(fixture.calls[2]?.body.sessionId, "kernel-session:owner");
+
+  const workspace = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "workspace.inspect", arguments: { workspaceId: "workspace:video-player" } } }), fixture.env, props);
+  const workspaceBody = await body(workspace);
+  const workspaceResult = workspaceBody.result as Record<string, unknown>;
+  assert.equal(workspaceResult.isError, false);
+  assert.equal(((workspaceResult.structuredContent as Record<string, unknown>).workspace as Record<string, unknown>).id, "workspace:video-player");
+  assert.equal(((workspaceResult.structuredContent as Record<string, unknown>).workspace as Record<string, unknown>).mounts, undefined);
+  assert.equal(JSON.stringify(workspaceBody).includes("kernel-session"), false);
+  assert.equal(JSON.stringify(workspaceBody).includes("credential:"), false);
+  assert.equal(fixture.calls[3]?.path, "/authority/workspaces/internal");
+  assert.deepEqual(fixture.calls[3]?.body, { sessionId: "kernel-session:owner", workspaceId: "workspace:video-player" });
 });
 
 test("remote MCP fails closed for malformed requests, unknown methods, mutations, and undiscoverable projects", async () => {
@@ -126,8 +172,22 @@ test("remote MCP fails closed for malformed requests, unknown methods, mutations
   assert.match(JSON.stringify(hiddenError), /not available/);
   assert.equal(JSON.stringify(hiddenError).includes("project:private"), false);
 
+  const hiddenWorkspace = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: "hidden-workspace", method: "tools/call", params: { name: "workspace.inspect", arguments: { workspaceId: "workspace:private" } } }), fixture.env, props);
+  const hiddenWorkspaceError = (await body(hiddenWorkspace)).error as Record<string, unknown>;
+  assert.equal(hiddenWorkspaceError.code, -32004);
+  assert.equal(JSON.stringify(hiddenWorkspaceError).includes("workspace:private"), false);
+
+  const malformedWorkspace = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: "malformed-workspace", method: "tools/call", params: { name: "workspace.inspect", arguments: {} } }), fixture.env, props);
+  assert.equal(((await body(malformedWorkspace)).error as Record<string, unknown>).code, -32602);
+
   const noScope = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: "scope", method: "tools/list" }), fixture.env, { ...props, scopes: ["source.read"] });
   assert.equal(((await body(noScope)).error as Record<string, unknown>).code, -32001);
+
+  const workspaceOnly = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: "workspace-scope", method: "tools/list" }), fixture.env, { ...props, scopes: ["workspace.inspect"] });
+  const workspaceOnlyTools = ((await body(workspaceOnly)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
+  assert.deepEqual(workspaceOnlyTools.map((tool) => tool.name), ["workspace.list", "workspace.inspect"]);
+  const deniedProject = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: "denied-project", method: "tools/call", params: { name: "project.list", arguments: {} } }), fixture.env, { ...props, scopes: ["workspace.inspect"] });
+  assert.equal(((await body(deniedProject)).error as Record<string, unknown>).code, -32001);
 });
 
 test("remote MCP requires POST and treats initialized notification as a no-content acknowledgement", async () => {

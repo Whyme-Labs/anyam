@@ -1,7 +1,9 @@
 # Remote MCP read-surface qualification
 
 This note records the private-alpha boundary implemented for [Wayfinder ticket
-155](https://github.com/Whyme-Labs/anyam/issues/155).
+155](https://github.com/Whyme-Labs/anyam/issues/155), [ticket
+158](https://github.com/Whyme-Labs/anyam/issues/158), and [ticket
+159](https://github.com/Whyme-Labs/anyam/issues/159).
 
 ## Qualified surface
 
@@ -11,6 +13,7 @@ single JSON-RPC 2.0 request at a time. The qualified methods are:
 - `initialize`
 - `tools/list`
 - `tools/call` for `project.list` and `project.inspect`
+- `tools/call` for `workspace.list` and `workspace.inspect` when the OAuth grant includes `workspace.inspect`
 - `notifications/initialized` as a no-content acknowledgement
 
 `project.inspect` requires an explicit `projectId`. The authenticated handler
@@ -26,6 +29,17 @@ the same safe summary shape in deterministic Project-identifier order. It does
 not expose the Authority snapshot, kernel session identifiers, or credential
 material.
 
+`workspace.list` and `workspace.inspect` use one dedicated Coordinator
+`workspace.list`/`workspace.inspect` query boundary. Discovery is sorted by
+Workspace identifier using code-unit ordering; `workspace.list` may receive a
+validated `projectId` filter and `workspace.inspect` requires one validated
+`workspaceId`. Both return the same safe Workspace summary: Project identity,
+immutable Project Revision and Project View identities, state, optional Change
+link, and mount count. Mount paths, Source Space snapshots, source objects,
+actor identity, and credentials are deliberately omitted. The dedicated
+`workspace.inspect` OAuth scope keeps Workspace reads separate from
+`project.read` while the handler still reuses the encrypted kernel session.
+
 ## Deliberate non-capabilities
 
 The surface does not transfer Git objects, issue task grants, expose secret
@@ -40,10 +54,13 @@ MCP token is never passed through to Git, Cloudflare, or another provider.
 
 ## Evidence
 
-`test/realm-mcp.test.ts` covers initialization, tool discovery, project
-discovery and inspection, authenticated coordinator binding, deterministic
-ordering, malformed JSON-RPC, unknown methods, mutation denial, missing-project
-concealment, missing scope, and notification acknowledgement.
+`test/realm-mcp.test.ts` covers initialization, scope-filtered tool discovery,
+project and Workspace discovery/inspection, authenticated coordinator binding,
+deterministic ordering and Project filtering, malformed JSON-RPC, unknown
+methods, mutation denial, missing-resource concealment, missing scopes, and
+notification acknowledgement. `test/worker-entrypoint.test.ts` covers the
+binding-shaped Coordinator Workspace list/inspect responses and confirms that
+mounts and actor identity are not returned by the safe summary.
 
 This is a read-surface qualification, not a claim that the full remote MCP,
 REST, task-grant mutation API, web console, or production-scale service is

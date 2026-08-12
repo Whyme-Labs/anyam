@@ -97,6 +97,16 @@ receipt. Unknown Projects are deliberately reported as an undiscoverable
 not-found result. This route does not create a Project, transfer source, issue
 credentials, land a Change, or promote a Release.
 
+The OAuth-protected `/mcp` resource exposes the same Project reads plus the
+read-only Workspace tools `workspace.list` and `workspace.inspect` when the
+grant includes the dedicated `workspace.inspect` scope. `workspace.list`
+accepts an optional validated `projectId` filter; both tools return only a
+safe Workspace summary (Project, immutable revision/view identities, state,
+Change link when present, and mount count). Mount paths, source snapshots,
+source objects, credentials, and mutation authority are not returned. The
+Coordinator sorts Workspace discovery by Workspace identifier using code-unit
+ordering and owns the single query boundary for list and inspect.
+
 The command envelope is:
 
 ```json

@@ -2,9 +2,12 @@ import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } f
 
 export const ANYAM_MCP_PROTOCOL_VERSION = "2025-06-18" as const;
 export const ANYAM_MCP_PROTOCOL = "anyam.remote-mcp/v1" as const;
-const MCP_READ_SCOPE = "project.read";
+const MCP_PROJECT_SCOPE = "project.read";
+const MCP_WORKSPACE_SCOPE = "workspace.inspect";
 const MCP_READ_TOOL = "project.inspect";
 const MCP_LIST_TOOL = "project.list";
+const MCP_WORKSPACE_READ_TOOL = "workspace.inspect";
+const MCP_WORKSPACE_LIST_TOOL = "workspace.list";
 const MCP_MUTATION_TOOLS = new Set(["workspace.create", "change.create", "change.publish_revision", "landing.apply", "promotion.request"]);
 
 export type AnyamRealmMcpProps = {
@@ -57,6 +60,20 @@ function mcpProjectId(value: unknown): string {
   return projectId.trim();
 }
 
+function mcpWorkspaceId(value: unknown): string {
+  const params = mcpParams(value);
+  const workspaceId = params.workspaceId;
+  if (typeof workspaceId !== "string" || workspaceId.trim().length === 0) throw new Error("workspaceId_required");
+  return workspaceId.trim();
+}
+
+function mcpWorkspaceListProjectId(value: unknown): string | undefined {
+  const params = mcpParams(value);
+  if (params.projectId === undefined) return undefined;
+  if (typeof params.projectId !== "string" || params.projectId.trim().length === 0) throw new Error("projectId_required");
+  return params.projectId.trim();
+}
+
 function mcpToolResult(value: Record<string, unknown>): Record<string, unknown> {
   return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value, isError: false };
 }
@@ -107,15 +124,42 @@ async function mcpProjectList(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, 
   };
 }
 
+async function mcpWorkspaceList(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, argumentsValue: unknown): Promise<Record<string, unknown>> {
+  if (!props.kernelSessionId) throw new Error("mcp_kernel_session_missing");
+  const projectId = mcpWorkspaceListProjectId(argumentsValue);
+  const result = await requestMcpCoordinator(env, "/authority/workspaces/internal", { sessionId: props.kernelSessionId, ...(projectId ? { projectId } : {}) });
+  return {
+    protocol: ANYAM_MCP_PROTOCOL,
+    status: "ready",
+    workspaces: result.workspaces,
+    receipt: `${typeof result.receipt === "string" ? result.receipt : "authority=coordinator; operation=workspace.list"}; oauth=audience-validated; mcp=read-only; credentialFree=true; canonicalWrite=false`,
+  };
+}
+
+async function mcpWorkspaceInspect(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, workspaceId: string): Promise<Record<string, unknown>> {
+  if (!props.kernelSessionId) throw new Error("mcp_kernel_session_missing");
+  const result = await requestMcpCoordinator(env, "/authority/workspaces/internal", { sessionId: props.kernelSessionId, workspaceId });
+  return {
+    protocol: ANYAM_MCP_PROTOCOL,
+    status: "ready",
+    workspace: result.workspace,
+    project: result.project,
+    mountCount: result.mountCount,
+    receipt: `${typeof result.receipt === "string" ? result.receipt : "authority=coordinator; operation=workspace.inspect"}; oauth=audience-validated; mcp=read-only; credentialFree=true; canonicalWrite=false`,
+  };
+}
+
 /**
- * Project-scoped remote MCP control surface. OAuthProvider has already
+ * Realm-scoped remote MCP control surface. OAuthProvider has already
  * validated the bearer token, audience, and encrypted grant properties before
  * this function runs. The handler only reads a project summary through the
  * Realm Coordinator; source transfer and all mutations stay on their own
  * authority boundaries.
  */
 export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps): Promise<Response> {
-  if (!props.scopes.includes(MCP_READ_SCOPE)) return mcpError(null, -32001, "The MCP grant does not include project.read.", { code: "mcp.scope_denied", recoveryAction: "authorize the project.read scope and retry", receipt: "oauth=validated; mcp=scope-denied; canonicalWrite=false" });
+  const canReadProjects = props.scopes.includes(MCP_PROJECT_SCOPE);
+  const canReadWorkspaces = props.scopes.includes(MCP_WORKSPACE_SCOPE);
+  if (!canReadProjects && !canReadWorkspaces) return mcpError(null, -32001, "The MCP grant does not include a supported read scope.", { code: "mcp.scope_denied", recoveryAction: "authorize project.read or workspace.inspect and retry", receipt: "oauth=validated; mcp=scope-denied; required=project.read|workspace.inspect; canonicalWrite=false" });
   if (request.method !== "POST") return mcpJson({ code: "method_not_allowed", recoveryAction: "Use POST with a JSON-RPC 2.0 request for the project-scoped MCP surface.", receipt: "mcp=read-only; method=post-required; canonicalWrite=false" }, 405);
 
   let parsed: unknown;
@@ -138,10 +182,20 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
     return mcpJson({ jsonrpc: "2.0", id, result: { protocolVersion: ANYAM_MCP_PROTOCOL_VERSION, capabilities: { tools: { listChanged: false } }, serverInfo: { name: "anyam", version: "private-alpha" }, receipt: "mcp=initialized; oauth=audience-validated; canonicalWrite=false" } });
   }
   if (rpc.method === "tools/list") {
-    return mcpJson({ jsonrpc: "2.0", id, result: { tools: [
-      { name: MCP_LIST_TOOL, description: "List owner-visible project summaries through the authenticated Realm Coordinator.", inputSchema: { type: "object", additionalProperties: false, properties: {} } },
-      { name: MCP_READ_TOOL, description: "Inspect one project summary through the authenticated Realm Coordinator.", inputSchema: { type: "object", additionalProperties: false, required: ["projectId"], properties: { projectId: { type: "string", minLength: 1 } } } },
-    ], receipt: "mcp=tools-listed; tools=read-only; canonicalWrite=false" } });
+    const tools: Array<Record<string, unknown>> = [];
+    if (canReadProjects) {
+      tools.push(
+        { name: MCP_LIST_TOOL, description: "List owner-visible project summaries through the authenticated Realm Coordinator.", inputSchema: { type: "object", additionalProperties: false, properties: {} } },
+        { name: MCP_READ_TOOL, description: "Inspect one project summary through the authenticated Realm Coordinator.", inputSchema: { type: "object", additionalProperties: false, required: ["projectId"], properties: { projectId: { type: "string", minLength: 1 } } } },
+      );
+    }
+    if (canReadWorkspaces) {
+      tools.push(
+        { name: MCP_WORKSPACE_LIST_TOOL, description: "List safe Workspace summaries through the authenticated Realm Coordinator.", inputSchema: { type: "object", additionalProperties: false, properties: { projectId: { type: "string", minLength: 1 } } } },
+        { name: MCP_WORKSPACE_READ_TOOL, description: "Inspect one safe Workspace summary through the authenticated Realm Coordinator.", inputSchema: { type: "object", additionalProperties: false, required: ["workspaceId"], properties: { workspaceId: { type: "string", minLength: 1 } } } },
+      );
+    }
+    return mcpJson({ jsonrpc: "2.0", id, result: { tools, receipt: "mcp=tools-listed; tools=read-only; canonicalWrite=false" } });
   }
   if (rpc.method === "tools/call") {
     let params: Record<string, unknown>;
@@ -153,18 +207,28 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
     const name = params.name;
     if (typeof name !== "string" || name.trim().length === 0) return mcpError(id, -32602, "tools/call requires a tool name.", { code: "mcp.tool_name_required", recoveryAction: "call one of the listed project.list or project.inspect tools", receipt: "mcp=tool-call-invalid; canonicalWrite=false" });
     if (MCP_MUTATION_TOOLS.has(name)) return mcpError(id, -32003, `Tool ${name} is not available on the read-only MCP surface.`, { code: "mcp.mutation_denied", recoveryAction: "use the qualified Authority or future task-grant surface; this token cannot write canonical state", receipt: `mcp=read-only; tool=${name}; canonicalWrite=false` });
-    if (name !== MCP_READ_TOOL && name !== MCP_LIST_TOOL) return mcpError(id, -32601, `Tool ${name} is not available.`, { code: "mcp.tool_not_found", recoveryAction: "call tools/list and use project.list or project.inspect", receipt: `mcp=tool-not-found; tool=${name}; canonicalWrite=false` });
+    const isProjectTool = name === MCP_READ_TOOL || name === MCP_LIST_TOOL;
+    const isWorkspaceTool = name === MCP_WORKSPACE_READ_TOOL || name === MCP_WORKSPACE_LIST_TOOL;
+    if (!isProjectTool && !isWorkspaceTool) return mcpError(id, -32601, `Tool ${name} is not available.`, { code: "mcp.tool_not_found", recoveryAction: "call tools/list and use a read-only Project or Workspace tool", receipt: `mcp=tool-not-found; tool=${name}; canonicalWrite=false` });
+    const requiredScope = isWorkspaceTool ? MCP_WORKSPACE_SCOPE : MCP_PROJECT_SCOPE;
+    if (!props.scopes.includes(requiredScope)) return mcpError(id, -32001, `The MCP grant does not include ${requiredScope}.`, { code: "mcp.scope_denied", recoveryAction: `authorize the ${requiredScope} scope and retry`, receipt: `oauth=validated; mcp=scope-denied; required=${requiredScope}; tool=${name}; canonicalWrite=false` });
     try {
       const value = name === MCP_LIST_TOOL
         ? await mcpProjectList(env, props, params.arguments)
-        : await mcpProjectInspect(env, props, mcpProjectId(params.arguments));
+        : name === MCP_READ_TOOL
+          ? await mcpProjectInspect(env, props, mcpProjectId(params.arguments))
+          : name === MCP_WORKSPACE_LIST_TOOL
+            ? await mcpWorkspaceList(env, props, params.arguments)
+            : await mcpWorkspaceInspect(env, props, mcpWorkspaceId(params.arguments));
       return mcpJson({ jsonrpc: "2.0", id, result: mcpToolResult(value) });
     } catch (error) {
       const detail = error instanceof Error ? error.message : "mcp_tool_call_failed";
       const notFound = detail.includes("not_found");
       const errorClass = notFound ? "not_found" : detail.includes("session.") || detail.includes("session_") ? "session_rejected" : "coordinator_rejected";
-      const isList = name === MCP_LIST_TOOL;
-      return mcpError(id, notFound ? -32004 : -32602, notFound ? "Project is not available in this Realm." : `${isList ? "project.list" : "project.inspect"} arguments are invalid or the coordinator rejected the read.`, { code: notFound ? "mcp.project_not_found" : "mcp.project_read_failed", recoveryAction: notFound ? "verify the Project identifier without probing undiscoverable resources" : "inspect the coordinator receipt and retry the same read", receipt: `mcp=${isList ? "project.list" : "project.inspect"}; errorClass=${errorClass}; credentialFree=true; canonicalWrite=false` });
+      const isWorkspace = isWorkspaceTool;
+      const isList = name === MCP_LIST_TOOL || name === MCP_WORKSPACE_LIST_TOOL;
+      const operation = isWorkspace ? (isList ? "workspace.list" : "workspace.inspect") : (isList ? "project.list" : "project.inspect");
+      return mcpError(id, notFound ? -32004 : -32602, notFound ? `${isWorkspace ? "Workspace" : "Project"} is not available in this Realm.` : `${operation} arguments are invalid or the coordinator rejected the read.`, { code: notFound ? `mcp.${isWorkspace ? "workspace" : "project"}_not_found` : `mcp.${isWorkspace ? "workspace" : "project"}_read_failed`, recoveryAction: notFound ? `verify the ${isWorkspace ? "Workspace" : "Project"} identifier without probing undiscoverable resources` : "inspect the coordinator receipt and retry the same read", receipt: `mcp=${operation}; errorClass=${errorClass}; credentialFree=true; canonicalWrite=false` });
     }
   }
   return mcpError(id, -32601, `Method ${rpc.method} is not available.`, { code: "mcp.method_not_found", recoveryAction: "use initialize, tools/list, or tools/call", receipt: `mcp=method-not-found; method=${rpc.method}; canonicalWrite=false` });

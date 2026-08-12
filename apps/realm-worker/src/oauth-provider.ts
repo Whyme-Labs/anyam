@@ -25,6 +25,7 @@ export const ANYAM_REALM_OAUTH_PROTOCOL = "anyam.realm-oauth/v1" as const;
 export const ANYAM_REALM_OAUTH_RESOURCE_PATH = "/mcp" as const;
 export const ANYAM_REALM_OAUTH_SCOPES = [
   "project.read",
+  "workspace.inspect",
   "source.read",
   "change.write",
   "run.invoke",

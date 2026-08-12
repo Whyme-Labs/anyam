@@ -312,11 +312,11 @@ function targetError(status: number, code: string, recoveryAction: string, recei
 }
 
 function promotionError(status: number, code: string, recoveryAction: string, receipt: string): Response {
-  return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction, receipt: `operation=${PROMOTION_REQUEST_COMMAND}; ${receipt}; credentialFree=true; canonicalWrite=false; providerExecution=not-performed` }, status);
+  return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction, credentialFree: true, canonicalWrite: false, receipt: `operation=${PROMOTION_REQUEST_COMMAND}; ${receipt}; credentialFree=true; canonicalWrite=false; providerExecution=not-performed` }, status);
 }
 
 function promotionExecutionError(status: number, code: string, recoveryAction: string, receipt: string): Response {
-  return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction, receipt: `operation=${PROMOTION_EXECUTE_COMMAND}; ${receipt}; credentialFree=true; canonicalWrite=false; providerExecution=trusted-handoff` }, status);
+  return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction, credentialFree: true, canonicalWrite: false, receipt: `operation=${PROMOTION_EXECUTE_COMMAND}; ${receipt}; credentialFree=true; canonicalWrite=false; providerExecution=trusted-handoff` }, status);
 }
 
 async function landingMutation(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {

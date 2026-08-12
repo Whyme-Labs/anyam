@@ -48,6 +48,12 @@ const workers = [
     source: "apps/provider-qualification-target/src/index.ts",
     routes: ["operationId", "invalid_qualification_request"],
   },
+  {
+    id: "promotion-executor",
+    config: "apps/promotion-executor/wrangler.example.jsonc",
+    source: "apps/promotion-executor/src/index.ts",
+    routes: ["/health", "/execute", "anyam.promotion-execution/v1"],
+  },
 ];
 
 async function ensureFile(path, label) {

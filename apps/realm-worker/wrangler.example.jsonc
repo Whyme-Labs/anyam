@@ -64,5 +64,11 @@
       "name": "anyam-realm-foundation",
       "class_name": "AnyamRealmWorkflow"
     }
+  ],
+  "services": [
+    {
+      "binding": "ANYAM_PROMOTION_EXECUTOR",
+      "service": "anyam-promotion-executor"
+    }
   ]
 }

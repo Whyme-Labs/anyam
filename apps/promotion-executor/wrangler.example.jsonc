@@ -1,0 +1,21 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-promotion-executor",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-27",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "vars": {
+    "ANYAM_PROMOTION_EXECUTOR_ACCOUNT_ID": "replace-with-customer-cloudflare-account-id",
+    "ANYAM_PROMOTION_EXECUTOR_TARGET_ID": "replace-with-customer-target-id",
+    "ANYAM_PROMOTION_EXECUTOR_SCRIPT_NAME": "replace-with-customer-worker-script",
+    "ANYAM_PROMOTION_EXECUTOR_PREVIEW_SUBDOMAIN": "replace-with-customer-workers-dev-subdomain",
+    "ANYAM_PROMOTION_CREDENTIAL_EXPIRES_AT": "replace-with-future-provider-credential-expiry"
+  },
+  "r2_buckets": [
+    {
+      "binding": "ANYAM_PROMOTION_ARTIFACTS",
+      "bucket_name": "replace-with-customer-anyam-artifacts",
+      "preview_bucket_name": "replace-with-customer-anyam-artifacts-preview"
+    }
+  ]
+}

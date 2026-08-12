@@ -27,6 +27,12 @@ import type {
  */
 export const PROMOTION_EXECUTION_PROTOCOL = CONTRACT_VERSIONS.promotionExecution;
 
+export type PromotionExecutionReleaseBundle = {
+  release: Release;
+  artifacts: readonly Artifact[];
+  evidence: readonly Evidence[];
+};
+
 export type PromotionExecutionStatus = "succeeded" | "blocked" | "indeterminate";
 
 export type PromotionExecutionContext = {
@@ -38,6 +44,8 @@ export type PromotionExecutionContext = {
   release: Release;
   artifacts: readonly Artifact[];
   evidence: readonly Evidence[];
+  /** Exact previous known-good inputs needed for provider-side rollback. */
+  previousRelease: PromotionExecutionReleaseBundle | null;
   target: Target;
   expectedCurrentReleaseId: string | null;
   executionIdempotencyKey: string;
@@ -189,6 +197,7 @@ function contextDigest(input: {
   release: Release;
   artifacts: readonly Artifact[];
   evidence: readonly Evidence[];
+  previousRelease: PromotionExecutionReleaseBundle | null;
   target: Target;
   expectedCurrentReleaseId: string | null;
   executionIdempotencyKey: string;
@@ -202,6 +211,7 @@ function contextDigest(input: {
     release: input.release,
     artifacts: input.artifacts,
     evidence: input.evidence,
+    previousRelease: input.previousRelease,
     target: input.target,
     expectedCurrentReleaseId: input.expectedCurrentReleaseId,
     executionIdempotencyKey: input.executionIdempotencyKey,
@@ -263,6 +273,19 @@ export function createPromotionExecutionContext(input: {
       receipt: `promotion=${input.promotionId}; artifacts=${artifacts.length}; evidence=${evidence.length}; lineage= incomplete; providerInvocation=false`,
     });
   }
+  const previousReleaseId = promotion.previousReleaseId;
+  const previousRelease = previousReleaseId ? input.snapshot.releases[previousReleaseId] : undefined;
+  const previousProject = previousRelease ? projectForRelease(input.snapshot, previousRelease) : undefined;
+  const previousArtifacts = previousRelease?.artifactIds.map((id) => input.snapshot.artifacts[id]) ?? [];
+  const previousEvidence = previousRelease?.evidenceIds.map((id) => input.snapshot.evidence[id]) ?? [];
+  if (previousReleaseId && (!previousRelease || previousProject?.id !== project.id || previousArtifacts.some((artifact) => !artifact) || previousEvidence.some((record) => !record))) {
+    resultError({
+      code: "context-mismatch",
+      message: `Promotion ${input.promotionId} does not have a complete immutable previous Release lineage for rollback.`,
+      recoveryAction: "restore the exact previous Release, Artifact, and Evidence records before invoking the provider; no provider call was made",
+      receipt: `promotion=${input.promotionId}; previousRelease=${previousReleaseId}; lineage=incomplete; providerInvocation=false`,
+    });
+  }
   const targetState = baseTargetState(target);
   const expectedCurrentReleaseId = promotion.expectedCurrentReleaseId ?? null;
   if (expectedCurrentReleaseId !== targetState.currentReleaseId) {
@@ -289,6 +312,9 @@ export function createPromotionExecutionContext(input: {
     release,
     artifacts: artifacts as Artifact[],
     evidence: evidence as Evidence[],
+    previousRelease: previousRelease
+      ? { release: previousRelease, artifacts: previousArtifacts as Artifact[], evidence: previousEvidence as Evidence[] }
+      : null,
     target,
     expectedCurrentReleaseId,
     executionIdempotencyKey: input.executionIdempotencyKey,

@@ -469,7 +469,7 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
   const targetMalformedPath = await record("/api/targets/extra", "idem:target-path", targetPayload);
   assert.equal(targetMalformedPath.response.status, 400);
   assert.equal(targetMalformedPath.value.code, "invalid_target_path");
-  const promotionPayload = { projectId: project.id, promotionId: "promotion:authority-rest", releaseId: "release:authority-test", targetId: "target:authority-test", releaseDigest: "sha256:release-authority", expectedCurrentReleaseId: "release:authority-test" };
+  const promotionPayload = { projectId: project.id, promotionId: "promotion:authority-rest", releaseId: "release:authority-test", targetId: "target:authority-test", releaseDigest: "sha256:release-authority" };
   const promotionRest = await record("/api/promotions", "idem:promotion-rest", promotionPayload);
   assert.equal(promotionRest.response.status, 409, JSON.stringify(promotionRest.value));
   assert.equal(promotionRest.value.status, "blocked");
@@ -480,7 +480,7 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
   assert.equal(promotionProjection.projectId, project.id);
   assert.equal(promotionProjection.releaseId, "release:authority-test");
   assert.equal(promotionProjection.targetId, "target:authority-test");
-  assert.equal(promotionProjection.expectedCurrentReleaseId, "release:authority-test");
+  assert.equal(promotionProjection.expectedCurrentReleaseId, null);
   assert.equal(promotionProjection.state, "blocked");
   assert.equal((promotionRest.value.target as Record<string, unknown>).id, "target:authority-test");
   assert.equal((promotionRest.value.release as Record<string, unknown>).id, "release:authority-test");
@@ -497,6 +497,11 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
   assert.equal(promotionHidden.response.status, 404);
   assert.equal(promotionHidden.value.code, "promotion_request_not_found");
   assert.equal(JSON.stringify(promotionHidden.value).includes("project:hidden"), false);
+  const promotionCurrentMismatch = await record("/api/promotions", "idem:promotion-current-mismatch", { ...promotionPayload, promotionId: "promotion:stale-current", expectedCurrentReleaseId: "release:authority-test" });
+  assert.equal(promotionCurrentMismatch.response.status, 409);
+  assert.equal(promotionCurrentMismatch.value.code, "promotion_request_conflict");
+  assert.equal(promotionCurrentMismatch.value.credentialFree, true);
+  assert.equal(promotionCurrentMismatch.value.canonicalWrite, false);
   const promotionStale = await record("/api/promotions", "idem:promotion-stale", { ...promotionPayload, promotionId: "promotion:stale", expectedVersion: 0 });
   assert.equal(promotionStale.response.status, 409);
   assert.equal(promotionStale.value.code, "promotion_request_conflict");

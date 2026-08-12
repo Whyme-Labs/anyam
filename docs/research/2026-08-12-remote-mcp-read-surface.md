@@ -1,4 +1,4 @@
-# Remote MCP read-surface qualification
+# Remote MCP read and typed-bootstrap qualification
 
 This note records the private-alpha boundary implemented for [Wayfinder ticket
 155](https://github.com/Whyme-Labs/anyam/issues/155), [ticket
@@ -6,7 +6,8 @@ This note records the private-alpha boundary implemented for [Wayfinder ticket
 159](https://github.com/Whyme-Labs/anyam/issues/159), [ticket
 160](https://github.com/Whyme-Labs/anyam/issues/160), and [ticket
 161](https://github.com/Whyme-Labs/anyam/issues/161), and [ticket
-162](https://github.com/Whyme-Labs/anyam/issues/162).
+162](https://github.com/Whyme-Labs/anyam/issues/162), and [ticket
+166](https://github.com/Whyme-Labs/anyam/issues/166).
 
 ## Qualified surface
 
@@ -17,7 +18,13 @@ single JSON-RPC 2.0 request at a time. The qualified methods are:
 - `tools/list`
 - `tools/call` for `project.list` and `project.inspect`
 - `tools/call` for `workspace.list` and `workspace.inspect` when the OAuth grant includes `workspace.inspect`
+- `tools/call` for typed `project.create`, `workspace.create`, and `change.create` when their explicit write scopes are granted
 - `notifications/initialized` as a no-content acknowledgement
+
+The write tools are deliberately narrow bootstrap mutations: `project.create`
+requires `project.write`, `workspace.create` requires `workspace.write`, and
+`change.create` requires `change.write`. They do not turn MCP into a general
+source-transfer or promotion channel.
 
 `project.inspect` requires an explicit `projectId`. The authenticated handler
 uses the encrypted OAuth grant property `kernelSessionId` to call the existing
@@ -43,6 +50,11 @@ actor identity, and credentials are deliberately omitted. The dedicated
 `workspace.inspect` OAuth scope keeps Workspace reads separate from
 `project.read` while the handler still reuses the encrypted kernel session.
 
+The typed `workspace.create` tool uses the same validated Project path and
+Coordinator command boundary as the owner REST route. It requires an
+`idempotencyKey`, a Project, a Project Revision, and a Source Space set; its
+safe result omits mount paths and actor identity.
+
 `change.list` and `change.inspect` use the dedicated `change.inspect` OAuth
 scope and one Coordinator query boundary. Change discovery is sorted by Change
 identifier using code-unit ordering; list filters are explicit `projectId`
@@ -50,6 +62,13 @@ and/or `workspaceId` values. Inspection returns the stable Change identity and
 safe immutable Revision summaries ordered by sequence. Revision source-space
 snapshots, author/actor identity, origin metadata, source objects, and
 credentials are excluded.
+
+`project.create` and `change.create` follow the same typed pattern. The edge
+rejects unknown fields and raw Authority envelopes before calling the
+Coordinator. Replaying one key and payload returns the original result;
+changing the payload for an existing key is a typed conflict. Project creation
+reports `canonicalWrite=initialization-only`; Workspace and Change creation do
+not advance canonical source.
 
 The owner-authenticated REST routes `GET /api/changes` and
 `GET /api/changes/{changeId}` reuse the same Coordinator boundary. Discovery
@@ -68,12 +87,28 @@ identity, immutable revision/view identities, state, optional Change link, and
 mount count. Mount paths, source snapshots, source objects, actor identity,
 sessions, and credentials remain excluded.
 
+## Typed bootstrap mutation boundary
+
+MCP bootstrap arguments are not accepted as an internal command envelope. The
+edge derives the REST-compatible resource path, validates the typed body with
+the shared `bootstrapCommand` helper, and adds the authenticated kernel
+session only on the internal Coordinator request. Callers cannot submit
+`protocol`, `command`, `payload`, `sessionId`, actor identity, or credentials.
+
+The response is passed through the credential-free safe projection: source
+snapshots, mount paths, author/actor identity, source objects, provider
+credentials, and raw Coordinator receipts are omitted. Hidden or missing
+resources are reported without echoing their identifiers. Malformed arguments
+fail before a Coordinator call.
+
 ## Deliberate non-capabilities
 
 The surface does not transfer Git objects, issue task grants, expose secret
-values, write canonical refs, Land Changes, or Promote Releases. Mutation-shaped
-tool names return a typed JSON-RPC error with `canonicalWrite=false`. Unknown
-methods and malformed requests fail closed with actionable recovery text.
+values, publish Change Revisions, write canonical refs, Land Changes, create
+Releases, or Promote Releases. Mutation-shaped tool names outside the three
+typed bootstrap operations return a typed JSON-RPC error with
+`canonicalWrite=false`. Unknown methods and malformed requests fail closed
+with actionable recovery text.
 
 OAuthProvider remains responsible for bearer validation, resource audience
 matching, and encrypted grant properties. Anyam remains responsible for the
@@ -87,17 +122,21 @@ project and Workspace discovery/inspection, authenticated coordinator binding,
 deterministic ordering and Project filtering, malformed JSON-RPC, unknown
 methods, mutation denial, missing-resource concealment, missing scopes, and
 notification acknowledgement. It also covers Change discovery/inspection,
-Revision sequence ordering, Project/Workspace filtering, and safe omission of
-source snapshots and actor identity. `test/worker-entrypoint.test.ts` covers
+Revision sequence ordering, Project/Workspace filtering, safe omission of
+source snapshots and actor identity, typed Project/Workspace/Change bootstrap
+mutations, explicit write-scope filtering, idempotent replay/conflict,
+malformed-argument rejection before the Coordinator, hidden-resource
+concealment, and safe credential-free projections. `test/worker-entrypoint.test.ts` covers
 the binding-shaped Coordinator Workspace and Change list/inspect responses,
 owner-authenticated REST Project, Workspace, and Change reads, malformed
 paths/filters, method errors, hidden resources, and confirms that mounts, source
 snapshots, actor identity, and credentials are not returned by the safe
 summaries.
 
-This is a read-surface qualification, not a claim that the full remote MCP,
-REST, task-grant mutation API, web console, or production-scale service is
-complete. Those remain explicit Wayfinder fog.
+This is a private-alpha read plus typed-bootstrap qualification, not a claim
+that the full remote MCP, REST, source-transfer, revision-publication,
+task-grant mutation API, web console, or production-scale service is complete.
+Those remain explicit Wayfinder fog.
 
 ## Generic owner delegation boundary
 
@@ -119,8 +158,8 @@ Repeated identical active requests return `already-delegated`; a request that
 would change an active delegation's resource, actions, effects, audiences,
 budget, or expiry is rejected as an idempotency conflict. Responses contain no
 credential values, provider credentials, source objects, or canonical-write
-authority. Git/MCP/Realm API credential exchange and MCP mutation tools remain
-separate follow-up boundaries.
+authority. Git/MCP/Realm API credential exchange and MCP mutation beyond typed
+bootstrap remain separate follow-up boundaries.
 
 ## Explicit generic credential exchange
 

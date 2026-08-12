@@ -117,6 +117,15 @@ source objects, credentials, and mutation authority are not returned. The
 Coordinator sorts Workspace discovery by Workspace identifier using code-unit
 ordering and owns the single query boundary for list and inspect.
 
+The same MCP resource exposes typed bootstrap tools only when their explicit
+write scope is present: `project.create` requires `project.write`,
+`workspace.create` requires `workspace.write`, and `change.create` requires
+`change.write`. Each tool has a closed argument schema, requires an
+`idempotencyKey`, and is translated into the validated Coordinator command
+boundary; callers cannot submit the internal Authority envelope, arbitrary
+commands, or a different Project path. Replaying the same key and payload is
+idempotent; reusing a key for a different payload is a typed conflict.
+
 The same resource exposes read-only `change.list` and `change.inspect` when the
 grant includes the dedicated `change.inspect` scope. `change.list` accepts
 validated `projectId` and `workspaceId` filters; `change.inspect` returns the
@@ -124,7 +133,12 @@ safe Change summary and immutable Revision summaries in sequence order.
 Revision source snapshots, author/actor identity, origin metadata, source
 objects, credentials, and mutation authority are omitted. The Coordinator
 owns one query boundary for both operations and reports the deterministic
-Change-identifier ordering in its receipt.
+Change-identifier ordering in its receipt. Typed bootstrap results remain
+credential-free projections: Project creation returns only initialization
+identities and Source Space metadata; Workspace creation omits mount paths and
+actor identity; Change creation omits author/actor identity. These MCP tools do
+not publish Change Revisions, transfer Git objects, issue task grants, land,
+create Releases, or promote Targets.
 
 The owner-authenticated REST surface exposes the same Change query boundary at
 `GET /api/changes` and `GET /api/changes/{changeId}`. The list accepts optional

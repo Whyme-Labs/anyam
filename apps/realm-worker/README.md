@@ -93,6 +93,7 @@ After an owner completes the passkey login ceremony, the public edge exposes:
 | `POST /api/runs` | Record one typed declared-Action Run through the Authority Coordinator |
 | `POST /api/evidence` | Record typed Evidence for one successful determinate Run through the Authority Coordinator |
 | `POST /api/artifacts` | Record one typed immutable Artifact bound to a Project/Change/Run lineage through the Authority Coordinator |
+| `POST /api/landings` | Request one typed single-Change Landing through the Authority Coordinator's compare-and-swap canonical boundary |
 | `POST /api/owner/agent/delegations` | Owner-authenticated, resource-bounded Agent Task delegation for one active Project/Workspace/Change; no credentials are issued |
 | `POST /api/owner/agent/delegations/revoke` | Owner-authenticated revocation of one enrolled Agent and its delegated authority; the owner Session remains active |
 | `POST /api/owner/agent/delegations/credentials` | Explicit exchange of an exact delegated Agent Session/Task/Grant for short-lived `realm-api`, Git, and/or MCP credentials; token material appears only in this response |
@@ -221,6 +222,24 @@ the original safe result; changing a payload under the same key is a conflict.
 These routes record already-derived facts only: execution, source transfer,
 Artifact storage, Landing, Release creation, and Target Promotion remain
 separate operations.
+
+The owner-authenticated REST surface exposes typed `POST /api/landings` for
+one Change Revision at a time. The closed `landing.apply` body requires the
+Project, Change, Change Revision, and expected canonical Project Revision;
+an optional new Project Revision and Landing identity may be supplied. The
+Coordinator verifies the exact Project/Change/Revision relationship, latest
+Revision state, Change base, and compare-and-swap canonical pointer before
+advancing canonical state. A requested Project Revision identity cannot
+overwrite an existing revision.
+
+The result is a credential-free projection containing the Landing, the new
+canonical Project Revision lineage, and the landed Change. Source-space
+snapshots, actors, sessions, credentials, and raw Coordinator receipts are
+omitted. A successful response is marked `canonicalWrite="landing-only"`;
+replays return the original safe result and changed payloads conflict. This
+route performs no Git object transfer and does not create a Release or
+promote a Target. Agents do not receive a `landing.apply` MCP tool in this
+surface; protected Landing remains an owner/trusted-authority boundary.
 
 The owner-authenticated REST surface also exposes typed `POST /api/artifacts`.
 It requires the owner host session, one `Idempotency-Key` header, a closed

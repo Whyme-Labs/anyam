@@ -6,6 +6,7 @@ import { bootstrapCommand, bootstrapPath, projectBootstrapValue, type BootstrapM
 import { RevisionPublishInputError, revisionPublishCommand, revisionPublishValue, REVISION_PUBLISH_COMMAND } from "./revision-contract.ts";
 import { EVIDENCE_RECORD_COMMAND, evidenceRecordCommand, evidenceRecordValue, RunEvidenceInputError, RUN_RECORD_COMMAND, runRecordCommand, runRecordValue } from "./run-evidence-contract.ts";
 import { ARTIFACT_RECORD_COMMAND, artifactRecordCommand, artifactRecordValue, ArtifactRecordInputError } from "./artifact-contract.ts";
+import { LANDING_APPLY_COMMAND, landingApplyCommand, landingApplyValue, LandingInputError } from "./landing-contract.ts";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
@@ -294,6 +295,43 @@ function revisionError(status: number, code: string, recoveryAction: string, rec
   return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction, receipt: `operation=${REVISION_PUBLISH_COMMAND}; ${receipt}; credentialFree=true; canonicalWrite=false` }, status);
 }
 
+function landingError(status: number, code: string, recoveryAction: string, receipt: string): Response {
+  return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction, receipt: `operation=${LANDING_APPLY_COMMAND}; ${receipt}; credentialFree=true; canonicalWrite=false` }, status);
+}
+
+async function landingMutation(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
+  const sessionId = await anyamRealmOwnerSessionId(request, env);
+  if (!sessionId) return landingError(401, "owner_authentication_required", "Authenticate the Realm owner through /owner/login before requesting Landing.", "ownerSession=missing-or-invalid; transition=not-applied");
+  if (request.method !== "POST") return landingError(405, "method_not_allowed", "Use POST /api/landings with one Idempotency-Key header.", "method=post-required; transition=not-applied");
+  const idempotencyKey = request.headers.get("idempotency-key")?.trim();
+  if (!idempotencyKey) return landingError(422, "invalid_request", "Send one non-empty Idempotency-Key header; no transition was accepted.", "idempotencyKey=required; transition=not-applied");
+  let body: Record<string, unknown>;
+  try {
+    body = await readBody(request);
+  } catch {
+    return landingError(422, "invalid_request", "Send a JSON object containing only the documented landing.apply fields; no transition was accepted.", "body=object-required; transition=not-applied");
+  }
+  if (body.idempotencyKey !== undefined && body.idempotencyKey !== idempotencyKey) return landingError(422, "invalid_request", "The body idempotencyKey does not match the Idempotency-Key header.", "idempotencyKey=transport-mismatch; transition=not-applied");
+  let command: ReturnType<typeof landingApplyCommand>;
+  try {
+    command = landingApplyCommand({ ...body, idempotencyKey });
+  } catch (error) {
+    if (error instanceof LandingInputError) return landingError(422, "invalid_request", error.recoveryAction, error.receipt);
+    return landingError(422, "invalid_request", "Correct the typed Landing request and retry; no transition was accepted.", "arguments=invalid; transition=not-applied");
+  }
+  try {
+    const result = await requestAnyamRealmCoordinator(env, "/authority/command/internal", { protocol: AUTHORITY_COMMAND_PROTOCOL, command: command.command, idempotencyKey: command.idempotencyKey, ...(command.expectedVersion === undefined ? {} : { expectedVersion: command.expectedVersion }), payload: command.payload, sessionId });
+    return json(landingApplyValue(result, idempotencyKey));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const status = detail.includes("not_found") ? 404 : detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : detail.includes("invalid_request") ? 422 : detail.includes("idempotency_conflict") || detail.includes("stale_state") || detail.includes("conflict") ? 409 : 503;
+    const errorClass = status === 404 ? "not_found" : status === 403 ? "session_rejected" : status === 422 ? "invalid_request" : status === 409 ? "conflict" : "coordinator_rejected";
+    const code = status === 404 ? "landing_apply_not_found" : status === 403 ? "owner_session_rejected" : status === 422 ? "invalid_request" : status === 409 ? "landing_apply_conflict" : "authority_coordinator_rejected";
+    const recoveryAction = status === 404 ? "Verify the Project, Change, Change Revision, and expected canonical Project Revision identifiers without probing hidden resources." : status === 409 ? "Read the current Authority version, reuse the original idempotent payload, or rebase and reverify the Change before retrying Landing." : status === 403 ? "Authenticate the Realm owner again and retry the same typed request." : "Inspect the Durable Object receipt and retry only the same idempotent request when safe.";
+    return landingError(status, code, recoveryAction, `authority=coordinator-rejected; errorClass=${errorClass}`);
+  }
+}
+
 async function revisionMutation(request: Request, env: AnyamRealmOAuthEnv, path: RevisionPublishPath): Promise<Response> {
   const changeId = path.changeId;
   if (!changeId) return revisionError(400, "invalid_revision_path", "Use POST /api/changes/{changeId}/revisions with one safe URL-encoded Change identifier.", "path=malformed; transition=not-applied");
@@ -347,8 +385,9 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   const isRunRoute = url.pathname === "/api/runs" || url.pathname.startsWith("/api/runs/");
   const isEvidenceRoute = url.pathname === "/api/evidence" || url.pathname.startsWith("/api/evidence/");
   const isArtifactRoute = url.pathname === "/api/artifacts" || url.pathname.startsWith("/api/artifacts/");
+  const isLandingRoute = url.pathname === "/api/landings" || url.pathname.startsWith("/api/landings/");
   const revisionRoute = revisionPublishPath(url.pathname);
-  if (!url.pathname.startsWith("/api/authority") && !isProjectRoute && !isChangeRoute && !isWorkspaceRoute && !isRunRoute && !isEvidenceRoute && !isArtifactRoute && !revisionRoute.matched) return undefined;
+  if (!url.pathname.startsWith("/api/authority") && !isProjectRoute && !isChangeRoute && !isWorkspaceRoute && !isRunRoute && !isEvidenceRoute && !isArtifactRoute && !isLandingRoute && !revisionRoute.matched) return undefined;
 
   const health = customerRealmWorkerHealth(env);
   if (health.status !== "ready") {
@@ -368,6 +407,11 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   if (isArtifactRoute) {
     if (url.pathname !== "/api/artifacts") return recordError(ARTIFACT_RECORD_COMMAND, 400, "invalid_artifact_path", "Use POST /api/artifacts with the Project and lifecycle bindings in the typed JSON body.", "path=malformed; transition=not-applied");
     return recordMutation(request, env, ARTIFACT_RECORD_COMMAND);
+  }
+
+  if (isLandingRoute) {
+    if (url.pathname !== "/api/landings") return landingError(400, "invalid_landing_path", "Use POST /api/landings with one typed single-Change Landing request.", "path=malformed; transition=not-applied");
+    return landingMutation(request, env);
   }
 
   if (revisionRoute.matched) {

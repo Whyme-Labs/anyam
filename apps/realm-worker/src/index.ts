@@ -25,7 +25,7 @@ import {
   type CustomerProviderSurface,
   type CustomerProviderRecoveryBundle,
 } from "../../../src/cloudflare/customer-provider-operation.ts";
-import { CREDENTIAL_AUDIENCES, RealmIdentityError, RealmIdentityPolicy, type CredentialClass, type RealmRecoverySnapshot } from "../../../src/identity/realm.ts";
+import { CREDENTIAL_AUDIENCES, RealmIdentityError, RealmIdentityPolicy, type Capability, type CredentialClass, type RealmRecoverySnapshot } from "../../../src/identity/realm.ts";
 import { oauthConsentBindingMatches } from "../../../src/identity/oauth-consent.ts";
 import { createAnyamRealmOAuthProvider, type AnyamRealmOAuthEnv } from "./oauth-provider.ts";
 import { handleAnyamRealmOwnerRequest } from "./passkey-owner.ts";
@@ -50,6 +50,22 @@ const REALM_QUALIFICATION_AGENT_ID = "agent:realm-qualification";
 const REALM_QUALIFICATION_AGENT_CLIENT_ID = "client:agent:realm-qualification";
 const REALM_QUALIFICATION_CREDENTIAL_CLASSES: readonly CredentialClass[] = ["git", "mcp"];
 const REALM_QUALIFICATION_ACTIONS = ["source.read", "workspace.write", "change.publish_revision", "run.invoke", "agent.delegate"] as const;
+const GENERIC_AGENT_CREDENTIAL_CLASSES: readonly CredentialClass[] = ["realm-api", "git", "mcp"];
+const GENERIC_AGENT_CAPABILITIES: readonly Capability[] = [
+  "project.inspect",
+  "source.read",
+  "source.propose",
+  "workspace.inspect",
+  "workspace.write",
+  "change.inspect",
+  "change.publish_revision",
+  "review.submit_finding",
+  "run.invoke",
+  "evidence.read",
+  "secret.use",
+];
+const GENERIC_AGENT_DENIED_CAPABILITIES: readonly Capability[] = ["change.approve", "landing.request", "target.promote", "policy.manage", "identity.manage"];
+const GENERIC_AGENT_DENIED_EFFECTS = ["canonical.write", "landing.apply", "production.deploy", "target.promote", "promotion.request"] as const;
 type RealmRecoveryStatus = "active" | "recovery-pending";
 const CUSTOMER_PROVIDER_SURFACES: readonly CustomerProviderSurface[] = ["d1", "r2", "queue", "workflow", "worker"];
 const CUSTOMER_PROVIDER_FAILURE_MODES: readonly CustomerProviderFailureMode[] = ["none", "provider-outage", "authorization-revoked", "timeout", "duplicate-delivery", "partial-mutation", "stale-callback"];
@@ -146,6 +162,45 @@ function coordinatorStringArray(body: CoordinatorRequestBody, key: string): stri
   const value = body[key];
   if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== "string" || item.trim().length === 0)) throw new RealmIdentityError({ code: "coordinator.array_invalid", message: `${key} must be a non-empty array of strings.`, recoveryAction: `provide a non-empty ${key} array and retry`, receipt: `${key}=string-array-required` });
   return [...new Set(value.map((item) => (item as string).trim()))];
+}
+
+function coordinatorCapabilityArray(body: CoordinatorRequestBody, key: string): Capability[] {
+  const values = coordinatorStringArray(body, key);
+  const known = new Set(GENERIC_AGENT_CAPABILITIES);
+  const denied = new Set(GENERIC_AGENT_DENIED_CAPABILITIES);
+  const unknown = values.find((value) => !known.has(value as Capability) && !denied.has(value as Capability));
+  if (unknown) throw new RealmIdentityError({ code: "delegation.capability_invalid", message: `${key} contains an unsupported capability ${unknown}.`, recoveryAction: `choose a supported non-promotional agent capability; no delegation was created`, receipt: `${key}=unsupported; capability=${unknown}; delegation=not-created` });
+  const deniedCapability = values.find((value) => denied.has(value as Capability));
+  if (deniedCapability) throw new RealmIdentityError({ code: "delegation.capability_denied", message: `Agent delegation cannot include ${deniedCapability}.`, recoveryAction: `remove ${deniedCapability} and keep canonical landing, promotion, policy, and identity authority outside the agent`, receipt: `${key}=denied; capability=${deniedCapability}; canonicalWrite=false` });
+  return values as Capability[];
+}
+
+function delegationCredentialClasses(body: CoordinatorRequestBody): CredentialClass[] {
+  const values = body.allowedCredentialClasses === undefined ? [...GENERIC_AGENT_CREDENTIAL_CLASSES] : coordinatorStringArray(body, "allowedCredentialClasses") as CredentialClass[];
+  const allowed = new Set(GENERIC_AGENT_CREDENTIAL_CLASSES);
+  const unsupported = values.find((value) => !allowed.has(value));
+  if (unsupported) throw new RealmIdentityError({ code: "delegation.credential_class_denied", message: `Agent delegation cannot issue the ${unsupported} credential audience.`, recoveryAction: "request only realm-api, git, or mcp for a coding-agent Task; deployment and promotion credentials require separate authority", receipt: `credentialClass=${unsupported}; canonicalWrite=false; credentials=not-issued` });
+  return [...new Set(values)];
+}
+
+function delegationBudget(body: CoordinatorRequestBody): Record<string, string | number> {
+  const value = body.budget;
+  if (value === undefined) return {};
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new RealmIdentityError({ code: "delegation.budget_invalid", message: "Agent delegation budget must be a JSON object.", recoveryAction: "provide named numeric or string budget dimensions; no delegation was created", receipt: "budget=object-required; delegation=not-created" });
+  const budget: Record<string, string | number> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (!key.trim() || (typeof entry !== "number" && typeof entry !== "string") || (typeof entry === "number" && (!Number.isFinite(entry) || entry < 0)) || (typeof entry === "string" && entry.trim().length === 0)) throw new RealmIdentityError({ code: "delegation.budget_invalid", message: `Agent delegation budget dimension ${key || "<empty>"} must be a finite non-negative number or non-empty string.`, recoveryAction: "name each budget dimension and provide a measurable non-negative value", receipt: `budget=${key || "<empty>"}; value=invalid; delegation=not-created` });
+    budget[key] = typeof entry === "string" ? entry.trim() : entry;
+  }
+  return budget;
+}
+
+function delegationEffects(body: CoordinatorRequestBody): string[] {
+  if (body.effects === undefined) return [];
+  const effects = coordinatorStringArray(body, "effects");
+  const denied = effects.find((effect) => GENERIC_AGENT_DENIED_EFFECTS.includes(effect as typeof GENERIC_AGENT_DENIED_EFFECTS[number]) || /(?:^|[.:_-])(canonical|promotion|promote|production|landing)(?:$|[.:_-])/iu.test(effect));
+  if (denied) throw new RealmIdentityError({ code: "delegation.effect_denied", message: `Agent delegation cannot include the effect ${denied}.`, recoveryAction: "declare only Workspace, source, test, review, or evidence effects; canonical landing and promotion remain separate", receipt: `effect=${denied}; canonicalWrite=false; delegation=not-created` });
+  return effects;
 }
 
 function coordinatorAuthRequest(value: unknown): StoredOAuthAuthRequest {
@@ -394,6 +449,48 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   private async authoritySnapshot(): Promise<AuthorityPlaneSnapshot> {
     const stored = await this.ctx.storage.get<AuthorityPlaneSnapshot>(REALM_AUTHORITY_SNAPSHOT_KEY);
     return stored ?? emptyAuthorityPlaneSnapshot(this.requireIdentity().realm.id);
+  }
+
+  private delegationAuthority(body: CoordinatorRequestBody, snapshot: AuthorityPlaneSnapshot): { projectId: string; workspaceId: string; changeId: string; sourceSpaceIds: string[]; resource: { realmId: string; projectId: string; workspaceId: string; changeId: string; sourceSpaceId?: string }; sources: AuthorityPlaneSnapshot["sourceSpaces"] } {
+    const projectId = coordinatorString(body, "projectId");
+    const workspaceId = coordinatorString(body, "workspaceId");
+    const changeId = coordinatorString(body, "changeId");
+    const sourceSpaceIds = coordinatorStringArray(body, "sourceSpaceIds");
+    const project = snapshot.projects[projectId];
+    const workspace = snapshot.workspaces[workspaceId];
+    const change = snapshot.changes[changeId];
+    if (!project || !workspace || !change || workspace.projectId !== projectId || change.projectId !== projectId || change.workspaceId !== workspaceId || workspace.state !== "active" || change.status === "landed" || change.status === "abandoned") throw new AuthorityPlaneError({ code: "not_found", message: "The requested Project, Workspace, or Change is not available for this delegation.", recoveryAction: "select one active Project, its active Workspace, and the assigned non-terminal Change without probing hidden resources", receipt: "delegation=authority-resource-mismatch; discoverable=false; transition=not-applied" });
+    const mountedSourceSpaceIds = new Set(workspace.mounts.map((mount) => mount.sourceSpaceId));
+    const sources: AuthorityPlaneSnapshot["sourceSpaces"] = {};
+    for (const sourceSpaceId of sourceSpaceIds) {
+      const source = snapshot.sourceSpaces[sourceSpaceId];
+      if (!source || !project.sourceSpaceIds.includes(sourceSpaceId) || !mountedSourceSpaceIds.has(sourceSpaceId)) throw new AuthorityPlaneError({ code: "not_found", message: "A requested Source Space is not available in the Project Workspace.", recoveryAction: "select only Source Spaces declared by the Project and mounted by the active Workspace", receipt: "delegation=source-space-mismatch; discoverable=false; transition=not-applied" });
+      sources[sourceSpaceId] = source;
+    }
+    return { projectId, workspaceId, changeId, sourceSpaceIds, resource: { realmId: snapshot.realmId, projectId, workspaceId, changeId, ...(sourceSpaceIds.length === 1 ? { sourceSpaceId: sourceSpaceIds[0] } : {}) }, sources };
+  }
+
+  private safeDelegation(next: RealmIdentityPolicy, input: { agentId: string; sessionId: string; taskId: string; grantId: string; status: "delegated" | "already-delegated" }): Record<string, unknown> {
+    const snapshot = next.getRecoverySnapshot();
+    const agent = snapshot.agents[input.agentId];
+    const session = snapshot.sessions[input.sessionId];
+    const task = snapshot.tasks[input.taskId];
+    const grant = snapshot.grants[input.grantId];
+    if (!agent || !session || !task || !grant) throw new RealmIdentityError({ code: "delegation.incomplete", message: "The delegation did not produce a complete Agent, Session, Task, and Grant chain.", recoveryAction: "retry after reconciling the Realm identity snapshot; no credentials were issued", receipt: "agent-session-task-grant=complete-required; credentials=not-issued" });
+    return {
+      protocol: REALM_COORDINATOR_PROTOCOL,
+      status: input.status,
+      agent: { id: agent.id, name: agent.name, runtime: agent.runtime, modelProvider: agent.modelProvider, clientId: agent.clientId, allowedCredentialClasses: [...agent.allowedCredentialClasses], status: agent.status },
+      session: { id: session.id, actorKind: session.actorKind, agentId: session.agentId, expiresAt: session.expiresAt, status: session.status },
+      task: { id: task.id, purpose: task.purpose, workspaceId: task.workspaceId, changeId: task.changeId, modelProvider: task.modelProvider, agentId: task.agentId, createdAt: task.createdAt, status: task.status },
+      grant: { id: grant.id, resource: grant.resource, sourceSpaceIds: [...grant.sourceSpaceIds], actions: [...grant.actions], effects: [...grant.effects], allowedCredentialClasses: [...grant.allowedCredentialClasses], budget: grant.budget, expiresAt: grant.expiresAt, status: grant.status, agentId: grant.agentId },
+      credentialClasses: [...grant.allowedCredentialClasses],
+      credentials: "not-issued",
+      credentialExchange: "explicit-later",
+      canonicalWrite: false,
+      credentialMaterialStored: false,
+      receipt: `kernelMembership=verified; delegation=${input.status}; project=${grant.resource.projectId ?? "missing"}; workspace=${grant.resource.workspaceId ?? "missing"}; change=${grant.resource.changeId ?? "missing"}; credentials=not-issued; exchange=explicit; canonicalWrite=false; credentialMaterialStored=false`,
+    };
   }
 
   private async authorityState(humanSessionId: string): Promise<Response> {
@@ -821,6 +918,91 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
           const session = next.authenticatePasskey({ credentialId, relyingPartyId, challenge, verified: true, ...(signCount === undefined ? {} : { signCount }), clientId: typeof body.clientId === "string" ? body.clientId : "client:anyam-web" });
           this.recoveryStatus = "active";
           return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "session-issued", session, identity: identitySummary(next), receipt: "kernelMembership=verified; session=durable; authentication=passkey; verification=worker-boundary; callerVerifiedFlag=ignored" });
+        }));
+      }
+
+      if (url.pathname === "/identity/agent/delegation") {
+        const humanSessionId = coordinatorString(body, "humanSessionId");
+        const agentId = coordinatorString(body, "agentId");
+        const agentName = coordinatorString(body, "agentName");
+        const runtime = coordinatorString(body, "runtime");
+        const modelProvider = coordinatorString(body, "modelProvider");
+        const clientId = coordinatorOptionalString(body, "clientId", `client:agent:${agentId}`);
+        const purpose = coordinatorString(body, "purpose");
+        const actions = coordinatorCapabilityArray(body, "actions");
+        const effects = delegationEffects(body);
+        const allowedCredentialClasses = delegationCredentialClasses(body);
+        const budget = delegationBudget(body);
+        const expiresAt = coordinatorTimestamp(body, "expiresAt");
+        return await this.ctx.blockConcurrencyWhile(async () => {
+          const authority = await this.authoritySnapshot();
+          const bounded = this.delegationAuthority(body, authority);
+          return await this.transitionIdentity((next) => {
+            const humanSession = next.validateSession(humanSessionId);
+            const identityBefore = next.getRecoverySnapshot();
+            const ownerRelationship = Object.values(identityBefore.relationships).some((relationship) => relationship.status === "active" && relationship.role === "owner" && relationship.principalId === humanSession.principalId && relationship.resource.realmId === identityBefore.realm.id);
+            if (!ownerRelationship) throw new RealmIdentityError({ code: "delegation.owner_denied", message: "Generic agent delegation is restricted to an active Realm owner.", recoveryAction: "authenticate the Realm owner and retry the bounded Project delegation", receipt: "owner=required; delegation=not-created" });
+
+            for (const sourceSpaceId of bounded.sourceSpaceIds) {
+              const source = bounded.sources[sourceSpaceId]!;
+              const existingPolicy = identityBefore.sourceSpacePolicies[sourceSpaceId];
+              if (!existingPolicy) {
+                next.setSourceSpacePolicy({ sourceSpaceId, classification: source.classification, allowedCapabilities: actions, readerPrincipalIds: source.classification === "public" ? [] : [humanSession.principalId], allowedModelProviders: source.classification === "public" ? [] : [modelProvider], discoverable: source.classification === "public" });
+                continue;
+              }
+              if (existingPolicy.classification !== source.classification || (source.classification !== "public" && !existingPolicy.readerPrincipalIds.includes(humanSession.principalId)) || actions.some((action) => !existingPolicy.allowedCapabilities.includes(action)) || actions.some((action) => existingPolicy.deniedCapabilities.includes(action)) || (existingPolicy.allowedModelProviders.length > 0 && !existingPolicy.allowedModelProviders.includes(modelProvider))) throw new RealmIdentityError({ code: "delegation.source_space_denied", message: "The Source Space policy does not authorize this owner delegation, or its identity policy is stale.", recoveryAction: "update the Source Space policy through an explicit owner policy operation, then retry without widening the Task", receipt: `sourceSpace=${sourceSpaceId}; policy=not-satisfied; delegation=not-created` });
+            }
+
+            const current = next.getRecoverySnapshot();
+            const existingAgent = current.agents[agentId];
+            let agent = existingAgent;
+            if (agent) {
+              const sameAudience = agent.allowedCredentialClasses.length === allowedCredentialClasses.length && agent.allowedCredentialClasses.every((credentialClass) => allowedCredentialClasses.includes(credentialClass));
+              if (agent.principalId !== humanSession.principalId || agent.status !== "active" || agent.name !== agentName || agent.runtime !== runtime || agent.modelProvider !== modelProvider || agent.clientId !== clientId || !sameAudience) throw new RealmIdentityError({ code: "delegation.agent_mismatch", message: "The enrolled agent identity does not match the requested owner, client, runtime, model provider, or credential audiences.", recoveryAction: "reuse the exact enrolled agent metadata or choose a new agent identity; provider credentials are never accepted here", receipt: `agent=${agentId}; metadata-match=false; credentials=not-issued` });
+            } else {
+              agent = next.registerAgent({ id: agentId, principalId: humanSession.principalId, name: agentName, runtime, modelProvider, clientId, allowedCredentialClasses });
+            }
+
+            const beforeDelegation = next.getRecoverySnapshot();
+            const sameResource = (grant: typeof beforeDelegation.grants[string]): boolean => grant.resource.realmId === bounded.resource.realmId && grant.resource.projectId === bounded.resource.projectId && grant.resource.workspaceId === bounded.resource.workspaceId && grant.resource.changeId === bounded.resource.changeId && (grant.resource.sourceSpaceId ?? undefined) === (bounded.resource.sourceSpaceId ?? undefined);
+            const sameList = (left: readonly string[], right: readonly string[]): boolean => left.length === right.length && left.every((value) => right.includes(value));
+            const sameBudget = (left: Readonly<Record<string, string | number>>, right: Readonly<Record<string, string | number>>): boolean => JSON.stringify(left) === JSON.stringify(right);
+            const grantIsLive = (grant: typeof beforeDelegation.grants[string]): boolean => grant.status === "active" && Number.isFinite(Date.parse(grant.expiresAt)) && Date.parse(grant.expiresAt) > Date.now();
+            const activeChild = Object.values(beforeDelegation.grants).find((grant) => {
+              if (!grantIsLive(grant) || grant.agentId !== agent!.id || !sameResource(grant) || !sameList(grant.sourceSpaceIds, bounded.sourceSpaceIds)) return false;
+              const task = beforeDelegation.tasks[grant.taskId];
+              return task?.status === "active" && task.agentId === agent!.id && task.purpose === purpose;
+            });
+            if (activeChild) {
+              const matches = sameList(activeChild.actions, actions) && sameList(activeChild.effects, effects) && sameList(activeChild.allowedCredentialClasses, allowedCredentialClasses) && sameBudget(activeChild.budget, budget) && activeChild.expiresAt === expiresAt;
+              if (!matches) throw new RealmIdentityError({ code: "delegation.idempotency_conflict", message: "An active delegation already exists for this owner, Agent, Project, Workspace, Change, and purpose with different authority.", recoveryAction: "reuse the existing delegation or revoke it explicitly before requesting a different capability set", receipt: `agent=${agent.id}; purpose=${purpose}; activeDelegation=conflict; transition=not-applied` });
+              return coordinatorJson({ ...this.safeDelegation(next, { agentId: agent!.id, sessionId: activeChild.sessionId, taskId: activeChild.taskId, grantId: activeChild.id, status: "already-delegated" }), identity: identitySummary(next) });
+            }
+
+            const parentTask = Object.values(beforeDelegation.tasks).find((task) => task.status === "active" && !task.agentId && task.sessionId === humanSession.id && task.workspaceId === bounded.workspaceId && task.changeId === bounded.changeId && task.purpose === purpose);
+            const task = parentTask ?? next.createTask({ principalId: humanSession.principalId, actorId: humanSession.actorId, sessionId: humanSession.id, purpose, workspaceId: bounded.workspaceId, changeId: bounded.changeId });
+            const afterTask = next.getRecoverySnapshot();
+            const parentGrant = Object.values(afterTask.grants).find((grant) => grantIsLive(grant) && grant.taskId === task.id && grant.sessionId === humanSession.id);
+            const parentActions = [...new Set<Capability>(["agent.delegate", ...actions])];
+            const usableParentGrant = parentGrant ?? next.createCapabilityGrant({ principalId: humanSession.principalId, actorId: humanSession.actorId, clientId: humanSession.clientId, sessionId: humanSession.id, taskId: task.id, resource: bounded.resource, sourceSpaceIds: bounded.sourceSpaceIds, actions: parentActions, effects, allowedModelProviders: [modelProvider], allowedCredentialClasses, budget, expiresAt });
+            const delegated = next.delegateAgent({ humanSessionId: humanSession.id, parentGrantId: usableParentGrant.id, agentId: agent!.id, purpose, resource: bounded.resource, sourceSpaceIds: bounded.sourceSpaceIds, actions, effects, allowedCredentialClasses, budget, expiresAt, workspaceId: bounded.workspaceId, changeId: bounded.changeId, consentAt: new Date().toISOString() });
+            return coordinatorJson({ ...this.safeDelegation(next, { agentId: agent!.id, sessionId: delegated.session.id, taskId: delegated.task.id, grantId: delegated.grant.id, status: "delegated" }), identity: identitySummary(next) });
+          });
+        });
+      }
+
+      if (url.pathname === "/identity/agent/delegation/revoke") {
+        const humanSessionId = coordinatorString(body, "humanSessionId");
+        const agentId = coordinatorString(body, "agentId");
+        return await this.ctx.blockConcurrencyWhile(() => this.transitionIdentity((next) => {
+          const humanSession = next.validateSession(humanSessionId);
+          const state = next.getRecoverySnapshot();
+          const ownerRelationship = Object.values(state.relationships).some((relationship) => relationship.status === "active" && relationship.role === "owner" && relationship.principalId === humanSession.principalId && relationship.resource.realmId === state.realm.id);
+          const agent = state.agents[agentId];
+          if (!ownerRelationship || !agent || agent.principalId !== humanSession.principalId) throw new RealmIdentityError({ code: "delegation.agent_denied", message: "The requested Agent is not owned by the authenticated Realm owner.", recoveryAction: "revoke only an Agent enrolled by this Realm owner", receipt: "agent=owner-bound; revocation=not-started" });
+          if (agent.status === "revoked") return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "already-revoked", agentId, canonicalWrite: false, credentialMaterialStored: false, receipt: `agent=${agentId}; status=already-revoked; humanSession=${humanSession.id}; humanSessionUntouched=true; credentialMaterialStored=false` });
+          const result = next.revokeAgent(agentId);
+          return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "delegation-revoked", agentId, revokedSessionCount: result.revokedSessionIds.length, revokedGrantCount: result.revokedGrantIds.length, revokedCredentialCount: result.revokedCredentialIds.length, canonicalWrite: false, credentialMaterialStored: false, receipt: `${result.receipt}; humanSession=${humanSession.id}; humanSessionUntouched=true; credentialMaterialStored=false` });
         }));
       }
 

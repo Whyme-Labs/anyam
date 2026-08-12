@@ -86,6 +86,8 @@ After an owner completes the passkey login ceremony, the public edge exposes:
 | `GET /api/changes/{changeId}` | Read one Change and its immutable Revision summaries through the Authority Coordinator |
 | `GET /api/workspaces` | Discover owner-visible Workspace summaries through the Authority Coordinator |
 | `GET /api/workspaces/{workspaceId}` | Read one Workspace summary through the Authority Coordinator |
+| `POST /api/owner/agent/delegations` | Owner-authenticated, resource-bounded Agent Task delegation for one active Project/Workspace/Change; no credentials are issued |
+| `POST /api/owner/agent/delegations/revoke` | Owner-authenticated revocation of one enrolled Agent and its delegated authority; the owner Session remains active |
 
 `GET /api/projects` and `GET /api/projects/{projectId}` are owner-authenticated,
 read-only surfaces. The list is sorted by Project identifier using code-unit
@@ -137,6 +139,27 @@ reject malformed or duplicate/unsupported filters, preserve Coordinator
 ordering, and return only Project identity, immutable revision/view identities,
 state, optional Change link, and mount count. They do not create Workspaces,
 issue task grants, transfer source, or mutate canonical state.
+
+The owner-authenticated Agent delegation surface accepts an explicit
+Project/Workspace/Change resource, mounted Source Space IDs, agent identity
+metadata, non-promotional capabilities/effects, allowed `realm-api`/`git`/`mcp`
+credential classes, an optional budget, and a future expiry. The Coordinator
+checks that the Authority snapshot contains one coherent active resource chain
+before it creates or reuses an enrolled Agent and derives the human parent
+Task/Grant into an agent Session/Task/Grant through the same Realm identity
+policy kernel used by every other client. Repeating an identical active
+delegation returns `already-delegated`; a request that would silently widen it
+is rejected. A missing Source Space policy is initialized only for this
+owner-bound first delegation from the Authority classification and requested
+capability/model boundary; an existing policy must already satisfy the request.
+
+The response is credential-free: it includes only safe Agent, Session, Task,
+and Grant metadata plus explicit `credentials=not-issued` and
+`canonicalWrite=false` receipts. Git/MCP/Realm API credential exchange remains
+a separate follow-up operation. The generic delegation endpoint does not
+expose MCP mutation tools, source objects, provider credentials, landing, or
+promotion authority. Revocation closes delegated authority without revoking
+the human owner Session.
 
 The command envelope is:
 
@@ -197,6 +220,8 @@ The Worker exposes a customer-owned WebAuthn adapter boundary:
 | `POST /api/owner/passkey/auth/options` | Authentication challenge for an enrolled owner |
 | `POST /api/owner/passkey/auth/verify` | Verifies the assertion and issues an opaque host-only owner session |
 | `POST /api/owner/session/revoke` | Revokes the current opaque owner session and expires its cookie |
+| `POST /api/owner/agent/delegations` | Creates or reuses one owner-authenticated, non-promotional Agent Task delegation for a real Project/Workspace/Change; credentials are not issued implicitly |
+| `POST /api/owner/agent/delegations/revoke` | Revokes one owner-owned Agent and closes its delegated authority without revoking the owner Session |
 | `POST /api/owner/qualification/delegate` | Owner-session-protected qualification delegation for an isolated agent Workspace; credentials are not issued implicitly |
 | `POST /api/owner/qualification/credentials` | Explicitly exchanges the exact delegated agent Session/Task/Grant for short-lived Git and/or MCP credentials |
 | `POST /api/owner/qualification/revoke` | Revokes the qualification agent, delegated Sessions, Tasks, Grants, credentials, and Workspace task |

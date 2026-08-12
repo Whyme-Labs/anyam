@@ -479,7 +479,7 @@ export async function anyamRealmOwnerSessionId(request: Request, env: AnyamRealm
 
 async function ownerKernelSession(request: Request, env: AnyamRealmOAuthEnv): Promise<{ session: OwnerSession; kernelSession: Record<string, unknown> } | Response> {
   const session = await readSession(request, env);
-  if (!session || session.realmId !== realmId(env) || !session.kernelSessionId) return json({ code: "owner_authentication_required", recoveryAction: "Complete passkey authentication before requesting a qualification agent or credential operation.", receipt: "ownerSession=missing-or-invalid; kernelSession=missing" }, 401);
+  if (!session || session.realmId !== realmId(env) || !session.kernelSessionId) return json({ code: "owner_authentication_required", recoveryAction: "Complete passkey authentication before requesting a protected Realm operation.", receipt: "ownerSession=missing-or-invalid; kernelSession=missing" }, 401);
   try {
     const kernel = await realmCoordinatorRequest(env, "/identity/session/validate", { sessionId: session.kernelSessionId });
     const kernelSession = kernel.session as Record<string, unknown> | undefined;
@@ -492,6 +492,8 @@ async function ownerKernelSession(request: Request, env: AnyamRealmOAuthEnv): Pr
 }
 
 type QualificationOperation = "delegate" | "credentials" | "revoke" | "recovery/export" | "recovery/restore" | "provider-operation" | "provider-operation/resume" | "provider-operation/callback" | "provider-operation/cleanup" | "provider-recovery/export" | "provider-recovery/restore";
+
+type AgentDelegationOperation = "delegate" | "revoke";
 
 async function qualificationRequest(request: Request, env: AnyamRealmOAuthEnv, operation: QualificationOperation): Promise<Response> {
   const ownerState = await ownerKernelSession(request, env);
@@ -514,6 +516,26 @@ async function qualificationRequest(request: Request, env: AnyamRealmOAuthEnv, o
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
     return json({ code: `qualification_${operation}_failed`, recoveryAction: "Retry after checking the durable Realm coordinator; no partial credential or authority transition is accepted.", receipt: `qualification=${operation}; operation=failed; detail=${detail}` }, 503);
+  }
+}
+
+async function agentDelegationRequest(request: Request, env: AnyamRealmOAuthEnv, operation: AgentDelegationOperation): Promise<Response> {
+  const ownerState = await ownerKernelSession(request, env);
+  if (ownerState instanceof Response) return ownerState;
+  let body: Record<string, unknown>;
+  try {
+    body = await readJson(request);
+  } catch {
+    return json({ code: "invalid_request", recoveryAction: operation === "delegate" ? "Send the bounded Project, Workspace, Change, Source Space, agent, capability, and future expiry fields as one JSON object." : "Send agentId as one JSON object field.", receipt: `agentDelegation=${operation}; request=json-object-required; transition=not-applied` }, 422);
+  }
+  try {
+    const coordinator = await realmCoordinatorRequest(env, operation === "delegate" ? "/identity/agent/delegation" : "/identity/agent/delegation/revoke", { ...body, humanSessionId: ownerState.session.kernelSessionId });
+    return json({ ...coordinator, receipt: `${typeof coordinator.receipt === "string" ? coordinator.receipt : `agentDelegation=${operation}`}; ownerSession=validated` });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const status = detail.includes("not_found") ? 404 : detail.includes("owner_denied") || detail.includes("agent_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : detail.includes("idempotency_conflict") || detail.includes("conflict") || detail.includes("exists") ? 409 : 422;
+    const code = status === 404 ? "delegation_resource_not_found" : status === 403 ? "delegation_not_authorized" : status === 409 ? "delegation_conflict" : "delegation_rejected";
+    return json({ code, recoveryAction: status === 404 ? "Verify the Project, Workspace, Change, and Source Space identifiers without probing hidden resources." : status === 403 ? "Re-authenticate the Realm owner and retry only an Agent owned by that Realm." : status === 409 ? "Reuse the active delegation or revoke it explicitly before requesting a different authority set." : "Inspect the coordinator receipt, correct the bounded delegation request, and retry; no credentials were issued.", receipt: `agentDelegation=${operation}; operation=not-accepted; credentialMaterialStored=false; canonicalWrite=false` }, status);
   }
 }
 
@@ -774,6 +796,8 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
         authenticationVerify: "/api/owner/passkey/auth/verify",
         oauthGrants: "/api/owner/oauth/grants",
         oauthGrantRevoke: "/api/owner/oauth/grants/revoke",
+        agentDelegation: "/api/owner/agent/delegations",
+        agentDelegationRevoke: "/api/owner/agent/delegations/revoke",
         qualificationDelegate: "/api/owner/qualification/delegate",
         qualificationCredentials: "/api/owner/qualification/credentials",
         qualificationRevoke: "/api/owner/qualification/revoke",
@@ -796,6 +820,8 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
     if (url.pathname === "/api/owner/session/revoke" && request.method === "POST") return await revokeSession(request, env);
     if (url.pathname === "/api/owner/oauth/grants" && request.method === "GET") return await listOAuthGrants(request, env);
     if (url.pathname === "/api/owner/oauth/grants/revoke" && request.method === "POST") return await revokeOAuthGrant(request, env);
+    if (url.pathname === "/api/owner/agent/delegations" && request.method === "POST") return await agentDelegationRequest(request, env, "delegate");
+    if (url.pathname === "/api/owner/agent/delegations/revoke" && request.method === "POST") return await agentDelegationRequest(request, env, "revoke");
     if (url.pathname === "/api/owner/qualification/delegate" && request.method === "POST") return await qualificationRequest(request, env, "delegate");
     if (url.pathname === "/api/owner/qualification/credentials" && request.method === "POST") return await qualificationRequest(request, env, "credentials");
     if (url.pathname === "/api/owner/qualification/revoke" && request.method === "POST") return await qualificationRequest(request, env, "revoke");

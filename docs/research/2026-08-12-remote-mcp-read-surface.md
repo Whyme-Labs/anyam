@@ -98,3 +98,26 @@ summaries.
 This is a read-surface qualification, not a claim that the full remote MCP,
 REST, task-grant mutation API, web console, or production-scale service is
 complete. Those remain explicit Wayfinder fog.
+
+## Generic owner delegation boundary
+
+The next owner-authenticated mutation boundary is deliberately separate from
+the read surface and from the disposable qualification routes:
+
+- `POST /api/owner/agent/delegations` accepts one active Project, Workspace,
+  Change, mounted Source Space set, agent identity, non-promotional actions and
+  effects, coding-agent credential classes, budget, and future expiry.
+- The Coordinator validates the complete Authority relationship before it
+  touches Realm identity state. It then reuses or enrolls the exact Agent
+  metadata, creates the human parent Task/Grant, and derives the Agent
+  Session/Task/Grant through `RealmIdentityPolicy.delegateAgent`.
+- `POST /api/owner/agent/delegations/revoke` closes that Agent's delegated
+  Sessions, Tasks, Grants, and credentials while leaving the human owner
+  Session active.
+
+Repeated identical active requests return `already-delegated`; a request that
+would change an active delegation's resource, actions, effects, audiences,
+budget, or expiry is rejected as an idempotency conflict. Responses contain no
+credential values, provider credentials, source objects, or canonical-write
+authority. Git/MCP/Realm API credential exchange and MCP mutation tools remain
+separate follow-up boundaries.

@@ -4,6 +4,7 @@ import test from "node:test";
 import providerTarget from "../apps/provider-qualification-target/src/index.ts";
 import replayArchiveWorker, { type Env as ReplayArchiveEnv } from "../apps/replay-archive-workload-qualification/src/index.ts";
 import { handleAuthorityRequest } from "../apps/realm-worker/src/authority-edge.ts";
+import { handleAnyamRealmOwnerRequest } from "../apps/realm-worker/src/passkey-owner.ts";
 import { AUTHORITY_COMMAND_PROTOCOL, AuthorityPlaneCoordinator, authorityStateSummary, emptyAuthorityPlaneSnapshot, type AuthorityCommand } from "../src/cloudflare/authority-plane.ts";
 import type { AnyamRealmOAuthEnv } from "../apps/realm-worker/src/oauth-provider.ts";
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "../apps/realm-worker/src/coordinator-protocol.ts";
@@ -545,4 +546,122 @@ test("Realm Worker exposes an authenticated project-scoped REST read through the
   assert.ok(unsupportedWorkspace);
   assert.equal(unsupportedWorkspace.status, 405);
   assert.equal((await unsupportedWorkspace.json() as Record<string, unknown>).code, "method_not_allowed");
+});
+
+test("Realm Worker owner delegation edge keeps task authority bounded and credential-free", async () => {
+  const oauthKv = new MemoryKV();
+  const hostSessionId = "host-session:agent-delegation";
+  const kernelSessionId = "session:agent-delegation";
+  const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+  let delegationCount = 0;
+  const namespace = {
+    idFromName: (_name: string): string => "agent-delegation-do",
+    get: (_id: string) => ({
+      fetch: async (request: Request): Promise<Response> => {
+        const path = new URL(request.url).pathname;
+        const body = await request.json() as Record<string, unknown>;
+        calls.push({ path, body });
+        if (request.headers.get(REALM_COORDINATOR_INTERNAL_HEADER) !== REALM_COORDINATOR_INTERNAL_VALUE) return new Response(JSON.stringify({ code: "internal_binding_required" }), { status: 403 });
+        if (path === "/identity/session/validate") return new Response(JSON.stringify({ protocol: "anyam.realm-coordinator/v1", status: "session-valid", session: { id: kernelSessionId, actorId: "actor:agent-delegation", principalId: "owner:agent-delegation", clientId: "client:anyam-web", status: "active" } }), { status: 200 });
+        if (path === "/identity/agent/delegation") {
+          if (body.effects && Array.isArray(body.effects) && body.effects.includes("canonical.write")) return new Response(JSON.stringify({ code: "delegation.effect_denied", receipt: "effect=canonical.write; canonicalWrite=false; delegation=not-created" }), { status: 422 });
+          if (body.projectId === "project:hidden") return new Response(JSON.stringify({ code: "not_found", receipt: "delegation=authority-resource-mismatch; discoverable=false" }), { status: 404 });
+          delegationCount += 1;
+          const status = delegationCount === 1 ? "delegated" : "already-delegated";
+          return new Response(JSON.stringify({
+            protocol: "anyam.realm-coordinator/v1",
+            status,
+            agent: { id: "agent:codex", name: "Codex", runtime: "codex-cli", modelProvider: "openai", clientId: "client:agent:agent:codex", allowedCredentialClasses: ["git", "mcp"], status: "active" },
+            session: { id: "session:agent-child", actorKind: "agent", agentId: "agent:codex", expiresAt: "2026-08-12T13:00:00.000Z", status: "active" },
+            task: { id: "task:agent-child", purpose: body.purpose, workspaceId: body.workspaceId, changeId: body.changeId, modelProvider: "openai", agentId: "agent:codex", createdAt: "2026-08-12T12:00:00.000Z", status: "active" },
+            grant: { id: "grant:agent-child", resource: { realmId: "realm:agent-delegation", projectId: body.projectId, workspaceId: body.workspaceId, changeId: body.changeId }, sourceSpaceIds: body.sourceSpaceIds, actions: body.actions, effects: body.effects ?? [], allowedCredentialClasses: ["git", "mcp"], budget: body.budget ?? {}, expiresAt: body.expiresAt, status: "active", agentId: "agent:codex" },
+            credentialClasses: ["git", "mcp"],
+            credentials: "not-issued",
+            credentialExchange: "explicit-later",
+            canonicalWrite: false,
+            credentialMaterialStored: false,
+            receipt: `delegation=${status}; credentials=not-issued; canonicalWrite=false; credentialMaterialStored=false`,
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (path === "/identity/agent/delegation/revoke") return new Response(JSON.stringify({ protocol: "anyam.realm-coordinator/v1", status: "delegation-revoked", agentId: body.agentId, revokedSessionCount: 1, revokedGrantCount: 1, revokedCredentialCount: 0, canonicalWrite: false, credentialMaterialStored: false, receipt: "agent=agent:codex; status=revoked; humanSessionUntouched=true; credentialMaterialStored=false" }), { status: 200, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify({ code: "not_found" }), { status: 404 });
+      },
+    }),
+  };
+  const env = {
+    ANYAM_HOSTING_MODE: "customer-operated",
+    ANYAM_INSTALLATION_ID: "agent-delegation",
+    ANYAM_PROTOCOL_VERSION: "anyam.customer-realm-worker/v1",
+    ANYAM_REALM_RP_ID: "realm-test.example",
+    REALM_COORDINATOR: namespace,
+    OAUTH_KV: oauthKv,
+    ANYAM_METADATA_DB: {},
+    ANYAM_EXPORTS: {},
+    ANYAM_EVENTS: {},
+    ANYAM_WORKFLOW: {},
+  } as unknown as AnyamRealmOAuthEnv;
+  oauthKv.values.set(`anyam:passkey:session:${hostSessionId}`, JSON.stringify({
+    protocol: "anyam.passkey-owner/v1",
+    sessionId: hostSessionId,
+    realmId: "realm:agent-delegation",
+    userId: "owner:agent-delegation",
+    displayName: "Agent Delegation Owner",
+    credentialId: "credential:agent-delegation",
+    kernelSessionId,
+    actorId: "actor:agent-delegation",
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    createdAt: new Date().toISOString(),
+  }));
+  const cookie = { cookie: `anyam_owner_session=${encodeURIComponent(hostSessionId)}` };
+  const requestBody = {
+    projectId: "project:video-player",
+    workspaceId: "workspace:video-player",
+    changeId: "change:video-player",
+    sourceSpaceIds: ["source:public"],
+    purpose: "add resumable playback controls",
+    agentId: "agent:codex",
+    agentName: "Codex",
+    runtime: "codex-cli",
+    modelProvider: "openai",
+    actions: ["source.read", "workspace.write", "change.publish_revision", "run.invoke"],
+    effects: ["source.read", "workspace.write", "run.invoke"],
+    allowedCredentialClasses: ["git", "mcp"],
+    budget: { modelCostUsd: 2 },
+    expiresAt: "2026-08-12T13:00:00.000Z",
+  };
+  const unauthenticated = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/agent/delegations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(requestBody) }), env);
+  assert.ok(unauthenticated);
+  assert.equal(unauthenticated.status, 401);
+  const delegated = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/agent/delegations", { method: "POST", headers: { ...cookie, "content-type": "application/json" }, body: JSON.stringify(requestBody) }), env);
+  assert.ok(delegated);
+  assert.equal(delegated.status, 200);
+  const delegatedBody = await delegated.json() as Record<string, unknown>;
+  assert.equal(delegatedBody.status, "delegated");
+  assert.equal(delegatedBody.credentials, "not-issued");
+  assert.equal(delegatedBody.canonicalWrite, false);
+  assert.equal(JSON.stringify(delegatedBody).includes("token"), false);
+  assert.deepEqual(calls.at(-1), { path: "/identity/agent/delegation", body: { ...requestBody, humanSessionId: kernelSessionId } });
+
+  const repeated = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/agent/delegations", { method: "POST", headers: { ...cookie, "content-type": "application/json" }, body: JSON.stringify(requestBody) }), env);
+  assert.ok(repeated);
+  assert.equal(repeated.status, 200);
+  assert.equal((await repeated.json() as Record<string, unknown>).status, "already-delegated");
+
+  const hidden = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/agent/delegations", { method: "POST", headers: { ...cookie, "content-type": "application/json" }, body: JSON.stringify({ ...requestBody, projectId: "project:hidden" }) }), env);
+  assert.ok(hidden);
+  assert.equal(hidden.status, 404);
+  assert.equal((await hidden.json() as Record<string, unknown>).code, "delegation_resource_not_found");
+
+  const denied = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/agent/delegations", { method: "POST", headers: { ...cookie, "content-type": "application/json" }, body: JSON.stringify({ ...requestBody, effects: ["canonical.write"] }) }), env);
+  assert.ok(denied);
+  assert.equal(denied.status, 422);
+  assert.equal((await denied.json() as Record<string, unknown>).code, "delegation_rejected");
+
+  const revoked = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/agent/delegations/revoke", { method: "POST", headers: { ...cookie, "content-type": "application/json" }, body: JSON.stringify({ agentId: "agent:codex" }) }), env);
+  assert.ok(revoked);
+  assert.equal(revoked.status, 200);
+  const revokedBody = await revoked.json() as Record<string, unknown>;
+  assert.equal(revokedBody.status, "delegation-revoked");
+  assert.equal(revokedBody.canonicalWrite, false);
+  assert.match(String(revokedBody.receipt), /humanSessionUntouched=true/);
 });

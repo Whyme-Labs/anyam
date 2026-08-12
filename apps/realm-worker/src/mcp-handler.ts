@@ -1,5 +1,6 @@
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "./coordinator-protocol.ts";
 import { bootstrapCommand, bootstrapPath, projectBootstrapValue, type BootstrapMutation } from "./bootstrap-contract.ts";
+import { revisionPublishCommand, revisionPublishValue, RevisionPublishInputError } from "./revision-contract.ts";
 
 export const ANYAM_MCP_PROTOCOL_VERSION = "2025-06-18" as const;
 export const ANYAM_MCP_PROTOCOL = "anyam.remote-mcp/v1" as const;
@@ -18,8 +19,9 @@ const MCP_CHANGE_LIST_TOOL = "change.list";
 const MCP_PROJECT_CREATE_TOOL = "project.create";
 const MCP_WORKSPACE_CREATE_TOOL = "workspace.create";
 const MCP_CHANGE_CREATE_TOOL = "change.create";
+const MCP_CHANGE_REVISION_PUBLISH_TOOL = "change.publish_revision";
 const MCP_BOOTSTRAP_TOOLS = new Set([MCP_PROJECT_CREATE_TOOL, MCP_WORKSPACE_CREATE_TOOL, MCP_CHANGE_CREATE_TOOL]);
-const MCP_MUTATION_TOOLS = new Set(["change.publish_revision", "landing.apply", "promotion.request"]);
+const MCP_MUTATION_TOOLS = new Set(["landing.apply", "release.create", "promotion.request"]);
 
 export type AnyamRealmMcpProps = {
   readonly scopes: readonly string[];
@@ -280,12 +282,39 @@ async function mcpBootstrap(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, op
   }
 }
 
+async function mcpRevisionPublish(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, argumentsValue: unknown): Promise<Record<string, unknown>> {
+  if (!props.kernelSessionId) throw new RevisionPublishInputError("The MCP grant is not bound to an authenticated Realm session.", "reauthorize the MCP client through the authenticated Realm owner session; no transition was accepted", "mcp=revision-publish; kernelSession=missing; transition=not-applied", "auth");
+  let input: ReturnType<typeof revisionPublishCommand>;
+  try {
+    input = revisionPublishCommand(argumentsValue);
+  } catch (error) {
+    if (error instanceof RevisionPublishInputError) throw error;
+    throw new RevisionPublishInputError("The typed revision publication arguments are invalid.", "send an object containing only the documented revision publication arguments; no transition was accepted", "mcp=revision-publish; arguments=invalid; transition=not-applied");
+  }
+  let result: Record<string, unknown>;
+  try {
+    result = await requestMcpCoordinator(env, "/authority/command/internal", { protocol: "anyam.authority-command/v1", command: input.command, idempotencyKey: input.idempotencyKey, ...(input.expectedVersion === undefined ? {} : { expectedVersion: input.expectedVersion }), payload: input.payload, sessionId: props.kernelSessionId });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const kind: RevisionPublishInputError["kind"] = detail.includes("not_found") ? "not_found" : detail.includes("idempotency_conflict") || detail.includes("stale_state") || detail.includes("conflict") ? "conflict" : detail.includes("invalid_request") ? "invalid_request" : detail.includes("session.") || detail.includes("session_") ? "auth" : "coordinator";
+    const recoveryAction = kind === "not_found" ? "verify the Project, Workspace, Change, and Project View identifiers without probing hidden resources" : kind === "conflict" ? "reuse the original idempotency payload or read the current Authority version before retrying" : kind === "auth" ? "reauthorize the MCP client through the authenticated Realm owner session" : "inspect the Coordinator receipt and retry only the same idempotent request when safe";
+    throw new RevisionPublishInputError("The typed Change Revision publication was not accepted.", recoveryAction, `mcp=revision-publish; errorClass=${kind}; credentialFree=true; canonicalWrite=false`, kind === "auth" || kind === "not_found" || kind === "conflict" ? kind : "coordinator");
+  }
+  try {
+    const value = revisionPublishValue(result, input.idempotencyKey);
+    return { ...value, protocol: ANYAM_MCP_PROTOCOL, receipt: `${String(value.receipt)}; oauth=audience-validated` };
+  } catch {
+    throw new RevisionPublishInputError("The Coordinator returned an invalid revision publication projection.", "inspect the Coordinator receipt and retry only after reconciling its authoritative result; no additional transition was accepted", "mcp=revision-publish; projection=malformed; credentialFree=true; canonicalWrite=false", "coordinator");
+  }
+}
+
 /**
  * Realm-scoped remote MCP control surface. OAuthProvider has already
  * validated the bearer token, audience, and encrypted grant properties before
- * this function runs. The handler only reads safe Project, Workspace, and
- * Change summaries through the Realm Coordinator; source transfer and all
- * mutations stay on their own authority boundaries.
+ * this function runs. The handler reads safe summaries and exposes only the
+ * typed bootstrap/revision mutations explicitly authorized by the grant;
+ * source transfer, Landing, Release, and Promotion stay on their own
+ * authority boundaries.
  */
 export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps): Promise<Response> {
   const canReadProjects = props.scopes.includes(MCP_PROJECT_SCOPE);
@@ -343,7 +372,10 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
       );
     }
     if (canWriteChanges) {
-      tools.push({ name: MCP_CHANGE_CREATE_TOOL, description: "Create a Change through the authenticated Coordinator using a typed, idempotent bootstrap command.", inputSchema: { type: "object", additionalProperties: false, required: ["idempotencyKey", "projectId", "intentId"], properties: { idempotencyKey: { type: "string", minLength: 1 }, projectId: { type: "string", minLength: 1 }, changeId: { type: "string", minLength: 1 }, intentId: { type: "string", minLength: 1 }, baseProjectRevisionId: { type: "string", minLength: 1 }, workspaceId: { type: "string", minLength: 1 }, expectedVersion: { type: "integer", minimum: 0 } } } });
+      tools.push(
+        { name: MCP_CHANGE_CREATE_TOOL, description: "Create a Change through the authenticated Coordinator using a typed, idempotent bootstrap command.", inputSchema: { type: "object", additionalProperties: false, required: ["idempotencyKey", "projectId", "intentId"], properties: { idempotencyKey: { type: "string", minLength: 1 }, projectId: { type: "string", minLength: 1 }, changeId: { type: "string", minLength: 1 }, intentId: { type: "string", minLength: 1 }, baseProjectRevisionId: { type: "string", minLength: 1 }, workspaceId: { type: "string", minLength: 1 }, expectedVersion: { type: "integer", minimum: 0 } } } },
+        { name: MCP_CHANGE_REVISION_PUBLISH_TOOL, description: "Publish an immutable Change Revision through the authenticated Coordinator; this never transfers source objects or mutates canonical state.", inputSchema: { type: "object", additionalProperties: false, required: ["idempotencyKey", "projectId", "changeId", "workspaceId", "projectViewId", "projectRevisionId", "sourceSpaceSnapshots", "declaredEffects"], properties: { idempotencyKey: { type: "string", minLength: 1 }, expectedVersion: { type: "integer", minimum: 0 }, projectId: { type: "string", minLength: 1 }, changeId: { type: "string", minLength: 1 }, workspaceId: { type: "string", minLength: 1 }, projectViewId: { type: "string", minLength: 1 }, projectRevisionId: { type: "string", minLength: 1 }, sourceSpaceSnapshots: { type: "object", minProperties: 1, additionalProperties: { type: "string", minLength: 1 } }, declaredEffects: { type: "array", items: { type: "string", minLength: 1 } }, revisionId: { type: "string", minLength: 1 }, kind: { type: "string", enum: ["implementation", "rebase", "conflict-resolution", "handoff", "revert"] }, conflictIds: { type: "array", items: { type: "string", minLength: 1 } }, affectedModuleIds: { type: "array", items: { type: "string", minLength: 1 } }, affectedTargetIds: { type: "array", items: { type: "string", minLength: 1 } } } } },
+      );
     }
     return mcpJson({ jsonrpc: "2.0", id, result: { tools, receipt: "mcp=tools-listed; scope-filtered=true; typedBootstrap=explicit; canonicalWrite=false" } });
   }
@@ -362,13 +394,16 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
     const isChangeBootstrap = name === MCP_CHANGE_CREATE_TOOL;
     const isProjectTool = name === MCP_READ_TOOL || name === MCP_LIST_TOOL || isProjectBootstrap;
     const isWorkspaceTool = name === MCP_WORKSPACE_READ_TOOL || name === MCP_WORKSPACE_LIST_TOOL || isWorkspaceBootstrap;
-    const isChangeTool = name === MCP_CHANGE_READ_TOOL || name === MCP_CHANGE_LIST_TOOL || isChangeBootstrap;
+    const isRevisionPublish = name === MCP_CHANGE_REVISION_PUBLISH_TOOL;
+    const isChangeTool = name === MCP_CHANGE_READ_TOOL || name === MCP_CHANGE_LIST_TOOL || isChangeBootstrap || isRevisionPublish;
     if (!isProjectTool && !isWorkspaceTool && !isChangeTool) return mcpError(id, -32601, `Tool ${name} is not available.`, { code: "mcp.tool_not_found", recoveryAction: "call tools/list and use a scope-authorized Project, Workspace, or Change tool", receipt: `mcp=tool-not-found; tool=${name}; canonicalWrite=false` });
-    const requiredScope = isProjectBootstrap ? MCP_PROJECT_WRITE_SCOPE : isWorkspaceBootstrap ? MCP_WORKSPACE_WRITE_SCOPE : isChangeBootstrap ? MCP_CHANGE_WRITE_SCOPE : isChangeTool ? MCP_CHANGE_SCOPE : isWorkspaceTool ? MCP_WORKSPACE_SCOPE : MCP_PROJECT_SCOPE;
+    const requiredScope = isProjectBootstrap ? MCP_PROJECT_WRITE_SCOPE : isWorkspaceBootstrap ? MCP_WORKSPACE_WRITE_SCOPE : isChangeBootstrap || isRevisionPublish ? MCP_CHANGE_WRITE_SCOPE : isChangeTool ? MCP_CHANGE_SCOPE : isWorkspaceTool ? MCP_WORKSPACE_SCOPE : MCP_PROJECT_SCOPE;
     if (!props.scopes.includes(requiredScope)) return mcpError(id, -32001, `The MCP grant does not include ${requiredScope}.`, { code: "mcp.scope_denied", recoveryAction: `authorize the ${requiredScope} scope and retry`, receipt: `oauth=validated; mcp=scope-denied; required=${requiredScope}; tool=${name}; canonicalWrite=false` });
     try {
       const value = MCP_BOOTSTRAP_TOOLS.has(name)
         ? await mcpBootstrap(env, props, name as BootstrapMutation, params.arguments)
+        : isRevisionPublish
+          ? await mcpRevisionPublish(env, props, params.arguments)
         : name === MCP_LIST_TOOL
         ? await mcpProjectList(env, props, params.arguments)
         : name === MCP_READ_TOOL
@@ -387,13 +422,17 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
         const errorCode = error.kind === "auth" ? "mcp.scope_denied" : error.kind === "not_found" ? "mcp.bootstrap_not_found" : error.kind === "conflict" ? "mcp.bootstrap_conflict" : error.kind === "invalid_request" ? "mcp.bootstrap_invalid" : "mcp.bootstrap_failed";
         return mcpError(id, code, error.message, { code: errorCode, recoveryAction: error.recoveryAction, receipt: error.receipt });
       }
+      if (error instanceof RevisionPublishInputError) {
+        const code = error.kind === "invalid_request" ? -32602 : error.kind === "auth" ? -32001 : error.kind === "not_found" ? -32004 : error.kind === "conflict" ? -32009 : -32002;
+        return mcpError(id, code, error.message, { code: error.kind === "invalid_request" ? "mcp.revision_publish_invalid" : error.kind === "auth" ? "mcp.scope_denied" : error.kind === "not_found" ? "mcp.revision_publish_not_found" : error.kind === "conflict" ? "mcp.revision_publish_conflict" : "mcp.revision_publish_failed", recoveryAction: error.recoveryAction, receipt: error.receipt });
+      }
       const detail = error instanceof Error ? error.message : "mcp_tool_call_failed";
       const notFound = detail.includes("not_found");
       const errorClass = notFound ? "not_found" : detail.includes("session.") || detail.includes("session_") ? "session_rejected" : "coordinator_rejected";
       const isWorkspace = isWorkspaceTool;
       const isChange = isChangeTool;
       const isList = name === MCP_LIST_TOOL || name === MCP_WORKSPACE_LIST_TOOL;
-      const operation = isChange ? (name === MCP_CHANGE_LIST_TOOL ? "change.list" : "change.inspect") : isWorkspace ? (isList ? "workspace.list" : "workspace.inspect") : (isList ? "project.list" : "project.inspect");
+      const operation = isChange ? (name === MCP_CHANGE_LIST_TOOL ? "change.list" : name === MCP_CHANGE_READ_TOOL ? "change.inspect" : "revision.publish") : isWorkspace ? (isList ? "workspace.list" : "workspace.inspect") : (isList ? "project.list" : "project.inspect");
       const resource = isChange ? "Change" : isWorkspace ? "Workspace" : "Project";
       return mcpError(id, notFound ? -32004 : -32602, notFound ? `${resource} is not available in this Realm.` : `${operation} arguments are invalid or the coordinator rejected the read.`, { code: notFound ? `mcp.${resource.toLowerCase()}_not_found` : `mcp.${resource.toLowerCase()}_read_failed`, recoveryAction: notFound ? `verify the ${resource} identifier without probing undiscoverable resources` : "inspect the coordinator receipt and retry the same read", receipt: `mcp=${operation}; errorClass=${errorClass}; credentialFree=true; canonicalWrite=false` });
     }

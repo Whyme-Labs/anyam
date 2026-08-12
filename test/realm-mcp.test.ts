@@ -45,6 +45,12 @@ function env(): { env: AnyamRealmMcpEnv; calls: Array<{ path: string; body: Reco
             value = {
               change: { protocol: "anyam.change/v1", id: typeof payload.changeId === "string" ? payload.changeId : "change:mcp", projectId: String(payload.projectId), intentId: String(payload.intentId), baseProjectRevisionId: typeof payload.baseProjectRevisionId === "string" ? payload.baseProjectRevisionId : "project-revision:mcp:1", status: "active", latestRevisionId: null, workspaceId: payload.workspaceId, author: { id: "owner:private" } },
             };
+          } else if (body.command === "revision.publish") {
+            if (payload.projectId === "project:missing") return new Response(JSON.stringify({ code: "not_found", receipt: "revision=hidden; discoverable=false" }), { status: 404 });
+            value = {
+              revision: { protocol: "anyam.change/v1", id: typeof payload.revisionId === "string" ? payload.revisionId : "change-revision:mcp:1", changeId: String(payload.changeId), projectRevisionId: String(payload.projectRevisionId), projectViewId: String(payload.projectViewId), sequence: 1, parentRevisionId: undefined, baseProjectRevisionId: "project-revision:mcp:1", workspaceId: String(payload.workspaceId), declaredEffects: payload.declaredEffects, sourceSpaceSnapshots: payload.sourceSpaceSnapshots, affectedSourceSpaceIds: Object.keys(payload.sourceSpaceSnapshots as Record<string, unknown>), author: { id: "owner:private" }, kind: payload.kind ?? "implementation" },
+              change: { protocol: "anyam.change/v1", id: String(payload.changeId), projectId: String(payload.projectId), intentId: "intent:mcp", baseProjectRevisionId: "project-revision:mcp:1", status: "submitted", latestRevisionId: typeof payload.revisionId === "string" ? payload.revisionId : "change-revision:mcp:1", workspaceId: String(payload.workspaceId), author: { id: "owner:private" } },
+            };
           } else return new Response(JSON.stringify({ code: "invalid_request", receipt: "command=unsupported; credentialFree=true" }), { status: 422 });
           const result = { protocol: "anyam.authority-plane/v1", status: "succeeded", version: 1, value, receipt: `authority=coordinator; operation=${String(body.command)}; credentialFree=true; canonicalWrite=false` };
           idempotency.set(key, { fingerprint, result });
@@ -243,7 +249,7 @@ test("remote MCP exposes scope-filtered typed bootstrap mutations with idempoten
   const writeProps: AnyamRealmMcpProps = { scopes: ["project.write", "workspace.write", "change.write"], kernelSessionId: "kernel-session:owner" };
   const listed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }), fixture.env, writeProps);
   const listedTools = ((await body(listed)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
-  assert.deepEqual(listedTools.map((tool) => tool.name), ["project.create", "workspace.create", "change.create"]);
+  assert.deepEqual(listedTools.map((tool) => tool.name), ["project.create", "workspace.create", "change.create", "change.publish_revision"]);
 
   const projectArguments = { idempotencyKey: "mcp-project-1", projectId: "project:mcp", name: "MCP Project", referenceType: "git", sourceSpaces: [{ id: "source:mcp-public", name: "public", classification: "public", snapshotId: "git:mcp-base" }] };
   const createdProject = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "project.create", arguments: projectArguments } }), fixture.env, writeProps);
@@ -293,6 +299,39 @@ test("remote MCP exposes scope-filtered typed bootstrap mutations with idempoten
   assert.equal((changeContent.change as Record<string, unknown>).author, undefined);
   assert.equal(JSON.stringify(changeBody).includes("owner:private"), false);
 
+  const revisionArguments = { idempotencyKey: "mcp-revision-1", projectId: "project:mcp", changeId: "change:mcp", workspaceId: "workspace:mcp", projectViewId: "project-view:mcp:1", projectRevisionId: "candidate:mcp:1", sourceSpaceSnapshots: { "source:mcp-public": "git:mcp-candidate" }, declaredEffects: ["source.modify"], kind: "implementation" };
+  const published = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 6.1, method: "tools/call", params: { name: "change.publish_revision", arguments: revisionArguments } }), fixture.env, writeProps);
+  const publishedBody = await body(published);
+  const publishedResult = publishedBody.result as Record<string, unknown>;
+  const publishedContent = publishedResult.structuredContent as Record<string, unknown>;
+  assert.equal(publishedResult.isError, false);
+  assert.equal(publishedContent.protocol, "anyam.remote-mcp/v1");
+  assert.equal(publishedContent.canonicalWrite, false);
+  assert.equal(((publishedContent.revision as Record<string, unknown>).id), "change-revision:mcp:1");
+  assert.equal(((publishedContent.change as Record<string, unknown>).status), "submitted");
+  assert.equal(JSON.stringify(publishedBody).includes("sourceSpaceSnapshots"), false);
+  assert.equal(JSON.stringify(publishedBody).includes("git:mcp-candidate"), false);
+  assert.equal(JSON.stringify(publishedBody).includes("owner:private"), false);
+  assert.equal(fixture.calls.at(-1)?.body.command, "revision.publish");
+
+  const publishedReplay = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 6.2, method: "tools/call", params: { name: "change.publish_revision", arguments: revisionArguments } }), fixture.env, writeProps);
+  assert.deepEqual(((await body(publishedReplay)).result as Record<string, unknown>).structuredContent, publishedContent);
+  const publishedConflict = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 6.3, method: "tools/call", params: { name: "change.publish_revision", arguments: { ...revisionArguments, projectRevisionId: "candidate:other" } } }), fixture.env, writeProps);
+  assert.equal((((await body(publishedConflict)).error as Record<string, unknown>).code), -32009);
+
+  const revisionReadOnly = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 6.4, method: "tools/list" }), fixture.env, props);
+  assert.equal((((await body(revisionReadOnly)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>).some((tool) => tool.name === "change.publish_revision"), false);
+  const revisionScopeDenied = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 6.45, method: "tools/call", params: { name: "change.publish_revision", arguments: revisionArguments } }), fixture.env, props);
+  assert.equal((((await body(revisionScopeDenied)).error as Record<string, unknown>).code), -32001);
+  const revisionHidden = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 6.46, method: "tools/call", params: { name: "change.publish_revision", arguments: { ...revisionArguments, idempotencyKey: "mcp-revision-hidden", projectId: "project:missing" } } }), fixture.env, writeProps);
+  const revisionHiddenError = (await body(revisionHidden)).error as Record<string, unknown>;
+  assert.equal(revisionHiddenError.code, -32004);
+  assert.equal(JSON.stringify(revisionHiddenError).includes("project:missing"), false);
+  const beforeRevisionInvalid = fixture.calls.length;
+  const revisionInvalid = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 6.5, method: "tools/call", params: { name: "change.publish_revision", arguments: { ...revisionArguments, unsupported: true } } }), fixture.env, writeProps);
+  assert.equal((((await body(revisionInvalid)).error as Record<string, unknown>).code), -32602);
+  assert.equal(fixture.calls.length, beforeRevisionInvalid);
+
   const beforeInvalid = fixture.calls.length;
   const malformed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "project.create", arguments: { ...projectArguments, command: "raw" } } }), fixture.env, writeProps);
   const malformedError = (await body(malformed)).error as Record<string, unknown>;
@@ -314,7 +353,7 @@ test("remote MCP exposes scope-filtered typed bootstrap mutations with idempoten
   const projectWriteOnly = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 11, method: "tools/list" }), fixture.env, { ...writeProps, scopes: ["project.write"] });
   assert.deepEqual((((await body(projectWriteOnly)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>).map((tool) => tool.name), ["project.create"]);
   const changeWriteOnly = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 12, method: "tools/list" }), fixture.env, { ...writeProps, scopes: ["change.write"] });
-  assert.deepEqual((((await body(changeWriteOnly)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>).map((tool) => tool.name), ["change.create"]);
+  assert.deepEqual((((await body(changeWriteOnly)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>).map((tool) => tool.name), ["change.create", "change.publish_revision"]);
 });
 
 test("remote MCP fails closed for malformed requests, unknown methods, mutations, and undiscoverable projects", async () => {

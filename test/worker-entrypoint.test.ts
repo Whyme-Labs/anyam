@@ -229,7 +229,7 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
   assert.equal(changeBootstrap.value.status, "succeeded");
   assert.equal(JSON.stringify(changeBootstrap.value).includes("\"author\":"), false);
   const change = changeBootstrap.value.change as { id: string };
-  const revisionResult = await command("revision.publish", "idem:revision", { changeId: change.id, workspaceId: workspace.id, projectViewId: workspace.projectViewId, projectRevisionId: "candidate:authority-test", sourceSpaceSnapshots: { "source:authority-test": "git:candidate" }, declaredEffects: ["source.modify"] });
+  const revisionResult = await command("revision.publish", "idem:revision", { changeId: change.id, workspaceId: workspace.id, projectViewId: workspace.projectViewId, projectRevisionId: "candidate:authority-test", sourceSpaceSnapshots: { "source:typed-authority-test": "git:candidate" }, declaredEffects: ["source.modify"] });
   const revision = (revisionResult.value as Record<string, unknown>).revision as { id: string };
   const changeListResponse = await namespace.get("authority-test-do").fetch(new Request("https://realm-coordinator/authority/changes/internal", { method: "POST", headers: { [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE, "content-type": "application/json" }, body: JSON.stringify({ sessionId: ownerSessionId, projectId: project.id, workspaceId: workspace.id }) }));
   assert.equal(changeListResponse.status, 200);

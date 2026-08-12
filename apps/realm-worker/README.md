@@ -137,8 +137,17 @@ Change-identifier ordering in its receipt. Typed bootstrap results remain
 credential-free projections: Project creation returns only initialization
 identities and Source Space metadata; Workspace creation omits mount paths and
 actor identity; Change creation omits author/actor identity. These MCP tools do
-not publish Change Revisions, transfer Git objects, issue task grants, land,
-create Releases, or promote Targets.
+not transfer Git objects, issue task grants, land, create Releases, or promote
+Targets. A grant with `change.write` also exposes the typed
+`change.publish_revision` mutation. It requires a Project-, Change-,
+Workspace-, and Project View-bound payload plus a non-empty Source Space
+snapshot map and declared effects. The Coordinator validates those bindings,
+serializes the transition, and keeps replay/conflict handling under the same
+idempotency key. The response is a credential-free Revision/Change projection:
+source snapshots, authors, mounts, credentials, and raw Coordinator receipts
+are omitted. Publication does not transfer Git objects or change the canonical
+Project Revision pointer; Landing, Release creation, and Target Promotion
+remain separate operations.
 
 The owner-authenticated REST surface exposes the same Change query boundary at
 `GET /api/changes` and `GET /api/changes/{changeId}`. The list accepts optional

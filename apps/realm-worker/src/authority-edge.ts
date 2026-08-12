@@ -10,7 +10,7 @@ import { LANDING_APPLY_COMMAND, landingApplyCommand, landingApplyValue, LandingI
 import { RELEASE_CREATE_COMMAND, releaseCreateCommand, releaseCreateValue, ReleaseCreateInputError } from "./release-contract.ts";
 import { TARGET_CONFIGURE_COMMAND, targetConfigureCommand, targetConfigureValue, TargetConfigureInputError } from "./target-contract.ts";
 import { PROMOTION_REQUEST_COMMAND, promotionRequestCommand, promotionRequestValue, PromotionRequestInputError } from "./promotion-contract.ts";
-import { PROMOTION_EXECUTE_COMMAND, promotionExecutionCommand, promotionExecutionValue, PromotionExecutionInputError } from "./promotion-execution-contract.ts";
+import { PROMOTION_EXECUTE_COMMAND, PROMOTION_RECONCILE_COMMAND, promotionExecutionCommand, promotionExecutionValue, promotionReconciliationCommand, promotionReconciliationValue, promotionStatusValue, PromotionExecutionInputError } from "./promotion-execution-contract.ts";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
@@ -315,8 +315,8 @@ function promotionError(status: number, code: string, recoveryAction: string, re
   return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction, credentialFree: true, canonicalWrite: false, receipt: `operation=${PROMOTION_REQUEST_COMMAND}; ${receipt}; credentialFree=true; canonicalWrite=false; providerExecution=not-performed` }, status);
 }
 
-function promotionExecutionError(status: number, code: string, recoveryAction: string, receipt: string): Response {
-  return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction, credentialFree: true, canonicalWrite: false, receipt: `operation=${PROMOTION_EXECUTE_COMMAND}; ${receipt}; credentialFree=true; canonicalWrite=false; providerExecution=trusted-handoff` }, status);
+function promotionExecutionError(status: number, code: string, recoveryAction: string, receipt: string, operation: string = PROMOTION_EXECUTE_COMMAND): Response {
+  return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction, credentialFree: true, canonicalWrite: false, receipt: `operation=${operation}; ${receipt}; credentialFree=true; canonicalWrite=false; providerExecution=trusted-handoff` }, status);
 }
 
 async function landingMutation(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
@@ -452,12 +452,28 @@ async function promotionMutation(request: Request, env: AnyamRealmOAuthEnv): Pro
   }
 }
 
-type PromotionExecutionPath = { matched: boolean; promotionId?: string; malformed: boolean };
+type PromotionExecutionPath = { matched: boolean; promotionId?: string; malformed: boolean; operation?: "execute" | "reconcile" };
 
 function promotionExecutionPath(pathname: string): PromotionExecutionPath {
   const segments = pathname.split("/");
   if (segments[1] !== "api" || segments[2] !== "promotions") return { matched: false, malformed: false };
-  if (segments.length !== 5 || segments[4] !== "execute") return { matched: false, malformed: false };
+  if (segments.length !== 5 || (segments[4] !== "execute" && segments[4] !== "reconcile")) return { matched: false, malformed: false };
+  if (!segments[3]) return { matched: true, malformed: true };
+  try {
+    const promotionId = decodeURIComponent(segments[3]);
+    if (!promotionId || promotionId.includes("/") || promotionId.includes("\\") || promotionId === "." || promotionId === "..") return { matched: true, malformed: true };
+    return { matched: true, promotionId, malformed: false, operation: segments[4] };
+  } catch {
+    return { matched: true, malformed: true };
+  }
+}
+
+type PromotionStatusPath = { matched: boolean; promotionId?: string; malformed: boolean };
+
+function promotionStatusPath(pathname: string): PromotionStatusPath {
+  const segments = pathname.split("/");
+  if (segments[1] !== "api" || segments[2] !== "promotions") return { matched: false, malformed: false };
+  if (segments.length !== 4) return { matched: false, malformed: false };
   if (!segments[3]) return { matched: true, malformed: true };
   try {
     const promotionId = decodeURIComponent(segments[3]);
@@ -503,6 +519,61 @@ async function promotionExecutionMutation(request: Request, env: AnyamRealmOAuth
     const code = status === 404 ? "promotion_execute_not_found" : status === 403 ? "owner_session_rejected" : status === 422 ? "invalid_request" : status === 409 ? "promotion_execute_conflict" : "authority_coordinator_rejected";
     const recoveryAction = status === 404 ? "Verify the Promotion identifier without probing hidden resources." : status === 409 ? "Inspect the provider-executor binding and Authority version; retry the same immutable execution only when safe." : status === 403 ? "Authenticate the Realm owner again and retry the same execution request." : "Inspect the Durable Object receipt and reconcile the provider operation before retrying.";
     return promotionExecutionError(status, code, recoveryAction, `authority=coordinator-rejected; credentialFree=true; canonicalWrite=false`);
+  }
+}
+
+async function promotionReconciliationMutation(request: Request, env: AnyamRealmOAuthEnv, path: PromotionExecutionPath): Promise<Response> {
+  if (!path.promotionId || path.malformed) return promotionExecutionError(400, "invalid_promotion_reconciliation_path", "Use POST /api/promotions/{promotionId}/reconcile with one Idempotency-Key header.", "path=malformed; providerInvocation=false", PROMOTION_RECONCILE_COMMAND);
+  const sessionId = await anyamRealmOwnerSessionId(request, env);
+  if (!sessionId) return promotionExecutionError(401, "owner_authentication_required", "Authenticate the Realm owner through /owner/login before reconciling Promotion execution.", "ownerSession=missing-or-invalid; providerInvocation=false", PROMOTION_RECONCILE_COMMAND);
+  if (request.method !== "POST") return promotionExecutionError(405, "method_not_allowed", "Use POST /api/promotions/{promotionId}/reconcile with one Idempotency-Key header.", "method=post-required; providerInvocation=false", PROMOTION_RECONCILE_COMMAND);
+  const reconciliationIdempotencyKey = request.headers.get("idempotency-key")?.trim();
+  if (!reconciliationIdempotencyKey) return promotionExecutionError(422, "invalid_request", "Send one non-empty Idempotency-Key header; no provider operation was started.", "reconciliationIdempotencyKey=required; providerInvocation=false", PROMOTION_RECONCILE_COMMAND);
+  let body: Record<string, unknown>;
+  try {
+    body = await readBody(request);
+  } catch {
+    return promotionExecutionError(422, "invalid_request", "Send a JSON object containing only expectedVersion; the immutable provider identity is read from the Promotion checkpoint.", "body=object-required; providerInvocation=false", PROMOTION_RECONCILE_COMMAND);
+  }
+  let command: ReturnType<typeof promotionReconciliationCommand>;
+  try {
+    command = promotionReconciliationCommand(path.promotionId, body, reconciliationIdempotencyKey);
+  } catch (error) {
+    if (error instanceof PromotionExecutionInputError) return promotionExecutionError(422, "invalid_request", error.recoveryAction, error.receipt, PROMOTION_RECONCILE_COMMAND);
+    return promotionExecutionError(422, "invalid_request", "Correct the typed Promotion reconciliation request and retry; no provider operation was started.", "arguments=invalid; providerInvocation=false", PROMOTION_RECONCILE_COMMAND);
+  }
+  try {
+    const result = await requestAnyamRealmCoordinator(env, "/authority/promotion/reconcile/internal", {
+      sessionId,
+      promotionId: command.promotionId,
+      reconciliationIdempotencyKey: command.reconciliationIdempotencyKey,
+      ...(command.expectedVersion === undefined ? {} : { expectedVersion: command.expectedVersion }),
+    }, { allowBlocked: true });
+    const value = promotionReconciliationValue(result, reconciliationIdempotencyKey);
+    return json(value, value.status === "succeeded" ? 200 : value.status === "blocked" ? 409 : 503);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const status = detail.includes("not_found") ? 404 : detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : detail.includes("invalid_request") ? 422 : detail.includes("idempotency_conflict") || detail.includes("stale_state") || detail.includes("conflict") || detail.includes("provider-executor") ? 409 : 503;
+    const code = status === 404 ? "promotion_reconcile_not_found" : status === 403 ? "owner_session_rejected" : status === 422 ? "invalid_request" : status === 409 ? "promotion_reconcile_conflict" : "authority_coordinator_rejected";
+    const recoveryAction = status === 404 ? "Verify the Promotion identifier without probing hidden resources." : status === 409 ? "Inspect the durable Promotion checkpoint and retry the same reconciliation request only when safe." : status === 403 ? "Authenticate the Realm owner again and retry the same reconciliation request." : "Inspect the Durable Object receipt and reconcile the provider operation before retrying.";
+    return promotionExecutionError(status, code, recoveryAction, `authority=coordinator-rejected; credentialFree=true; canonicalWrite=false`, PROMOTION_RECONCILE_COMMAND);
+  }
+}
+
+async function promotionStatusRead(request: Request, env: AnyamRealmOAuthEnv, path: PromotionStatusPath): Promise<Response> {
+  if (!path.promotionId || path.malformed) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "invalid_promotion_status_path", recoveryAction: "Use GET /api/promotions/{promotionId} with one safe URL-encoded Promotion identifier.", receipt: "operation=promotion.status; path=malformed; readOnly=true; credentialFree=true; canonicalWrite=false" }, 400);
+  const sessionId = await anyamRealmOwnerSessionId(request, env);
+  if (!sessionId) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "owner_authentication_required", recoveryAction: "Authenticate the Realm owner through /owner/login before inspecting Promotion status.", receipt: "operation=promotion.status; ownerSession=missing-or-invalid; readOnly=true; credentialFree=true; canonicalWrite=false" }, 401);
+  if (request.method !== "GET") return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "method_not_allowed", recoveryAction: "Use GET /api/promotions/{promotionId} for the read-only Promotion and Target status.", receipt: `operation=promotion.status; promotion=${path.promotionId}; method=get-required; readOnly=true; credentialFree=true; canonicalWrite=false` }, 405);
+  try {
+    const result = await requestAnyamRealmCoordinator(env, "/authority/promotion/status/internal", { sessionId, promotionId: path.promotionId });
+    return json(promotionStatusValue(result));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const status = detail.includes("not_found") ? 404 : detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : 503;
+    const code = status === 404 ? "promotion_status_not_found" : status === 403 ? "owner_session_rejected" : "authority_coordinator_rejected";
+    const recoveryAction = status === 404 ? "Verify the Promotion identifier without probing hidden resources." : status === 403 ? "Authenticate the Realm owner again and retry the same read." : "Inspect the Durable Object receipt and retry the same read only when safe.";
+    return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction, receipt: `operation=promotion.status; authority=coordinator-rejected; readOnly=true; credentialFree=true; canonicalWrite=false` }, status);
   }
 }
 
@@ -564,6 +635,7 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   const isTargetRoute = url.pathname === "/api/targets" || url.pathname.startsWith("/api/targets/");
   const isPromotionRoute = url.pathname === "/api/promotions" || url.pathname.startsWith("/api/promotions/");
   const promotionExecutionRoute = promotionExecutionPath(url.pathname);
+  const promotionStatusRoute = promotionStatusPath(url.pathname);
   const revisionRoute = revisionPublishPath(url.pathname);
   if (!url.pathname.startsWith("/api/authority") && !isProjectRoute && !isChangeRoute && !isWorkspaceRoute && !isRunRoute && !isEvidenceRoute && !isArtifactRoute && !isLandingRoute && !isReleaseRoute && !isTargetRoute && !isPromotionRoute && !revisionRoute.matched) return undefined;
 
@@ -603,8 +675,9 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   }
 
   if (isPromotionRoute) {
-    if (promotionExecutionRoute.matched) return promotionExecutionMutation(request, env, promotionExecutionRoute);
-    if (url.pathname !== "/api/promotions") return promotionError(400, "invalid_promotion_path", "Use POST /api/promotions or /api/promotions/{promotionId}/execute with one typed request.", "path=malformed; transition=not-applied");
+    if (promotionExecutionRoute.matched) return promotionExecutionRoute.operation === "reconcile" ? promotionReconciliationMutation(request, env, promotionExecutionRoute) : promotionExecutionMutation(request, env, promotionExecutionRoute);
+    if (promotionStatusRoute.matched && request.method === "GET") return promotionStatusRead(request, env, promotionStatusRoute);
+    if (url.pathname !== "/api/promotions") return promotionError(400, "invalid_promotion_path", "Use POST /api/promotions, GET /api/promotions/{promotionId}, or POST /api/promotions/{promotionId}/execute or /reconcile with one typed request.", "path=malformed; transition=not-applied");
     return promotionMutation(request, env);
   }
 

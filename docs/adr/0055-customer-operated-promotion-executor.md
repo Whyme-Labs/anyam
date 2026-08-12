@@ -58,9 +58,9 @@ be qualified against the same `/execute` route by setting
 - Provider credential lifetime is an explicit customer configuration receipt,
   not an Anyam-wide limit. It must be a future ISO timestamp and be remeasured
   before production.
-- Durable polling, late callbacks, and operator reconciliation remain in
-  #179; this boundary returns safe checkpoints but does not pretend to own
-  durable provider state.
+- Durable reconciliation, late-callback rejection, and operator status are
+  defined in ADR 0056 / #179. This boundary returns safe checkpoints but does
+  not pretend to own provider mechanics or credential material.
 
 ## Rejected alternatives
 

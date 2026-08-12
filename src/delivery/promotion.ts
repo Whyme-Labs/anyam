@@ -169,6 +169,12 @@ export type PromotionReconciliationCheckpoint = {
   stage: "preview" | "apply" | "health" | "rollback" | "complete" | "reconcile";
   providerOperationIds: readonly string[];
   receipt: string;
+  /** Stable handoff binding retained across retries and coordinator restarts. */
+  executionDigest?: string;
+  releaseId?: string;
+  targetId?: string;
+  status?: "succeeded" | "blocked" | "indeterminate";
+  updatedAt?: string;
 };
 
 export type PromotionEvent = {

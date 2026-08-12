@@ -109,6 +109,86 @@ test("a provider result bound to another Release is rejected and recorded as ind
   assert.match(String(result.recoveryAction), /discard|reconcile|provider/i);
 });
 
+test("indeterminate Promotion execution survives a coordinator restart and reconciles with the same provider identity", async () => {
+  const firstCoordinator = new AuthorityPlaneCoordinator(fixture());
+  const first = await firstCoordinator.executePromotion({
+    promotionId: "promotion:execution",
+    executionIdempotencyKey: "execute:execution:reconcile",
+    executor: { execute: async () => { throw new Error("provider transport timed out after apply"); } },
+    session,
+  });
+  assert.equal(first.status, "indeterminate", JSON.stringify(first));
+  assert.equal((first.value.target as { currentReleaseId: string | null }).currentReleaseId, null);
+  const firstCheckpoint = first.value.checkpoint as { executionDigest?: string; idempotencyKey: string; stage: string };
+  assert.equal(firstCheckpoint.idempotencyKey, "execute:execution:reconcile");
+  assert.equal(typeof firstCheckpoint.executionDigest, "string");
+
+  // Durable Object restart is represented by reconstructing the coordinator
+  // from its persisted snapshot before the operator retry.
+  const restarted = new AuthorityPlaneCoordinator(firstCoordinator.snapshot());
+  let reconciledContext: PromotionExecutionContext | undefined;
+  const reconciled = await restarted.reconcilePromotion({
+    promotionId: "promotion:execution",
+    reconciliationIdempotencyKey: "reconcile:execution:1",
+    executor: {
+      async execute(context) {
+        reconciledContext = context;
+        return healthyExecutor({ count: 0 }).execute(context);
+      },
+    },
+    session,
+  });
+  assert.equal(reconciled.status, "succeeded", JSON.stringify(reconciled));
+  assert.equal((reconciled.value.target as { currentReleaseId: string }).currentReleaseId, "release:execution");
+  assert.equal((reconciled.value.promotion as { executionIdempotencyKey: string }).executionIdempotencyKey, "execute:execution:reconcile");
+  assert.equal((reconciled.value.checkpoint as { executionDigest: string }).executionDigest, firstCheckpoint.executionDigest);
+  assert.equal(reconciledContext?.executionIdempotencyKey, "execute:execution:reconcile");
+  assert.equal(reconciledContext?.executionDigest, firstCheckpoint.executionDigest);
+
+  const replay = await restarted.executePromotion({
+    promotionId: "promotion:execution",
+    executionIdempotencyKey: "execute:execution:reconcile",
+    executor: { execute: async () => { throw new Error("must-not-run after reconciliation"); } },
+    session,
+  });
+  assert.equal((replay.value.target as { currentReleaseId: string }).currentReleaseId, "release:execution");
+  await assert.rejects(
+    restarted.executePromotion({
+      promotionId: "promotion:execution",
+      executionIdempotencyKey: "execute:execution:superseding",
+      executor: { execute: async () => { throw new Error("must-not-run"); } },
+      session,
+    }),
+    /immutable execution identity/,
+  );
+});
+
+test("a stale reconciliation callback is rejected without moving the known-good Target pointer", async () => {
+  const coordinator = new AuthorityPlaneCoordinator(fixture());
+  await coordinator.executePromotion({
+    promotionId: "promotion:execution",
+    executionIdempotencyKey: "execute:execution:stale",
+    executor: { execute: async () => { throw new Error("provider callback delayed"); } },
+    session,
+  });
+  const result = await coordinator.reconcilePromotion({
+    promotionId: "promotion:execution",
+    reconciliationIdempotencyKey: "reconcile:execution:stale",
+    executor: {
+      async execute(context) {
+        const healthy = await healthyExecutor({ count: 0 }).execute(context);
+        return { ...healthy, checkpoint: { ...healthy.checkpoint!, idempotencyKey: "execute:execution:superseded" } };
+      },
+    },
+    session,
+  });
+  assert.equal(result.status, "indeterminate", JSON.stringify(result));
+  assert.equal((result.value.promotion as { state: string }).state, "degraded");
+  assert.equal((result.value.target as { currentReleaseId: string | null }).currentReleaseId, null);
+  assert.equal((result.value.checkpoint as { idempotencyKey: string }).idempotencyKey, "execute:execution:stale");
+  assert.match(String(result.recoveryAction), /stale|reconcile|discard/i);
+});
+
 test("the public Authority command surface cannot submit promotion.execute as a caller command", () => {
   const coordinator = new AuthorityPlaneCoordinator(fixture());
   assert.throws(() => coordinator.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "promotion.execute", idempotencyKey: "public:execute", payload: { promotionId: "promotion:execution" } }, session), /internal provider handoff/);

@@ -15,7 +15,7 @@ import {
   type AuthorityPlaneSnapshot,
   type AuthoritySession,
 } from "../../../src/cloudflare/authority-plane.ts";
-import { PROMOTION_EXECUTION_PROTOCOL, type PromotionExecutionResult } from "../../../src/cloudflare/promotion-execution.ts";
+import { PROMOTION_EXECUTION_PROTOCOL, type PromotionExecutionResult, type PromotionReconciliationRequest } from "../../../src/cloudflare/promotion-execution.ts";
 import {
   CUSTOMER_PROVIDER_OPERATION_PROTOCOL,
   CustomerProviderDurableObjectOperationStore,
@@ -701,6 +701,83 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     });
   }
 
+  private async authorityPromotionReconcile(body: CoordinatorRequestBody): Promise<Response> {
+    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const promotionId = coordinatorString(body, "promotionId");
+    const reconciliationIdempotencyKey = coordinatorString(body, "reconciliationIdempotencyKey");
+    const expectedVersion = body.expectedVersion === undefined ? undefined : typeof body.expectedVersion === "number" && Number.isSafeInteger(body.expectedVersion) && body.expectedVersion >= 0 ? body.expectedVersion : (() => { throw new AuthorityPlaneError({ code: "invalid_request", message: "expectedVersion must be a non-negative safe integer.", recoveryAction: "read the Authority version and retry with a safe expectedVersion", receipt: "expectedVersion=non-negative-safe-integer-required; promotionReconcile=not-accepted" }); })();
+    const executorBinding = this.env.ANYAM_PROMOTION_EXECUTOR;
+    if (!executorBinding || typeof executorBinding.fetch !== "function") {
+      throw new AuthorityPlaneError({ code: "blocked", message: "No trusted Promotion executor service is bound to this customer-operated Realm.", recoveryAction: "bind the qualified Target execution service before reconciling provider Promotion execution", receipt: `promotion=${promotionId}; providerExecutor=not-bound; reconciliation=not-started; credentialFree=true; canonicalWrite=false` });
+    }
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      const current = await this.authoritySnapshot();
+      const coordinator = new AuthorityPlaneCoordinator(current);
+      const executor = {
+        execute: async (context: Readonly<import("../../../src/cloudflare/promotion-execution.ts").PromotionExecutionContext>): Promise<PromotionExecutionResult> => {
+          const response = await executorBinding.fetch(new Request("https://anyam-promotion-executor/execute", {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-anyam-promotion-protocol": PROMOTION_EXECUTION_PROTOCOL },
+            body: JSON.stringify(context),
+          }));
+          if (!response.ok) throw new Error(`promotion-executor-http-${response.status}`);
+          const payload: unknown = await response.json().catch(() => undefined);
+          if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new Error("promotion-executor-result-not-object");
+          return payload as PromotionExecutionResult;
+        },
+      };
+      const result = await coordinator.reconcilePromotion({ promotionId, reconciliationIdempotencyKey, ...(expectedVersion === undefined ? {} : { expectedVersion }), executor, session } satisfies PromotionReconciliationRequest);
+      await this.ctx.storage.put(REALM_AUTHORITY_SNAPSHOT_KEY, coordinator.snapshot());
+      return coordinatorJson({ ...result, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, credentialFree: true, canonicalWrite: false }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
+    });
+  }
+
+  private async authorityPromotionStatus(body: CoordinatorRequestBody): Promise<Response> {
+    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const promotionId = coordinatorString(body, "promotionId");
+    const snapshot = await this.authoritySnapshot();
+    const promotion = snapshot.promotions[promotionId];
+    if (!promotion) throw new AuthorityPlaneError({ code: "not_found", message: `Promotion ${promotionId} is not available in this Realm.`, recoveryAction: "verify the Promotion identifier without probing undiscoverable resources", receipt: `promotion=${promotionId}; operation=promotion.status; discoverable=false` });
+    const target = snapshot.targets[promotion.targetId];
+    const release = snapshot.releases[promotion.releaseId];
+    if (!target || !release) throw new AuthorityPlaneError({ code: "indeterminate", message: `Promotion ${promotionId} has incomplete Target or Release lineage.`, recoveryAction: "reconcile the Authority snapshot before exposing Promotion status", receipt: `promotion=${promotionId}; target=${promotion.targetId}; release=${promotion.releaseId}; operation=promotion.status; lineage=incomplete` });
+    const safePromotion = {
+      protocol: promotion.protocol,
+      id: promotion.id,
+      projectId: promotion.projectId,
+      targetId: promotion.targetId,
+      releaseId: promotion.releaseId,
+      releaseDigest: promotion.releaseDigest,
+      previousReleaseId: promotion.previousReleaseId,
+      expectedCurrentReleaseId: promotion.expectedCurrentReleaseId,
+      state: promotion.state,
+      attempt: promotion.attempt,
+      kind: promotion.kind,
+      ...(promotion.previewId ? { previewId: promotion.previewId } : {}),
+      ...(promotion.deploymentId ? { deploymentId: promotion.deploymentId } : {}),
+      ...(promotion.providerOperationId ? { providerOperationId: promotion.providerOperationId } : {}),
+      ...(promotion.rollbackDeploymentId ? { rollbackDeploymentId: promotion.rollbackDeploymentId } : {}),
+      ...(promotion.rollbackProviderOperationId ? { rollbackProviderOperationId: promotion.rollbackProviderOperationId } : {}),
+      ...(promotion.health ? { health: promotion.health } : {}),
+      ...(promotion.rollbackHealth ? { rollbackHealth: promotion.rollbackHealth } : {}),
+      ...(promotion.healthFailure ? { healthFailure: promotion.healthFailure } : {}),
+      ...(promotion.recoveryAction ? { recoveryAction: promotion.recoveryAction } : {}),
+      ...(promotion.executionIdempotencyKey ? { executionIdempotencyKey: promotion.executionIdempotencyKey } : {}),
+      ...(promotion.reconciliationCheckpoint ? { reconciliationCheckpoint: promotion.reconciliationCheckpoint } : {}),
+    };
+    return coordinatorJson({
+      protocol: AUTHORITY_PLANE_PROTOCOL,
+      status: "ready",
+      version: snapshot.version,
+      promotion: safePromotion,
+      target: { protocol: target.protocol, id: target.id, projectId: target.projectId, name: target.name, adapterId: target.adapterId, state: target.state, currentReleaseId: target.currentReleaseId ?? null, releaseHistory: [...(target.releaseHistory ?? [])], ...(target.lastPromotionId ? { lastPromotionId: target.lastPromotionId } : {}) },
+      release: { protocol: release.protocol, id: release.id, projectRevisionId: release.projectRevisionId, status: release.status },
+      ...(promotion.reconciliationCheckpoint ? { checkpoint: promotion.reconciliationCheckpoint } : {}),
+      session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch },
+      receipt: `authority=coordinator; operation=promotion.status; promotion=${promotion.id}; state=${promotion.state}; readOnly=true; credentialFree=true; canonicalWrite=false`,
+    });
+  }
+
   private async authorityCommand(body: CoordinatorRequestBody): Promise<Response> {
     const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const command = coordinatorString(body, "command") as AuthorityCommandName;
@@ -774,6 +851,8 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/workspaces/internal") return await this.authorityWorkspaces(body);
       if (url.pathname === "/authority/changes/internal") return await this.authorityChanges(body);
       if (url.pathname === "/authority/promotion/execute/internal") return await this.authorityPromotionExecute(body);
+      if (url.pathname === "/authority/promotion/reconcile/internal") return await this.authorityPromotionReconcile(body);
+      if (url.pathname === "/authority/promotion/status/internal") return await this.authorityPromotionStatus(body);
       if (url.pathname === "/authority/command/internal") return await this.authorityCommand(body);
 
       if (url.pathname === "/identity/passkey-challenge/issue") {

@@ -50,7 +50,7 @@ export type PromotionExecutionContext = {
   expectedCurrentReleaseId: string | null;
   executionIdempotencyKey: string;
   actor: ActorRef;
-  /** Digest over the exact Authority records supplied to the provider. */
+  /** Digest over the immutable Authority inputs supplied to the provider. */
   executionDigest: string;
 };
 
@@ -79,6 +79,20 @@ export type TrustedPromotionExecutor = {
 export type PromotionExecutionRequest = {
   promotionId: string;
   executionIdempotencyKey: string;
+  expectedVersion?: number;
+  executor: TrustedPromotionExecutor;
+  session: AuthoritySession;
+};
+
+/**
+ * Reconciliation is a new Authority command identity, but it deliberately
+ * reuses the immutable executionIdempotencyKey recorded on the Promotion.
+ * This lets an operator retry/poll one provider operation without creating a
+ * second provider-side deployment identity.
+ */
+export type PromotionReconciliationRequest = {
+  promotionId: string;
+  reconciliationIdempotencyKey: string;
   expectedVersion?: number;
   executor: TrustedPromotionExecutor;
   session: AuthoritySession;
@@ -191,7 +205,6 @@ function baseTargetState(target: Target): {
 
 function contextDigest(input: {
   realmId: string;
-  stateVersion: number;
   project: Project;
   promotion: PromotionRecord;
   release: Release;
@@ -202,17 +215,44 @@ function contextDigest(input: {
   expectedCurrentReleaseId: string | null;
   executionIdempotencyKey: string;
 }): string {
+  // The provider handoff is an immutable execution identity.  Authority
+  // state, Promotion status, attempt counters, and receipts may change while
+  // an operation is being reconciled; none of those changes may manufacture a
+  // new provider operation or make a late result look current.  Bind only the
+  // immutable Project/Release/Target inputs and the execution identity.
   return digest({
     protocol: PROMOTION_EXECUTION_PROTOCOL,
     realmId: input.realmId,
-    stateVersion: input.stateVersion,
-    project: input.project,
-    promotion: input.promotion,
+    project: {
+      protocol: input.project.protocol,
+      id: input.project.id,
+      referenceType: input.project.referenceType,
+      sourceSpaceIds: input.project.sourceSpaceIds,
+    },
+    promotion: {
+      protocol: input.promotion.protocol,
+      id: input.promotion.id,
+      projectId: input.promotion.projectId,
+      targetId: input.promotion.targetId,
+      releaseId: input.promotion.releaseId,
+      releaseDigest: input.promotion.releaseDigest,
+      previousReleaseId: input.promotion.previousReleaseId,
+      expectedCurrentReleaseId: input.promotion.expectedCurrentReleaseId,
+      kind: input.promotion.kind,
+      idempotencyKey: input.promotion.idempotencyKey,
+    },
     release: input.release,
     artifacts: input.artifacts,
     evidence: input.evidence,
     previousRelease: input.previousRelease,
-    target: input.target,
+    target: {
+      protocol: input.target.protocol,
+      id: input.target.id,
+      projectId: input.target.projectId,
+      adapterId: input.target.adapterId,
+      acceptedArtifactTypes: input.target.acceptedArtifactTypes,
+      requiredEvidenceKeys: input.target.requiredEvidenceKeys,
+    },
     expectedCurrentReleaseId: input.expectedCurrentReleaseId,
     executionIdempotencyKey: input.executionIdempotencyKey,
   });
@@ -421,7 +461,7 @@ export function validatePromotionExecutionResult(input: PromotionExecutionContex
   }
   const resultPromotion = result.promotion;
   const resultTarget = result.target;
-  if (resultPromotion.protocol !== CONTRACT_VERSIONS.promotion || resultPromotion.id !== input.promotion.id || resultPromotion.projectId !== input.project.id || resultPromotion.targetId !== input.target.id || resultPromotion.releaseId !== input.release.id || resultPromotion.expectedCurrentReleaseId !== input.expectedCurrentReleaseId || resultPromotion.kind !== input.promotion.kind || (!input.promotion.releaseDigest.startsWith("declared:") && resultPromotion.releaseDigest !== input.promotion.releaseDigest) || resultPromotion.previousReleaseId !== input.promotion.previousReleaseId) {
+  if (resultPromotion.protocol !== CONTRACT_VERSIONS.promotion || resultPromotion.id !== input.promotion.id || resultPromotion.projectId !== input.project.id || resultPromotion.targetId !== input.target.id || resultPromotion.releaseId !== input.release.id || resultPromotion.expectedCurrentReleaseId !== input.expectedCurrentReleaseId || resultPromotion.kind !== input.promotion.kind || (!input.promotion.releaseDigest.startsWith("declared:") && resultPromotion.releaseDigest !== input.promotion.releaseDigest) || resultPromotion.previousReleaseId !== input.promotion.previousReleaseId || (resultPromotion.executionIdempotencyKey !== undefined && resultPromotion.executionIdempotencyKey !== input.executionIdempotencyKey)) {
     resultError({
       code: "lineage-mismatch",
       message: "Provider Promotion result is not bound to the requested Project, Release, Target, or expected current state.",
@@ -444,6 +484,14 @@ export function validatePromotionExecutionResult(input: PromotionExecutionContex
       message: "Promotion execution result contains credential material or a credential-shaped field.",
       recoveryAction: "remove credential material; return provider IDs, digests, and safe receipts only",
       receipt: `promotion=${input.promotion.id}; credentialMaterial=${forbidden}; targetMutation=false`,
+    });
+  }
+  if (result.checkpoint && result.checkpoint.idempotencyKey !== input.executionIdempotencyKey) {
+    resultError({
+      code: "lineage-mismatch",
+      message: "Provider reconciliation checkpoint belongs to a different immutable execution identity.",
+      recoveryAction: "discard the stale callback and reconcile the recorded execution identity",
+      receipt: `promotion=${input.promotion.id}; checkpointIdentity=${result.checkpoint.idempotencyKey}; expectedIdentity=${input.executionIdempotencyKey}; targetMutation=false`,
     });
   }
   validateResultState(input, result);

@@ -12,6 +12,7 @@
     "qualification:provider-feed": "tsx scripts/qualify-provider-feed.ts",
     "qualification:worker-target": "tsx scripts/qualify-worker-target.ts",
     "qualification:promotion-executor": "tsx scripts/qualify-promotion-executor.ts",
+    "qualification:promotion-reconciliation": "tsx scripts/qualify-promotion-reconciliation.ts",
     "qualification:private-alpha-journey": "tsx scripts/qualify-private-alpha-journey.ts",
     "test:private-alpha-journey": "tsx --test test/private-alpha-journey.test.ts",
     "qualification:replay-archive-workload": "tsx scripts/qualify-replay-archive-workload.ts",

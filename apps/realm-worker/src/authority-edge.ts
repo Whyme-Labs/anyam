@@ -3,6 +3,7 @@ import { AUTHORITY_COMMAND_PROTOCOL, AUTHORITY_PLANE_PROTOCOL } from "../../../s
 import { anyamRealmOwnerSessionId, requestAnyamRealmCoordinator } from "./passkey-owner.ts";
 import type { AnyamRealmOAuthEnv } from "./oauth-provider.ts";
 import { bootstrapCommand, bootstrapPath, projectBootstrapValue, type BootstrapMutation, type BootstrapPath } from "./bootstrap-contract.ts";
+import { RevisionPublishInputError, revisionPublishCommand, revisionPublishValue, REVISION_PUBLISH_COMMAND } from "./revision-contract.ts";
 import { EVIDENCE_RECORD_COMMAND, evidenceRecordCommand, evidenceRecordValue, RunEvidenceInputError, RUN_RECORD_COMMAND, runRecordCommand, runRecordValue } from "./run-evidence-contract.ts";
 
 function json(body: unknown, status = 200): Response {
@@ -268,6 +269,63 @@ async function recordMutation(request: Request, env: AnyamRealmOAuthEnv, operati
   }
 }
 
+type RevisionPublishPath = { matched: boolean; changeId?: string; malformed: boolean };
+
+function revisionPublishPath(pathname: string): RevisionPublishPath {
+  const segments = pathname.split("/");
+  if (segments[1] !== "api" || segments[2] !== "changes") return { matched: false, malformed: false };
+  if (segments.length !== 5 || segments[4] !== "revisions") return { matched: false, malformed: false };
+  const encodedChangeId = segments[3];
+  if (!encodedChangeId) return { matched: true, malformed: true };
+  try {
+    const changeId = decodeURIComponent(encodedChangeId);
+    if (!changeId || changeId.includes("/") || changeId.includes("\\") || changeId === "." || changeId === "..") return { matched: true, malformed: true };
+    return { matched: true, changeId, malformed: false };
+  } catch {
+    return { matched: true, malformed: true };
+  }
+}
+
+function revisionError(status: number, code: string, recoveryAction: string, receipt: string): Response {
+  return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction, receipt: `operation=${REVISION_PUBLISH_COMMAND}; ${receipt}; credentialFree=true; canonicalWrite=false` }, status);
+}
+
+async function revisionMutation(request: Request, env: AnyamRealmOAuthEnv, path: RevisionPublishPath): Promise<Response> {
+  const changeId = path.changeId;
+  if (!changeId) return revisionError(400, "invalid_revision_path", "Use POST /api/changes/{changeId}/revisions with one safe URL-encoded Change identifier.", "path=malformed; transition=not-applied");
+  const sessionId = await anyamRealmOwnerSessionId(request, env);
+  if (!sessionId) return revisionError(401, "owner_authentication_required", "Authenticate the Realm owner through /owner/login before publishing a Change Revision.", "ownerSession=missing-or-invalid; transition=not-applied");
+  if (request.method !== "POST") return revisionError(405, "method_not_allowed", "Use POST /api/changes/{changeId}/revisions with one Idempotency-Key header.", "method=post-required; transition=not-applied");
+  const idempotencyKey = request.headers.get("idempotency-key")?.trim();
+  if (!idempotencyKey) return revisionError(422, "invalid_request", "Send one non-empty Idempotency-Key header; no transition was accepted.", "idempotencyKey=required; transition=not-applied");
+  let body: Record<string, unknown>;
+  try {
+    body = await readBody(request);
+  } catch {
+    return revisionError(422, "invalid_request", "Send a JSON object containing only the documented revision.publish fields; no transition was accepted.", "body=object-required; transition=not-applied");
+  }
+  if (body.idempotencyKey !== undefined && body.idempotencyKey !== idempotencyKey) return revisionError(422, "invalid_request", "The body idempotencyKey does not match the Idempotency-Key header.", "idempotencyKey=transport-mismatch; transition=not-applied");
+  if (body.changeId !== undefined && body.changeId !== changeId) return revisionError(422, "invalid_request", "The Change path and body changeId must identify the same Change; no transition was accepted.", "changeId=path-body-mismatch; transition=not-applied");
+  let command: ReturnType<typeof revisionPublishCommand>;
+  try {
+    command = revisionPublishCommand({ ...body, changeId, idempotencyKey });
+  } catch (error) {
+    if (error instanceof RevisionPublishInputError) return revisionError(422, "invalid_request", error.recoveryAction, error.receipt);
+    return revisionError(422, "invalid_request", "Correct the typed revision request and retry; no transition was accepted.", "arguments=invalid; transition=not-applied");
+  }
+  try {
+    const result = await requestAnyamRealmCoordinator(env, "/authority/command/internal", { protocol: AUTHORITY_COMMAND_PROTOCOL, command: command.command, idempotencyKey: command.idempotencyKey, ...(command.expectedVersion === undefined ? {} : { expectedVersion: command.expectedVersion }), payload: command.payload, sessionId });
+    return json(revisionPublishValue(result, idempotencyKey));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const status = detail.includes("not_found") ? 404 : detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : detail.includes("invalid_request") ? 422 : detail.includes("idempotency_conflict") || detail.includes("stale_state") || detail.includes("conflict") ? 409 : 503;
+    const errorClass = status === 404 ? "not_found" : status === 403 ? "session_rejected" : status === 422 ? "invalid_request" : status === 409 ? "conflict" : "coordinator_rejected";
+    const code = status === 404 ? "revision_publish_not_found" : status === 403 ? "owner_session_rejected" : status === 422 ? "invalid_request" : status === 409 ? "revision_publish_conflict" : "authority_coordinator_rejected";
+    const recoveryAction = status === 404 ? "Verify the Project, Change, Workspace, Project View, and Source Space identifiers without probing hidden resources." : status === 409 ? "Read the current Authority version, reuse the original idempotency payload, or reconcile the exact Change/Workspace relationship before retrying." : status === 403 ? "Authenticate the Realm owner again and retry the same typed request." : "Inspect the Durable Object receipt and retry only the same idempotent request when safe.";
+    return revisionError(status, code, recoveryAction, `authority=coordinator-rejected; errorClass=${errorClass}`);
+  }
+}
+
 /**
  * Public Authority Plane edge. The host-only owner session is the current
  * authenticated principal boundary; the Durable Object revalidates the
@@ -284,7 +342,8 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   const isWorkspaceRoute = url.pathname === "/api/workspaces" || url.pathname.startsWith("/api/workspaces/");
   const isRunRoute = url.pathname === "/api/runs" || url.pathname.startsWith("/api/runs/");
   const isEvidenceRoute = url.pathname === "/api/evidence" || url.pathname.startsWith("/api/evidence/");
-  if (!url.pathname.startsWith("/api/authority") && !isProjectRoute && !isChangeRoute && !isWorkspaceRoute && !isRunRoute && !isEvidenceRoute) return undefined;
+  const revisionRoute = revisionPublishPath(url.pathname);
+  if (!url.pathname.startsWith("/api/authority") && !isProjectRoute && !isChangeRoute && !isWorkspaceRoute && !isRunRoute && !isEvidenceRoute && !revisionRoute.matched) return undefined;
 
   const health = customerRealmWorkerHealth(env);
   if (health.status !== "ready") {
@@ -299,6 +358,11 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   if (isEvidenceRoute) {
     if (url.pathname !== "/api/evidence") return recordError(EVIDENCE_RECORD_COMMAND, 400, "invalid_evidence_path", "Use POST /api/evidence with the Project and Run bindings in the typed JSON body.", "path=malformed; transition=not-applied");
     return recordMutation(request, env, EVIDENCE_RECORD_COMMAND);
+  }
+
+  if (revisionRoute.matched) {
+    if (revisionRoute.malformed) return revisionError(400, "invalid_revision_path", "Use POST /api/changes/{changeId}/revisions with one safe URL-encoded Change identifier.", "path=malformed; transition=not-applied");
+    return revisionMutation(request, env, revisionRoute);
   }
 
   if (bootstrap.mutation && (url.pathname !== "/api/projects" || request.method !== "GET")) return bootstrapMutation(request, env, bootstrap);

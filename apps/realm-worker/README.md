@@ -87,6 +87,7 @@ After an owner completes the passkey login ceremony, the public edge exposes:
 | `GET /api/projects/{projectId}` | Read one project-scoped summary through the Authority Coordinator |
 | `GET /api/changes` | Discover owner-visible Change summaries through the Authority Coordinator |
 | `GET /api/changes/{changeId}` | Read one Change and its immutable Revision summaries through the Authority Coordinator |
+| `POST /api/changes/{changeId}/revisions` | Publish one typed Change Revision candidate through the Authority Coordinator |
 | `GET /api/workspaces` | Discover owner-visible Workspace summaries through the Authority Coordinator |
 | `GET /api/workspaces/{workspaceId}` | Read one Workspace summary through the Authority Coordinator |
 | `POST /api/runs` | Record one typed declared-Action Run through the Authority Coordinator |
@@ -172,6 +173,22 @@ safe Change identifier, reject malformed or duplicate filters, preserve the
 Coordinator's deterministic ordering, and return only the safe Change and
 Revision summaries. They do not create Changes, publish Revisions, transfer
 source, issue task grants, land, or promote anything.
+
+The owner-authenticated REST surface also exposes typed
+`POST /api/changes/{changeId}/revisions`. The URL-decoded Change identifier is
+the authoritative path binding; a body `changeId`, when supplied, must match
+it. The JSON body uses the same closed `revision.publish` contract as MCP and
+requires Project, Change, Workspace, Project View, Project Revision,
+Source-Space snapshot, and declared-effect bindings, plus one
+`Idempotency-Key` header. The Coordinator checks the complete Change and
+Workspace relationship before accepting the candidate.
+
+The response is a credential-free redacted Revision/Change projection with
+`canonicalWrite=false`; source snapshots, mounts, actors, sessions,
+credentials, and raw Coordinator receipts are omitted. Identical requests
+replay the original safe result and changed payloads conflict. Publication
+does not transfer Git objects or advance the canonical Project Revision
+pointer; Landing, Release creation, and Target Promotion remain separate.
 
 The owner-authenticated REST surface also exposes the qualified Workspace
 summary at `GET /api/workspaces` and `GET /api/workspaces/{workspaceId}`. The

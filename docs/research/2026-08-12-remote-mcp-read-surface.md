@@ -3,7 +3,8 @@
 This note records the private-alpha boundary implemented for [Wayfinder ticket
 155](https://github.com/Whyme-Labs/anyam/issues/155), [ticket
 158](https://github.com/Whyme-Labs/anyam/issues/158), and [ticket
-159](https://github.com/Whyme-Labs/anyam/issues/159).
+159](https://github.com/Whyme-Labs/anyam/issues/159), and [ticket
+160](https://github.com/Whyme-Labs/anyam/issues/160).
 
 ## Qualified surface
 
@@ -40,6 +41,14 @@ actor identity, and credentials are deliberately omitted. The dedicated
 `workspace.inspect` OAuth scope keeps Workspace reads separate from
 `project.read` while the handler still reuses the encrypted kernel session.
 
+`change.list` and `change.inspect` use the dedicated `change.inspect` OAuth
+scope and one Coordinator query boundary. Change discovery is sorted by Change
+identifier using code-unit ordering; list filters are explicit `projectId`
+and/or `workspaceId` values. Inspection returns the stable Change identity and
+safe immutable Revision summaries ordered by sequence. Revision source-space
+snapshots, author/actor identity, origin metadata, source objects, and
+credentials are excluded.
+
 ## Deliberate non-capabilities
 
 The surface does not transfer Git objects, issue task grants, expose secret
@@ -58,9 +67,12 @@ MCP token is never passed through to Git, Cloudflare, or another provider.
 project and Workspace discovery/inspection, authenticated coordinator binding,
 deterministic ordering and Project filtering, malformed JSON-RPC, unknown
 methods, mutation denial, missing-resource concealment, missing scopes, and
-notification acknowledgement. `test/worker-entrypoint.test.ts` covers the
-binding-shaped Coordinator Workspace list/inspect responses and confirms that
-mounts and actor identity are not returned by the safe summary.
+notification acknowledgement. It also covers Change discovery/inspection,
+Revision sequence ordering, Project/Workspace filtering, and safe omission of
+source snapshots and actor identity. `test/worker-entrypoint.test.ts` covers
+the binding-shaped Coordinator Workspace and Change list/inspect responses and
+confirms that mounts, source snapshots, and actor identity are not returned by
+the safe summaries.
 
 This is a read-surface qualification, not a claim that the full remote MCP,
 REST, task-grant mutation API, web console, or production-scale service is

@@ -26,6 +26,7 @@ export const ANYAM_REALM_OAUTH_RESOURCE_PATH = "/mcp" as const;
 export const ANYAM_REALM_OAUTH_SCOPES = [
   "project.read",
   "workspace.inspect",
+  "change.inspect",
   "source.read",
   "change.write",
   "run.invoke",

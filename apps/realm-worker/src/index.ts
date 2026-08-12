@@ -449,6 +449,56 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     };
   }
 
+  private authorityChangeRevisionSummary(revision: AuthorityPlaneSnapshot["changeRevisions"][string]) {
+    return {
+      protocol: revision.protocol,
+      id: revision.id,
+      changeId: revision.changeId,
+      projectRevisionId: revision.projectRevisionId,
+      projectViewId: revision.projectViewId,
+      sequence: revision.sequence,
+      ...(revision.parentRevisionId ? { parentRevisionId: revision.parentRevisionId } : {}),
+      ...(revision.baseProjectRevisionId ? { baseProjectRevisionId: revision.baseProjectRevisionId } : {}),
+      ...(revision.workspaceId ? { workspaceId: revision.workspaceId } : {}),
+      declaredEffects: [...revision.declaredEffects],
+      ...(revision.affectedModuleIds ? { affectedModuleIds: [...revision.affectedModuleIds] } : {}),
+      ...(revision.affectedTargetIds ? { affectedTargetIds: [...revision.affectedTargetIds] } : {}),
+      ...(revision.conflictIds ? { conflictIds: [...revision.conflictIds] } : {}),
+      ...(revision.kind ? { kind: revision.kind } : {}),
+    };
+  }
+
+  private authorityChangeSummary(snapshot: AuthorityPlaneSnapshot, changeId: string) {
+    const change = snapshot.changes[changeId];
+    if (!change) throw new AuthorityPlaneError({ code: "not_found", message: `Change ${changeId} is not available in this Realm.`, recoveryAction: "verify the Change identifier without probing undiscoverable resources", receipt: `change=${changeId}; operation=change.inspect; discoverable=false` });
+    const project = snapshot.projects[change.projectId];
+    if (!project) throw new AuthorityPlaneError({ code: "indeterminate", message: `Change ${changeId} refers to a Project that is not readable.`, recoveryAction: "reconcile the Authority snapshot before exposing the Change summary", receipt: `change=${changeId}; project=missing; operation=change.inspect` });
+    const revisions = Object.values(snapshot.changeRevisions)
+      .filter((revision) => revision.changeId === changeId)
+      .sort((left, right) => left.sequence - right.sequence || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
+      .map((revision) => this.authorityChangeRevisionSummary(revision));
+    return {
+      change: {
+        protocol: change.protocol,
+        id: change.id,
+        projectId: change.projectId,
+        intentId: change.intentId,
+        baseProjectRevisionId: change.baseProjectRevisionId,
+        status: change.status,
+        latestRevisionId: change.latestRevisionId,
+        ...(change.workspaceId ? { workspaceId: change.workspaceId } : {}),
+        ...(change.revertsChangeRevisionId ? { revertsChangeRevisionId: change.revertsChangeRevisionId } : {}),
+      },
+      project: {
+        protocol: project.protocol,
+        id: project.id,
+        name: project.name,
+        referenceType: project.referenceType,
+      },
+      revisions,
+    };
+  }
+
   private async authorityProject(body: CoordinatorRequestBody): Promise<Response> {
     const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const projectId = coordinatorString(body, "projectId");
@@ -478,6 +528,33 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const workspaceIds = Object.keys(snapshot.workspaces).filter((id) => projectId === undefined || snapshot.workspaces[id]?.projectId === projectId).sort();
     const workspaces = workspaceIds.map((id) => this.authorityWorkspaceSummary(snapshot, id));
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", workspaces, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=workspace.list; workspaceCount=${workspaces.length}; ordering=workspace-id-code-unit-ascending;${projectId ? ` project=${projectId};` : ""} readOnly=true; credentialFree=true; canonicalWrite=false` });
+  }
+
+  private async authorityChanges(body: CoordinatorRequestBody): Promise<Response> {
+    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const projectId = body.projectId === undefined ? undefined : coordinatorString(body, "projectId");
+    const workspaceId = body.workspaceId === undefined ? undefined : coordinatorString(body, "workspaceId");
+    const changeId = body.changeId === undefined ? undefined : coordinatorString(body, "changeId");
+    const snapshot = await this.authoritySnapshot();
+    if (projectId !== undefined && !snapshot.projects[projectId]) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${projectId} is not available in this Realm.`, recoveryAction: "verify the Project identifier without probing undiscoverable resources", receipt: `project=${projectId}; operation=change.list; discoverable=false` });
+    if (workspaceId !== undefined && !snapshot.workspaces[workspaceId]) throw new AuthorityPlaneError({ code: "not_found", message: `Workspace ${workspaceId} is not available in this Realm.`, recoveryAction: "verify the Workspace identifier without probing undiscoverable resources", receipt: `workspace=${workspaceId}; operation=change.list; discoverable=false` });
+    if (changeId !== undefined) {
+      const summary = this.authorityChangeSummary(snapshot, changeId);
+      if (projectId !== undefined && summary.change.projectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Change ${changeId} is not available for Project ${projectId}.`, recoveryAction: "verify the Change identifier within the requested Project without probing undiscoverable resources", receipt: `change=${changeId}; project=${projectId}; operation=change.inspect; discoverable=false` });
+      if (workspaceId !== undefined && summary.change.workspaceId !== workspaceId) throw new AuthorityPlaneError({ code: "not_found", message: `Change ${changeId} is not available for Workspace ${workspaceId}.`, recoveryAction: "verify the Change identifier within the requested Workspace without probing undiscoverable resources", receipt: `change=${changeId}; workspace=${workspaceId}; operation=change.inspect; discoverable=false` });
+      return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", ...summary, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=change.inspect; change=${changeId}; revisionCount=${summary.revisions.length}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+    }
+    const changeIds = Object.keys(snapshot.changes)
+      .filter((id) => {
+        const change = snapshot.changes[id];
+        return change !== undefined && (projectId === undefined || change.projectId === projectId) && (workspaceId === undefined || change.workspaceId === workspaceId);
+      })
+      .sort();
+    const changes = changeIds.map((id) => {
+      const summary = this.authorityChangeSummary(snapshot, id);
+      return { change: summary.change, project: summary.project, revisionCount: summary.revisions.length };
+    });
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", changes, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=change.list; changeCount=${changes.length}; ordering=change-id-code-unit-ascending;${projectId ? ` project=${projectId};` : ""}${workspaceId ? ` workspace=${workspaceId};` : ""} readOnly=true; credentialFree=true; canonicalWrite=false` });
   }
 
   private async authorityCommand(body: CoordinatorRequestBody): Promise<Response> {
@@ -551,6 +628,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/project/internal") return await this.authorityProject(body);
       if (url.pathname === "/authority/projects/internal") return await this.authorityProjects(body);
       if (url.pathname === "/authority/workspaces/internal") return await this.authorityWorkspaces(body);
+      if (url.pathname === "/authority/changes/internal") return await this.authorityChanges(body);
       if (url.pathname === "/authority/command/internal") return await this.authorityCommand(body);
 
       if (url.pathname === "/identity/passkey-challenge/issue") {

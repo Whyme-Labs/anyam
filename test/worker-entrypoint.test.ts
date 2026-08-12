@@ -122,6 +122,19 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
           if (body.workspaceId !== undefined) return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", ...workspaces[0], receipt: "authority=coordinator; operation=workspace.inspect; readOnly=true; credentialFree=true; canonicalWrite=false" }));
           return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", workspaces, receipt: `authority=coordinator; operation=workspace.list; workspaceCount=${workspaces.length}; ordering=workspace-id-code-unit-ascending; readOnly=true; credentialFree=true; canonicalWrite=false` }));
         }
+        if (new URL(request.url).pathname === "/authority/changes/internal") {
+          const snapshot = authority.snapshot();
+          const changeIds = Object.keys(snapshot.changes).filter((id) => body.changeId === undefined || id === body.changeId).filter((id) => body.projectId === undefined || snapshot.changes[id]?.projectId === body.projectId).filter((id) => body.workspaceId === undefined || snapshot.changes[id]?.workspaceId === body.workspaceId).sort();
+          const summaries = changeIds.map((id) => {
+            const change = snapshot.changes[id]!;
+            const project = snapshot.projects[change.projectId]!;
+            const revisions = Object.values(snapshot.changeRevisions).filter((revision) => revision.changeId === id).sort((left, right) => left.sequence - right.sequence).map((revision) => ({ protocol: revision.protocol, id: revision.id, changeId: revision.changeId, projectRevisionId: revision.projectRevisionId, projectViewId: revision.projectViewId, sequence: revision.sequence, ...(revision.parentRevisionId ? { parentRevisionId: revision.parentRevisionId } : {}), ...(revision.baseProjectRevisionId ? { baseProjectRevisionId: revision.baseProjectRevisionId } : {}), ...(revision.workspaceId ? { workspaceId: revision.workspaceId } : {}), declaredEffects: [...revision.declaredEffects], ...(revision.kind ? { kind: revision.kind } : {}) }));
+            return { change: { protocol: change.protocol, id: change.id, projectId: change.projectId, intentId: change.intentId, baseProjectRevisionId: change.baseProjectRevisionId, status: change.status, latestRevisionId: change.latestRevisionId, ...(change.workspaceId ? { workspaceId: change.workspaceId } : {}) }, project: { protocol: project.protocol, id: project.id, name: project.name, referenceType: project.referenceType }, revisionCount: revisions.length, revisions };
+          });
+          if (body.changeId !== undefined && summaries.length === 0) return new Response(JSON.stringify({ code: "not_found", receipt: "change=hidden; discoverable=false" }), { status: 404 });
+          if (body.changeId !== undefined) return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", ...summaries[0], receipt: "authority=coordinator; operation=change.inspect; readOnly=true; credentialFree=true; canonicalWrite=false" }));
+          return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", changes: summaries.map(({ revisions, ...summary }) => ({ ...summary, revisionCount: revisions.length })), receipt: `authority=coordinator; operation=change.list; changeCount=${summaries.length}; ordering=change-id-code-unit-ascending; readOnly=true; credentialFree=true; canonicalWrite=false` }));
+        }
         const command = { ...body, protocol: body.protocol, command: body.command, idempotencyKey: body.idempotencyKey, payload: body.payload } as unknown as AuthorityCommand;
         const result = authority.execute(command, { realmId: "realm:authority-test", principalId: "owner:authority-test", actorId: "actor:authority-test", sessionId: ownerSessionId, clientId: "client:anyam-web", authorizationEpoch: 1 });
         return new Response(JSON.stringify(result), { status: result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503, headers: { "content-type": "application/json" } });
@@ -192,6 +205,19 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
   const change = (changeResult.value as Record<string, unknown>).change as { id: string };
   const revisionResult = await command("revision.publish", "idem:revision", { changeId: change.id, workspaceId: workspace.id, projectViewId: workspace.projectViewId, projectRevisionId: "candidate:authority-test", sourceSpaceSnapshots: { "source:authority-test": "git:candidate" }, declaredEffects: ["source.modify"] });
   const revision = (revisionResult.value as Record<string, unknown>).revision as { id: string };
+  const changeListResponse = await namespace.get("authority-test-do").fetch(new Request("https://realm-coordinator/authority/changes/internal", { method: "POST", headers: { [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE, "content-type": "application/json" }, body: JSON.stringify({ sessionId: ownerSessionId, projectId: project.id, workspaceId: workspace.id }) }));
+  assert.equal(changeListResponse.status, 200);
+  const changeList = await changeListResponse.json() as Record<string, unknown>;
+  assert.deepEqual((changeList.changes as Array<Record<string, unknown>>).map((entry) => (entry.change as Record<string, unknown>).id), [change.id]);
+  assert.equal(JSON.stringify(changeList).includes("sourceSpaceSnapshots"), false);
+  assert.equal(JSON.stringify(changeList).includes("\"author\":"), false);
+  assert.match(String(changeList.receipt), /ordering=change-id-code-unit-ascending/);
+  const changeInspectResponse = await namespace.get("authority-test-do").fetch(new Request("https://realm-coordinator/authority/changes/internal", { method: "POST", headers: { [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE, "content-type": "application/json" }, body: JSON.stringify({ sessionId: ownerSessionId, changeId: change.id }) }));
+  assert.equal(changeInspectResponse.status, 200);
+  const changeInspect = await changeInspectResponse.json() as Record<string, unknown>;
+  assert.equal(((changeInspect.change as Record<string, unknown>).id), change.id);
+  assert.deepEqual((changeInspect.revisions as Array<Record<string, unknown>>).map((entry) => entry.sequence), [1]);
+  assert.equal(JSON.stringify(changeInspect).includes("sourceSpaceSnapshots"), false);
   const beforeLanding = await state();
   assert.equal(((beforeLanding.authority as Record<string, unknown>).canonicalByProject as Record<string, string>)[project.id], canonicalBefore);
   const runResult = await command("run.record", "idem:run", { runId: "run:authority-test", actionId: "action:unit", projectRevisionId: "candidate:authority-test", projectViewId: workspace.projectViewId, runnerId: "runner:binding-shaped", status: "succeeded", outputDigest: "sha256:run" });

@@ -107,6 +107,15 @@ source objects, credentials, and mutation authority are not returned. The
 Coordinator sorts Workspace discovery by Workspace identifier using code-unit
 ordering and owns the single query boundary for list and inspect.
 
+The same resource exposes read-only `change.list` and `change.inspect` when the
+grant includes the dedicated `change.inspect` scope. `change.list` accepts
+validated `projectId` and `workspaceId` filters; `change.inspect` returns the
+safe Change summary and immutable Revision summaries in sequence order.
+Revision source snapshots, author/actor identity, origin metadata, source
+objects, credentials, and mutation authority are omitted. The Coordinator
+owns one query boundary for both operations and reports the deterministic
+Change-identifier ordering in its receipt.
+
 The command envelope is:
 
 ```json

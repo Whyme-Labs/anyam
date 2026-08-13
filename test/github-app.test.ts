@@ -15,6 +15,8 @@ import {
   type GitHubRestClient,
   type GitHubSmartHttpRefs,
   type GitHubSmartHttpTransport,
+  FetchGitHubAppHttpClient,
+  FetchGitHubRestClient,
 } from "../src/portability/github-app.ts";
 import { AUTHORITY_COMMAND_PROTOCOL, AuthorityPlaneCoordinator, emptyAuthorityPlaneSnapshot, type AuthoritySession } from "../src/cloudflare/authority-plane.ts";
 import type { GitRef } from "../src/kernel/contracts.ts";
@@ -94,6 +96,10 @@ class FakeApi implements GitHubRestClient {
 
   async getPullRequest(): Promise<GitHubPullRequestObservation> {
     return this.pullRequest;
+  }
+
+  async createPullRequest(): Promise<{ number: number; receipt: string }> {
+    return { number: this.pullRequest.number, receipt: "github-rest=create-pull-request; providerReceipt=redacted" };
   }
 
   async deleteRepository(input: { repository: string; token: string }): Promise<{ receipt: string }> {
@@ -217,6 +223,23 @@ test("GitHub App PR observation maps to an external proposal without copying pri
     receipt: "provider=github-app; proposal=42; delivery=delivery:42; credentialFree=true",
   });
   assert.equal(JSON.stringify(proposal).includes("title"), false);
+});
+
+test("GitHub App qualification setup creates a PR through the bounded REST client", async () => {
+  let request: { url: string; method: string | undefined; body: string } | undefined;
+  const http = new FetchGitHubAppHttpClient({
+    baseUrl: "https://api.github.com",
+    retry: { delaysMs: [], sizingReceipt: "fixture=rest-setup-retry-measured" },
+    fetchImpl: async (input, init) => {
+      request = { url: String(input), method: init?.method, body: String(init?.body ?? "") };
+      return new Response(JSON.stringify({ number: 73 }), { status: 201, headers: { "content-type": "application/json" } });
+    },
+  });
+  const client = new FetchGitHubRestClient(http);
+  const created = await client.createPullRequest({ repository: "acme/video-player", head: "qualification-pr", base: "main", title: "Disposable qualification", token: "opaque-setup-token" });
+  assert.equal(created.number, 73);
+  assert.deepEqual(request, { url: "https://api.github.com/repos/acme/video-player/pulls", method: "POST", body: JSON.stringify({ head: "qualification-pr", base: "main", title: "Disposable qualification" }) });
+  assert.equal(created.receipt.includes("opaque-setup-token"), false);
 });
 
 test("GitHub App external proposals enter Authority as one stable Change with successive Revisions", async () => {

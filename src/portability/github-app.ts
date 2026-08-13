@@ -16,7 +16,7 @@ export const GITHUB_APP_ADAPTER_PROTOCOL = "anyam.github-app-adapter/v1" as cons
 const execFile = promisify(execFileCallback);
 
 export type GitHubWebhookEventName = "push" | "pull_request";
-export type GitHubAppPermission = "contents:read" | "contents:write" | "metadata:read" | "pull_requests:read" | "administration:write";
+export type GitHubAppPermission = "contents:read" | "contents:write" | "metadata:read" | "pull_requests:read" | "pull_requests:write" | "administration:write";
 
 export type GitHubAppInstallation = {
   installationId: string;
@@ -28,7 +28,7 @@ export type GitHubAppInstallation = {
   permissions: {
     contents: "read" | "write";
     metadata: "read";
-    pullRequests: "read";
+    pullRequests: "read" | "write";
     administration?: "write";
   };
   events: readonly GitHubWebhookEventName[];
@@ -70,6 +70,7 @@ export type GitHubRestClient = {
   getCommit(input: { repository: string; oid: string; ref: string; token: string }): Promise<GitHubCommitObservation>;
   compare(input: { repository: string; baseOid: string; headOid: string; token: string }): Promise<{ status: "identical" | "ahead" | "behind" | "diverged"; receipt: string }>;
   getPullRequest(input: { repository: string; number: number; token: string }): Promise<GitHubPullRequestObservation>;
+  createPullRequest(input: { repository: string; head: string; base: string; title: string; token: string }): Promise<{ number: number; receipt: string }>;
   deleteRepository(input: { repository: string; token: string }): Promise<{ receipt: string }>;
 };
 
@@ -177,7 +178,7 @@ function validateInstallation(input: GitHubAppInstallation): void {
   if (input.selectedRepository !== true) throw new GitHubAppAdapterError({ errorCode: "github_app.repository_not_selected", message: "The GitHub App installation is not bound to a selected repository.", retryable: false, recoveryAction: "install the GitHub App with selected-repository access and retry", receipt: `repository=${repository}; selectedRepository=false; credentialMaterialStored=false` });
   const requiredEvents: readonly GitHubWebhookEventName[] = ["push", "pull_request"];
   if (input.events.length !== requiredEvents.length || requiredEvents.some((event) => !input.events.includes(event))) throw new GitHubAppAdapterError({ errorCode: "github_app.events_incomplete", message: "The GitHub App installation must subscribe only to push and pull_request events.", retryable: false, recoveryAction: "subscribe the App installation to push and pull_request only, then retry", receipt: `repository=${repository}; configuredEvents=${input.events.join(",")}; requiredEvents=push,pull_request; transition=not-applied` });
-  if (input.permissions.contents !== "write" || input.permissions.metadata !== "read" || input.permissions.pullRequests !== "read") throw new GitHubAppAdapterError({ errorCode: "github_app.permissions_incomplete", message: "The selected GitHub App installation lacks the minimum mirror permissions.", retryable: false, recoveryAction: "grant Contents write, Metadata read, and Pull requests read to the installed App", receipt: `repository=${repository}; permissions=minimum-required; transition=not-applied` });
+  if (input.permissions.contents !== "write" || input.permissions.metadata !== "read" || (input.permissions.pullRequests !== "read" && input.permissions.pullRequests !== "write")) throw new GitHubAppAdapterError({ errorCode: "github_app.permissions_incomplete", message: "The selected GitHub App installation lacks the minimum mirror permissions.", retryable: false, recoveryAction: "grant Contents write, Metadata read, and Pull requests read or write to the installed App", receipt: `repository=${repository}; permissions=minimum-required; transition=not-applied` });
 }
 
 function installationTokenPermissions(mode: "read" | "write" | "cleanup"): readonly GitHubAppPermission[] {
@@ -590,6 +591,13 @@ export class FetchGitHubRestClient implements GitHubRestClient {
     const base = data?.base as Record<string, unknown> | undefined;
     const repository = typeof (data?.base as Record<string, unknown> | undefined)?.repo === "object" && (data?.base as Record<string, unknown>).repo !== null ? ((data?.base as Record<string, unknown>).repo as Record<string, unknown>).full_name : input.repository;
     return { number: input.number, repository: typeof repository === "string" ? repository : input.repository, state: data?.state === "closed" ? "closed" : "open", merged: data?.merged === true, headRef: typeof head?.ref === "string" ? head.ref : "", headCommit: typeof head?.sha === "string" ? head.sha : "", baseRef: typeof base?.ref === "string" ? base.ref : "", baseCommit: typeof base?.sha === "string" ? base.sha : "" };
+  }
+
+  async createPullRequest(input: { repository: string; head: string; base: string; title: string; token: string }): Promise<{ number: number; receipt: string }> {
+    const response = await this.http.request({ method: "POST", path: `/repos/${input.repository}/pulls`, token: input.token, body: { head: input.head, base: input.base, title: input.title } });
+    const number = (response.data as Record<string, unknown> | undefined)?.number;
+    if (typeof number !== "number" || !Number.isSafeInteger(number) || number < 1) throw new GitHubAppAdapterError({ errorCode: "github_app.pull_request_create_invalid", message: "GitHub did not return a valid pull request number.", retryable: false, recoveryAction: "inspect the disposable repository pull request state before retrying setup", receipt: `provider=github-app; operation=create-pull-request; number=invalid; credentialMaterialStored=false` });
+    return { number, receipt: response.receipt };
   }
 
   async deleteRepository(input: { repository: string; token: string }): Promise<{ receipt: string }> {

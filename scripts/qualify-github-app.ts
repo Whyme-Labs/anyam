@@ -67,7 +67,7 @@ function runGit(directory: string, args: readonly string[], maxBufferBytes: numb
   return execFile("git", [...args], { cwd: directory, maxBuffer: maxBufferBytes }).then(({ stdout }) => stdout.trim());
 }
 
-async function seedRepository(maxBufferBytes: number): Promise<{ directory: string; initialOid: string; secondOid: string; divergentOid: string; bundlePath: string; bundleDigest: string }> {
+async function seedRepository(maxBufferBytes: number): Promise<{ directory: string; initialOid: string; secondOid: string; divergentOid: string; proposalBranch: string; proposalInitialOid: string; proposalSecondOid: string; bundlePath: string; bundleDigest: string }> {
   const directory = mkdtempSync(join(tmpdir(), "anyam-github-app-qualification-"));
   await runGit(directory, ["init", "-b", "main"], maxBufferBytes);
   await runGit(directory, ["config", "user.name", "Anyam GitHub App qualification"], maxBufferBytes);
@@ -81,6 +81,16 @@ async function seedRepository(maxBufferBytes: number): Promise<{ directory: stri
   await runGit(directory, ["bundle", "verify", bundlePath], maxBufferBytes);
   const bundleDigest = digest(readFileSync(bundlePath));
 
+  const proposalBranch = "qualification-pr";
+  await runGit(directory, ["checkout", "-b", proposalBranch], maxBufferBytes);
+  writeFileSync(join(directory, "README.md"), "Anyam GitHub App qualification\nPull request initial revision\n");
+  await runGit(directory, ["commit", "-am", "Create disposable pull request"], maxBufferBytes);
+  const proposalInitialOid = await runGit(directory, ["rev-parse", "HEAD"], maxBufferBytes);
+  writeFileSync(join(directory, "README.md"), "Anyam GitHub App qualification\nPull request successive revision\n");
+  await runGit(directory, ["commit", "-am", "Advance disposable pull request"], maxBufferBytes);
+  const proposalSecondOid = await runGit(directory, ["rev-parse", "HEAD"], maxBufferBytes);
+
+  await runGit(directory, ["checkout", "main"], maxBufferBytes);
   writeFileSync(join(directory, "README.md"), "Anyam GitHub App qualification\nInbound proposal revision\n");
   await runGit(directory, ["commit", "-am", "Record inbound proposal revision"], maxBufferBytes);
   const secondOid = await runGit(directory, ["rev-parse", "HEAD"], maxBufferBytes);
@@ -90,8 +100,8 @@ async function seedRepository(maxBufferBytes: number): Promise<{ directory: stri
   await runGit(directory, ["add", "README.md"], maxBufferBytes);
   await runGit(directory, ["commit", "-m", "Create explicit force-push divergence"], maxBufferBytes);
   const divergentOid = await runGit(directory, ["rev-parse", "HEAD"], maxBufferBytes);
-  await runGit(directory, ["checkout", "main"], maxBufferBytes);
-  return { directory, initialOid, secondOid, divergentOid, bundlePath, bundleDigest };
+  await runGit(directory, ["update-ref", "refs/heads/main", initialOid], maxBufferBytes);
+  return { directory, initialOid, secondOid, divergentOid, proposalBranch, proposalInitialOid, proposalSecondOid, bundlePath, bundleDigest };
 }
 
 function mirror(input: { repository: string; initialGeneration: string; initialOid?: string }): RepositoryMirror {
@@ -171,7 +181,6 @@ async function main(): Promise<void> {
   const qualificationId = required("ANYAM_GITHUB_APP_QUALIFICATION_ID");
   const disposableRepository = required("ANYAM_GITHUB_APP_DISPOSABLE_REPOSITORY");
   if (disposableRepository !== repository) throw new Error("ANYAM_GITHUB_APP_DISPOSABLE_REPOSITORY must exactly equal ANYAM_GITHUB_APP_REPOSITORY; cleanup target must be explicit");
-  const pullRequestNumber = positiveInteger("ANYAM_GITHUB_APP_PULL_REQUEST_NUMBER");
   const jwtLifetimeSeconds = positiveInteger("ANYAM_GITHUB_APP_JWT_LIFETIME_SECONDS");
   const jwtSizingReceipt = required("ANYAM_GITHUB_APP_JWT_SIZING_RECEIPT");
   const clockSkewSeconds = positiveInteger("ANYAM_GITHUB_APP_JWT_CLOCK_SKEW_SECONDS");
@@ -201,7 +210,7 @@ async function main(): Promise<void> {
     repositoryUrl,
     disposableQualificationId: qualificationId,
     selectedRepository: true,
-    permissions: { contents: "write", metadata: "read", pullRequests: "read", administration: "write" },
+    permissions: { contents: "write", metadata: "read", pullRequests: "write", administration: "write" },
     events: ["push", "pull_request"],
   };
   let http: FetchGitHubAppHttpClient | undefined;
@@ -223,6 +232,15 @@ async function main(): Promise<void> {
     const outbound = await service.sync({ canonical: { projectRevisionId: "project-revision:github-app-qualification:one", sourceSpaceId: emptyMirror.sourceSpaceId, sourceSpaceClassification: "public", disclosure: "public", verified: true, verificationReceipt: "qualification=source-verified", refs: refs([["refs/heads/main", seeded.initialOid]]) }, idempotencyKey: "qualification:outbound", actor });
     if (outbound.status !== "succeeded") throw new Error(`outbound projection failed: ${outbound.errorCode}; ${outbound.recoveryAction}`);
 
+    const setupToken = await issuer.issue({ installationId, repository, permissions: ["contents:write", "metadata:read", "pull_requests:write"] });
+    if (!setupToken.token.trim() || !Number.isFinite(Date.parse(setupToken.expiresAt)) || Date.parse(setupToken.expiresAt) <= Date.now()) throw new Error("GitHub App qualification setup credential was missing or expired");
+    const setupGit = new NodeGitSmartHttpTransport({ sourceDirectory: seeded.directory, maxBufferBytes: gitMaxBufferBytes, sizingReceipt: gitSizingReceipt });
+    await runGit(seeded.directory, ["update-ref", `refs/heads/${seeded.proposalBranch}`, seeded.proposalInitialOid], gitMaxBufferBytes);
+    const proposalBranchPush = await setupGit.push({ repositoryUrl, token: setupToken.token, expectedRefs: [], desiredRefs: [{ name: `refs/heads/${seeded.proposalBranch}`, oid: seeded.proposalInitialOid }], refMappings: [{ localRef: `refs/heads/${seeded.proposalBranch}`, remoteRef: `refs/heads/${seeded.proposalBranch}` }], operationId: "github:qualification:pr-branch", idempotencyKey: "github:qualification:pr-branch" });
+    const pullRequest = await api.createPullRequest({ repository, head: seeded.proposalBranch, base: "main", title: "Anyam disposable projection qualification", token: setupToken.token });
+    const pullRequestNumber = pullRequest.number;
+
+    await runGit(seeded.directory, ["update-ref", "refs/heads/main", seeded.secondOid], gitMaxBufferBytes);
     const externalPush = await adapter.push({ mirror: service.repositoryMirror, expectedGeneration: service.repositoryMirror.remoteGeneration, expectedRefs: refs([["refs/heads/main", seeded.initialOid]]), desiredRefs: refs([["refs/heads/main", seeded.secondOid]]), operationId: "github:qualification:external-push", idempotencyKey: "github:qualification:external-push" });
     if (externalPush.status !== "succeeded") throw new Error(`inbound push seed failed: ${externalPush.errorCode}; ${externalPush.recoveryAction}`);
     const inbound = await service.sync({ canonical: { projectRevisionId: "project-revision:github-app-qualification:one", sourceSpaceId: emptyMirror.sourceSpaceId, sourceSpaceClassification: "public", disclosure: "public", verified: true, verificationReceipt: "qualification=source-verified", refs: refs([["refs/heads/main", seeded.initialOid]]) }, idempotencyKey: "qualification:inbound", actor });
@@ -271,6 +289,8 @@ async function main(): Promise<void> {
     if (observedPr.status !== "succeeded") throw new Error(`pull-request observation failed: ${observedPr.errorCode}; ${observedPr.recoveryAction}`);
     const proposal = adapter.externalProposal(observedPr.value, { projectViewId: "project-view:github-app-qualification-public", baseProjectRevisionId: "project-revision:github-app-qualification:one", disclosure: "public", deliveryId: "delivery:github-app:pr", sourceSpaceSnapshots: { [emptyMirror.sourceSpaceId]: observedPr.value.headCommit } });
     if (proposal.proposalKey !== String(pullRequestNumber) || proposal.remoteRepository !== repository || JSON.stringify(proposal).includes("title")) throw new Error("pull-request proposal was not stable and metadata-minimal");
+    await runGit(seeded.directory, ["update-ref", `refs/heads/${seeded.proposalBranch}`, seeded.proposalSecondOid], gitMaxBufferBytes);
+    const proposalRevisionPush = await setupGit.push({ repositoryUrl, token: setupToken.token, expectedRefs: refs([[`refs/heads/${seeded.proposalBranch}`, seeded.proposalInitialOid]]), desiredRefs: [{ name: `refs/heads/${seeded.proposalBranch}`, oid: seeded.proposalSecondOid }], refMappings: [{ localRef: `refs/heads/${seeded.proposalBranch}`, remoteRef: `refs/heads/${seeded.proposalBranch}` }], operationId: "github:qualification:pr-revision", idempotencyKey: "github:qualification:pr-revision" });
     const secondProposal = await waitForSecondProposalRevision({ adapter, first: observedPr.value, number: pullRequestNumber, waitMs: proposalWaitMs, pollMs: proposalPollMs });
     if (!secondProposal.second) throw new Error(`pull-request ${pullRequestNumber} did not publish a successive head revision within the measured wait window; attempts=${secondProposal.attempts}; waitMs=${proposalWaitMs}; pollMs=${proposalPollMs}`);
     if (secondProposal.first.changeKey !== secondProposal.second.changeKey || secondProposal.first.revisionKey === secondProposal.second.revisionKey) throw new Error("pull-request revisions did not preserve stable Change identity while advancing the Revision");
@@ -287,7 +307,7 @@ async function main(): Promise<void> {
 
     cleanup = await cleanupGitHubAppDisposable({ installation, issuer, api, repositoryPrefix: repository, qualificationId, disposableRepository });
     if (cleanup.status !== "succeeded") throw new Error(`provider cleanup failed: ${cleanup.recoveryAction ?? cleanup.receipt}`);
-    console.log(JSON.stringify({ protocol, status: "succeeded", qualificationScope: "provider-adapter-only", acceptance: "partial; customer Realm/Authority qualification remains required", qualificationId, repository, mappedRef: "refs/heads/main", outbound: "projected", inbound: { changeCount: changes.length }, forcePush: "classified", credentialExpiry: "rejected-and-resumed", webhook: "signed-deduplicated-and-reconciled", pullRequestObservation: { proposalKey: String(pullRequestNumber), stableObservationIdentity: true, successiveHeadObserved: true, authorityChangeLedger: "not-run" }, gitBundleExportRestore: { bundleDigest: seeded.bundleDigest, restored: true, authorityExportRestore: "not-run" }, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true, cleanup }, null, 2));
+    console.log(JSON.stringify({ protocol, status: "succeeded", qualificationScope: "provider-adapter-only", acceptance: "partial; customer Realm/Authority qualification remains required", qualificationId, repository, mappedRef: "refs/heads/main", outbound: "projected", inbound: { changeCount: changes.length }, forcePush: "classified", credentialExpiry: "rejected-and-resumed", webhook: "signed-deduplicated-and-reconciled", pullRequestSetup: { branch: seeded.proposalBranch, created: true, branchPush: proposalBranchPush.receipt, successiveRevisionPush: proposalRevisionPush.receipt }, pullRequestObservation: { proposalKey: String(pullRequestNumber), stableObservationIdentity: true, successiveHeadObserved: true, authorityChangeLedger: "not-run" }, gitBundleExportRestore: { bundleDigest: seeded.bundleDigest, restored: true, authorityExportRestore: "not-run" }, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true, cleanup }, null, 2));
   } catch (error) {
     if (!cleanup) {
       try {

@@ -5,11 +5,14 @@ GitHub App projection adapter. It is not a production-support claim. Anyam
 remains canonical; GitHub is an external projection and contribution surface.
 
 The qualification requires a customer-operated GitHub App installation with
-selected-repository access. The App must have `Contents: write`, `Metadata:
-read`, `Pull requests: read`, and `Administration: write` only for the
-disposable-repository cleanup step. Subscribe the App to exactly `push` and
-`pull_request` events. The qualification repository must be disposable and
-must equal the explicit cleanup target.
+selected-repository access. The runtime adapter uses `Contents: write`,
+`Metadata: read`, and `Pull requests: read`. The qualification setup also uses
+`Pull requests: write` to create a disposable branch and PR, then advances the
+PR head deterministically; this setup permission is not required by the
+production observation path. `Administration: write` is used only for the
+explicit disposable-repository cleanup step. Subscribe the App to exactly
+`push` and `pull_request` events. The qualification repository must be
+disposable and must equal the explicit cleanup target.
 
 Required environment variables:
 
@@ -22,7 +25,6 @@ ANYAM_GITHUB_APP_REPOSITORY_URL=https://github.com/owner/name.git (optional)
 ANYAM_GITHUB_APP_WEBHOOK_SECRET
 ANYAM_GITHUB_APP_QUALIFICATION_ID
 ANYAM_GITHUB_APP_DISPOSABLE_REPOSITORY=owner/name
-ANYAM_GITHUB_APP_PULL_REQUEST_NUMBER
 ANYAM_GITHUB_APP_JWT_LIFETIME_SECONDS
 ANYAM_GITHUB_APP_JWT_SIZING_RECEIPT
 ANYAM_GITHUB_APP_JWT_CLOCK_SKEW_SECONDS
@@ -56,12 +58,13 @@ The command exercises:
 - a local Git bundle export/restore digest check; and
 - exact disposable-repository cleanup.
 
-The PR successive-head check needs an existing PR and an external synchronize
-event during the measured wait window. It observes the stable provider proposal
-key and successive head, but does not itself write Anyam's Change/Revision
-ledger. Project/Authority export and restore are also outside this provider
-adapter command. These are deliberate qualification boundaries, not hidden
-claims.
+The qualification creates the disposable PR through the installed App after
+the initial mapped branch projection, then pushes a second head revision and
+observes the provider's updated PR state during the measured wait window. It
+does not require a pre-existing PR or human timing. The adapter still observes
+the PR; it does not itself write Anyam's Change/Revision ledger. Project/
+Authority export and restore are also outside this provider adapter command.
+These are deliberate qualification boundaries, not hidden claims.
 
 The repository must already exist and be bound to the customer Realm/Source
 Space qualification. The script does not create an unowned repository. On

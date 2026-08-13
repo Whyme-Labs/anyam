@@ -73,6 +73,8 @@ export const CONTRACT_VERSIONS = {
   mirror: "anyam.mirror/v1",
   mirrorOperation: "anyam.mirror-operation/v1",
   mirrorCheckpoint: "anyam.mirror-checkpoint/v1",
+  externalProposal: "anyam.external-proposal/v1",
+  mirrorDelivery: "anyam.mirror-delivery/v1",
   publicIntake: "anyam.public-intake/v1",
   publicGateway: "anyam.public-gateway/v1",
   publicGatewayAbuse: "anyam.public-gateway-abuse/v1",
@@ -208,6 +210,13 @@ export type ChangeOrigin = {
   remoteRef?: string;
   remoteCommit?: string;
   remoteAuthor?: { name: string; email?: string };
+  externalProposalKey?: string;
+  externalProposalKind?: "pull-request" | "ref" | "commit";
+  externalProposalHead?: string;
+  externalProposalBase?: string;
+  externalProposalInstallation?: string;
+  externalProposalSourceIdentity?: string;
+  externalDeliveryId?: string;
   disclosure: DisclosureClassification;
   receipt: string;
 };
@@ -826,6 +835,10 @@ export type ProjectExport = {
   releases: readonly Release[];
   targets: readonly Target[];
   mirrors?: readonly RepositoryMirror[];
+  mirrorOperations?: readonly MirrorOperation[];
+  mirrorCheckpoints?: readonly MirrorCheckpoint[];
+  externalProposals?: readonly ExternalProposal[];
+  mirrorDeliveries?: readonly MirrorDelivery[];
   mirrorOperationIds?: readonly string[];
   capabilityGrants: readonly CapabilityGrant[];
   extensions: readonly ExtensionManifest[];
@@ -933,6 +946,59 @@ export type MirrorCheckpoint = {
   remoteRefs: readonly GitRef[];
   completedInboundChangeIds: readonly string[];
   recoveryAction: string;
+  receipt: string;
+};
+
+/** Stable provider identity for one external proposal. The composite key is
+ * deliberately explicit so a provider adapter cannot accidentally collapse
+ * two installations or repositories into one Anyam Change. */
+export type ExternalProposal = {
+  protocol: typeof CONTRACT_VERSIONS.externalProposal;
+  id: string;
+  /** Stable serialized ledger identity preserved across export and restore. */
+  ledgerKey: string;
+  mirrorId: string;
+  projectId: string;
+  sourceSpaceId: string;
+  provider: string;
+  installationId?: string;
+  sourceIdentity: string;
+  remoteRepository: string;
+  proposalKind: "pull-request" | "ref" | "commit";
+  proposalKey: string;
+  remoteRef?: string;
+  baseRef?: string;
+  baseCommit?: string;
+  latestHeadCommit: string;
+  observedHeadCommits: readonly string[];
+  changeId: string;
+  changeRevisionIds: readonly string[];
+  status: "open" | "closed" | "merged" | "blocked";
+  lastDeliveryId?: string;
+  disclosure: DisclosureClassification;
+  createdAt: string;
+  updatedAt: string;
+  receipt: string;
+};
+
+/** Credential-free delivery identity used to reject duplicate provider
+ * deliveries even when a caller retries with a new Authority idempotency key. */
+export type MirrorDelivery = {
+  protocol: typeof CONTRACT_VERSIONS.mirrorDelivery;
+  id: string;
+  mirrorId: string;
+  provider: string;
+  installationId?: string;
+  sourceIdentity: string;
+  remoteRepository: string;
+  deliveryId: string;
+  deliveryKey: string;
+  eventType: string;
+  proposalKey?: string;
+  operationId?: string;
+  state: "received" | "processed" | "duplicate" | "blocked";
+  createdAt: string;
+  processedAt?: string;
   receipt: string;
 };
 

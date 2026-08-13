@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { createProject, type Project, type RepositoryMirror, type SourceSpace } from "../src/kernel/contracts.ts";
+import { CONTRACT_VERSIONS, createProject, type ExternalProposal, type MirrorCheckpoint, type MirrorDelivery, type MirrorOperation, type Project, type RepositoryMirror, type SourceSpace } from "../src/kernel/contracts.ts";
 import { LocalGitRepositoryDriver } from "../src/portability/local-git.ts";
 import {
   LocalProjectExporter,
@@ -199,6 +199,77 @@ test("Project Export includes Git bundles, lineage, and recovery metadata and re
       updatedAt: "2026-08-03T00:00:00.000Z",
       receipt: "fixture=mirror-export",
     };
+    const mirrorOperation: MirrorOperation = {
+      protocol: CONTRACT_VERSIONS.mirrorOperation,
+      id: "mirror-operation:one",
+      mirrorId: mirror.id,
+      kind: "inbound",
+      state: "succeeded",
+      canonicalProjectRevisionId: "project-revision:initial",
+      expectedRemoteGeneration: "remote:g0",
+      actualRemoteGeneration: "remote:g1",
+      inboundChangeIds: ["change:external-42"],
+      checkpointId: "mirror-checkpoint:one",
+      createdAt: "2026-08-03T00:00:00.000Z",
+      completedAt: "2026-08-03T00:01:00.000Z",
+      receipt: "fixture=mirror-operation; credentialFree=true",
+    };
+    const mirrorCheckpoint: MirrorCheckpoint = {
+      protocol: CONTRACT_VERSIONS.mirrorCheckpoint,
+      id: "mirror-checkpoint:one",
+      mirrorId: mirror.id,
+      operationId: mirrorOperation.id,
+      state: "completed",
+      canonicalProjectRevisionId: "project-revision:initial",
+      canonicalRefs: [{ name: "refs/heads/main", oid: "initial" }],
+      remoteGeneration: "remote:g1",
+      remoteRefs: [{ name: "refs/heads/main", oid: "external" }],
+      completedInboundChangeIds: ["change:external-42"],
+      recoveryAction: "inspect the completed checkpoint before another provider operation",
+      receipt: "fixture=mirror-checkpoint; credentialFree=true",
+    };
+    const externalProposal: ExternalProposal = {
+      protocol: CONTRACT_VERSIONS.externalProposal,
+      id: "external-proposal:42",
+      ledgerKey: JSON.stringify(["github", "installation:github-app", "installation:github-app", "acme/round-trip", "pull-request", "42"]),
+      mirrorId: mirror.id,
+      projectId: project.id,
+      sourceSpaceId: sourceSpace.id,
+      provider: "github",
+      installationId: "installation:github-app",
+      sourceIdentity: "installation:github-app",
+      remoteRepository: mirror.remoteRepository,
+      proposalKind: "pull-request",
+      proposalKey: "42",
+      latestHeadCommit: "external",
+      observedHeadCommits: ["external"],
+      changeId: "change:external-42",
+      changeRevisionIds: ["change-revision:external-42"],
+      status: "open",
+      lastDeliveryId: "delivery:42",
+      disclosure: "public",
+      createdAt: "2026-08-03T00:00:00.000Z",
+      updatedAt: "2026-08-03T00:01:00.000Z",
+      receipt: "fixture=external-proposal; credentialFree=true",
+    };
+    const mirrorDelivery: MirrorDelivery = {
+      protocol: CONTRACT_VERSIONS.mirrorDelivery,
+      id: "mirror-delivery:42",
+      mirrorId: mirror.id,
+      provider: "github",
+      installationId: "installation:github-app",
+      sourceIdentity: "installation:github-app",
+      remoteRepository: mirror.remoteRepository,
+      deliveryId: "delivery:42",
+      deliveryKey: JSON.stringify(["github", "installation:github-app", "installation:github-app", "acme/round-trip", "delivery:42"]),
+      eventType: "pull_request.synchronize",
+      proposalKey: "42",
+      operationId: mirrorOperation.id,
+      state: "processed",
+      createdAt: "2026-08-03T00:00:00.000Z",
+      processedAt: "2026-08-03T00:01:00.000Z",
+      receipt: "fixture=mirror-delivery; credentialFree=true",
+    };
     const exported = await exporter.exportProject({
       project,
       sourceSpaces: [sourceSpace],
@@ -208,6 +279,10 @@ test("Project Export includes Git bundles, lineage, and recovery metadata and re
       policies: ["policy:local"],
       auditEventIds: ["event:exported"],
       mirrors: [mirror],
+      mirrorOperations: [mirrorOperation],
+      mirrorCheckpoints: [mirrorCheckpoint],
+      externalProposals: [externalProposal],
+      mirrorDeliveries: [mirrorDelivery],
       mirrorOperationIds: ["mirror-operation:one"],
       idempotencyKey: "export-round-trip",
     });
@@ -221,6 +296,11 @@ test("Project Export includes Git bundles, lineage, and recovery metadata and re
     assert.equal(manifest.recovery.state, "verified");
     assert.equal(manifest.mirrors?.[0]?.id, mirror.id);
     assert.deepEqual(manifest.mirrorOperationIds, ["mirror-operation:one"]);
+    assert.equal(manifest.mirrorOperations?.[0]?.id, mirrorOperation.id);
+    assert.equal(manifest.mirrorCheckpoints?.[0]?.id, mirrorCheckpoint.id);
+    assert.equal(manifest.externalProposals?.[0]?.changeId, externalProposal.changeId);
+    assert.equal(manifest.externalProposals?.[0]?.ledgerKey, externalProposal.ledgerKey);
+    assert.equal(manifest.mirrorDeliveries?.[0]?.deliveryId, mirrorDelivery.deliveryId);
     assert.equal(manifest.integrity.credentialFree, true);
     assert.equal(manifest.integrity.manifestDigest, projectExportManifestDigest(manifest));
     const serialized = JSON.stringify(manifest);

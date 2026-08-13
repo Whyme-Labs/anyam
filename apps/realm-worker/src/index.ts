@@ -10,6 +10,7 @@ import {
   AuthorityPlaneError,
   authorityStateSummary,
   emptyAuthorityPlaneSnapshot,
+  normalizeAuthorityPlaneSnapshot,
   type AuthorityCommand,
   type AuthorityCommandName,
   type AuthorityPlaneSnapshot,
@@ -555,7 +556,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
 
   private async authoritySnapshot(): Promise<AuthorityPlaneSnapshot> {
     const stored = await this.ctx.storage.get<AuthorityPlaneSnapshot>(REALM_AUTHORITY_SNAPSHOT_KEY);
-    return stored ?? emptyAuthorityPlaneSnapshot(this.requireIdentity().realm.id);
+    return stored ? normalizeAuthorityPlaneSnapshot(stored) : emptyAuthorityPlaneSnapshot(this.requireIdentity().realm.id);
   }
 
   private delegationAuthority(body: CoordinatorRequestBody, snapshot: AuthorityPlaneSnapshot): { projectId: string; workspaceId: string; changeId: string; sourceSpaceIds: string[]; resource: { realmId: string; projectId: string; workspaceId: string; changeId: string; sourceSpaceId?: string }; sources: AuthorityPlaneSnapshot["sourceSpaces"] } {
@@ -762,6 +763,25 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", changes, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=change.list; changeCount=${changes.length}; ordering=change-id-code-unit-ascending;${projectId ? ` project=${projectId};` : ""}${workspaceId ? ` workspace=${workspaceId};` : ""} readOnly=true; credentialFree=true; canonicalWrite=false` });
   }
 
+  private async authorityMirrors(body: CoordinatorRequestBody): Promise<Response> {
+    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const projectId = body.projectId === undefined ? undefined : coordinatorString(body, "projectId");
+    const mirrorId = body.mirrorId === undefined ? undefined : coordinatorString(body, "mirrorId");
+    const snapshot = await this.authoritySnapshot();
+    if (projectId !== undefined && !snapshot.projects[projectId]) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${projectId} is not available in this Realm.`, recoveryAction: "verify the Project identifier without probing undiscoverable resources", receipt: `project=${projectId}; operation=mirror.list; discoverable=false` });
+    if (mirrorId !== undefined) {
+      const mirror = snapshot.mirrors[mirrorId];
+      if (!mirror || (projectId !== undefined && mirror.projectId !== projectId)) throw new AuthorityPlaneError({ code: "not_found", message: `Repository Mirror ${mirrorId} is not available for this Project.`, recoveryAction: "verify the Mirror identifier within the requested Project without probing undiscoverable resources", receipt: `mirror=${mirrorId}; project=${projectId ?? "not-supplied"}; operation=mirror.inspect; discoverable=false` });
+      const operation = mirror.lastOperationId ? snapshot.mirrorOperations[mirror.lastOperationId] : undefined;
+      const checkpoint = mirror.checkpointId ? snapshot.mirrorCheckpoints[mirror.checkpointId] : undefined;
+      const proposals = Object.values(snapshot.externalProposals).filter((proposal) => proposal.mirrorId === mirror.id).map((proposal) => ({ ...proposal, observedHeadCommits: [...proposal.observedHeadCommits], changeRevisionIds: [...proposal.changeRevisionIds] }));
+      const deliveries = Object.values(snapshot.mirrorDeliveries).filter((delivery) => delivery.mirrorId === mirror.id).map((delivery) => ({ ...delivery }));
+      return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", mirror: { ...mirror, refMappings: mirror.refMappings.map((mapping) => ({ ...mapping })), canonicalRefs: mirror.canonicalRefs.map((ref) => ({ ...ref })), remoteRefs: mirror.remoteRefs.map((ref) => ({ ...ref })), pendingInboundChangeIds: [...mirror.pendingInboundChangeIds] }, ...(operation ? { operation } : {}), ...(checkpoint ? { checkpoint } : {}), proposals, deliveries, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=mirror.inspect; mirror=${mirror.id}; proposals=${proposals.length}; deliveries=${deliveries.length}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+    }
+    const mirrors = Object.values(snapshot.mirrors).filter((mirror) => projectId === undefined || mirror.projectId === projectId).sort((left, right) => left.id.localeCompare(right.id)).map((mirror) => ({ id: mirror.id, projectId: mirror.projectId, sourceSpaceId: mirror.sourceSpaceId, provider: mirror.provider, remoteRepository: mirror.remoteRepository, disclosure: mirror.disclosure, state: mirror.state, canonicalProjectRevisionId: mirror.canonicalProjectRevisionId, remoteGeneration: mirror.remoteGeneration, pendingInboundChangeIds: [...mirror.pendingInboundChangeIds], ...(mirror.lastOperationId ? { lastOperationId: mirror.lastOperationId } : {}), ...(mirror.checkpointId ? { checkpointId: mirror.checkpointId } : {}) }));
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", mirrors, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=mirror.list; mirrorCount=${mirrors.length}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+  }
+
   private async authorityPromotionExecute(body: CoordinatorRequestBody): Promise<Response> {
     const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const promotionId = coordinatorString(body, "promotionId");
@@ -873,7 +893,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   private async authorityCommand(body: CoordinatorRequestBody): Promise<Response> {
     const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const command = coordinatorString(body, "command") as AuthorityCommandName;
-    const allowed: readonly AuthorityCommandName[] = ["project.create", "workspace.create", "change.create", "revision.publish", "run.record", "evidence.record", "artifact.record", "landing.apply", "release.create", "target.configure", "promotion.request"];
+    const allowed: readonly AuthorityCommandName[] = ["project.create", "workspace.create", "change.create", "revision.publish", "run.record", "evidence.record", "artifact.record", "landing.apply", "release.create", "target.configure", "promotion.request", "mirror.configure", "mirror.sync", "mirror.reconcile"];
     if (!allowed.includes(command)) throw new AuthorityPlaneError({ code: "invalid_request", message: `Authority command ${command} is not supported by this vertical slice.`, recoveryAction: `use one of ${allowed.join(", ")} and retry; no authority transition was accepted`, receipt: `command=${command}; transition=not-applied` });
     const payload = body.payload;
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new AuthorityPlaneError({ code: "invalid_request", message: "Authority command payload must be a JSON object.", recoveryAction: "send the command-specific payload as an object; no authority transition was accepted", receipt: `command=${command}; payload=object-required; transition=not-applied` });
@@ -942,6 +962,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/projects/internal") return await this.authorityProjects(body);
       if (url.pathname === "/authority/workspaces/internal") return await this.authorityWorkspaces(body);
       if (url.pathname === "/authority/changes/internal") return await this.authorityChanges(body);
+      if (url.pathname === "/authority/mirrors/internal") return await this.authorityMirrors(body);
       if (url.pathname === "/authority/promotion/execute/internal") return await this.authorityPromotionExecute(body);
       if (url.pathname === "/authority/promotion/reconcile/internal") return await this.authorityPromotionReconcile(body);
       if (url.pathname === "/authority/promotion/status/internal") return await this.authorityPromotionStatus(body);

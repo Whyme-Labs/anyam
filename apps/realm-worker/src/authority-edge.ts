@@ -11,6 +11,7 @@ import { RELEASE_CREATE_COMMAND, releaseCreateCommand, releaseCreateValue, Relea
 import { TARGET_CONFIGURE_COMMAND, targetConfigureCommand, targetConfigureValue, TargetConfigureInputError } from "./target-contract.ts";
 import { PROMOTION_REQUEST_COMMAND, promotionRequestCommand, promotionRequestValue, PromotionRequestInputError } from "./promotion-contract.ts";
 import { PROMOTION_EXECUTE_COMMAND, PROMOTION_RECONCILE_COMMAND, promotionExecutionCommand, promotionExecutionValue, promotionReconciliationCommand, promotionReconciliationValue, promotionStatusValue, PromotionExecutionInputError } from "./promotion-execution-contract.ts";
+import { mirrorCommand, mirrorMutationValue, mirrorPath, MirrorInputError, type MirrorMutation } from "./mirror-contract.ts";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
@@ -275,6 +276,61 @@ async function recordMutation(request: Request, env: AnyamRealmOAuthEnv, operati
     const code = status === 404 ? `${operation.replace(".", "_")}_not_found` : status === 403 ? "owner_session_rejected" : status === 422 ? "invalid_request" : status === 409 ? `${operation.replace(".", "_")}_conflict` : "authority_coordinator_rejected";
     const recoveryAction = status === 404 ? "Verify the Project, Project Revision, Project View, Workspace, Change Revision, Run, and Artifact identifiers without probing hidden resources." : status === 409 ? "Read the current Authority version, reuse the original idempotency payload, or reconcile the exact lifecycle relationship before retrying." : status === 403 ? "Authenticate the Realm owner again and retry the same typed request." : "Inspect the Durable Object receipt and retry only the same idempotent request when safe.";
     return recordError(operation, status, code, recoveryAction, `authority=coordinator-rejected; errorClass=${errorClass}`);
+  }
+}
+
+function mirrorError(status: number, code: string, recoveryAction: string, receipt: string): Response {
+  return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction, credentialFree: true, canonicalWrite: false, receipt: `operation=mirror; ${receipt}; credentialFree=true; canonicalWrite=false` }, status);
+}
+
+async function mirrorMutation(request: Request, env: AnyamRealmOAuthEnv, operation: MirrorMutation, mirrorId?: string): Promise<Response> {
+  const sessionId = await anyamRealmOwnerSessionId(request, env);
+  if (!sessionId) return mirrorError(401, "owner_authentication_required", "Authenticate the Realm owner through /owner/login before mutating a Repository Mirror.", "ownerSession=missing-or-invalid; transition=not-applied");
+  if (request.method !== "POST") return mirrorError(405, "method_not_allowed", `Use POST /api/mirrors${mirrorId ? `/${encodeURIComponent(mirrorId)}/${operation}` : ""} with one Idempotency-Key header.`, "method=post-required; transition=not-applied");
+  const idempotencyKey = request.headers.get("idempotency-key")?.trim();
+  if (!idempotencyKey) return mirrorError(422, "invalid_request", "Send one non-empty Idempotency-Key header; no Mirror transition was accepted.", "idempotencyKey=required; transition=not-applied");
+  let body: Record<string, unknown>;
+  try {
+    body = await readBody(request);
+  } catch {
+    return mirrorError(422, "invalid_request", "Send a JSON object containing only the documented Mirror fields; no provider authority was accepted.", "body=object-required; transition=not-applied");
+  }
+  if (mirrorId && body.mirrorId !== undefined && body.mirrorId !== mirrorId) return mirrorError(422, "invalid_request", "The Mirror path and body mirrorId must identify the same Mirror.", "mirrorId=path-body-mismatch; transition=not-applied");
+  let command: ReturnType<typeof mirrorCommand>;
+  try {
+    command = mirrorCommand({ operation, body, idempotencyKey, ...(mirrorId ? { mirrorId } : {}) });
+  } catch (error) {
+    if (error instanceof MirrorInputError) return mirrorError(422, "invalid_request", error.recoveryAction, error.receipt);
+    return mirrorError(422, "invalid_request", "Correct the typed Mirror request and retry; no provider authority was accepted.", "arguments=invalid; transition=not-applied");
+  }
+  try {
+    const result = await requestAnyamRealmCoordinator(env, "/authority/command/internal", { protocol: AUTHORITY_COMMAND_PROTOCOL, command: command.command, idempotencyKey: command.idempotencyKey, ...(command.expectedVersion === undefined ? {} : { expectedVersion: command.expectedVersion }), payload: command.payload, sessionId });
+    return json(mirrorMutationValue(result, idempotencyKey), result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const status = detail.includes("not_found") ? 404 : detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : detail.includes("invalid_request") ? 422 : detail.includes("idempotency_conflict") || detail.includes("stale_state") || detail.includes("conflict") ? 409 : 503;
+    const errorClass = status === 404 ? "not_found" : status === 403 ? "session_rejected" : status === 422 ? "invalid_request" : status === 409 ? "conflict" : "coordinator_rejected";
+    const code = status === 404 ? "mirror_not_found" : status === 403 ? "owner_session_rejected" : status === 422 ? "invalid_request" : status === 409 ? "mirror_conflict" : "authority_coordinator_rejected";
+    const recoveryAction = status === 404 ? "Verify the Project, Source Space, Mirror, Project View, and canonical Revision identifiers without probing hidden resources." : status === 409 ? "Read the current Mirror checkpoint, reuse the original idempotent payload, or choose an explicit reconciliation; no provider credential was accepted." : status === 403 ? "Authenticate the Realm owner again and retry the same typed request." : "Inspect the Durable Object receipt and retry only the same idempotent request when safe.";
+    return mirrorError(status, code, recoveryAction, `authority=coordinator-rejected; errorClass=${errorClass}`);
+  }
+}
+
+async function mirrorRead(request: Request, env: AnyamRealmOAuthEnv, mirrorId?: string): Promise<Response> {
+  const sessionId = await anyamRealmOwnerSessionId(request, env);
+  if (!sessionId) return mirrorError(401, "owner_authentication_required", "Authenticate the Realm owner through /owner/login before inspecting Repository Mirrors.", "ownerSession=missing-or-invalid; mirrorRead=not-accepted");
+  if (request.method !== "GET") return mirrorError(405, "method_not_allowed", "Use GET /api/mirrors or GET /api/mirrors/{mirrorId} for the read-only Mirror ledger.", "method=get-required; mirrorRead=not-accepted");
+  const url = new URL(request.url);
+  const supported = new Set(["projectId"]);
+  if ([...url.searchParams.keys()].some((key) => !supported.has(key)) || url.searchParams.getAll("projectId").length > 1) return mirrorError(400, "invalid_mirror_query", "Use at most one projectId query parameter as a safe identifier.", "mirrorRead=not-accepted; parameter=unsupported-or-duplicate");
+  const projectId = url.searchParams.get("projectId")?.trim();
+  if (projectId && (projectId.includes("/") || projectId.includes("\\") || projectId === "." || projectId === "..")) return mirrorError(400, "invalid_mirror_query", "Use one safe projectId query parameter.", "mirrorRead=not-accepted; parameter=malformed");
+  try {
+    return json(await requestAnyamRealmCoordinator(env, "/authority/mirrors/internal", { sessionId, ...(mirrorId ? { mirrorId } : {}), ...(projectId ? { projectId } : {}) }));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const status = detail.includes("not_found") ? 404 : detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : 503;
+    return mirrorError(status, status === 404 ? "mirror_not_found" : status === 403 ? "owner_session_rejected" : "authority_coordinator_rejected", status === 404 ? "Verify the Mirror identifier without probing undiscoverable resources." : status === 403 ? "Authenticate the Realm owner again and retry the same read." : "Inspect the Durable Object receipt and retry the same read only when safe.", `authority=coordinator-rejected; operation=mirror.inspect; readOnly=true; errorClass=${status === 404 ? "not_found" : status === 403 ? "session_rejected" : "coordinator_rejected"}`);
   }
 }
 
@@ -634,10 +690,11 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   const isReleaseRoute = url.pathname === "/api/releases" || url.pathname.startsWith("/api/releases/");
   const isTargetRoute = url.pathname === "/api/targets" || url.pathname.startsWith("/api/targets/");
   const isPromotionRoute = url.pathname === "/api/promotions" || url.pathname.startsWith("/api/promotions/");
+  const mirrorRoute = mirrorPath(url.pathname);
   const promotionExecutionRoute = promotionExecutionPath(url.pathname);
   const promotionStatusRoute = promotionStatusPath(url.pathname);
   const revisionRoute = revisionPublishPath(url.pathname);
-  if (!url.pathname.startsWith("/api/authority") && !isProjectRoute && !isChangeRoute && !isWorkspaceRoute && !isRunRoute && !isEvidenceRoute && !isArtifactRoute && !isLandingRoute && !isReleaseRoute && !isTargetRoute && !isPromotionRoute && !revisionRoute.matched) return undefined;
+  if (!url.pathname.startsWith("/api/authority") && !isProjectRoute && !isChangeRoute && !isWorkspaceRoute && !isRunRoute && !isEvidenceRoute && !isArtifactRoute && !isLandingRoute && !isReleaseRoute && !isTargetRoute && !isPromotionRoute && !mirrorRoute.matched && !revisionRoute.matched) return undefined;
 
   const health = customerRealmWorkerHealth(env);
   if (health.status !== "ready") {
@@ -679,6 +736,13 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
     if (promotionStatusRoute.matched && request.method === "GET") return promotionStatusRead(request, env, promotionStatusRoute);
     if (url.pathname !== "/api/promotions") return promotionError(400, "invalid_promotion_path", "Use POST /api/promotions, GET /api/promotions/{promotionId}, or POST /api/promotions/{promotionId}/execute or /reconcile with one typed request.", "path=malformed; transition=not-applied");
     return promotionMutation(request, env);
+  }
+
+  if (mirrorRoute.matched) {
+    if (mirrorRoute.malformed) return mirrorError(400, "invalid_mirror_path", "Use /api/mirrors, /api/mirrors/{mirrorId}, /api/mirrors/{mirrorId}/sync, or /api/mirrors/{mirrorId}/reconcile with one safe URL-encoded identifier.", "path=malformed; transition=not-applied");
+    if (mirrorRoute.operation) return mirrorMutation(request, env, mirrorRoute.operation, mirrorRoute.mirrorId);
+    if (mirrorRoute.mirrorId) return request.method === "GET" ? mirrorRead(request, env, mirrorRoute.mirrorId) : mirrorError(400, "invalid_mirror_path", "Use POST /api/mirrors/{mirrorId}/sync or /reconcile for a Mirror mutation; GET is read-only.", "path=operation-required; transition=not-applied");
+    return request.method === "GET" ? mirrorRead(request, env) : mirrorMutation(request, env, "configure");
   }
 
   if (revisionRoute.matched) {

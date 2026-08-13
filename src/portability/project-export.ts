@@ -10,6 +10,7 @@ import {
   type ExtensionEvent,
   type ExtensionInstallation,
   type ExtensionManifest,
+  type ExternalProposal,
   type GovernanceControlEvidence,
   type GovernanceEvaluation,
   type GovernanceProfile,
@@ -21,6 +22,9 @@ import {
   type ProjectRevision,
   type RepositoryExport,
   type RepositoryMirror,
+  type MirrorCheckpoint,
+  type MirrorDelivery,
+  type MirrorOperation,
   type Release,
   type SourceSpace,
   type Target,
@@ -81,6 +85,10 @@ export type ProjectExportInput = {
   governanceControlEvidence?: readonly GovernanceControlEvidence[];
   governanceEvaluations?: readonly GovernanceEvaluation[];
   mirrors?: readonly RepositoryMirror[];
+  mirrorOperations?: readonly MirrorOperation[];
+  mirrorCheckpoints?: readonly MirrorCheckpoint[];
+  externalProposals?: readonly ExternalProposal[];
+  mirrorDeliveries?: readonly MirrorDelivery[];
   mirrorOperationIds?: readonly string[];
   policies?: readonly string[];
   auditEventIds?: readonly string[];
@@ -546,6 +554,10 @@ export class LocalProjectExporter {
         releases: [...(input.releases ?? [])],
         targets: [...(input.targets ?? [])],
         ...(input.mirrors ? { mirrors: input.mirrors.map((mirror) => ({ ...mirror, refMappings: mirror.refMappings.map((mapping) => ({ ...mapping })), canonicalRefs: mirror.canonicalRefs.map((ref) => ({ ...ref })), remoteRefs: mirror.remoteRefs.map((ref) => ({ ...ref })), pendingInboundChangeIds: [...mirror.pendingInboundChangeIds] })) } : {}),
+        ...(input.mirrorOperations ? { mirrorOperations: input.mirrorOperations.map((operation) => ({ ...operation, inboundChangeIds: [...operation.inboundChangeIds] })) } : {}),
+        ...(input.mirrorCheckpoints ? { mirrorCheckpoints: input.mirrorCheckpoints.map((checkpoint) => ({ ...checkpoint, canonicalRefs: checkpoint.canonicalRefs.map((ref) => ({ ...ref })), remoteRefs: checkpoint.remoteRefs.map((ref) => ({ ...ref })), completedInboundChangeIds: [...checkpoint.completedInboundChangeIds] })) } : {}),
+        ...(input.externalProposals ? { externalProposals: input.externalProposals.map((proposal) => ({ ...proposal, observedHeadCommits: [...proposal.observedHeadCommits], changeRevisionIds: [...proposal.changeRevisionIds] })) } : {}),
+        ...(input.mirrorDeliveries ? { mirrorDeliveries: input.mirrorDeliveries.map((delivery) => ({ ...delivery })) } : {}),
         ...(input.mirrorOperationIds ? { mirrorOperationIds: [...input.mirrorOperationIds] } : {}),
         capabilityGrants: [],
         extensions: [...(input.extensions ?? [])],

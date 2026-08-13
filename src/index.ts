@@ -8,6 +8,7 @@ export * from "./portability/smart-http.ts";
 export * from "./portability/smart-http-driver.ts";
 export * from "./portability/project-export.ts";
 export * from "./portability/mirror.ts";
+export * from "./portability/github-app.ts";
 export * from "./change-control/local.ts";
 export * from "./change-control/collaboration.ts";
 export * from "./execution/local.ts";

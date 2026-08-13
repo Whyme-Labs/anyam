@@ -44,6 +44,86 @@ _Avoid_: Best-effort retry, hidden progress
 A group of principals, teams, and projects governed together inside a Realm.
 _Avoid_: Realm, tenant
 
+**Team**:
+A named group of human principals inside an Organization. Team membership may
+grant access to Projects, Source Spaces, modules, and Targets, but a Team is
+not an ownership claim, an exclusive lock, or a canonical-write authority.
+Coding agents are Actors, not Team members.
+_Avoid_: Agent pool, ownership lock
+
+**Personal Organization**:
+The implicit Organization in which a principal's solo Projects begin. It can
+accept additional human members without migrating the Project or changing its
+Source Space, Change, Evidence, Landing, Release, Target, or Capability
+contracts.
+_Avoid_: Personal Realm, solo mode edition
+
+**Project Guest**:
+A human principal invited to a Project with explicitly scoped access without
+becoming a member of its Organization. A Project Guest receives no implied
+access to other Projects, Source Spaces, Targets, membership administration,
+canonical write, Landing, or production Promotion.
+_Avoid_: External Organization member, temporary admin
+
+**Membership Administrator**:
+A human principal delegated to manage Organization membership and invitations.
+This delegation does not imply Project source access, canonical write, Landing,
+or Target Promotion authority.
+_Avoid_: Organization owner by implication, superuser
+
+**Organization Owner**:
+A human principal with Organization-level authority to manage membership,
+Projects, and Organization policy. This role does not by itself grant source
+write, Landing, or Target Promotion authority.
+_Avoid_: Realm owner, unrestricted administrator
+
+**Project Maintainer**:
+A human principal with Project-level authority to manage Project configuration,
+Source Space policy, Change policy, and reviewer routing. This role does not by
+itself perform canonical Landing or production Promotion.
+_Avoid_: Repository administrator, canonical writer
+
+**Contributor**:
+A human principal permitted to read disclosed Project state, write authorized
+Workspaces, publish Change Revisions, and request Landing under policy.
+_Avoid_: Direct pusher, approver by default
+
+**Reviewer**:
+A human principal permitted to submit Review Findings and Review Approvals for
+the scopes and Changes assigned by policy. Review authority does not imply
+canonical write or production Promotion.
+_Avoid_: Merge authority, automatic approver
+
+**Policy Profile**:
+An explicit Project or Target governance posture that selects the required
+review, Evidence, Landing, and Promotion rules without changing the Project's
+source or collaboration contracts. Profiles tighten monotonically during an
+active adoption path; loosening requires explicit owner reauthorization and a
+recorded policy Change.
+_Avoid_: Team mode switch, hidden ceremony level
+
+**Solo Profile**:
+A Policy Profile in which permitted low-risk Changes may self-land or
+auto-land while canonical-write and production safeguards remain enforced.
+_Avoid_: Unprotected mode
+
+**Team Profile**:
+A Policy Profile in which ownership-based routing and independent review apply
+to governed Changes.
+_Avoid_: Multi-user toggle
+
+**Protected Profile**:
+A Policy Profile in which effect- and Target-specific rules require explicit
+separation of duties for sensitive policy, secret, or production operations.
+_Avoid_: Enterprise-only mode
+
+**Review Route**:
+The deterministic set of ownership- and effect-derived review requirements for
+one Change Revision. It is the union of every applicable module, symbol, Source
+Space, API, schema, and Target requirement; missing, conflicting, or stale
+ownership blocks the Change instead of selecting a reviewer implicitly.
+_Avoid_: Reviewer guess, CODEOWNERS-only route
+
 **Project**:
 A Realm's root managed unit: a logical product, system, library, model, document set, or other body of work that may span multiple Source Spaces, repositories, modules, Artifacts, and Targets. A Project does not imply a web application, runtime, or Deployment.
 _Avoid_: Repository, application
@@ -187,6 +267,13 @@ _Avoid_: Direct push; use merge for the participating Git operation and Landing 
 **Claim**:
 A time-bounded, inspectable statement that an Actor is working on a declared scope. Claims coordinate overlapping work and may produce warnings, but they are not exclusive locks and do not by themselves block a Change.
 _Avoid_: Hard lock, ownership transfer
+
+**Ownership Assignment**:
+A policy relationship assigning one or more human principals or Teams as
+accountable owners of a governed scope. Team assignments expand to eligible
+human members when a Review Route is evaluated; they grant accountability and
+routing, not canonical write or Target Promotion by themselves.
+_Avoid_: Lock holder, implicit permission
 
 **Revert Change**:
 A new Change whose declared effects restore selected state from a previously landed Change. It creates new revisions and a new Landing; it never deletes or rewrites the landed history.

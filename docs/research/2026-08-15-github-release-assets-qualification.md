@@ -75,16 +75,27 @@ ANYAM_GITHUB_RELEASE_ASSETS_TOKEN=<short-lived repository-scoped credential>
 ANYAM_GITHUB_RELEASE_ASSETS_SCOPES=contents:read,contents:write
 ANYAM_GITHUB_RELEASE_ASSETS_TOKEN_EXPIRES_AT=<provider expiry timestamp>
 ANYAM_GITHUB_RELEASE_ASSETS_SCOPE_RECEIPT=<redacted provider scope receipt>
-ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_RECEIPT=<Anyam broker/Authority receipt>
+ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_BASE_URL=https://customer-realm.example
+ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_OWNER_SESSION_FILE=/path/to/owner-session.txt
 ```
 
+Use exactly one of
+`ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_OWNER_SESSION` or
+`ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_OWNER_SESSION_FILE`. The session file
+contains only the opaque owner-session value, not a `Cookie:` header. The
+qualification exports and verifies an empty credential-free Authority
+snapshot, creates a disposable Project/Workspace/Change/Revision/Run/Evidence
+lineage, records the selected Artifact, creates the immutable Release and
+provider-neutral Target, and records the expected blocked `promotion.request`
+handoff. Cleanup restores the exact Authority snapshot and verifies its digest.
+
 The adapter requires an observed immutable-release capability by default. A
-missing capability, missing scoped credential receipt, or provider response
-that cannot be reconciled is a visible qualification blocker. The live path
-must use an explicitly disposable repository and clean its deterministic
-Release before reporting success. No GitHub Actions runner is required; the
-qualification is a local command using the provider API, so Blacksmith is not
-part of this gate.
+missing capability, missing scoped credential receipt, unavailable owner
+session, non-empty Authority boundary, or provider response that cannot be
+reconciled is a visible qualification blocker. The live path must use an
+explicitly disposable repository and clean its deterministic Release before
+reporting success. No GitHub Actions runner is required; the qualification is
+a local command using the provider API, so Blacksmith is not part of this gate.
 
 Until that live command succeeds with a current provider and Authority
 receipt, `github.release-assets` is locally implemented and contract-qualified

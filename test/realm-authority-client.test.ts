@@ -25,6 +25,7 @@ test("Realm Authority client sends the owner session as a host cookie and preser
   await client.inspectMirror("mirror:qualification");
   await client.exportAuthoritySnapshot();
   await client.restoreAuthoritySnapshot({ credentialFree: true });
+  await client.command({ command: "release.create", payload: { projectId: "project:qualification" }, idempotencyKey: "qualification:release" });
 
   assert.deepEqual(calls.map((call) => [call.method, new URL(call.url).pathname]), [
     ["GET", "/api/projects/project%3Aqualification"],
@@ -37,6 +38,7 @@ test("Realm Authority client sends the owner session as a host cookie and preser
     ["GET", "/api/mirrors/mirror%3Aqualification"],
     ["POST", "/api/authority/recovery/export"],
     ["POST", "/api/authority/recovery/restore"],
+    ["POST", "/api/authority/command"],
   ]);
   assert.equal(calls[0]?.cookie, "anyam_owner_session=session%3Aowner-qualification");
   assert.equal(calls[1]?.body?.projectId, "project:qualification");
@@ -45,6 +47,8 @@ test("Realm Authority client sends the owner session as a host cookie and preser
   assert.equal(calls[4]?.body?.operationId, "operation:one");
   assert.equal(calls[5]?.body?.reconciliation, "canonical-wins");
   assert.equal(calls[9]?.body?.snapshot && (calls[9]?.body?.snapshot as Record<string, unknown>).credentialFree, true);
+  assert.equal(calls[10]?.body?.command, "release.create");
+  assert.equal(calls[10]?.body?.idempotencyKey, "qualification:release");
 });
 
 test("Realm Authority client redacts provider response bodies from typed request errors", async () => {
@@ -65,6 +69,18 @@ test("Realm Authority client redacts provider response bodies from typed request
       return true;
     },
   );
+});
+
+test("Realm Authority client can inspect an expected blocked command without hiding the typed result", async () => {
+  const client = new RealmAuthorityHttpClient({
+    baseUrl: "https://realm.example",
+    ownerSession: "session:owner",
+    fetchImpl: async () => new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "blocked", recoveryAction: "provider handoff is separate", receipt: "promotion=blocked; credentialFree=true" }), { status: 409, headers: { "content-type": "application/json" } }),
+  });
+
+  const result = await client.command({ command: "promotion.request", payload: { projectId: "project:qualification" }, idempotencyKey: "qualification:promotion", allowStatuses: [409] });
+  assert.equal(result.status, "blocked");
+  assert.equal(result.receipt, "promotion=blocked; credentialFree=true");
 });
 
 test("Realm Authority client refuses insecure remote endpoints and cookie-header injection", () => {

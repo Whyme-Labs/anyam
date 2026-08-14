@@ -71,7 +71,7 @@ export class RealmAuthorityHttpClient {
     return new URL(pathname, this.baseUrl).toString();
   }
 
-  private async request(pathname: string, input: { method: "GET" | "POST"; body?: JsonObject; idempotencyKey?: string }): Promise<JsonObject> {
+  private async request(pathname: string, input: { method: "GET" | "POST"; body?: JsonObject; idempotencyKey?: string; allowStatuses?: readonly number[] }): Promise<JsonObject> {
     const headers = new Headers({ accept: "application/json", cookie: this.cookie });
     if (input.body !== undefined) {
       headers.set("content-type", "application/json");
@@ -86,7 +86,7 @@ export class RealmAuthorityHttpClient {
     });
     const parsed: unknown = await response.json().catch(() => ({}));
     const payload = object(parsed, "response");
-    if (!response.ok) {
+    if (!response.ok && !(input.allowStatuses ?? []).includes(response.status)) {
       throw new RealmAuthorityRequestError({
         status: response.status,
         code: safeField(payload.code, `http_${response.status}`),
@@ -135,5 +135,26 @@ export class RealmAuthorityHttpClient {
 
   restoreAuthoritySnapshot(snapshot: JsonObject): Promise<JsonObject> {
     return this.request("/api/authority/recovery/restore", { method: "POST", body: { snapshot }, idempotencyKey: "qualification:authority-recovery-restore" });
+  }
+
+  /**
+   * Send one typed, owner-authenticated Authority command through the public
+   * customer-Realm boundary. The caller owns the command-specific payload;
+   * this transport only supplies the protocol envelope, idempotency key, and
+   * optional optimistic version. Provider credentials never cross this edge.
+   */
+  command(input: { command: string; payload: JsonObject; idempotencyKey: string; expectedVersion?: number; allowStatuses?: readonly number[] }): Promise<JsonObject> {
+    return this.request("/api/authority/command", {
+      method: "POST",
+      body: {
+        protocol: "anyam.authority-command/v1",
+        command: input.command,
+        idempotencyKey: input.idempotencyKey,
+        ...(input.expectedVersion === undefined ? {} : { expectedVersion: input.expectedVersion }),
+        payload: input.payload,
+      },
+      idempotencyKey: input.idempotencyKey,
+      ...(input.allowStatuses === undefined ? {} : { allowStatuses: input.allowStatuses }),
+    });
   }
 }

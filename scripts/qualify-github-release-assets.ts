@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import {
   createReleaseAssetTarget,
@@ -9,6 +10,7 @@ import {
 } from "../src/delivery/release-publication.ts";
 import { CONTRACT_VERSIONS, type Artifact, type DisclosureClassification } from "../src/kernel/contracts.ts";
 import type { ImmutableRelease } from "../src/delivery/promotion.ts";
+import { RealmAuthorityHttpClient, type JsonObject } from "../src/portability/realm-authority-client.ts";
 import {
   GITHUB_RELEASE_ASSETS_ADAPTER_ID,
   GITHUB_RELEASE_ASSETS_AUDIENCE,
@@ -27,6 +29,10 @@ const actor = { principalId: "principal:qualification", actorId: "actor:qualific
 
 function digest(bytes: Uint8Array): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+function jsonDigest(value: unknown): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
 }
 
 function artifact(id: string, bytes: Uint8Array, disclosure: DisclosureClassification = "public"): Artifact {
@@ -202,6 +208,129 @@ function optional(name: string): string | undefined {
   return value || undefined;
 }
 
+function authorityObject(value: unknown, field: string): JsonObject {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`customer Realm Authority returned malformed ${field}`);
+  return value as JsonObject;
+}
+
+function authorityField(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) throw new Error(`customer Realm Authority response omitted ${field}`);
+  return value.trim();
+}
+
+function authorityResultValue(value: JsonObject): JsonObject {
+  return value.value === undefined ? value : authorityObject(value.value, "value");
+}
+
+type AuthorityConfig = { baseUrl: string; ownerSession: string };
+
+function authorityConfig(): AuthorityConfig | undefined {
+  const baseUrl = optional("ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_BASE_URL");
+  const direct = optional("ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_OWNER_SESSION");
+  const file = optional("ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_OWNER_SESSION_FILE");
+  if (direct && file) throw new Error("set only one of ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_OWNER_SESSION or ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_OWNER_SESSION_FILE; credential material is not printed");
+  const ownerSession = file ? readOwnerSessionFile(file) : direct;
+  const configured = [baseUrl, ownerSession].some((value) => value !== undefined);
+  if (!configured) return undefined;
+  if (!baseUrl) throw new Error("ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_BASE_URL is required when live customer Realm Authority qualification is enabled");
+  if (!ownerSession) throw new Error("set ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_OWNER_SESSION or ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_OWNER_SESSION_FILE for the authenticated Realm owner; credential material is never printed");
+  return { baseUrl, ownerSession: ownerSession.trim() };
+}
+
+function readOwnerSessionFile(path: string): string {
+  // Keep owner-session loading synchronous so it happens before any provider
+  // mutation. The value is never included in a receipt.
+  return readFileSync(path, "utf8").trim();
+}
+
+type CleanupReceipt = { status: "succeeded" | "blocked" | "not-run"; receipt: string; recoveryAction?: string };
+
+async function restoreAuthoritySnapshot(client: RealmAuthorityHttpClient, snapshot: JsonObject): Promise<CleanupReceipt> {
+  try {
+    const restored = await client.restoreAuthoritySnapshot(snapshot);
+    if (restored.status !== "recovery-restored") return { status: "blocked", receipt: "cleanup=authority-recovery-blocked; unexpected-status; credentialMaterialStored=false", recoveryAction: "authenticate the Realm owner again, inspect the recovery receipt, and restore the exact exported snapshot" };
+    const readBack = await client.exportAuthoritySnapshot();
+    const readBackSnapshot = authorityObject(readBack.snapshot, "restored Authority snapshot");
+    if (readBack.credentialFree !== true || Object.prototype.hasOwnProperty.call(readBackSnapshot, "credentials") || jsonDigest(readBackSnapshot) !== jsonDigest(snapshot)) return { status: "blocked", receipt: "cleanup=authority-recovery-blocked; snapshot-read-back-mismatch; credentialMaterialStored=false", recoveryAction: "retain the disposable Authority boundary and retry the exact snapshot restore after inspecting its receipt" };
+    return { status: "succeeded", receipt: "cleanup=authority-recovery-restored; snapshot-read-back-verified; identity-sessions-untouched; credentialMaterialStored=false" };
+  } catch (error) {
+    return { status: "blocked", receipt: `cleanup=authority-recovery-blocked; errorClass=${error instanceof Error ? error.name : "unknown"}; credentialMaterialStored=false`, recoveryAction: "authenticate the Realm owner again and restore the exact credential-free Authority snapshot" };
+  }
+}
+
+async function qualifyCustomerRealmAuthority(input: {
+  client: RealmAuthorityHttpClient;
+  selected: Artifact;
+  verified: ImmutableRelease;
+  target: ReleaseAssetTarget;
+}): Promise<{ receipt: string; cleanupSnapshot: JsonObject; projectId: string; releaseId: string; targetId: string; promotionStatus: string }> {
+  const recovery = await input.client.exportAuthoritySnapshot();
+  const snapshot = authorityObject(recovery.snapshot, "Authority recovery snapshot");
+  if (recovery.credentialFree !== true || Object.prototype.hasOwnProperty.call(snapshot, "credentials")) throw new Error("customer Realm Authority recovery snapshot was not credential-free; no Authority mutation was attempted");
+  const state = await input.client.inspectState();
+  const authority = authorityObject(state.authority, "Authority state");
+  const counts = authorityObject(authority.counts, "Authority state counts");
+  const occupied = Object.entries(counts).filter(([key, value]) => key !== "audit" && typeof value === "number" && value > 0);
+  if (occupied.length > 0) throw new Error(`customer Realm Authority is not an empty disposable boundary (${occupied.map(([key, value]) => `${key}=${String(value)}`).join(", ")}); use a fresh Realm or restore its credential-free snapshot before retrying`);
+
+  const suffix = input.verified.releaseDigest.slice("sha256:".length, "sha256:".length + 24);
+  const projectId = `project:github-release-assets:${suffix}`;
+  const sourceSpaceId = `source:github-release-assets:${suffix}`;
+  const projectRevisionId = `project-revision:github-release-assets:${suffix}`;
+  const workspaceId = `workspace:github-release-assets:${suffix}`;
+  const changeId = `change:github-release-assets:${suffix}`;
+  const intentId = `intent:github-release-assets:${suffix}`;
+  const changeRevisionId = `change-revision:github-release-assets:${suffix}`;
+  const runId = `run:github-release-assets:${suffix}`;
+  const evidenceId = `evidence:github-release-assets:${suffix}`;
+  const artifactId = `artifact:github-release-assets:${suffix}`;
+  const releaseId = `release:github-release-assets:${suffix}`;
+  const targetId = `target:github-release-assets:${suffix}`;
+
+  const project = await input.client.createProject({ projectId, name: "Anyam GitHub release-assets qualification", referenceType: "git", sourceSpaces: [{ id: sourceSpaceId, name: "Qualification public", classification: "public", snapshotId: input.verified.releaseDigest }], projectRevisionId }, `github-release-assets:${suffix}:project-create`);
+  const canonical = authorityObject(project.canonicalRevision, "canonical Project Revision");
+  if (authorityField(canonical.id, "canonicalRevision.id") !== projectRevisionId) throw new Error("customer Realm Authority returned a different canonical Project Revision than requested");
+  const workspace = await input.client.createWorkspace(projectId, { workspaceId, projectRevisionId, sourceSpaceIds: [sourceSpaceId], mounts: [], projectionId: `projection:github-release-assets:${suffix}`, classification: "public" }, `github-release-assets:${suffix}:workspace-create`);
+  const view = authorityObject(workspace.view, "Project View");
+  if (typeof view.id !== "string" || view.id.trim().length === 0) throw new Error("customer Realm Authority returned an invalid Project View identity");
+  const actualProjectViewId = authorityField(view.id, "view.id");
+
+  const change = await input.client.command({ command: "change.create", idempotencyKey: `github-release-assets:${suffix}:change-create`, payload: { projectId, changeId, intentId, baseProjectRevisionId: projectRevisionId, workspaceId } });
+  const changeValue = authorityResultValue(change);
+  const changeRecord = authorityObject(changeValue.change, "Change");
+  if (authorityField(changeRecord.id, "change.id") !== changeId) throw new Error("customer Realm Authority returned a different Change identity");
+  const revision = await input.client.command({ command: "revision.publish", idempotencyKey: `github-release-assets:${suffix}:revision-publish`, payload: { projectId, changeId, workspaceId, projectViewId: actualProjectViewId, projectRevisionId, sourceSpaceSnapshots: { [sourceSpaceId]: input.verified.releaseDigest }, declaredEffects: ["release-download-artifact"], revisionId: changeRevisionId, kind: "implementation" } });
+  const revisionValue = authorityResultValue(revision);
+  const revisionRecord = authorityObject(revisionValue.revision, "Change Revision");
+  if (authorityField(revisionRecord.id, "revision.id") !== changeRevisionId || authorityField(revisionRecord.projectRevisionId, "revision.projectRevisionId") !== projectRevisionId) throw new Error("customer Realm Authority Change Revision lineage did not match the canonical Project Revision");
+
+  const run = await input.client.command({ command: "run.record", idempotencyKey: `github-release-assets:${suffix}:run-record`, payload: { projectId, runId, actionId: `action:github-release-assets:${suffix}`, projectRevisionId, projectViewId: actualProjectViewId, runnerId: `runner:github-release-assets:${suffix}`, status: "succeeded", outputDigest: input.selected.digest, changeRevisionId, workspaceId, inputDigests: [input.verified.releaseDigest], outputDigests: [input.selected.digest] } });
+  const runValue = authorityResultValue(run);
+  const runRecord = authorityObject(runValue.run, "Run");
+  if (authorityField(runRecord.id, "run.id") !== runId) throw new Error("customer Realm Authority returned a different Run identity");
+  const evidence = await input.client.command({ command: "evidence.record", idempotencyKey: `github-release-assets:${suffix}:evidence-record`, payload: { projectId, evidenceId, runId, key: "release-download-bytes", criterion: "The detached Artifact bytes are exactly the bytes published to the release Target.", outcome: "passed", validityKey: `release-download:${input.selected.digest}`, actionId: `action:github-release-assets:${suffix}`, verifierId: "verifier:github-release-assets-qualification", toolchainDigest: "sha256:qualification-toolchain", dependencyDigest: "sha256:qualification-dependencies", environmentDigest: "sha256:qualification-environment", inputDigests: [input.verified.releaseDigest], effectDigests: ["sha256:release-download-artifact"], outputDigest: input.selected.digest, projectRevisionId, projectViewId: actualProjectViewId, changeRevisionId, runnerId: `runner:github-release-assets:${suffix}`, policyVersion: "policy:github-release-assets-qualification", authorizationEpoch: "owner-session", capabilityGrantId: `grant:github-release-assets:${suffix}`, disclosure: { projectionId: `projection:github-release-assets:${suffix}`, classification: "public" }, receipt: "qualification=detached-artifact-byte-verification; credentialMaterialStored=false", invalidators: ["source-revision", "artifact-digest", "target-policy"], owner: "Anyam release-assets qualification", workspaceId } });
+  const evidenceValue = authorityResultValue(evidence);
+  const evidenceRecord = authorityObject(evidenceValue.evidence, "Evidence");
+  if (authorityField(evidenceRecord.id, "evidence.id") !== evidenceId || authorityField(evidenceRecord.outcome, "evidence.outcome") !== "passed") throw new Error("customer Realm Authority did not record passed Evidence");
+  const recordedArtifact = await input.client.command({ command: "artifact.record", idempotencyKey: `github-release-assets:${suffix}:artifact-record`, payload: { projectId, artifactId, type: input.selected.type, digest: input.selected.digest, projectRevisionId, changeRevisionId, runId, actionId: `action:github-release-assets:${suffix}`, outputPath: input.selected.outputPath, provenanceDigest: input.verified.releaseDigest, disclosure: { projectionId: `projection:github-release-assets:${suffix}`, classification: "public" } } });
+  const artifactValue = authorityResultValue(recordedArtifact);
+  const artifactRecord = authorityObject(artifactValue.artifact, "Artifact");
+  if (authorityField(artifactRecord.id, "artifact.id") !== artifactId || authorityField(artifactRecord.digest, "artifact.digest") !== input.selected.digest) throw new Error("customer Realm Authority Artifact did not preserve the exact selected digest");
+  const releaseResult = await input.client.command({ command: "release.create", idempotencyKey: `github-release-assets:${suffix}:release-create`, payload: { projectId, releaseId, name: "Anyam GitHub release-assets qualification", projectRevisionId, artifactIds: [artifactId], evidenceIds: [evidenceId], configurationDigests: ["sha256:github-release-assets-configuration"], stateAssumptions: ["disposable public release-download Target"], policyVersion: "policy:github-release-assets-qualification", changeRevisionId, provenanceDigest: input.verified.releaseDigest } });
+  const releaseValue = authorityResultValue(releaseResult);
+  const releaseRecord = authorityObject(releaseValue.release, "Release");
+  if (authorityField(releaseRecord.id, "release.id") !== releaseId || authorityField(releaseRecord.status, "release.status") !== "ready") throw new Error("customer Realm Authority did not record a ready Release");
+  const targetResult = await input.client.command({ command: "target.configure", idempotencyKey: `github-release-assets:${suffix}:target-configure`, payload: { projectId, targetId, name: input.target.name, adapterId: input.target.adapterId, acceptedArtifactTypes: [...input.target.acceptedArtifactTypes], requiredEvidenceKeys: [...input.target.requiredEvidenceKeys] } });
+  const targetValue = authorityResultValue(targetResult);
+  const targetRecord = authorityObject(targetValue.target, "Target");
+  if (authorityField(targetRecord.id, "target.id") !== targetId) throw new Error("customer Realm Authority returned a different Target identity");
+  const promotion = await input.client.command({ command: "promotion.request", idempotencyKey: `github-release-assets:${suffix}:promotion-request`, payload: { projectId, promotionId: `promotion:github-release-assets:${suffix}`, targetId, releaseId, releaseDigest: input.verified.releaseDigest }, allowStatuses: [409] });
+  const promotionStatus = authorityField(promotion.status, "promotion.status");
+  if (promotionStatus !== "blocked") throw new Error(`customer Realm Authority Promotion unexpectedly returned ${promotionStatus}; provider execution must remain a separate handoff`);
+  const finalState = await input.client.inspectState();
+  return { cleanupSnapshot: snapshot, projectId, releaseId, targetId, promotionStatus, receipt: `authority=customer-realm; project=${projectId}; artifact=${artifactId}; evidence=${evidenceId}; release=${releaseId}; target=${targetId}; promotion=${promotionStatus}; canonicalWrite=false; credentialMaterialStored=false; stateReadBack=${jsonDigest(finalState)}` };
+}
+
 async function qualifyLive(): Promise<Record<string, unknown>> {
   const repository = optional("ANYAM_GITHUB_RELEASE_ASSETS_REPOSITORY");
   const disposableRepository = optional("ANYAM_GITHUB_RELEASE_ASSETS_DISPOSABLE_REPOSITORY");
@@ -209,44 +338,58 @@ async function qualifyLive(): Promise<Record<string, unknown>> {
   const scopes = optional("ANYAM_GITHUB_RELEASE_ASSETS_SCOPES")?.split(",").map((scope) => scope.trim()).filter(Boolean);
   const expiresAt = optional("ANYAM_GITHUB_RELEASE_ASSETS_TOKEN_EXPIRES_AT");
   const scopeReceipt = optional("ANYAM_GITHUB_RELEASE_ASSETS_SCOPE_RECEIPT");
-  const authorityReceipt = optional("ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_RECEIPT");
-  if (!repository || !disposableRepository || !token || !scopes || !expiresAt || !scopeReceipt || !authorityReceipt) return { status: "blocked", mode: "live", live: "not-run", recoveryAction: "set ANYAM_GITHUB_RELEASE_ASSETS_REPOSITORY, _DISPOSABLE_REPOSITORY, _TOKEN, _SCOPES, _TOKEN_EXPIRES_AT, _SCOPE_RECEIPT, and _AUTHORITY_RECEIPT; credential values are never printed" };
+  const authorityInputs = authorityConfig();
+  if (!repository || !disposableRepository || !token || !scopes || !expiresAt || !scopeReceipt || !authorityInputs) return { status: "blocked", mode: "live", live: "not-run", recoveryAction: "set ANYAM_GITHUB_RELEASE_ASSETS_REPOSITORY, ANYAM_GITHUB_RELEASE_ASSETS_DISPOSABLE_REPOSITORY, ANYAM_GITHUB_RELEASE_ASSETS_TOKEN, ANYAM_GITHUB_RELEASE_ASSETS_SCOPES, ANYAM_GITHUB_RELEASE_ASSETS_TOKEN_EXPIRES_AT, ANYAM_GITHUB_RELEASE_ASSETS_SCOPE_RECEIPT, ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_BASE_URL, and one of ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_OWNER_SESSION_FILE or ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_OWNER_SESSION; credential values are never printed" };
   if (disposableRepository !== repository) throw new Error("ANYAM_GITHUB_RELEASE_ASSETS_DISPOSABLE_REPOSITORY must exactly equal the selected repository");
   const [owner, name, ...extra] = repository.split("/");
   if (!owner || !name || extra.length > 0) throw new Error("ANYAM_GITHUB_RELEASE_ASSETS_REPOSITORY must be owner/name");
   if (!scopes.includes("contents:read") || !scopes.includes("contents:write")) throw new Error("ANYAM_GITHUB_RELEASE_ASSETS_SCOPES must include contents:read,contents:write");
   if (Date.parse(expiresAt) <= Date.now()) throw new Error("ANYAM_GITHUB_RELEASE_ASSETS_TOKEN_EXPIRES_AT must be future-dated");
-  const capabilityReceipt = `provider=github; repository=${repository}; scopeReceipt=${scopeReceipt}; authorityReceipt=${authorityReceipt}; credentialMaterialStored=false`;
   const bytes = new TextEncoder().encode("Anyam disposable immutable release qualification\n");
   const selected = artifact("artifact:live", bytes);
   const verified = release("release:live", selected, "live");
   const targetValue = target("public");
-  const broker: GitHubReleaseAssetsCredentialBroker = { async issue() { return { token, credentialId: "credential:env:github-release-assets", expiresAt, audience: GITHUB_RELEASE_ASSETS_AUDIENCE, scopes, receipt: `${scopeReceipt}; selectedRepository=true; credentialMaterialStored=false` }; } };
-  const client = new FetchGitHubReleaseAssetsClient({ retry: { delaysMs: [], sizingReceipt: "qualification=caller-supplied; retry=none" } });
-  const adapter = new GitHubReleaseAssetsAdapter({ owner, repository: name, disclosure: "public", credentialBroker: broker, client, artifactReader: { read: async () => bytes }, capabilityReceipt, requireImmutableRelease: true });
+  const authorityClient = new RealmAuthorityHttpClient({ baseUrl: authorityInputs.baseUrl, ownerSession: authorityInputs.ownerSession });
   const tagName = `anyam-${verified.releaseDigest.slice("sha256:".length)}`;
+  const client = new FetchGitHubReleaseAssetsClient({ retry: { delaysMs: [], sizingReceipt: "qualification=caller-supplied; retry=none" } });
   const existing = await client.findReleaseByTag({ owner, repository: name, tagName, token });
   if (existing) throw new Error(`disposable Release already exists for deterministic tag ${tagName}; reconcile it before retrying without deleting an owner object`);
+  let authorityQualification: Awaited<ReturnType<typeof qualifyCustomerRealmAuthority>> | undefined;
+  let authoritySnapshot: JsonObject | undefined;
   let result: Awaited<ReturnType<GitHubReleaseAssetsAdapter["publish"]>> | undefined;
   let cleanup: Record<string, unknown> = { status: "not-run", receipt: "cleanup=not-run" };
+  let authorityCleanup: CleanupReceipt | undefined;
   try {
+    const authorityExport = await authorityClient.exportAuthoritySnapshot();
+    authoritySnapshot = authorityObject(authorityExport.snapshot, "Authority recovery snapshot");
+    if (authorityExport.credentialFree !== true || Object.prototype.hasOwnProperty.call(authoritySnapshot, "credentials")) throw new Error("customer Realm Authority recovery snapshot was not credential-free; no Authority mutation was attempted");
+    authorityQualification = await qualifyCustomerRealmAuthority({ client: authorityClient, selected, verified, target: targetValue });
+    const capabilityReceipt = `provider=github; repository=${repository}; scopeReceipt=${scopeReceipt}; ${authorityQualification.receipt}; credentialMaterialStored=false`;
+    const broker: GitHubReleaseAssetsCredentialBroker = { async issue() { return { token, credentialId: "credential:env:github-release-assets", expiresAt, audience: GITHUB_RELEASE_ASSETS_AUDIENCE, scopes, receipt: `${scopeReceipt}; selectedRepository=true; authority=customer-realm; credentialMaterialStored=false` }; } };
+    const adapter = new GitHubReleaseAssetsAdapter({ owner, repository: name, disclosure: "public", credentialBroker: broker, client, artifactReader: { read: async () => bytes }, capabilityReceipt, requireImmutableRelease: true });
     result = await adapter.publish({ publicationId: "publication:live", attempt: 0, release: verified, artifact: selected, target: targetValue });
+    if (authorityQualification) authorityCleanup = await restoreAuthoritySnapshot(authorityClient, authorityQualification.cleanupSnapshot);
   } finally {
     try {
       const created = await client.findReleaseByTag({ owner, repository: name, tagName, token });
-      if (created) cleanup = await adapter.deleteForQualification(created.id);
+      if (created) {
+        const cleanupAdapter: GitHubReleaseAssetsAdapter = new GitHubReleaseAssetsAdapter({ owner, repository: name, disclosure: "public", credentialBroker: { async issue() { return { token, credentialId: "credential:env:github-release-assets", expiresAt, audience: GITHUB_RELEASE_ASSETS_AUDIENCE, scopes, receipt: `${scopeReceipt}; selectedRepository=true; cleanup=true; credentialMaterialStored=false` }; } }, client, artifactReader: { read: async () => bytes }, capabilityReceipt: "cleanup=owner-controlled; credentialMaterialStored=false", requireImmutableRelease: true });
+        cleanup = await cleanupAdapter.deleteForQualification(created.id);
+      }
       else cleanup = { status: "succeeded", receipt: "cleanup=no-release-observed; credentialMaterialStored=false" };
     } catch (error) {
       cleanup = { status: "blocked", receipt: `cleanup=blocked; errorClass=${error instanceof Error ? error.name : "unknown"}; credentialMaterialStored=false`, recoveryAction: "retain the disposable repository, inspect the deterministic Release, and retry cleanup with the owner-controlled credential" };
     }
+    if (!authorityCleanup && authoritySnapshot) authorityCleanup = await restoreAuthoritySnapshot(authorityClient, authoritySnapshot);
   }
   if (!result || result.status !== "succeeded") {
     const error = result && result.status === "failed" ? `${result.errorCode}; ${result.recoveryAction}; ${result.receipt}` : "live release publication did not return a result";
-    throw new Error(`${error}; cleanup=${JSON.stringify(cleanup)}`);
+    throw new Error(`${error}; cleanup=${JSON.stringify({ provider: cleanup, authority: authorityCleanup ?? { status: "not-run" } })}`);
   }
   if (!result.value.providerReleaseId) throw new Error("live release publication omitted provider release identity");
   if (cleanup.status !== "succeeded") throw new Error(`live release cleanup did not complete: ${JSON.stringify(cleanup)}`);
-  return { status: "succeeded", mode: "live", repository, providerReleaseId: result.value.providerReleaseId, providerAssetId: result.value.providerAssetId, releaseDigest: result.value.releaseDigest, artifactDigest: result.value.artifactDigest, receipt: result.receipt, cleanup };
+  if (!authorityCleanup || authorityCleanup.status !== "succeeded") throw new Error(`customer Realm Authority cleanup did not complete: ${JSON.stringify(authorityCleanup ?? { status: "not-run" })}`);
+  return { status: "succeeded", mode: "live", qualificationScope: "provider-adapter-and-customer-realm-authority", repository, providerReleaseId: result.value.providerReleaseId, providerAssetId: result.value.providerAssetId, releaseDigest: result.value.releaseDigest, artifactDigest: result.value.artifactDigest, receipt: result.receipt, authority: { projectId: authorityQualification?.projectId, releaseId: authorityQualification?.releaseId, targetId: authorityQualification?.targetId, promotionStatus: authorityQualification?.promotionStatus, receipt: authorityQualification?.receipt }, cleanup: { provider: cleanup, authority: authorityCleanup } };
 }
 
 const fixture = await qualifyFixture();

@@ -16,6 +16,7 @@ import type {
 } from "./oauth-provider.ts";
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "./coordinator-protocol.ts";
 import { toOAuthSubject } from "../../../src/identity/oauth-subject.ts";
+import { customerRealmOperatorPreflight, inspectCustomerRealmOperatorStatus, type CustomerRealmOperatorIdentityObservation } from "../../../src/cloudflare/realm-operator.ts";
 
 export const ANYAM_PASSKEY_OWNER_PROTOCOL = "anyam.passkey-owner/v1" as const;
 export const ANYAM_PASSKEY_CHALLENGE_TTL_SECONDS = 300;
@@ -477,18 +478,39 @@ export async function anyamRealmOwnerSessionId(request: Request, env: AnyamRealm
   return session && session.realmId === realmId(env) ? session.kernelSessionId : undefined;
 }
 
-async function ownerKernelSession(request: Request, env: AnyamRealmOAuthEnv): Promise<{ session: OwnerSession; kernelSession: Record<string, unknown> } | Response> {
+async function ownerKernelSession(request: Request, env: AnyamRealmOAuthEnv): Promise<{ session: OwnerSession; kernelSession: Record<string, unknown>; identity?: CustomerRealmOperatorIdentityObservation } | Response> {
   const session = await readSession(request, env);
   if (!session || session.realmId !== realmId(env) || !session.kernelSessionId) return json({ code: "owner_authentication_required", recoveryAction: "Complete passkey authentication before requesting a protected Realm operation.", receipt: "ownerSession=missing-or-invalid; kernelSession=missing" }, 401);
   try {
     const kernel = await realmCoordinatorRequest(env, "/identity/session/validate", { sessionId: session.kernelSessionId });
     const kernelSession = kernel.session as Record<string, unknown> | undefined;
     if (!kernelSession || kernelSession.id !== session.kernelSessionId || kernelSession.actorId !== session.actorId || kernelSession.principalId !== session.userId) return json({ code: "owner_kernel_session_mismatch", recoveryAction: "Re-authenticate through /owner/login before requesting a protected qualification operation.", receipt: "kernelSession=identity-mismatch; operation=not-created" }, 401);
-    return { session, kernelSession };
+    const identityValue = kernel.identity;
+    const identity = identityValue !== null && typeof identityValue === "object" && !Array.isArray(identityValue)
+      ? {
+          ...(identityValue as CustomerRealmOperatorIdentityObservation),
+          ...(typeof kernel.recoveryStatus === "string" ? { recoveryStatus: kernel.recoveryStatus } : {}),
+        }
+      : (typeof kernel.recoveryStatus === "string" ? { recoveryStatus: kernel.recoveryStatus } : undefined);
+    return { session, kernelSession, ...(identity ? { identity } : {}) };
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
     return json({ code: "owner_kernel_session_invalid", recoveryAction: "Re-authenticate through /owner/login and retry after checking the Realm coordinator.", receipt: `kernelSession=invalid; operation=not-created; detail=${detail}` }, 401);
   }
+}
+
+async function operatorRead(request: Request, env: AnyamRealmOAuthEnv, operation: "status" | "preflight"): Promise<Response> {
+  const ownerState = await ownerKernelSession(request, env);
+  if (ownerState instanceof Response) return ownerState;
+  const identity: CustomerRealmOperatorIdentityObservation = {
+    ...(ownerState.identity ?? {}),
+    realmId: ownerState.identity?.realmId ?? realmId(env),
+    ownerSessionValidated: true,
+  };
+  const value = operation === "status"
+    ? await inspectCustomerRealmOperatorStatus(env, identity)
+    : await customerRealmOperatorPreflight(env, identity);
+  return json(value);
 }
 
 type QualificationOperation = "delegate" | "credentials" | "revoke" | "recovery/export" | "recovery/restore" | "provider-operation" | "provider-operation/resume" | "provider-operation/callback" | "provider-operation/cleanup" | "provider-recovery/export" | "provider-recovery/restore";
@@ -856,6 +878,8 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
         providerOperationCleanup: "/api/owner/qualification/provider-operation/cleanup",
         providerRecoveryExport: "/api/owner/qualification/provider-recovery/export",
         providerRecoveryRestore: "/api/owner/qualification/provider-recovery/restore",
+        operatorStatus: "/api/operator/status",
+        operatorPreflight: "/api/operator/preflight",
         recoveryAction: url.pathname === "/owner/claim" ? "Send the customer-owned bootstrap secret in the request header for the first-owner registration ceremony." : "Complete passkey authentication and retry the protected operation.",
         receipt: `${ANYAM_PASSKEY_SIZING_RECEIPT}; browserUI=qualification-minimal; ownerKernelMembership=verified-at-coordinator; credentialMaterialStored=false`,
       });
@@ -864,6 +888,8 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
     if (url.pathname === "/api/owner/passkey/register/verify" && request.method === "POST") return await registrationVerify(request, env);
     if (url.pathname === "/api/owner/passkey/auth/options" && request.method === "POST") return await authenticationOptions(request, env);
     if (url.pathname === "/api/owner/passkey/auth/verify" && request.method === "POST") return await authenticationVerify(request, env);
+    if (url.pathname === "/api/operator/status" && request.method === "GET") return await operatorRead(request, env, "status");
+    if (url.pathname === "/api/operator/preflight" && request.method === "GET") return await operatorRead(request, env, "preflight");
     if (url.pathname === "/api/owner/session/revoke" && request.method === "POST") return await revokeSession(request, env);
     if (url.pathname === "/api/owner/oauth/grants" && request.method === "GET") return await listOAuthGrants(request, env);
     if (url.pathname === "/api/owner/oauth/grants/revoke" && request.method === "POST") return await revokeOAuthGrant(request, env);

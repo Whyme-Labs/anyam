@@ -1696,7 +1696,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/identity/session/validate") {
         const sessionId = coordinatorString(body, "sessionId");
         const session = identity.validateSession(sessionId);
-        return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "session-valid", session, identity: identitySummary(identity), receipt: "kernelMembership=verified; session=active; authorizationEpoch=checked" });
+        return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "session-valid", session, identity: identitySummary(identity), recoveryStatus: this.recoveryStatus, receipt: "kernelMembership=verified; session=active; authorizationEpoch=checked; recoveryStatus=observed" });
       }
 
       if (url.pathname === "/identity/session/revoke") {

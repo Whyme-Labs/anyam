@@ -53,6 +53,9 @@ transport convenience only; it does not weaken the deployed HTTPS contract.
 3. Replace every `replace-with-customer-*` value and the installation/build
    variables with customer-owned values. Do not put API tokens, passkeys,
    refresh tokens, or secret values in this file.
+   Generate the current manifest and its digest with
+   `npm run realm:installation-manifest`, then set the printed `digest` as
+   `ANYAM_INSTALLATION_MANIFEST_DIGEST`.
    Set `ANYAM_REALM_RP_ID` to the exact hostname that serves the owner
    passkey ceremony (for example, `source.customer.example`; do not include a
    scheme or port). The hostname must remain stable for that Realm.
@@ -66,6 +69,13 @@ transport convenience only; it does not weaken the deployed HTTPS contract.
    foundation bindings and customer-owned mode variables are present. It does
    not prove account ownership, owner authentication, Git, Artifacts, durable
    persistence, or Worker Promotion.
+7. After owner passkey authentication, check `GET /api/operator/status` and
+   `GET /api/operator/preflight`. These are read-only, owner-authenticated
+   JSON surfaces. They report the pinned installation-manifest digest,
+   release/schema/migration/configuration digests, owner/recovery state,
+   binding/provider observations, policy/export/checkpoint observations, and
+   explicit next actions. They never create resources, mint credentials,
+   write canonical state, or promote a Target.
 
 The current Wrangler configuration uses a SQLite-backed Durable Object export,
 which is the current Cloudflare configuration shape for new Durable Object
@@ -460,9 +470,39 @@ run and independently observed.
 | `ANYAM_INSTALLATION_ID` | Non-secret installation identity | Installation state |
 | `ANYAM_PROTOCOL_VERSION` | Must match the Worker protocol | Contract compatibility |
 | `ANYAM_REALM_RP_ID` | Exact hostname used for WebAuthn ceremonies; no scheme or port | Realm identity policy |
+| `ANYAM_INSTALLATION_MANIFEST_DIGEST` | SHA-256 digest of the versioned installation manifest | Operator preflight pin |
+| `ANYAM_RELEASE_DIGEST` | SHA-256 digest of the active Anyam release | Operator status observation |
+| `ANYAM_SCHEMA_DIGEST` | SHA-256 digest of the active schema set | Operator status observation |
+| `ANYAM_MIGRATION_DIGEST` | SHA-256 digest of the applied migration set | Operator status observation |
+| `ANYAM_CONFIGURATION_DIGEST` | SHA-256 digest of the non-secret Worker configuration | Operator status observation |
+| `ANYAM_PROVIDER_ACCOUNT_ID` | Non-secret customer provider account reference | Operator status observation |
+| `ANYAM_PROVIDER_STATE` | `healthy`, `outage`, or `expired-grant` observation | Operator status observation |
+| `ANYAM_PROVIDER_AUTHORIZATION_STATE` | Customer-recorded provider authorization state; no token value | Operator status observation |
+| `ANYAM_MIGRATION_STATE` | `current`, `stale`, or `failed` migration observation | Operator status/preflight |
+| `ANYAM_RELEASE_STATE` | `compatible`, `incompatible`, or `degraded` release observation | Operator status/preflight |
+| `ANYAM_DOMAIN_POLICY_STATE` | Customer-recorded domain policy observation | Operator status/preflight |
+| `ANYAM_RESIDENCY_POLICY_STATE` | Customer-recorded residency policy observation | Operator status/preflight |
+| `ANYAM_EXPORT_DESTINATION` | Non-secret export destination reference | Operator status/preflight |
+| `ANYAM_LAST_EXPORT_DIGEST` | SHA-256 digest of the last verified credential-free export | Operator status/preflight |
+| `ANYAM_LAST_CHECKPOINT_DIGEST` | SHA-256 digest of the last verified recovery checkpoint | Operator status/preflight |
+| `ANYAM_RESTORE_DRILL_STATE` | `verified` or `failed` customer restore-drill observation | Operator status/preflight |
+| `ANYAM_PENDING_OPERATIONS_STATE` | `none`, `pending`, or `stale` operation-ledger observation | Operator status/preflight |
 
 Configured bindings are reported by name only. The health response never
 returns binding values or credentials.
+
+The operator status and preflight responses are similarly disclosure-filtered:
+they return identifiers, enum observations, and SHA-256 digests only. An
+unobserved provider, migration, policy, export, or pending-operation state is
+reported as `indeterminate`, not guessed as healthy. A missing binding or
+incompatible/stale release is `blocked`; a provider outage or failed restore
+drill is `degraded`. Every non-healthy check includes a receipt and recovery
+action.
+
+The current source manifest receipt is generated locally (not a provider
+claim): `sha256:1ffa6cb53c2bf1ba5325106c82315ba1be1f925addb9eacf5a220aa1baab0021`.
+Regenerate it whenever the manifest changes; do not copy a stale digest into a
+customer deployment.
 
 ## Owner passkey qualification surface
 
@@ -475,6 +515,8 @@ The Worker exposes a customer-owned WebAuthn adapter boundary:
 | `POST /api/owner/passkey/auth/options` | Authentication challenge for an enrolled owner |
 | `POST /api/owner/passkey/auth/verify` | Verifies the assertion and issues an opaque host-only owner session |
 | `POST /api/owner/session/revoke` | Revokes the current opaque owner session and expires its cookie |
+| `GET /api/operator/status` | Owner-authenticated machine-readable installation status; read-only |
+| `GET /api/operator/preflight` | Owner-authenticated read-only binding/migration/policy/export preflight; no provider calls or mutations |
 | `POST /api/owner/agent/delegations` | Creates or reuses one owner-authenticated, non-promotional Agent Task delegation for a real Project/Workspace/Change; credentials are not issued implicitly |
 | `POST /api/owner/agent/delegations/revoke` | Revokes one owner-owned Agent and closes its delegated authority without revoking the owner Session |
 | `POST /api/owner/agent/delegations/credentials` | Explicitly exchanges the exact generic delegation for short-lived, audience-bound `realm-api`, Git, and/or MCP credentials; provider, deployment, runner, and promotion credentials are rejected |

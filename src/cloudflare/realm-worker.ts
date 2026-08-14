@@ -9,6 +9,7 @@
 
 export const CUSTOMER_REALM_WORKER_PROTOCOL = "anyam.customer-realm-worker/v1" as const;
 export const CUSTOMER_REALM_HOSTING_MODE = "customer-operated" as const;
+export const CUSTOMER_REALM_INSTALLATION_MANIFEST_PROTOCOL = "anyam.customer-realm-installation/v1" as const;
 
 export type CustomerRealmWorkerBindingName =
   | "REALM_COORDINATOR"

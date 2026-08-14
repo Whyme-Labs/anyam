@@ -9,7 +9,12 @@
     "ANYAM_INSTALLATION_ID": "replace-with-installation-id",
     "ANYAM_PROTOCOL_VERSION": "anyam.customer-realm-worker/v1",
     "ANYAM_REALM_RP_ID": "replace-with-authentication-hostname",
-    "ANYAM_BUILD_REVISION": "replace-with-source-revision"
+    "ANYAM_BUILD_REVISION": "replace-with-source-revision",
+    "ANYAM_INSTALLATION_MANIFEST_DIGEST": "replace-with-installation-manifest-digest",
+    "ANYAM_RELEASE_DIGEST": "replace-with-release-digest",
+    "ANYAM_SCHEMA_DIGEST": "replace-with-schema-digest",
+    "ANYAM_MIGRATION_DIGEST": "replace-with-migration-digest",
+    "ANYAM_CONFIGURATION_DIGEST": "replace-with-configuration-digest"
   },
   "kv_namespaces": [
     {

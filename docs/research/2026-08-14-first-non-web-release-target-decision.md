@@ -5,7 +5,7 @@
 **Ticket:** [#188](https://github.com/Whyme-Labs/anyam/issues/188)
 
 **Protocol:** `anyam.first-non-web-release-target/v1`
-**Status:** decision recorded; the selected adapter still needs a fresh live qualification
+**Status:** decision recorded; the selected adapter and portable Artifact-byte disposition are implemented; a fresh live provider/Authority qualification remains required
 
 ## Decision
 
@@ -206,22 +206,19 @@ overwriting the old bytes.
 
 ## Portable export
 
-The current local test proves that Artifact, Evidence, Release, and Target
-metadata survive `LocalProjectExporter`, that `verifyProjectExportPackage`
-passes, and that the export is `credentialFree=true`. The export contract
-includes these records and repository/large-object manifests:
+The current local tests prove that Artifact, Evidence, Release, and Target
+metadata survive `LocalProjectExporter`, that exact non-repository Artifact
+bytes can be included and re-verified, and that an export with unavailable
+bytes carries an explicit disposition and remains `credentialFree=true`. The
+export contract includes these records and repository/large-object manifests:
 [`ProjectExport`](../../src/kernel/contracts.ts), [portable export test](../../test/library-release.test.ts).
 
-There is an important remaining gap: the current exporter copies repository
-bundles and declared repository LFS objects; passing Artifact metadata does not
-prove that non-web Artifact bytes are copied into the export. A releasable
-download path must either include the exact Artifact bytes in an
-owner-controlled content-addressed export object (with size/media type/digest
-and signature) or mark an external provider reference as explicitly
-unavailable/incomplete. Restore must verify those bytes, retain Release and
-Target lineage, and activate neither provider credentials nor a Target pointer
-without an owner decision. This is a portability requirement, not a reason to
-make GitHub or npm canonical.
+`ProjectExport.artifactFiles` now makes that boundary explicit: an `included`
+entry stores the exact bytes under `artifacts/` with byte length, media type,
+and digest; an `unavailable` entry records why bytes were not supplied. Package
+verification re-reads included bytes and fails closed on missing, digest, or
+length mismatch. This is a portability requirement, not a reason to make
+GitHub or npm canonical.
 
 ## Qualification still required
 

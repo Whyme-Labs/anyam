@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { CONTRACT_VERSIONS, createProject, type ExternalProposal, type MirrorCheckpoint, type MirrorDelivery, type MirrorOperation, type Project, type RepositoryMirror, type SourceSpace } from "../src/kernel/contracts.ts";
+import { CONTRACT_VERSIONS, createProject, type Artifact, type ExternalProposal, type MirrorCheckpoint, type MirrorDelivery, type MirrorOperation, type Project, type RepositoryMirror, type SourceSpace } from "../src/kernel/contracts.ts";
 import { LocalGitRepositoryDriver } from "../src/portability/local-git.ts";
 import {
   LocalProjectExporter,
@@ -500,6 +500,54 @@ test("corrupt Project Export objects fail with an owner-visible recovery receipt
       assert.equal(verification.checkpointId.length > 0, true);
       assert.match(verification.recoveryAction, /replace|repair/i);
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Project Export includes and verifies exact non-repository Artifact bytes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "anyam-export-artifact-bytes-"));
+  try {
+    const driver = new LocalGitRepositoryDriver(join(root, "driver"));
+    const repositoryDirectory = join(root, "repository");
+    const repository = await driver.createRepository({ sourceSpaceId: sourceSpace.id, directory: repositoryDirectory });
+    assert.equal(repository.status, "succeeded");
+    if (repository.status !== "succeeded") return;
+    await writeFile(join(repositoryDirectory, "README.md"), "artifact export\n", "utf8");
+    assert.equal((await driver.commitRepository({ repository: repository.value, message: "Create artifact export source" })).status, "succeeded");
+    const artifactBytes = new TextEncoder().encode("downloadable artifact\n");
+    const artifact: Artifact = {
+      protocol: CONTRACT_VERSIONS.artifact,
+      id: "artifact:release-download",
+      type: "package.archive",
+      digest: `sha256:${createHash("sha256").update(artifactBytes).digest("hex")}`,
+      projectRevisionId: "project-revision:artifact-export",
+      outputPath: "dist/release.tgz",
+      disclosure: { projectionId: "project-view:public", classification: "public" },
+    };
+    const packageDirectory = join(root, "export");
+    const exported = await new LocalProjectExporter(driver).exportProject({
+      project,
+      sourceSpaces: [sourceSpace],
+      repositories: [{ sourceSpaceId: sourceSpace.id, repository: repository.value }],
+      destination: packageDirectory,
+      artifacts: [artifact],
+      artifactFiles: [{ artifactId: artifact.id, bytes: artifactBytes, mediaType: "application/gzip" }],
+      idempotencyKey: "artifact-bytes-export",
+    });
+    assert.equal(exported.status, "succeeded");
+    if (exported.status !== "succeeded") return;
+    const entry = exported.value.manifest.artifactFiles?.[0];
+    assert.equal(entry?.state, "included");
+    assert.equal(entry?.digest, artifact.digest);
+    assert.equal(entry?.byteLength, artifactBytes.byteLength);
+    assert.equal(entry?.mediaType, "application/gzip");
+    assert.deepEqual(new Uint8Array(await readFile(join(packageDirectory, entry?.relativePath ?? ""))), artifactBytes);
+    assert.equal((await verifyProjectExportPackage(packageDirectory)).status, "succeeded");
+    await writeFile(join(packageDirectory, entry?.relativePath ?? ""), "tampered\n", "utf8");
+    const tampered = await verifyProjectExportPackage(packageDirectory);
+    assert.equal(tampered.status, "failed");
+    if (tampered.status === "failed") assert.equal(tampered.errorCode, "export.artifact_digest_mismatch");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

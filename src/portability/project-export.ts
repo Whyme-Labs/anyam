@@ -17,6 +17,7 @@ import {
   type LargeObjectRef,
   type Project,
   type ProjectExport,
+  type ProjectExportArtifactFile,
   type ProjectExportIntegrity,
   type ProjectExportLineage,
   type ProjectRevision,
@@ -76,6 +77,8 @@ export type ProjectExportInput = {
   changes?: readonly Change[];
   evidence?: readonly Evidence[];
   artifacts?: readonly Artifact[];
+  /** Optional exact bytes for the declared non-repository Artifacts. */
+  artifactFiles?: readonly ProjectExportArtifactInput[];
   releases?: readonly Release[];
   targets?: readonly Target[];
   extensions?: readonly ExtensionManifest[];
@@ -94,6 +97,12 @@ export type ProjectExportInput = {
   auditEventIds?: readonly string[];
   exportId?: string;
   idempotencyKey?: string;
+};
+
+export type ProjectExportArtifactInput = {
+  artifactId: string;
+  bytes?: Uint8Array;
+  mediaType?: string;
 };
 
 export type ProjectExportPackage = {
@@ -186,6 +195,61 @@ function safeName(value: string): string {
   return normalized === "." || normalized === ".." ? `_${normalized}` : normalized;
 }
 
+function artifactFilePath(artifact: Artifact): string {
+  return `artifacts/${safeName(artifact.id)}-${safeName(artifact.digest)}.bin`;
+}
+
+type PreparedArtifactFile = {
+  manifest: ProjectExportArtifactFile;
+  bytes?: Uint8Array;
+};
+
+function prepareArtifactFiles(input: {
+  artifacts: readonly Artifact[];
+  artifactFiles: readonly ProjectExportArtifactInput[];
+}): readonly PreparedArtifactFile[] {
+  const provided = new Map<string, ProjectExportArtifactInput>();
+  for (const entry of input.artifactFiles) {
+    if (!entry.artifactId || provided.has(entry.artifactId)) {
+      throw new Error(`artifactFiles=duplicate-or-missing-artifact-id; artifact=${entry.artifactId || "missing"}`);
+    }
+    provided.set(entry.artifactId, entry);
+  }
+  const declared = new Set(input.artifacts.map((artifact) => artifact.id));
+  const paths = new Set<string>();
+  for (const entry of input.artifactFiles) {
+    if (!declared.has(entry.artifactId)) throw new Error(`artifactFiles=undeclared-artifact; artifact=${entry.artifactId}`);
+  }
+  return input.artifacts.map((artifact) => {
+    const entry = provided.get(artifact.id);
+    if (!entry?.bytes) {
+      const unavailable: ProjectExportArtifactFile = {
+        artifactId: artifact.id,
+        digest: artifact.digest,
+        state: "unavailable",
+        reason: "bytes-not-provided-to-exporter",
+      };
+      return { manifest: unavailable };
+    }
+    const actualDigest = `sha256:${digestBytes(entry.bytes)}`;
+    if (actualDigest !== artifact.digest) {
+      throw new Error(`artifact=${artifact.id}; expectedDigest=${artifact.digest}; actualDigest=${actualDigest}; bytes=changed-before-export`);
+    }
+    const relativePath = artifactFilePath(artifact);
+    if (paths.has(relativePath)) throw new Error(`artifactFiles=path-collision; path=${relativePath}; artifact=${artifact.id}`);
+    paths.add(relativePath);
+    const included: ProjectExportArtifactFile = {
+      artifactId: artifact.id,
+      digest: artifact.digest,
+      state: "included",
+      relativePath,
+      byteLength: entry.bytes.byteLength,
+      ...(entry.mediaType ? { mediaType: entry.mediaType } : {}),
+    };
+    return { manifest: included, bytes: new Uint8Array(entry.bytes) };
+  });
+}
+
 function safeRelativePath(root: string, candidate: string): boolean {
   if (isAbsolute(candidate)) return false;
   const resolved = resolve(root, candidate);
@@ -207,6 +271,35 @@ function manifestProblems(manifest: ProjectExport): readonly string[] {
     if (!safeRelativePath(".", repository.bundle.relativePath)) problems.push(`repository ${repository.sourceSpaceId} bundle path escapes the package`);
     for (const object of repository.lfs.objects) {
       if (!safeRelativePath(".", object.relativePath ?? "")) problems.push(`repository ${repository.sourceSpaceId} LFS path escapes the package`);
+    }
+  }
+  const artifactEntries = manifest.artifactFiles;
+  if (manifest.artifacts.length > 0 && !artifactEntries) problems.push("Artifact byte disposition is missing");
+  if (artifactEntries) {
+    const artifactIds = new Set(manifest.artifacts.map((artifact) => artifact.id));
+    const seenArtifacts = new Set<string>();
+    const seenPaths = new Set<string>();
+    for (const entry of artifactEntries) {
+      if (!artifactIds.has(entry.artifactId)) problems.push(`artifact file ${entry.artifactId} is not declared by the Project Export`);
+      if (seenArtifacts.has(entry.artifactId)) problems.push(`artifact ${entry.artifactId} has duplicate byte dispositions`);
+      seenArtifacts.add(entry.artifactId);
+      const artifact = manifest.artifacts.find((candidate) => candidate.id === entry.artifactId);
+      if (artifact && entry.digest !== artifact.digest) problems.push(`artifact ${entry.artifactId} byte disposition digest differs from Artifact`);
+      if (entry.state === "included") {
+        if (!entry.relativePath || !safeRelativePath(".", entry.relativePath) || !entry.relativePath.startsWith("artifacts/")) problems.push(`artifact ${entry.artifactId} included path escapes the artifact package`);
+        if (entry.relativePath && seenPaths.has(entry.relativePath)) problems.push(`artifact ${entry.artifactId} included path is duplicated`);
+        if (entry.relativePath) seenPaths.add(entry.relativePath);
+        if (entry.byteLength === undefined || !Number.isSafeInteger(entry.byteLength) || entry.byteLength < 0) problems.push(`artifact ${entry.artifactId} included byte length is invalid`);
+        if (entry.reason !== undefined) problems.push(`artifact ${entry.artifactId} included disposition has an unavailable reason`);
+      } else if (entry.state === "unavailable") {
+        if (!entry.reason || entry.reason.trim().length === 0) problems.push(`artifact ${entry.artifactId} unavailable disposition has no reason`);
+        if (entry.relativePath !== undefined || entry.byteLength !== undefined) problems.push(`artifact ${entry.artifactId} unavailable disposition names bytes`);
+      } else {
+        problems.push(`artifact ${entry.artifactId} byte disposition state is invalid`);
+      }
+    }
+    for (const artifact of manifest.artifacts) {
+      if (!seenArtifacts.has(artifact.id)) problems.push(`artifact ${artifact.id} has no byte disposition`);
     }
   }
   return problems;
@@ -295,6 +388,7 @@ function singleRepositoryProjectExport(input: {
     changes: [],
     evidence: [],
     artifacts: [],
+    artifactFiles: [],
     releases: [],
     targets: [],
     capabilityGrants: [],
@@ -487,6 +581,21 @@ export async function verifyProjectExportPackage(directory: string): Promise<Por
         }
       }
     }
+    for (const artifactFile of manifest.artifactFiles ?? []) {
+      if (artifactFile.state !== "included") continue;
+      const artifactPath = join(packageDirectory, artifactFile.relativePath ?? "");
+      if (!(await exists(artifactPath))) {
+        return { status: "failed", ...blocked("export.artifact_file_missing", "verification", artifactFile.artifactId, checkpoint, true, "restore the missing Artifact bytes into the export package and rerun verification", "the declared included Artifact bytes", `artifact=${artifactFile.artifactId}; path=${artifactFile.relativePath ?? "missing"}`) };
+      }
+      const bytes = await readFile(artifactPath);
+      const actualDigest = `sha256:${digestBytes(bytes)}`;
+      if (actualDigest !== artifactFile.digest) {
+        return { status: "failed", ...blocked("export.artifact_digest_mismatch", "verification", artifactFile.artifactId, checkpoint, false, "replace the corrupt Artifact bytes and regenerate the owner-controlled export", "the declared Artifact digest", `artifact=${artifactFile.artifactId}; expected=${artifactFile.digest}; actual=${actualDigest}`) };
+      }
+      if (bytes.byteLength !== artifactFile.byteLength) {
+        return { status: "failed", ...blocked("export.artifact_byte_length_mismatch", "verification", artifactFile.artifactId, checkpoint, false, "replace the incomplete Artifact bytes and regenerate the owner-controlled export", "the declared Artifact byte length", `artifact=${artifactFile.artifactId}; expected=${artifactFile.byteLength}; actual=${bytes.byteLength}`) };
+      }
+    }
     return { status: "succeeded", value: manifest };
   } catch (error) {
     return { status: "failed", ...blocked("export.manifest_unreadable", "verification", exportFile, checkpoint, false, "restore a readable export package and rerun verification", "export.json", `cause=${error instanceof Error ? error.name : "unknown"}`) };
@@ -533,6 +642,13 @@ export class LocalProjectExporter {
         largeObjects.push(...repository.lfs.objects);
         repositoryDigests.push(repository.bundle.digest);
       }
+      const preparedArtifactFiles = prepareArtifactFiles({ artifacts: input.artifacts ?? [], artifactFiles: input.artifactFiles ?? [] });
+      for (const entry of preparedArtifactFiles) {
+        if (entry.manifest.state !== "included" || !entry.manifest.relativePath || !entry.bytes) continue;
+        const artifactPath = join(destination, entry.manifest.relativePath);
+        await mkdir(dirname(artifactPath), { recursive: true });
+        await writeFile(artifactPath, entry.bytes);
+      }
       const lineage: ProjectExportLineage[] = (input.projectRevisions ?? []).map((revision) => ({
         projectRevisionId: revision.id,
         sourceSpaceSnapshots: { ...revision.sourceSpaceSnapshots },
@@ -551,6 +667,7 @@ export class LocalProjectExporter {
         changes: [...(input.changes ?? [])],
         evidence: [...(input.evidence ?? [])],
         artifacts: [...(input.artifacts ?? [])],
+        artifactFiles: preparedArtifactFiles.map((entry) => ({ ...entry.manifest })),
         releases: [...(input.releases ?? [])],
         targets: [...(input.targets ?? [])],
         ...(input.mirrors ? { mirrors: input.mirrors.map((mirror) => ({ ...mirror, refMappings: mirror.refMappings.map((mapping) => ({ ...mapping })), canonicalRefs: mirror.canonicalRefs.map((ref) => ({ ...ref })), remoteRefs: mirror.remoteRefs.map((ref) => ({ ...ref })), pendingInboundChangeIds: [...mirror.pendingInboundChangeIds] })) } : {}),

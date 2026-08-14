@@ -244,6 +244,8 @@ test("TypeScript library Release, Artifact, Evidence, and Target remain in the p
     assert.equal(exported.status, "succeeded");
     if (exported.status !== "succeeded") return;
     assert.equal(exported.value.manifest.artifacts[0]?.id, built.release.artifacts[0]?.id);
+    assert.equal(exported.value.manifest.artifactFiles?.[0]?.state, "unavailable");
+    assert.equal(exported.value.manifest.artifactFiles?.[0]?.reason, "bytes-not-provided-to-exporter");
     assert.equal(exported.value.manifest.releases[0]?.id, built.release.release.id);
     assert.equal(exported.value.manifest.targets[0]?.id, built.target.id);
     assert.equal(exported.value.manifest.integrity.credentialFree, true);

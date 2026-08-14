@@ -832,6 +832,9 @@ export type ProjectExport = {
   changes: readonly Change[];
   evidence: readonly Evidence[];
   artifacts: readonly Artifact[];
+  /** Portable byte disposition for non-repository Artifacts. Every exported
+   * Artifact is either included and digest-verified or explicitly unavailable. */
+  artifactFiles?: readonly ProjectExportArtifactFile[];
   releases: readonly Release[];
   targets: readonly Target[];
   mirrors?: readonly RepositoryMirror[];
@@ -852,6 +855,16 @@ export type ProjectExport = {
   recoveryCheckpointIds: readonly string[];
   recovery: ProjectExportRecovery;
   integrity: ProjectExportIntegrity;
+};
+
+export type ProjectExportArtifactFile = {
+  artifactId: string;
+  digest: string;
+  state: "included" | "unavailable";
+  relativePath?: string;
+  byteLength?: number;
+  mediaType?: string;
+  reason?: string;
 };
 
 export type GitObjectFormat = "sha1" | "sha256";

@@ -5,6 +5,7 @@ import {
   opaqueId,
   type ActorRef,
   type Artifact,
+  type DisclosureClassification,
   type Target,
 } from "../kernel/contracts.ts";
 import {
@@ -32,6 +33,15 @@ export type PublishedArtifact = {
   releaseDigest: string;
   artifactDigest: string;
   providerObjectId: string;
+  providerReleaseId?: string;
+  providerAssetId?: string;
+  providerReleaseUrl?: string;
+  providerAssetUrl?: string;
+  providerAssetApiUrl?: string;
+  providerMediaType?: string;
+  providerByteLength?: number;
+  disclosure?: DisclosureClassification;
+  providerCapabilities?: Readonly<Record<string, boolean>>;
   receipt: string;
 };
 
@@ -69,6 +79,15 @@ export type ReleasePublicationRecord = {
   updatedAt: string;
   receipt: string;
   providerObjectId?: string;
+  providerReleaseId?: string;
+  providerAssetId?: string;
+  providerReleaseUrl?: string;
+  providerAssetUrl?: string;
+  providerAssetApiUrl?: string;
+  providerMediaType?: string;
+  providerByteLength?: number;
+  disclosure?: DisclosureClassification;
+  providerCapabilities?: Readonly<Record<string, boolean>>;
   recoveryAction?: string;
 };
 
@@ -513,6 +532,15 @@ export class ReleasePublicationCoordinator {
       return clone(publication);
     }
     publication.providerObjectId = result.value.providerObjectId;
+    if (result.value.providerReleaseId !== undefined) publication.providerReleaseId = result.value.providerReleaseId;
+    if (result.value.providerAssetId !== undefined) publication.providerAssetId = result.value.providerAssetId;
+    if (result.value.providerReleaseUrl !== undefined) publication.providerReleaseUrl = result.value.providerReleaseUrl;
+    if (result.value.providerAssetUrl !== undefined) publication.providerAssetUrl = result.value.providerAssetUrl;
+    if (result.value.providerAssetApiUrl !== undefined) publication.providerAssetApiUrl = result.value.providerAssetApiUrl;
+    if (result.value.providerMediaType !== undefined) publication.providerMediaType = result.value.providerMediaType;
+    if (result.value.providerByteLength !== undefined) publication.providerByteLength = result.value.providerByteLength;
+    if (result.value.disclosure !== undefined) publication.disclosure = result.value.disclosure;
+    if (result.value.providerCapabilities !== undefined) publication.providerCapabilities = result.value.providerCapabilities;
     this.target.currentReleaseId = release.release.id;
     this.target.currentArtifactId = artifact.id;
     if (this.target.releaseHistory[this.target.releaseHistory.length - 1] !== release.release.id) {

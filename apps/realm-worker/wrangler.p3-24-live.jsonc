@@ -11,7 +11,7 @@
     "ANYAM_INSTALLATION_ID": "anyam-p3-24-live-20260810",
     "ANYAM_PROTOCOL_VERSION": "anyam.customer-realm-worker/v1",
     "ANYAM_REALM_RP_ID": "anyam-p3-24-live-20260810.swmengappdev.workers.dev",
-    "ANYAM_BUILD_REVISION": "fb0acc9",
+    "ANYAM_BUILD_REVISION": "55ece7d",
     "ANYAM_PROVIDER_WORKER_URL": "https://anyam-p3-24-target-20260810.swmengappdev.workers.dev"
   },
   "kv_namespaces": [
@@ -44,7 +44,8 @@
     {
       "binding": "ANYAM_METADATA_DB",
       "database_name": "anyam-p3-24-live-20260810-metadata",
-      "database_id": "19ebda9a-ed35-4009-877b-198d84e08f99"
+      "database_id": "9ed28760-7937-4e6a-9547-6f3784687225",
+      "remote": true
     }
   ],
   "r2_buckets": [

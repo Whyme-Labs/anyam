@@ -402,6 +402,119 @@ function recoverySnapshot(body: CoordinatorRequestBody): RealmRecoverySnapshot {
   return value as RealmRecoverySnapshot;
 }
 
+const AUTHORITY_RECOVERY_FIELDS = [
+  "protocol",
+  "realmId",
+  "version",
+  "projects",
+  "sourceSpaces",
+  "projectRevisions",
+  "projectViews",
+  "workspaces",
+  "changes",
+  "changeRevisions",
+  "runs",
+  "evidence",
+  "artifacts",
+  "landings",
+  "releases",
+  "targets",
+  "promotions",
+  "mirrors",
+  "mirrorOperations",
+  "mirrorCheckpoints",
+  "externalProposals",
+  "mirrorDeliveries",
+  "canonicalByProject",
+  "idempotency",
+  "audit",
+] as const;
+
+function authorityRecoveryCredentialField(value: unknown): string | undefined {
+  const pending: Array<{ value: unknown; path: string }> = [{ value, path: "snapshot" }];
+  const forbidden = /^(?:access|refresh|provider|api)?token$|^(?:client)?secret$|^password$|^credentials?$|^private[_-]?key$|^authorization(?:[_-]?header)?$/iu;
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current || current.value === null || typeof current.value !== "object") continue;
+    if (Array.isArray(current.value)) {
+      current.value.forEach((entry, index) => pending.push({ value: entry, path: `${current.path}[${index}]` }));
+      continue;
+    }
+    for (const [key, child] of Object.entries(current.value as Record<string, unknown>)) {
+      if (forbidden.test(key)) return `${current.path}.${key}`;
+      pending.push({ value: child, path: `${current.path}.${key}` });
+    }
+  }
+  return undefined;
+}
+
+function authorityRecoverySnapshot(body: CoordinatorRequestBody, realmId: string): AuthorityPlaneSnapshot {
+  const value = body.snapshot;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new AuthorityPlaneError({
+      code: "invalid_request",
+      message: "Authority recovery restore requires a full Authority Plane snapshot object.",
+      recoveryAction: "export a fresh Authority Plane snapshot and submit it without credential or identity-recovery fields",
+      receipt: "authorityRecoverySnapshot=object-required; restore=not-applied; credentialMaterialStored=false",
+    });
+  }
+  const raw = value as Record<string, unknown>;
+  const unknownField = Object.keys(raw).find((key) => !(AUTHORITY_RECOVERY_FIELDS as readonly string[]).includes(key));
+  if (unknownField) {
+    throw new AuthorityPlaneError({
+      code: "invalid_request",
+      message: `Authority recovery snapshot contains unsupported field ${unknownField}.`,
+      recoveryAction: "submit only the credential-free Authority Plane snapshot fields returned by the Authority recovery export",
+      receipt: `authorityRecoverySnapshot=unsupported-field; field=${unknownField}; restore=not-applied; credentialMaterialStored=false`,
+    });
+  }
+  const missingField = AUTHORITY_RECOVERY_FIELDS.find((field) => !Object.prototype.hasOwnProperty.call(raw, field));
+  if (missingField) {
+    throw new AuthorityPlaneError({
+      code: "invalid_request",
+      message: `Authority recovery snapshot is missing ${missingField}.`,
+      recoveryAction: "export a fresh complete Authority Plane snapshot and retry; the existing Authority state is unchanged",
+      receipt: `authorityRecoverySnapshot=complete-required; missing=${missingField}; restore=not-applied; credentialMaterialStored=false`,
+    });
+  }
+  if (raw.protocol !== AUTHORITY_PLANE_PROTOCOL || raw.realmId !== realmId) {
+    throw new AuthorityPlaneError({
+      code: "invalid_request",
+      message: "Authority recovery snapshot belongs to a different protocol or Realm.",
+      recoveryAction: "restore only the snapshot exported by this customer Realm Authority",
+      receipt: "authorityRecoverySnapshot=realm-or-protocol-mismatch; restore=not-applied; credentialMaterialStored=false",
+    });
+  }
+  const credentialField = authorityRecoveryCredentialField(raw);
+  if (credentialField) {
+    throw new AuthorityPlaneError({
+      code: "invalid_request",
+      message: `Authority recovery snapshot contains credential field ${credentialField}.`,
+      recoveryAction: "restore only the credential-free Authority Plane snapshot returned by the customer Realm",
+      receipt: `authorityRecoverySnapshot=credential-field-rejected; field=${credentialField}; restore=not-applied; credentialMaterialStored=false`,
+    });
+  }
+  if (!Number.isSafeInteger(raw.version) || (raw.version as number) < 0) {
+    throw new AuthorityPlaneError({
+      code: "invalid_request",
+      message: "Authority recovery snapshot version must be a non-negative safe integer.",
+      recoveryAction: "export a fresh Authority Plane snapshot and retry; the existing Authority state is unchanged",
+      receipt: "authorityRecoverySnapshot=version-invalid; restore=not-applied; credentialMaterialStored=false",
+    });
+  }
+  try {
+    return normalizeAuthorityPlaneSnapshot(raw as AuthorityPlaneSnapshot);
+  } catch (error) {
+    if (error instanceof AuthorityPlaneError) throw error;
+    throw new AuthorityPlaneError({
+      code: "invalid_request",
+      message: "Authority recovery snapshot could not be normalized.",
+      recoveryAction: "export a fresh complete Authority Plane snapshot and retry; the existing Authority state is unchanged",
+      receipt: "authorityRecoverySnapshot=normalization-failed; restore=not-applied; credentialMaterialStored=false",
+    });
+  }
+}
+
 function identitySummary(identity: RealmIdentityPolicy): Record<string, unknown> {
   const snapshot = identity.getRecoverySnapshot();
   const ownerRelationships = Object.values(snapshot.relationships).filter((relationship) => relationship.role === "owner" && relationship.status === "active");
@@ -606,6 +719,28 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const session = this.authorityOwnerSession(humanSessionId);
     const snapshot = await this.authoritySnapshot();
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", authority: authorityStateSummary(snapshot), session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; persistence=durable-object-storage; version=${snapshot.version}; credentialFree=true; canonicalWrite=landing-only` });
+  }
+
+  private async authorityRecoveryExport(humanSessionId: string): Promise<Response> {
+    // This exports only the Authority Plane. Identity recovery remains a
+    // separate owner ceremony and is intentionally not touched here.
+    const session = this.authorityOwnerSession(humanSessionId);
+    const snapshot = await this.authoritySnapshot();
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-exported", ownerPrincipalId: session.principalId, snapshot, credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=exported; version=${snapshot.version}; credentialFree=true; canonicalWrite=false` });
+  }
+
+  private async authorityRecoveryRestore(body: CoordinatorRequestBody): Promise<Response> {
+    // Replace the serialized Authority state only after the full snapshot has
+    // been validated. Owner identity, passkeys, sessions, and grants remain
+    // outside this cleanup boundary.
+    const humanSessionId = coordinatorString(body, "sessionId");
+    coordinatorString(body, "idempotencyKey");
+    const session = this.authorityOwnerSession(humanSessionId);
+    const snapshot = authorityRecoverySnapshot(body, this.requireIdentity().realm.id);
+    await this.ctx.blockConcurrencyWhile(async () => {
+      await this.ctx.storage.put(REALM_AUTHORITY_SNAPSHOT_KEY, snapshot);
+    });
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-restored", ownerPrincipalId: session.principalId, snapshotVersion: snapshot.version, credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=restored; version=${snapshot.version}; state=replaced; credentialFree=true; canonicalWrite=false` });
   }
 
   private authorityProjectSummary(snapshot: AuthorityPlaneSnapshot, projectId: string) {
@@ -958,6 +1093,8 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       const identity = this.requireIdentity();
 
       if (url.pathname === "/authority/state/internal") return await this.authorityState(coordinatorString(body, "sessionId"));
+      if (url.pathname === "/authority/recovery/export/internal") return await this.authorityRecoveryExport(coordinatorString(body, "sessionId"));
+      if (url.pathname === "/authority/recovery/restore/internal") return await this.authorityRecoveryRestore(body);
       if (url.pathname === "/authority/project/internal") return await this.authorityProject(body);
       if (url.pathname === "/authority/projects/internal") return await this.authorityProjects(body);
       if (url.pathname === "/authority/workspaces/internal") return await this.authorityWorkspaces(body);

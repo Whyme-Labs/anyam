@@ -103,7 +103,7 @@ test("replay archive qualification entrypoint enforces its binding-shaped creden
 test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion command path through binding-shaped Durable Object state", async () => {
   const oauthKv = new MemoryKV();
   const ownerSessionId = "session:authority-test";
-  const authority = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot("realm:authority-test"));
+  let authority = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot("realm:authority-test"));
   const namespace = {
     idFromName: (_name: string): string => "authority-test-do",
     get: (_id: string) => ({
@@ -111,6 +111,11 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
         if (request.headers.get(REALM_COORDINATOR_INTERNAL_HEADER) !== REALM_COORDINATOR_INTERNAL_VALUE) return new Response(JSON.stringify({ code: "internal_binding_required" }), { status: 403 });
         const body = request.method === "POST" ? await request.json() as Record<string, unknown> : {};
         if (body.sessionId !== ownerSessionId) return new Response(JSON.stringify({ code: "session.invalid" }), { status: 403 });
+        if (new URL(request.url).pathname === "/authority/recovery/export/internal") return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "recovery-exported", snapshot: authority.snapshot(), credentialFree: true, canonicalWrite: false, receipt: "authorityRecovery=exported; credentialFree=true; canonicalWrite=false" }), { status: 200, headers: { "content-type": "application/json" } });
+        if (new URL(request.url).pathname === "/authority/recovery/restore/internal") {
+          authority = new AuthorityPlaneCoordinator(body.snapshot as never);
+          return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "recovery-restored", credentialFree: true, canonicalWrite: false, receipt: "authorityRecovery=restored; state=replaced; credentialFree=true; canonicalWrite=false" }), { status: 200, headers: { "content-type": "application/json" } });
+        }
         if (new URL(request.url).pathname === "/authority/state/internal") return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", authority: authorityStateSummary(authority.snapshot()) }));
         if (new URL(request.url).pathname === "/authority/workspaces/internal") {
           const snapshot = authority.snapshot();
@@ -540,6 +545,16 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
   const finalState = await state();
   assert.equal(((finalState.authority as Record<string, unknown>).canonicalByProject as Record<string, string>)[project.id], landedRevision);
   assert.equal(((finalState.authority as Record<string, unknown>).counts as Record<string, number>).audit, 13);
+  const authorityExport = await handleAuthorityRequest(new Request("https://realm.example/api/authority/recovery/export", { method: "POST", headers: { cookie: `anyam_owner_session=${encodeURIComponent(hostSessionId)}`, "content-type": "application/json", "idempotency-key": "authority-recovery-export" }, body: "{}" }), env);
+  assert.ok(authorityExport);
+  assert.equal(authorityExport.status, 200);
+  const authorityExportBody = await authorityExport.json() as Record<string, unknown>;
+  assert.equal(authorityExportBody.status, "recovery-exported");
+  assert.equal(authorityExportBody.credentialFree, true);
+  const authorityRestore = await handleAuthorityRequest(new Request("https://realm.example/api/authority/recovery/restore", { method: "POST", headers: { cookie: `anyam_owner_session=${encodeURIComponent(hostSessionId)}`, "content-type": "application/json", "idempotency-key": "authority-recovery-restore" }, body: JSON.stringify({ snapshot: authorityExportBody.snapshot }) }), env);
+  assert.ok(authorityRestore);
+  assert.equal(authorityRestore.status, 200);
+  assert.equal((await authorityRestore.json() as Record<string, unknown>).status, "recovery-restored");
 });
 
 test("Realm Worker exposes an authenticated project-scoped REST read through the Coordinator", async () => {

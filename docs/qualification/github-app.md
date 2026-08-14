@@ -39,6 +39,38 @@ ANYAM_GITHUB_APP_PR_REVISION_WAIT_MS
 ANYAM_GITHUB_APP_PR_REVISION_POLL_MS
 ```
 
+To extend the provider qualification into the customer-operated Authority
+boundary, set the following additional inputs. The owner session may be
+provided directly for a one-off run or through a file so it is not placed in
+shell history; it is sent only as the host cookie to the configured Realm and
+is never printed.
+
+```text
+ANYAM_GITHUB_APP_AUTHORITY_BASE_URL=https://customer-realm.example
+ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION_FILE=/path/to/owner-session.txt
+```
+
+The Authority URL must be HTTPS (loopback HTTP is allowed only for local
+development), and the owner session file should contain only the opaque
+session value with no cookie header or other credentials.
+
+Use exactly one of `ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION` or
+`ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION_FILE`. The Realm must be an empty,
+disposable Authority boundary: the qualification exports its credential-free
+Authority Plane snapshot, creates one Project, public Source Space, public
+Project View, and empty mapped Mirror from the actual seeded Git OID, then
+restores that Authority snapshot after provider cleanup, then exports it again
+and compares the snapshot digest. The Authority recovery endpoint replaces only
+the Authority Plane state; it does not revoke or restore
+identity, passkeys, owner sessions, or OAuth grants. This removes a hidden
+pre-seeding dependency and makes the cleanup boundary explicit. A non-empty
+Authority Realm is rejected before mutation.
+
+The qualification records outbound projection, inbound ref proposal, explicit
+force-push failure, canonical-wins reconciliation, one stable pull-request
+Change with successive Revisions, duplicate delivery, and a credential-free
+Mirror read-back digest. It never exports or prints credentials.
+
 The private key, webhook secret, installation tokens, App JWT, and provider
 responses containing credentials are never printed or persisted by the
 adapter. The delivery ledger supplied by the Realm boundary is mandatory; it
@@ -62,20 +94,25 @@ The qualification creates the disposable PR through the installed App after
 the initial mapped branch projection, then pushes a second head revision and
 observes the provider's updated PR state during the measured wait window. It
 does not require a pre-existing PR or human timing. The adapter still observes
-the PR; it does not itself write Anyam's Change/Revision ledger. Project/
-Authority export and restore are also outside this provider adapter command.
-These are deliberate qualification boundaries, not hidden claims.
+the PR; it does not itself write Anyam's Change/Revision ledger. The enclosing
+qualification command writes the observed provider events through the
+customer-operated Authority boundary and restores its credential-free Authority
+Plane snapshot after cleanup. These are deliberate qualification boundaries, not
+hidden claims.
 
-The repository must already exist and be bound to the customer Realm/Source
-Space qualification. The script does not create an unowned repository. On
+The repository is the explicitly disposable selected repository. The script
+creates only its disposable Authority state inside the empty customer Realm;
+it does not create an unowned GitHub repository. On
 setup or adapter-authentication failure, it makes a separate cleanup attempt
 for the exact named repository when the App credential can be constructed; if
 credential construction itself fails, the result is an explicit blocked
 cleanup receipt rather than a false success. No PAT or Realm credential may be
 substituted.
 
-A green command receipt therefore proves only the selected GitHub App and
-qualification repository adapter boundary. It does not claim the customer
-Realm/Authority vertical slice, GitHub Enterprise support, general repository
-mirroring, or production readiness. #193 remains open until that live
-customer-operated Realm receipt is captured.
+A green command receipt with the Authority inputs proves the selected GitHub
+App, qualification repository adapter, and the exercised customer Realm /
+Authority boundary only. Without those inputs, a provider-only receipt proves
+only the selected GitHub App and qualification repository adapter boundary. It
+does not claim GitHub Enterprise support, general repository mirroring, or
+production readiness. #193 remains open until the live customer-operated
+Realm receipt is captured.

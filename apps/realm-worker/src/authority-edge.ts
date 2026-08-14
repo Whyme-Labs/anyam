@@ -776,8 +776,14 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
 
   try {
     if (url.pathname === "/api/authority/state" && request.method === "GET") return json(await requestAnyamRealmCoordinator(env, "/authority/state/internal", { sessionId }));
+    if (url.pathname === "/api/authority/recovery/export" && request.method === "POST") return json(await requestAnyamRealmCoordinator(env, "/authority/recovery/export/internal", { sessionId }));
+    if (url.pathname === "/api/authority/recovery/restore" && request.method === "POST") {
+      const idempotencyKey = request.headers.get("idempotency-key")?.trim();
+      if (!idempotencyKey) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "invalid_request", recoveryAction: "send one non-empty Idempotency-Key header for Authority recovery restore", receipt: "authorityRecovery=restore; idempotencyKey=required; restore=not-applied; credentialMaterialStored=false" }, 422);
+      return json(await requestAnyamRealmCoordinator(env, "/authority/recovery/restore/internal", { ...(await readBody(request)), idempotencyKey, sessionId }));
+    }
     if (url.pathname === "/api/authority/command" && request.method === "POST") return json(await requestAnyamRealmCoordinator(env, "/authority/command/internal", { ...(await readBody(request)), sessionId }));
-    return json({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "not_found", recoveryAction: "Use GET /api/authority/state or POST /api/authority/command.", receipt: `authorityRoute=${url.pathname}; method=${request.method}; transition=not-started` }, 404);
+    return json({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "not_found", recoveryAction: "Use GET /api/authority/state, POST /api/authority/command, or the owner-authenticated Authority recovery endpoints.", receipt: `authorityRoute=${url.pathname}; method=${request.method}; transition=not-started` }, 404);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
     const status = detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : detail.includes("idempotency_conflict") || detail.includes("stale_state") || detail.includes("conflict") || detail.includes("promotion=blocked") ? 409 : 503;

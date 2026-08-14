@@ -39,6 +39,31 @@ ANYAM_GITHUB_APP_PR_REVISION_WAIT_MS
 ANYAM_GITHUB_APP_PR_REVISION_POLL_MS
 ```
 
+## Customer setup checklist
+
+1. Create a GitHub App in the customer GitHub account and install it on one
+   disposable repository. Grant `Contents: write`, `Metadata: read`, and
+   `Pull requests: write` for this qualification. Grant `Administration: write`
+   only because the final cleanup deletes that explicitly disposable
+   repository. Subscribe the App to exactly `push` and `pull_request`.
+2. Generate the App's private key and keep the PEM in a local file readable
+   only by the operator. Record the App ID and installation ID; do not paste
+   the private key, webhook secret, or installation token into chat or commit
+   them to the repository.
+3. Set `ANYAM_GITHUB_APP_REPOSITORY` and
+   `ANYAM_GITHUB_APP_DISPOSABLE_REPOSITORY` to that same `owner/name`. The
+   qualification refuses a different cleanup target.
+4. Open the deployed customer Realm's `/owner/login`, authenticate with the
+   enrolled passkey, and place only the opaque `anyam_owner_session` value in
+   a local owner-session file. Do not copy the `Cookie:` header or any other
+   browser data. Set `ANYAM_GITHUB_APP_AUTHORITY_BASE_URL` to the deployed
+   Realm URL and point `ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION_FILE` at that
+   file.
+5. Run the qualification from the same terminal that contains the non-secret
+   IDs, sizing receipts, and file paths. A successful receipt must show both
+   provider and Authority cleanup success; otherwise the named disposable
+   resources remain an operator-owned recovery task.
+
 To extend the provider qualification into the customer-operated Authority
 boundary, set the following additional inputs. The owner session may be
 provided directly for a one-off run or through a file so it is not placed in

@@ -46,6 +46,29 @@ test("qualification scripts fail deterministically when their named inputs are m
   }
 });
 
+test("GitHub App qualification names all missing setup inputs in one receipt", async () => {
+  const environment = cleanEnvironment();
+  let failure: { stdout?: string; stderr?: string; code?: string | number } | undefined;
+  try {
+    await execFile(process.execPath, ["node_modules/tsx/dist/cli.mjs", "scripts/qualify-github-app.ts"], {
+      cwd: process.cwd(),
+      env: environment,
+      maxBuffer: 1024 * 1024,
+    });
+    assert.fail("GitHub App qualification unexpectedly succeeded without inputs");
+  } catch (error) {
+    failure = error as { stdout?: string; stderr?: string; code?: string | number };
+  }
+
+  assert.ok(failure);
+  const body = JSON.parse(`${failure.stdout ?? ""}${failure.stderr ?? ""}`) as { error?: string; credentialValues?: string };
+  assert.equal(body.credentialValues, "not-printed");
+  assert.match(body.error ?? "", /ANYAM_GITHUB_APP_ID/);
+  assert.match(body.error ?? "", /ANYAM_GITHUB_APP_REPOSITORY/);
+  assert.match(body.error ?? "", /ANYAM_GITHUB_APP_PRIVATE_KEY or ANYAM_GITHUB_APP_PRIVATE_KEY_FILE/);
+  assert.match(body.error ?? "", /ANYAM_GITHUB_APP_PR_REVISION_POLL_MS/);
+});
+
 test("worker-target qualification declares module syntax in its seed upload", async () => {
   const source = await (await import("node:fs/promises")).readFile("scripts/qualify-worker-target.ts", "utf8");
   assert.match(source, /form\.append\("metadata",\s*new Blob\(\[JSON\.stringify\(\{\s*main_module:\s*"worker\.js"\s*\}\)\],\s*\{\s*type:\s*"application\/json"\s*\}\),\s*"metadata\.json"\)/);

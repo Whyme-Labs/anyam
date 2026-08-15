@@ -37,6 +37,14 @@ function optional(name: string): string | undefined {
   return value || undefined;
 }
 
+function requireConfiguration(names: readonly string[]): void {
+  const missing = names.filter((name) => optional(name) === undefined);
+  if (optional("ANYAM_GITHUB_APP_PRIVATE_KEY") === undefined && optional("ANYAM_GITHUB_APP_PRIVATE_KEY_FILE") === undefined) {
+    missing.push("ANYAM_GITHUB_APP_PRIVATE_KEY or ANYAM_GITHUB_APP_PRIVATE_KEY_FILE");
+  }
+  if (missing.length > 0) throw new Error(`missing qualification inputs: ${missing.join(", ")}; set them in the same terminal that runs this qualification`);
+}
+
 function positiveInteger(name: string): number {
   const raw = required(name);
   const value = Number(raw);
@@ -414,6 +422,26 @@ async function waitForSecondProposalRevision(input: { adapter: GitHubAppProjecti
 
 async function main(): Promise<void> {
   const apiBaseUrl = optional("ANYAM_GITHUB_APP_API_BASE_URL") ?? "https://api.github.com";
+  requireConfiguration([
+    "ANYAM_GITHUB_APP_ID",
+    "ANYAM_GITHUB_APP_INSTALLATION_ID",
+    "ANYAM_GITHUB_APP_REPOSITORY",
+    "ANYAM_GITHUB_APP_WEBHOOK_SECRET",
+    "ANYAM_GITHUB_APP_QUALIFICATION_ID",
+    "ANYAM_GITHUB_APP_DISPOSABLE_REPOSITORY",
+    "ANYAM_GITHUB_APP_JWT_LIFETIME_SECONDS",
+    "ANYAM_GITHUB_APP_JWT_SIZING_RECEIPT",
+    "ANYAM_GITHUB_APP_JWT_CLOCK_SKEW_SECONDS",
+    "ANYAM_GITHUB_APP_JWT_CLOCK_SKEW_SIZING_RECEIPT",
+    "ANYAM_GITHUB_APP_GIT_MAX_BUFFER_BYTES",
+    "ANYAM_GITHUB_APP_GIT_SIZING_RECEIPT",
+    "ANYAM_GITHUB_APP_RETRY_DELAYS_MS",
+    "ANYAM_GITHUB_APP_RETRY_SIZING_RECEIPT",
+    "ANYAM_GITHUB_APP_QUEUE_MAX_PENDING",
+    "ANYAM_GITHUB_APP_QUEUE_SIZING_RECEIPT",
+    "ANYAM_GITHUB_APP_PR_REVISION_WAIT_MS",
+    "ANYAM_GITHUB_APP_PR_REVISION_POLL_MS",
+  ]);
   const appId = required("ANYAM_GITHUB_APP_ID");
   const installationId = required("ANYAM_GITHUB_APP_INSTALLATION_ID");
   const repository = required("ANYAM_GITHUB_APP_REPOSITORY");

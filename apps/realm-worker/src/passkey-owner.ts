@@ -162,6 +162,40 @@ function expiredSessionCookie(): string {
   return `${COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax`;
 }
 
+function ownerSessionExportAllowed(request: Request): boolean {
+  const origin = request.headers.get("origin");
+  if (origin !== null && origin !== new URL(request.url).origin) return false;
+  const fetchSite = request.headers.get("sec-fetch-site");
+  return fetchSite === null || fetchSite === "same-origin" || fetchSite === "same-site";
+}
+
+async function exportOwnerSession(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
+  if (!ownerSessionExportAllowed(request)) return json({ code: "owner_session_export_origin_rejected", recoveryAction: "Use the owner-session download button on the authenticated Realm origin; no session material was returned.", receipt: "ownerSessionExport=origin-rejected; credentialMaterialStored=false" }, 403);
+  const ownerState = await ownerKernelSession(request, env);
+  if (ownerState instanceof Response) return ownerState;
+  const encodedSessionId = parseCookies(request)[COOKIE_NAME];
+  if (!encodedSessionId) return json({ code: "owner_session_missing", recoveryAction: "Authenticate the Realm owner before downloading the owner-session file.", receipt: "ownerSessionExport=missing; credentialMaterialStored=false" }, 401);
+  let sessionId: string;
+  try {
+    sessionId = decodeURIComponent(encodedSessionId);
+  } catch {
+    return json({ code: "owner_session_invalid", recoveryAction: "Authenticate the Realm owner again before downloading the owner-session file.", receipt: "ownerSessionExport=malformed; credentialMaterialStored=false" }, 401);
+  }
+  if (!sessionId || /[\r\n]/u.test(sessionId)) return json({ code: "owner_session_invalid", recoveryAction: "Authenticate the Realm owner again before downloading the owner-session file.", receipt: "ownerSessionExport=invalid; credentialMaterialStored=false" }, 401);
+  return new Response(`${sessionId}\n`, {
+    status: 200,
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "content-disposition": 'attachment; filename="owner-session.txt"',
+      "cache-control": "no-store",
+      pragma: "no-cache",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "default-src 'none'",
+      "referrer-policy": "no-referrer",
+    },
+  });
+}
+
 function ownerPage(mode: "claim" | "login"): Response {
   const claim = mode === "claim";
   const title = claim ? "Claim Anyam Realm" : "Sign in to Anyam Realm";
@@ -175,6 +209,7 @@ function ownerPage(mode: "claim" | "login"): Response {
     const mode = ${JSON.stringify(mode)};
     const result = document.getElementById("result");
     const button = document.getElementById("continue");
+    const sessionExport = document.getElementById("sessionExport");
     const status = (message) => { result.textContent = message; };
     const decode = (value) => {
       const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
@@ -239,6 +274,7 @@ function ownerPage(mode: "claim" | "login"): Response {
         const verified = await call(mode === "claim" ? "/api/owner/passkey/register/verify" : "/api/owner/passkey/auth/verify", { challengeId: options.challengeId, response: responseJSON(credential) }, bootstrap);
         status(JSON.stringify(verified, null, 2));
         button.textContent = mode === "claim" ? "Realm claimed" : "Signed in";
+        if (mode === "login" && sessionExport) sessionExport.hidden = false;
       } catch (error) {
         status(error instanceof Error ? error.message : "owner_authentication_failed");
         button.disabled = false;
@@ -247,12 +283,13 @@ function ownerPage(mode: "claim" | "login"): Response {
   `;
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
-<style>body{font:16px system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1rem;color:#17202a}main{border:1px solid #d6dbe1;border-radius:12px;padding:2rem}label{display:grid;gap:.4rem;margin:1rem 0}input{font:inherit;padding:.65rem;border:1px solid #9aa5b1;border-radius:6px}button{font:inherit;padding:.7rem 1rem;border:0;border-radius:6px;background:#14532d;color:white;cursor:pointer}button:disabled{opacity:.6;cursor:wait}.hint{font-size:.9rem;color:#52606d}pre{white-space:pre-wrap;background:#f4f6f8;padding:1rem;border-radius:6px;min-height:2rem}</style></head>
+<style>body{font:16px system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1rem;color:#17202a}main{border:1px solid #d6dbe1;border-radius:12px;padding:2rem}label{display:grid;gap:.4rem;margin:1rem 0}input{font:inherit;padding:.65rem;border:1px solid #9aa5b1;border-radius:6px}button{font:inherit;padding:.7rem 1rem;border:0;border-radius:6px;background:#14532d;color:white;cursor:pointer}button:disabled{opacity:.6;cursor:wait}.hint{font-size:.9rem;color:#52606d}.warning{font-size:.9rem;color:#7c2d12;background:#ffedd5;border-radius:6px;padding:.75rem}#sessionExport{margin-top:1.5rem;border-top:1px solid #d6dbe1;padding-top:1.5rem}pre{white-space:pre-wrap;background:#f4f6f8;padding:1rem;border-radius:6px;min-height:2rem}</style></head>
 <body><main><h1>${heading}</h1><p>Anyam verifies this Realm-bound passkey in the customer-owned Worker.</p>
 ${claim ? `<label>Display name<input id="displayName" autocomplete="name" value="Anyam Realm owner"></label>` : ""}${bootstrapField}
-<button id="continue" type="button">${claim ? "Create owner passkey" : "Use passkey"}</button><pre id="result" aria-live="polite"></pre></main>
+<button id="continue" type="button">${claim ? "Create owner passkey" : "Use passkey"}</button><pre id="result" aria-live="polite"></pre>
+${!claim ? `<section id="sessionExport" hidden><h2>Owner session file</h2><p class="warning">This downloads a bearer session credential. Store the file securely, never commit it, and delete it when the qualification is complete.</p><form method="post" action="/api/owner/session/export"><button type="submit">Download owner-session.txt</button></form></section>` : ""}</main>
   <script>${script.replaceAll("</script>", "<\\/script>")}</script></body></html>`;
-  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'" } });
+  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'" } });
 }
 
 function qualificationPage(): Response {
@@ -890,6 +927,7 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
     if (url.pathname === "/api/owner/passkey/auth/verify" && request.method === "POST") return await authenticationVerify(request, env);
     if (url.pathname === "/api/operator/status" && request.method === "GET") return await operatorRead(request, env, "status");
     if (url.pathname === "/api/operator/preflight" && request.method === "GET") return await operatorRead(request, env, "preflight");
+    if (url.pathname === "/api/owner/session/export" && request.method === "POST") return await exportOwnerSession(request, env);
     if (url.pathname === "/api/owner/session/revoke" && request.method === "POST") return await revokeSession(request, env);
     if (url.pathname === "/api/owner/oauth/grants" && request.method === "GET") return await listOAuthGrants(request, env);
     if (url.pathname === "/api/owner/oauth/grants/revoke" && request.method === "POST") return await revokeOAuthGrant(request, env);

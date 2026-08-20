@@ -1089,3 +1089,62 @@ test("Realm Worker owner delegation edge keeps task authority bounded and creden
   assert.equal(afterRevoke.status, 422);
   assert.equal((await afterRevoke.json() as Record<string, unknown>).code, "credential_exchange_rejected");
 });
+
+test("owner session download is owner-authenticated, same-origin, and attachment-only", async () => {
+  const oauthKv = new MemoryKV();
+  const hostSessionId = "host-session:download";
+  const kernelSessionId = "session:download";
+  oauthKv.values.set(`anyam:passkey:session:${hostSessionId}`, JSON.stringify({
+    protocol: "anyam.passkey-owner/v1",
+    sessionId: hostSessionId,
+    realmId: "realm:download",
+    userId: "owner:download",
+    displayName: "Download Owner",
+    credentialId: "credential:download",
+    kernelSessionId,
+    actorId: "actor:download",
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    createdAt: new Date().toISOString(),
+  }));
+  const namespace = {
+    idFromName: (_name: string): string => "download-do",
+    get: (_id: string) => ({
+      fetch: async (request: Request): Promise<Response> => {
+        if (request.headers.get(REALM_COORDINATOR_INTERNAL_HEADER) !== REALM_COORDINATOR_INTERNAL_VALUE) return new Response(JSON.stringify({ code: "internal_binding_required" }), { status: 403 });
+        const body = await request.json() as { sessionId?: string };
+        if (new URL(request.url).pathname !== "/identity/session/validate" || body.sessionId !== kernelSessionId) return new Response(JSON.stringify({ code: "session.invalid" }), { status: 403 });
+        return new Response(JSON.stringify({ session: { id: kernelSessionId, actorId: "actor:download", principalId: "owner:download", expiresAt: new Date(Date.now() + 60_000).toISOString() } }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    }),
+  };
+  const env = {
+    ANYAM_HOSTING_MODE: "customer-operated",
+    ANYAM_INSTALLATION_ID: "download",
+    ANYAM_PROTOCOL_VERSION: "anyam.customer-realm-worker/v1",
+    ANYAM_REALM_RP_ID: "realm-download.example",
+    REALM_COORDINATOR: namespace,
+    OAUTH_KV: oauthKv,
+    ANYAM_METADATA_DB: {},
+    ANYAM_EXPORTS: {},
+    ANYAM_EVENTS: {},
+    ANYAM_WORKFLOW: {},
+  } as unknown as AnyamRealmOAuthEnv;
+  const cookie = `anyam_owner_session=${encodeURIComponent(hostSessionId)}`;
+  const exported = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/session/export", { method: "POST", headers: { cookie, origin: "https://realm.example", "sec-fetch-site": "same-origin" } }), env);
+  assert.ok(exported);
+  assert.equal(exported.status, 200);
+  assert.equal(await exported.text(), `${hostSessionId}\n`);
+  assert.equal(exported.headers.get("content-disposition"), 'attachment; filename="owner-session.txt"');
+  assert.equal(exported.headers.get("cache-control"), "no-store");
+  const crossOrigin = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/session/export", { method: "POST", headers: { cookie, origin: "https://evil.example", "sec-fetch-site": "cross-site" } }), env);
+  assert.ok(crossOrigin);
+  assert.equal(crossOrigin.status, 403);
+  const unauthenticated = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/api/owner/session/export", { method: "POST", headers: { origin: "https://realm.example", "sec-fetch-site": "same-origin" } }), env);
+  assert.ok(unauthenticated);
+  assert.equal(unauthenticated.status, 401);
+  const loginPage = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/owner/login"), env);
+  assert.ok(loginPage);
+  const page = await loginPage.text();
+  assert.match(page, /Download owner-session\.txt/u);
+  assert.match(loginPage.headers.get("content-security-policy") ?? "", /form-action 'self'/u);
+});

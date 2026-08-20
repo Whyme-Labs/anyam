@@ -515,6 +515,7 @@ The Worker exposes a customer-owned WebAuthn adapter boundary:
 | `POST /api/owner/passkey/auth/options` | Authentication challenge for an enrolled owner |
 | `POST /api/owner/passkey/auth/verify` | Verifies the assertion and issues an opaque host-only owner session |
 | `POST /api/owner/session/revoke` | Revokes the current opaque owner session and expires its cookie |
+| `POST /api/owner/session/export` | Owner-authenticated same-origin download of the opaque session value as `owner-session.txt`; response is no-store and never JSON/logged |
 | `GET /api/operator/status` | Owner-authenticated machine-readable installation status; read-only |
 | `GET /api/operator/preflight` | Owner-authenticated read-only binding/migration/policy/export preflight; no provider calls or mutations |
 | `POST /api/owner/agent/delegations` | Creates or reuses one owner-authenticated, non-promotional Agent Task delegation for a real Project/Workspace/Change; credentials are not issued implicitly |

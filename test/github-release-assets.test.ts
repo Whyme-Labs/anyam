@@ -277,11 +277,36 @@ test("fetch-backed GitHub client retries a transient provider response with a vi
 });
 
 test("fetch-backed GitHub client treats a missing release tag as an empty lookup", async () => {
+  let requests = 0;
   const client = new FetchGitHubReleaseAssetsClient({
     retry: { delaysMs: [], sizingReceipt: "qualification=fixture; retry=none" },
-    fetchImpl: async () => new Response(JSON.stringify({ message: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } }),
+    fetchImpl: async () => {
+      requests += 1;
+      return requests === 1
+        ? new Response(JSON.stringify({ message: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } })
+        : new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
+    },
   });
 
   const found = await client.findReleaseByTag({ owner, repository, tagName: "missing-release", token: "fixture-token" });
   assert.equal(found, null);
+  assert.equal(requests, 2);
+});
+
+test("fetch-backed GitHub client finds draft Releases through the collection fallback", async () => {
+  let requests = 0;
+  const client = new FetchGitHubReleaseAssetsClient({
+    retry: { delaysMs: [], sizingReceipt: "qualification=fixture; retry=none" },
+    fetchImpl: async () => {
+      requests += 1;
+      return requests === 1
+        ? new Response(JSON.stringify({ message: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } })
+        : new Response(JSON.stringify([{ id: 17, tag_name: "draft-release", draft: true, immutable: false, html_url: "https://github.com/anyam-test/release-assets/releases/tag/draft-release", assets: [] }]), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  const found = await client.findReleaseByTag({ owner, repository, tagName: "draft-release", token: "fixture-token" });
+  assert.equal(found?.id, "17");
+  assert.equal(found?.draft, true);
+  assert.equal(requests, 2);
 });

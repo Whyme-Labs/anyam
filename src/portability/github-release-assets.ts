@@ -531,8 +531,16 @@ export class FetchGitHubReleaseAssetsClient implements GitHubReleaseAssetsClient
   }
 
   async findReleaseByTag(input: { owner: string; repository: string; tagName: string; token: string }): Promise<GitHubRelease | null> {
-    const response = await this.requestJson("GET", `/repos/${safeRepositoryPart(input.owner, "owner")}/${safeRepositoryPart(input.repository, "repository")}/releases/tags/${encodeURIComponent(safeTag(input.tagName))}`, input.token, undefined, true);
-    return response === null ? null : parseRelease(response);
+    const owner = safeRepositoryPart(input.owner, "owner");
+    const repository = safeRepositoryPart(input.repository, "repository");
+    const tagName = safeTag(input.tagName);
+    const response = await this.requestJson("GET", `/repos/${owner}/${repository}/releases/tags/${encodeURIComponent(tagName)}`, input.token, undefined, true);
+    if (response !== null) return parseRelease(response);
+    // GitHub's tag lookup does not expose draft Releases, but the collection
+    // does. Reconcile drafts before treating a deterministic tag as absent.
+    const listed = await this.requestJson("GET", `/repos/${owner}/${repository}/releases`, input.token);
+    if (!Array.isArray(listed)) throw new Error("github_releases_list_malformed");
+    return listed.map(parseRelease).find((release) => release.tagName === tagName) ?? null;
   }
 
   async createDraftRelease(input: { owner: string; repository: string; tagName: string; token: string }): Promise<GitHubRelease> {

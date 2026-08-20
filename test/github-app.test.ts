@@ -17,6 +17,7 @@ import {
   type GitHubSmartHttpTransport,
   FetchGitHubAppHttpClient,
   FetchGitHubRestClient,
+  gitInstallationAuthorizationHeader,
 } from "../src/portability/github-app.ts";
 import { AUTHORITY_COMMAND_PROTOCOL, AuthorityPlaneCoordinator, emptyAuthorityPlaneSnapshot, type AuthoritySession } from "../src/cloudflare/authority-plane.ts";
 import type { GitRef } from "../src/kernel/contracts.ts";
@@ -36,6 +37,11 @@ const refs = (entries: readonly [string, string][]): GitRef[] => entries.map(([n
 function fixtureDeliveryLedger() {
   return { recordIfAbsent: (_task: GitHubReconciliationTask) => "accepted" as const, listPending: (): readonly GitHubReconciliationTask[] => [], markProcessed: (_deliveryId: string) => undefined };
 }
+
+test("Git Smart HTTP binds an installation token as x-access-token Basic auth", () => {
+  assert.equal(gitInstallationAuthorizationHeader("ghs_test-token"), "Authorization: Basic eC1hY2Nlc3MtdG9rZW46Z2hzX3Rlc3QtdG9rZW4=");
+  assert.doesNotMatch(gitInstallationAuthorizationHeader("ghs_test-token"), /Bearer/u);
+});
 
 class FakeTokenIssuer implements GitHubAppTokenIssuer {
   readonly calls: Array<{ installationId: string; repository: string; permissions: readonly string[] }> = [];

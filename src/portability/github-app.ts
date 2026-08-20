@@ -50,6 +50,12 @@ export type GitHubSmartHttpTransport = {
   push(input: { repositoryUrl: string; token: string; expectedRefs: readonly GitRef[]; desiredRefs: readonly GitRef[]; refMappings: readonly { localRef: string; remoteRef: string }[]; operationId: string; idempotencyKey: string }): Promise<GitHubSmartHttpRefs>;
 };
 
+/** GitHub's Git-over-HTTPS transport accepts an installation token as the
+ * password for the x-access-token user, unlike the REST Bearer header. */
+export function gitInstallationAuthorizationHeader(token: string): string {
+  return `Authorization: Basic ${Buffer.from(`x-access-token:${token}`, "utf8").toString("base64")}`;
+}
+
 export type GitHubCommitObservation = {
   oid: string;
   author: { name: string; email?: string };
@@ -619,7 +625,7 @@ export class NodeGitSmartHttpTransport implements GitHubSmartHttpTransport {
   }
 
   private authEnv(token: string): NodeJS.ProcessEnv {
-    return { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` };
+    return { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: gitInstallationAuthorizationHeader(token) };
   }
 
   async inspect(input: { repositoryUrl: string; token: string; refs: readonly string[]; knownGeneration: string }): Promise<GitHubSmartHttpRefs> {

@@ -511,7 +511,7 @@ async function main(): Promise<void> {
     const service = new MirrorCoordinator({ mirror: emptyMirror, remote: adapter, changeSink: changeSink(changes), sourceSpaceClassification: "public" });
     const actor = { principalId: "principal:github-app-qualification", actorId: "actor:github-app-qualification", sessionId: "session:github-app-qualification", clientId: "client:github-app-qualification" };
     const outbound = await service.sync({ canonical: { projectRevisionId: "project-revision:github-app-qualification:one", sourceSpaceId: emptyMirror.sourceSpaceId, sourceSpaceClassification: "public", disclosure: "public", verified: true, verificationReceipt: "qualification=source-verified", refs: refs([["refs/heads/main", seeded.initialOid]]) }, idempotencyKey: "qualification:outbound", actor });
-    if (outbound.status !== "succeeded") throw new Error(`outbound projection failed: ${outbound.errorCode}; ${outbound.recoveryAction}`);
+    if (outbound.status !== "succeeded") throw new Error(`outbound projection failed: ${outbound.errorCode}; ${outbound.recoveryAction}; receipt=${outbound.receipt}`);
 
     const setupToken = await issuer.issue({ installationId, repository, permissions: ["contents:write", "metadata:read", "pull_requests:write"] });
     if (!setupToken.token.trim() || !Number.isFinite(Date.parse(setupToken.expiresAt)) || Date.parse(setupToken.expiresAt) <= Date.now()) throw new Error("GitHub App qualification setup credential was missing or expired");

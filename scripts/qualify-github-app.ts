@@ -407,17 +407,21 @@ async function qualifyCustomerRealmAuthority(input: {
   return { status: "succeeded", realm: { baseUrl: config.baseUrl, projectId: config.projectId, sourceSpaceId: config.sourceSpaceId, projectRevisionId: config.projectRevisionId, projectViewId: config.projectViewId, mirrorId: config.mirrorId }, stateReceipt: authorityField(state.receipt, "authority.receipt"), outbound: { status: authorityOutbound.status, operation: authorityField(authorityObject(outboundValue.operation, "outbound.operation").id, "outbound.operation.id") }, inbound: { status: authorityInbound.status, changeId: authorityInboundChangeId ?? "missing", deliveryId: authorityInboundDeliveryId }, forcePush: { status: authorityForcePush.status, mirrorState: authorityField(forceMirror.state, "forcePush.mirror.state") }, reconciliation: { status: authorityReconciled.status, mirrorState: authorityField(afterReconcile.state, "reconciliation.mirror.state") }, pullRequest: { proposalKey, changeId: authorityField(proposal.changeId, "proposal.changeId"), revisionCount: revisionIds.length, stableChange: true, successiveRevisions: true, duplicateDelivery: true, setupReceipt: input.proposalRevisionPush.receipt, observationAttempts: input.waitForSecond.attempts }, mirrorLedgerReadBack: { exportedDigest, readBackDigest, readBackVerified: true }, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true, finalMirrorState: authorityField(finalMirror.state, "finalMirror.state") };
 }
 
-async function waitForSecondProposalRevision(input: { adapter: GitHubAppProjectionAdapter; first: GitHubPullRequestObservation; number: number; waitMs: number; pollMs: number }): Promise<{ first: { changeKey: string; revisionKey: string }; second?: { changeKey: string; revisionKey: string }; attempts: number }> {
+async function waitForSecondProposalRevision(input: { adapter: GitHubAppProjectionAdapter; first: GitHubPullRequestObservation; number: number; waitMs: number; pollMs: number }): Promise<{ first: { changeKey: string; revisionKey: string }; second?: { changeKey: string; revisionKey: string }; attempts: number; lastHeadCommit: string }> {
   const first = proposalRevision(input.first);
   const started = Date.now();
   let attempts = 1;
+  let lastHeadCommit = input.first.headCommit;
   while (Date.now() - started < input.waitMs) {
     await new Promise((resolve) => setTimeout(resolve, input.pollMs));
     attempts += 1;
     const next = await input.adapter.observePullRequest({ number: input.number });
-    if (next.status === "succeeded" && next.value.headCommit !== input.first.headCommit) return { first, second: proposalRevision(next.value), attempts };
+    if (next.status === "succeeded") {
+      lastHeadCommit = next.value.headCommit;
+      if (next.value.headCommit !== input.first.headCommit) return { first, second: proposalRevision(next.value), attempts, lastHeadCommit };
+    }
   }
-  return { first, attempts };
+  return { first, attempts, lastHeadCommit };
 }
 
 async function main(): Promise<void> {
@@ -575,8 +579,11 @@ async function main(): Promise<void> {
     if (proposal.proposalKey !== String(pullRequestNumber) || proposal.remoteRepository !== repository || JSON.stringify(proposal).includes("title")) throw new Error("pull-request proposal was not stable and metadata-minimal");
     await runGit(seeded.directory, ["update-ref", `refs/heads/${seeded.proposalBranch}`, seeded.proposalSecondOid], gitMaxBufferBytes);
     const proposalRevisionPush = await setupGit.push({ repositoryUrl, token: setupToken.token, expectedRefs: refs([[`refs/heads/${seeded.proposalBranch}`, seeded.proposalInitialOid]]), desiredRefs: [{ name: `refs/heads/${seeded.proposalBranch}`, oid: seeded.proposalSecondOid }], refMappings: [{ localRef: `refs/heads/${seeded.proposalBranch}`, remoteRef: `refs/heads/${seeded.proposalBranch}` }], operationId: "github:qualification:pr-revision", idempotencyKey: "github:qualification:pr-revision" });
+    const proposalBranchReadBack = await setupGit.inspect({ repositoryUrl, token: setupToken.token, refs: [`refs/heads/${seeded.proposalBranch}`], knownGeneration: "qualification:pr-revision" });
+    const proposalBranchOid = proposalBranchReadBack.refs.find((ref) => ref.name === `refs/heads/${seeded.proposalBranch}`)?.oid;
+    if (proposalBranchOid !== seeded.proposalSecondOid) throw new Error(`pull-request branch push did not read back the requested head; expected=${seeded.proposalSecondOid}; observed=${proposalBranchOid ?? "missing"}; pushReceipt=${proposalRevisionPush.receipt}; readBackReceipt=${proposalBranchReadBack.receipt}`);
     const secondProposal = await waitForSecondProposalRevision({ adapter, first: observedPr.value, number: pullRequestNumber, waitMs: proposalWaitMs, pollMs: proposalPollMs });
-    if (!secondProposal.second) throw new Error(`pull-request ${pullRequestNumber} did not publish a successive head revision within the measured wait window; attempts=${secondProposal.attempts}; waitMs=${proposalWaitMs}; pollMs=${proposalPollMs}`);
+    if (!secondProposal.second) throw new Error(`pull-request ${pullRequestNumber} did not publish a successive head revision within the measured wait window; attempts=${secondProposal.attempts}; lastHeadCommit=${secondProposal.lastHeadCommit}; expectedHeadCommit=${seeded.proposalSecondOid}; waitMs=${proposalWaitMs}; pollMs=${proposalPollMs}; pushReceipt=${proposalRevisionPush.receipt}; branchReadBackReceipt=${proposalBranchReadBack.receipt}`);
     if (secondProposal.first.changeKey !== secondProposal.second.changeKey || secondProposal.first.revisionKey === secondProposal.second.revisionKey) throw new Error("pull-request revisions did not preserve stable Change identity while advancing the Revision");
 
     const restoredDirectory = mkdtempSync(join(tmpdir(), "anyam-github-app-restore-"));

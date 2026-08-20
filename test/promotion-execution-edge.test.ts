@@ -93,6 +93,87 @@ test("owner Promotion execution forwards only the typed handoff identity to the 
   assert.equal(JSON.stringify(value).includes("credential"), true);
 });
 
+test("owner Mirror configuration preserves the coordinator receipt when the Durable Object rejects the command", async () => {
+  const oauthKv = new MemoryKV();
+  const hostSessionId = "host-session:mirror-detail";
+  const kernelSessionId = "session:mirror-detail";
+  oauthKv.values.set(`anyam:passkey:session:${hostSessionId}`, JSON.stringify({
+    protocol: "anyam.passkey-owner/v1",
+    sessionId: hostSessionId,
+    realmId: "realm:mirror-detail",
+    userId: "owner:mirror-detail",
+    displayName: "Mirror Detail Owner",
+    credentialId: "credential:mirror-detail",
+    kernelSessionId,
+    actorId: "actor:mirror-detail",
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    createdAt: new Date().toISOString(),
+  }));
+
+  const namespace = {
+    idFromName: (_name: string): string => "mirror-detail-do",
+    get: (_id: string) => ({
+      fetch: async (request: Request): Promise<Response> => {
+        assert.equal(new URL(request.url).pathname, "/authority/command/internal");
+        assert.equal(request.headers.get(REALM_COORDINATOR_INTERNAL_HEADER), REALM_COORDINATOR_INTERNAL_VALUE);
+        return new Response(JSON.stringify({
+          protocol: "anyam.authority-plane/v1",
+          code: "conflict",
+          message: "Repository Mirror mirror:detail already exists.",
+          recoveryAction: "reuse the original idempotency key or choose a new Mirror identity",
+          receipt: "mirror=mirror:detail; exists=true; transition=not-applied; credentialFree=true",
+        }), { status: 409, headers: { "content-type": "application/json" } });
+      },
+    }),
+  };
+
+  const env = {
+    ANYAM_HOSTING_MODE: "customer-operated",
+    ANYAM_INSTALLATION_ID: "mirror-detail",
+    ANYAM_PROTOCOL_VERSION: "anyam.customer-realm-worker/v1",
+    ANYAM_REALM_RP_ID: "realm-edge.example",
+    REALM_COORDINATOR: namespace,
+    OAUTH_KV: oauthKv,
+    ANYAM_METADATA_DB: {},
+    ANYAM_EXPORTS: {},
+    ANYAM_EVENTS: {},
+    ANYAM_WORKFLOW: {},
+  } as unknown as AnyamRealmOAuthEnv;
+
+  const response = await handleAuthorityRequest(new Request("https://realm.example/api/mirrors", {
+    method: "POST",
+    headers: {
+      cookie: `anyam_owner_session=${encodeURIComponent(hostSessionId)}`,
+      "content-type": "application/json",
+      "idempotency-key": "mirror:detail:configure",
+    },
+    body: JSON.stringify({
+      mirrorId: "mirror:detail",
+      projectId: "project:detail",
+      sourceSpaceId: "source:detail",
+      provider: "github",
+      remoteRepository: "Whyme-Labs/detail",
+      refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }],
+      disclosure: "public",
+      canonicalProjectRevisionId: "project-revision:detail",
+      canonicalRefs: [],
+      remoteGeneration: "qualification:empty",
+      remoteRefs: [],
+      pendingInboundChangeIds: [],
+      receipt: "qualification=mirror-detail; credentialMaterialStored=false",
+    }),
+  }), env);
+
+  if (!response) throw new Error("mirror authority edge did not return a response");
+  assert.equal(response.status, 409);
+  const value = await response.json() as Record<string, unknown>;
+  assert.equal(value.code, "mirror_conflict");
+  assert.match(String(value.receipt), /coordinatorDetail=/);
+  assert.match(decodeURIComponent(String(value.receipt)), /Repository Mirror mirror:detail already exists/);
+  assert.match(decodeURIComponent(String(value.receipt)), /transition=not-applied/);
+  assert.equal(JSON.stringify(value).includes("credentialMaterial"), false);
+});
+
 test("owner Promotion status is a read-only credential-free surface", async () => {
   const oauthKv = new MemoryKV();
   const hostSessionId = "host-session:promotion-status-edge";

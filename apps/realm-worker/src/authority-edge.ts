@@ -23,6 +23,14 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+function coordinatorDetailReceipt(error: unknown): string {
+  const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+  const redacted = detail
+    .replace(/(Bearer\s+)[^\s;]+/giu, "$1<redacted>")
+    .replace(/((?:token|secret|credential|password|privateKey)\s*[=:]\s*)[^\s;,]+/giu, "$1<redacted>");
+  return `coordinatorDetail=${encodeURIComponent(redacted)}`;
+}
+
 async function readBody(request: Request): Promise<Record<string, unknown>> {
   const value: unknown = await request.json();
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("authority request body must be a JSON object");
@@ -312,7 +320,7 @@ async function mirrorMutation(request: Request, env: AnyamRealmOAuthEnv, operati
     const errorClass = status === 404 ? "not_found" : status === 403 ? "session_rejected" : status === 422 ? "invalid_request" : status === 409 ? "conflict" : "coordinator_rejected";
     const code = status === 404 ? "mirror_not_found" : status === 403 ? "owner_session_rejected" : status === 422 ? "invalid_request" : status === 409 ? "mirror_conflict" : "authority_coordinator_rejected";
     const recoveryAction = status === 404 ? "Verify the Project, Source Space, Mirror, Project View, and canonical Revision identifiers without probing hidden resources." : status === 409 ? "Read the current Mirror checkpoint, reuse the original idempotent payload, or choose an explicit reconciliation; no provider credential was accepted." : status === 403 ? "Authenticate the Realm owner again and retry the same typed request." : "Inspect the Durable Object receipt and retry only the same idempotent request when safe.";
-    return mirrorError(status, code, recoveryAction, `authority=coordinator-rejected; errorClass=${errorClass}`);
+    return mirrorError(status, code, recoveryAction, `authority=coordinator-rejected; errorClass=${errorClass}; ${coordinatorDetailReceipt(error)}`);
   }
 }
 

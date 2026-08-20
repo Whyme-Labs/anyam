@@ -65,6 +65,8 @@ export type AnyamRealmOAuthEnv = CustomerRealmWorkerEnv & {
   ANYAM_PROVIDER_WORKER_URL?: string;
   /** Internal service binding for the qualified Target execution plane. */
   ANYAM_PROMOTION_EXECUTOR?: Fetcher;
+  /** Shared secret used only to sign Authority-to-executor handoffs. */
+  ANYAM_PROMOTION_HANDOFF_SECRET?: string;
   ANYAM_OWNER_BOOTSTRAP_TOKEN?: string;
   ANYAM_REALM_RP_ID?: string;
   OAUTH_PROVIDER?: OAuthHelpers;

@@ -27,6 +27,7 @@ import {
   type PromotionExecutionReleaseBundle,
   type PromotionExecutionResult,
 } from "./promotion-execution.ts";
+import { verifyPromotionHandoff, type PromotionHandoffNonceStore } from "./promotion-execution.ts";
 
 /**
  * The executor is the customer-owned provider boundary. Authority sends the
@@ -60,6 +61,8 @@ export type PromotionExecutorConfig = {
   routeReadinessRetry?: CloudflareWorkerRouteReadinessRetry;
   rollbackRouteReadinessRetry?: CloudflareWorkerRouteReadinessRetry;
   healthHeaders?: Readonly<Record<string, string>>;
+  handoffSecret: string;
+  handoffNonceStore: PromotionHandoffNonceStore;
 };
 
 export type PromotionExecutorResponse = {
@@ -437,11 +440,11 @@ function mapPromotionResult(context: PromotionExecutionContext, local: Promotion
 }
 
 export function createPromotionExecutor(config: PromotionExecutorConfig): { execute(context: Readonly<PromotionExecutionContext>): Promise<PromotionExecutionResult> } {
-  if (!config.accountId || !config.scriptName || !config.targetId || !config.previewSubdomain || !config.providerToken) {
+  if (!config.accountId || !config.scriptName || !config.targetId || !config.previewSubdomain || !config.providerToken || !config.handoffSecret || !config.handoffNonceStore) {
     throw new PromotionExecutorConfigurationError(
       "Customer-operated Promotion executor configuration is incomplete.",
-      "configure account ID, Worker script, Target ID, preview subdomain, provider credential secret, and credential expiry before binding the service",
-      "executor=config-incomplete; providerInvocation=false; credentialMaterialStored=false",
+      "configure account ID, Worker script, Target ID, preview subdomain, provider credential secret, handoff secret, nonce store, and credential expiry before binding the service",
+      `executor=config-incomplete; handoff=${config.handoffSecret ? "present" : "missing"}; nonceStore=${config.handoffNonceStore ? "present" : "missing"}; providerInvocation=false; credentialMaterialStored=false`,
     );
   }
   if (Date.parse(config.providerCredentialExpiresAt) <= Date.now()) {
@@ -513,7 +516,13 @@ export function createPromotionExecutor(config: PromotionExecutorConfig): { exec
 }
 
 export function createPromotionExecutorHandler(config: PromotionExecutorConfig): (request: Request) => Promise<Response> {
-  const executor = createPromotionExecutor(config);
+  let executor: ReturnType<typeof createPromotionExecutor>;
+  try {
+    executor = createPromotionExecutor(config);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return async () => jsonResponse({ protocol: PROMOTION_EXECUTOR_PROTOCOL, status: "blocked", code: "executor_configuration_invalid", message, recoveryAction: "configure the signed Authority handoff and durable nonce store before binding the executor", receipt: "executor=config-invalid; providerInvocation=false; credentialMaterialStored=false" }, 503);
+  }
   return async (request) => {
     if (request.method !== "POST" || new URL(request.url).pathname !== "/execute") {
       return jsonResponse({ protocol: PROMOTION_EXECUTOR_PROTOCOL, status: "blocked", code: "not_found", message: "Only POST /execute is exposed by the Promotion executor.", recoveryAction: "send the Authority handoff to POST /execute", receipt: "executor=customer-operated; operation=not-found; credentialMaterialStored=false" }, 404);
@@ -528,7 +537,17 @@ export function createPromotionExecutorHandler(config: PromotionExecutorConfig):
       return jsonResponse({ protocol: PROMOTION_EXECUTOR_PROTOCOL, status: "blocked", code: "invalid_json", message: "Promotion execution body must be valid JSON.", recoveryAction: "send the exact serialized Authority handoff context", receipt: "executor=customer-operated; body=invalid-json; providerInvocation=false; credentialMaterialStored=false" }, 422);
     }
     try {
-      const result = await executor.execute(validateContext(body, config));
+      const context = validateContext(body, config);
+      const nonce = request.headers.get("x-anyam-promotion-nonce")?.trim() ?? "";
+      const expiresAt = request.headers.get("x-anyam-promotion-expires-at")?.trim() ?? "";
+      const signature = request.headers.get("x-anyam-promotion-handoff")?.trim() ?? "";
+      if (!nonce || !expiresAt || !signature || !(await verifyPromotionHandoff({ context, nonce, expiresAt, signature, secret: config.handoffSecret }))) {
+        return jsonResponse({ protocol: PROMOTION_EXECUTOR_PROTOCOL, status: "blocked", code: "handoff_invalid", message: "The Authority Promotion handoff is missing, expired, or invalid.", recoveryAction: "request a fresh signed one-time Authority handoff; provider invocation was not attempted", receipt: "executor=handoff-invalid; providerInvocation=false; credentialMaterialStored=false" }, 401);
+      }
+      if (!(await config.handoffNonceStore.claim({ nonce, expiresAt }))) {
+        return jsonResponse({ protocol: PROMOTION_EXECUTOR_PROTOCOL, status: "blocked", code: "handoff_replayed", message: "The Authority Promotion handoff nonce has already been consumed.", recoveryAction: "request a fresh signed handoff for explicit reconciliation", receipt: "executor=handoff-replay; providerInvocation=false; credentialMaterialStored=false" }, 409);
+      }
+      const result = await executor.execute(context);
       return jsonResponse(result as unknown as Record<string, unknown>, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
     } catch (error) {
       if (error instanceof PromotionExecutorInputError || error instanceof PromotionExecutorConfigurationError || error instanceof PromotionExecutorProviderError) {

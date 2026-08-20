@@ -1,5 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
+import { DurableObject } from "cloudflare:workers";
+
 import {
   createPromotionExecutorHandler,
   type PromotionExecutorArtifactStore,
@@ -15,6 +17,8 @@ export interface Env {
   ANYAM_PROMOTION_EXECUTOR_ADAPTER_ID?: string;
   ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN?: string;
   ANYAM_PROMOTION_CREDENTIAL_EXPIRES_AT?: string;
+  ANYAM_PROMOTION_HANDOFF_SECRET?: string;
+  ANYAM_PROMOTION_NONCE_STORE?: DurableObjectNamespace;
   ANYAM_PROMOTION_ARTIFACTS: R2Bucket;
 }
 
@@ -36,6 +40,15 @@ function configFromEnv(env: Env): PromotionExecutorConfig {
     previewSubdomain: required(env.ANYAM_PROMOTION_EXECUTOR_PREVIEW_SUBDOMAIN, "ANYAM_PROMOTION_EXECUTOR_PREVIEW_SUBDOMAIN"),
     providerToken: required(env.ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN, "ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN"),
     providerCredentialExpiresAt: required(env.ANYAM_PROMOTION_CREDENTIAL_EXPIRES_AT, "ANYAM_PROMOTION_CREDENTIAL_EXPIRES_AT"),
+    handoffSecret: required(env.ANYAM_PROMOTION_HANDOFF_SECRET, "ANYAM_PROMOTION_HANDOFF_SECRET"),
+    handoffNonceStore: {
+      async claim(input) {
+        if (!env.ANYAM_PROMOTION_NONCE_STORE) throw new Error("ANYAM_PROMOTION_NONCE_STORE binding is required");
+        const id = env.ANYAM_PROMOTION_NONCE_STORE.idFromName("promotion-handoff-nonces");
+        const response = await env.ANYAM_PROMOTION_NONCE_STORE.get(id).fetch("https://nonce-store/claim", { method: "POST", body: JSON.stringify(input), headers: { "content-type": "application/json" } });
+        return response.status === 201;
+      },
+    },
     ...(env.ANYAM_PROMOTION_EXECUTOR_HEALTH_URL?.trim() ? { healthUrl: env.ANYAM_PROMOTION_EXECUTOR_HEALTH_URL.trim() } : {}),
     ...(env.ANYAM_PROMOTION_EXECUTOR_ADAPTER_ID?.trim() ? { adapterId: env.ANYAM_PROMOTION_EXECUTOR_ADAPTER_ID.trim() } : {}),
     artifactStore,
@@ -50,7 +63,12 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
-      return json({ protocol: "anyam.promotion-executor-health/v1", status: "healthy", providerCredentials: "brokered-only", canonicalWrite: false, credentialMaterialStored: false });
+      try {
+        configFromEnv(env);
+        return json({ protocol: "anyam.promotion-executor-health/v1", status: "healthy", handoff: "signed-and-replay-protected", providerCredentials: "brokered-only", canonicalWrite: false, credentialMaterialStored: false });
+      } catch (error) {
+        return json({ protocol: "anyam.promotion-executor-health/v1", status: "blocked", code: "executor_configuration_invalid", recoveryAction: "configure the signed Authority handoff and durable nonce store before binding the Realm service", receipt: `executor=config-invalid; field=${error instanceof Error ? error.message : "unknown"}; providerInvocation=false; credentialMaterialStored=false` }, 503);
+      }
     }
     try {
       const handler = createPromotionExecutorHandler(configFromEnv(env));
@@ -61,3 +79,15 @@ export default {
     }
   },
 };
+
+export class PromotionExecutorNonceStore extends DurableObject<Env> {
+  async fetch(request: Request): Promise<Response> {
+    if (request.method !== "POST" || new URL(request.url).pathname !== "/claim") return new Response(null, { status: 404 });
+    const body = await request.json() as { nonce?: unknown; expiresAt?: unknown };
+    if (typeof body.nonce !== "string" || body.nonce.trim().length === 0 || typeof body.expiresAt !== "string" || !Number.isFinite(Date.parse(body.expiresAt))) return new Response(null, { status: 422 });
+    const key = `nonce:${body.nonce}`;
+    if (await this.ctx.storage.get(key)) return new Response(null, { status: 409 });
+    await this.ctx.storage.put(key, { expiresAt: body.expiresAt, claimedAt: new Date().toISOString() });
+    return new Response(null, { status: 201 });
+  }
+}

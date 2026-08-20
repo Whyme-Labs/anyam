@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createPromotionExecutorHandler } from "../src/cloudflare/promotion-executor.ts";
-import { createPromotionExecutionContext } from "../src/cloudflare/promotion-execution.ts";
+import { createPromotionExecutionContext, PROMOTION_HANDOFF_TTL_MS, signPromotionHandoff } from "../src/cloudflare/promotion-execution.ts";
 import { CONTRACT_VERSIONS, type Artifact, type Release } from "../src/kernel/contracts.ts";
 import { emptyAuthorityPlaneSnapshot } from "../src/cloudflare/authority-plane.ts";
 import { createHash } from "node:crypto";
@@ -66,6 +66,7 @@ function fakeFetch(releaseId: string): typeof fetch {
 }
 
 function handlerFor(context: ReturnType<typeof createPromotionExecutionContext>, artifactBytes: Uint8Array) {
+  const claimed = new Set<string>();
   return createPromotionExecutorHandler({
     accountId: "account:executor",
     scriptName: "worker-executor",
@@ -73,6 +74,8 @@ function handlerFor(context: ReturnType<typeof createPromotionExecutionContext>,
     previewSubdomain: "customer",
     providerToken: "provider-token-kept-in-executor",
     providerCredentialExpiresAt: "2099-01-01T00:00:00.000Z",
+    handoffSecret: "promotion-executor-test-handoff-secret",
+    handoffNonceStore: { async claim(input) { if (claimed.has(input.nonce)) return false; claimed.add(input.nonce); return true; } },
     fetch: fakeFetch(context.release.id),
     artifactStore: {
       async get(key) {
@@ -82,9 +85,16 @@ function handlerFor(context: ReturnType<typeof createPromotionExecutionContext>,
   });
 }
 
+async function signedRequest(context: ReturnType<typeof createPromotionExecutionContext>, body: unknown = context): Promise<Request> {
+  const nonce = `nonce:${crypto.randomUUID()}`;
+  const expiresAt = new Date(Date.now() + PROMOTION_HANDOFF_TTL_MS).toISOString();
+  const signature = await signPromotionHandoff({ context, nonce, expiresAt, secret: "promotion-executor-test-handoff-secret" });
+  return new Request("https://executor.example/execute", { method: "POST", headers: { "content-type": "application/json", "x-anyam-promotion-protocol": "anyam.promotion-execution/v1", "x-anyam-promotion-handoff": signature, "x-anyam-promotion-nonce": nonce, "x-anyam-promotion-expires-at": expiresAt }, body: JSON.stringify(body) });
+}
+
 test("customer-operated executor runs the qualified Worker Target and returns a credential-free result", async () => {
   const { context, artifactBytes } = fixture();
-  const response = await handlerFor(context, artifactBytes)(new Request("https://executor.example/execute", { method: "POST", headers: { "content-type": "application/json", "x-anyam-promotion-protocol": "anyam.promotion-execution/v1" }, body: JSON.stringify(context) }));
+  const response = await handlerFor(context, artifactBytes)(await signedRequest(context));
   const body = await response.text();
   assert.equal(response.status, 200, body);
   const result = JSON.parse(body) as Record<string, unknown>;
@@ -97,7 +107,7 @@ test("customer-operated executor runs the qualified Worker Target and returns a 
 test("customer-operated executor rejects caller-supplied provider credentials before provider invocation", async () => {
   const { context, artifactBytes } = fixture();
   const requestContext = { ...context, providerToken: "cfat_attacker" };
-  const response = await handlerFor(context, artifactBytes)(new Request("https://executor.example/execute", { method: "POST", headers: { "content-type": "application/json", "x-anyam-promotion-protocol": "anyam.promotion-execution/v1" }, body: JSON.stringify(requestContext) }));
+  const response = await handlerFor(context, artifactBytes)(await signedRequest(context, requestContext));
   assert.equal(response.status, 422);
   const result = await response.json() as Record<string, unknown>;
   assert.equal(result.status, "blocked");
@@ -109,9 +119,25 @@ test("customer-operated executor rejects a Target routed to the wrong adapter", 
   const { context, artifactBytes } = fixture();
   const wrongTarget = { ...context.target, adapterId: "other.provider" };
   const wrongContext = { ...context, target: wrongTarget };
-  const response = await handlerFor(context, artifactBytes)(new Request("https://executor.example/execute", { method: "POST", headers: { "content-type": "application/json", "x-anyam-promotion-protocol": "anyam.promotion-execution/v1" }, body: JSON.stringify(wrongContext) }));
+  const response = await handlerFor(context, artifactBytes)(await signedRequest(wrongContext));
   assert.equal(response.status, 422);
   const result = await response.json() as Record<string, unknown>;
   assert.match(String(result.recoveryAction), /Target|adapter/i);
   assert.match(String(result.receipt), /providerInvocation=false/);
+});
+
+test("customer-operated executor rejects missing, altered, and replayed handoffs before provider invocation", async () => {
+  const { context, artifactBytes } = fixture();
+  const handler = handlerFor(context, artifactBytes);
+  const missing = await handler(new Request("https://executor.example/execute", { method: "POST", headers: { "content-type": "application/json", "x-anyam-promotion-protocol": "anyam.promotion-execution/v1" }, body: JSON.stringify(context) }));
+  assert.equal(missing.status, 401);
+  const valid = await signedRequest(context);
+  const validBody = await valid.text();
+  const first = await handler(new Request(valid.url, { method: "POST", headers: valid.headers, body: validBody }));
+  assert.equal(first.status, 200);
+  const replay = await handler(new Request(valid.url, { method: "POST", headers: valid.headers, body: validBody }));
+  assert.equal(replay.status, 409);
+  const signed = await signedRequest(context);
+  const alteredResponse = await handler(new Request(signed.url, { method: "POST", headers: signed.headers, body: JSON.stringify({ ...context, executionDigest: `sha256:${"0".repeat(64)}` }) }));
+  assert.equal(alteredResponse.status, 401);
 });

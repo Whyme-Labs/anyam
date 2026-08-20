@@ -26,6 +26,8 @@ import type {
  * before mutating Anyam-owned Target state.
  */
 export const PROMOTION_EXECUTION_PROTOCOL = CONTRACT_VERSIONS.promotionExecution;
+export const PROMOTION_HANDOFF_TTL_MS = 5 * 60 * 1000;
+export const PROMOTION_HANDOFF_SIZING_RECEIPT = "handoffTtl=300000ms; sizing=qualification-tripwire; remeasure-before-production";
 
 export type PromotionExecutionReleaseBundle = {
   release: Release;
@@ -52,6 +54,10 @@ export type PromotionExecutionContext = {
   actor: ActorRef;
   /** Digest over the immutable Authority inputs supplied to the provider. */
   executionDigest: string;
+};
+
+export type PromotionHandoffNonceStore = {
+  claim(input: { nonce: string; expiresAt: string }): Promise<boolean>;
 };
 
 export type PromotionExecutionResult = {
@@ -134,6 +140,42 @@ function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   const record = value as Record<string, unknown>;
   return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
+}
+
+export function promotionHandoffMessage(context: Readonly<PromotionExecutionContext>, nonce: string, expiresAt: string): string {
+  return stableJson({ protocol: PROMOTION_EXECUTION_PROTOCOL, nonce, expiresAt, context });
+}
+
+function base64Url(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+function decodeBase64Url(value: string): Uint8Array {
+  const normalized = value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - (value.length % 4)) % 4);
+  const binary = atob(normalized);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+async function handoffKey(secret: string, usage: KeyUsage[]): Promise<CryptoKey> {
+  if (secret.trim().length === 0) throw new Error("promotion handoff secret is empty");
+  return crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, usage);
+}
+
+export async function signPromotionHandoff(input: { context: Readonly<PromotionExecutionContext>; nonce: string; expiresAt: string; secret: string }): Promise<string> {
+  const key = await handoffKey(input.secret, ["sign"]);
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(promotionHandoffMessage(input.context, input.nonce, input.expiresAt)));
+  return base64Url(new Uint8Array(signature));
+}
+
+export async function verifyPromotionHandoff(input: { context: Readonly<PromotionExecutionContext>; nonce: string; expiresAt: string; signature: string; secret: string }): Promise<boolean> {
+  if (!Number.isFinite(Date.parse(input.expiresAt)) || Date.parse(input.expiresAt) <= Date.now()) return false;
+  try {
+    const key = await handoffKey(input.secret, ["verify"]);
+    const signature = decodeBase64Url(input.signature);
+    return await crypto.subtle.verify("HMAC", key, signature.buffer as ArrayBuffer, new TextEncoder().encode(promotionHandoffMessage(input.context, input.nonce, input.expiresAt)));
+  } catch {
+    return false;
+  }
 }
 
 function digest(value: unknown): string {

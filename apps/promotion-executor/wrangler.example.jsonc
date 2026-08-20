@@ -17,5 +17,19 @@
       "bucket_name": "replace-with-customer-anyam-artifacts",
       "preview_bucket_name": "replace-with-customer-anyam-artifacts-preview"
     }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ANYAM_PROMOTION_NONCE_STORE",
+        "class_name": "PromotionExecutorNonceStore"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PromotionExecutorNonceStore"]
+    }
   ]
 }

@@ -319,11 +319,11 @@ export class GitHubReleaseAssetsAdapter implements ReleaseTargetAdapter {
     }
   }
 
-  async deleteForQualification(releaseId: string): Promise<{ receipt: string }> {
+  async deleteForQualification(releaseId: string): Promise<{ status: "succeeded"; receipt: string }> {
     const credential = await this.options.credentialBroker.issue({ owner: this.options.owner, repository: this.options.repository, operation: "delete", disclosure: this.options.disclosure });
     assertCredential(credential, ["contents:write"], "delete");
     await this.options.client.deleteRelease({ owner: this.options.owner, repository: this.options.repository, releaseId, token: credential.token });
-    return { receipt: `provider=github.release-assets; operation=delete; releaseId=${releaseId}; credentialMaterialStored=false` };
+    return { status: "succeeded", receipt: `provider=github.release-assets; operation=delete; releaseId=${releaseId}; credentialMaterialStored=false` };
   }
 
   private async credential(operation: GitHubReleaseAssetsCredentialOperation): Promise<GitHubReleaseAssetsCredential> {

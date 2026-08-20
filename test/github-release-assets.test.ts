@@ -258,6 +258,20 @@ test("public Target disclosure and scoped credential requirements fail closed", 
   assert.equal(client.releases.size, 0);
 });
 
+test("GitHub release-assets qualification cleanup returns an explicit success status", async () => {
+  const client = new FakeGitHubReleaseClient();
+  const bytes = new TextEncoder().encode("cleanup bytes\n");
+  const releaseArtifact = artifact("artifact:cleanup", bytes);
+  testBytes.set(releaseArtifact.digest, bytes);
+  const adapterValue = adapter(client);
+  const published = await adapterValue.publish({ publicationId: "publication:cleanup", attempt: 0, release: release("release:cleanup", releaseArtifact, `sha256:${"6".repeat(64)}`), artifact: releaseArtifact, target: target("public") });
+  assert.equal(published.status, "succeeded");
+  if (published.status !== "succeeded") return;
+  const cleanup = await adapterValue.deleteForQualification(published.value.providerReleaseId);
+  assert.equal(cleanup.status, "succeeded");
+  assert.match(cleanup.receipt, /operation=delete/u);
+});
+
 test("fetch-backed GitHub client retries a transient provider response with a visible sizing receipt", async () => {
   let attempts = 0;
   const sleeps: number[] = [];

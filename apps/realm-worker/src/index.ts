@@ -898,6 +898,33 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", changes, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=change.list; changeCount=${changes.length}; ordering=change-id-code-unit-ascending;${projectId ? ` project=${projectId};` : ""}${workspaceId ? ` workspace=${workspaceId};` : ""} readOnly=true; credentialFree=true; canonicalWrite=false` });
   }
 
+  private async authorityRun(body: CoordinatorRequestBody): Promise<Response> {
+    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const runId = coordinatorString(body, "runId");
+    const snapshot = await this.authoritySnapshot();
+    const run = snapshot.runs[runId];
+    if (!run) throw new AuthorityPlaneError({ code: "not_found", message: `Run ${runId} is not available in this Realm.`, recoveryAction: "verify the Run identifier without probing undiscoverable resources", receipt: `run=${runId}; operation=run.inspect; discoverable=false` });
+    const safeRun = {
+      protocol: run.protocol,
+      id: run.id,
+      actionId: run.actionId,
+      projectRevisionId: run.projectRevisionId,
+      projectViewId: run.projectViewId,
+      runnerId: run.runnerId,
+      status: run.status,
+      ...(run.attemptId ? { attemptId: run.attemptId } : {}),
+      ...(run.verifierId ? { verifierId: run.verifierId } : {}),
+      ...(run.actionContractDigest ? { actionContractDigest: run.actionContractDigest } : {}),
+      ...(run.verifierContractDigest ? { verifierContractDigest: run.verifierContractDigest } : {}),
+      ...(run.changeRevisionId ? { changeRevisionId: run.changeRevisionId } : {}),
+      ...(run.workspaceId ? { workspaceId: run.workspaceId } : {}),
+      ...(run.outputDigest ? { outputDigest: run.outputDigest } : {}),
+      ...(run.inputDigests ? { inputDigests: [...run.inputDigests] } : {}),
+      ...(run.outputDigests ? { outputDigests: [...run.outputDigests] } : {}),
+    };
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", run: safeRun, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=run.inspect; run=${run.id}; readOnly=true; completion=runner-only; credentialFree=true; canonicalWrite=false` });
+  }
+
   private async authorityMirrors(body: CoordinatorRequestBody): Promise<Response> {
     const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const projectId = body.projectId === undefined ? undefined : coordinatorString(body, "projectId");
@@ -1038,7 +1065,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   private async authorityCommand(body: CoordinatorRequestBody): Promise<Response> {
     const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const command = coordinatorString(body, "command") as AuthorityCommandName;
-    const allowed: readonly AuthorityCommandName[] = ["project.create", "workspace.create", "change.create", "revision.publish", "run.record", "evidence.record", "artifact.record", "landing.apply", "release.create", "target.configure", "promotion.request", "mirror.configure", "mirror.sync", "mirror.reconcile"];
+    const allowed: readonly AuthorityCommandName[] = ["project.create", "workspace.create", "change.create", "revision.publish", "run.request", "landing.apply", "release.create", "target.configure", "promotion.request", "mirror.configure", "mirror.sync", "mirror.reconcile"];
     if (!allowed.includes(command)) throw new AuthorityPlaneError({ code: "invalid_request", message: `Authority command ${command} is not supported by this vertical slice.`, recoveryAction: `use one of ${allowed.join(", ")} and retry; no authority transition was accepted`, receipt: `command=${command}; transition=not-applied` });
     const payload = body.payload;
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new AuthorityPlaneError({ code: "invalid_request", message: "Authority command payload must be a JSON object.", recoveryAction: "send the command-specific payload as an object; no authority transition was accepted", receipt: `command=${command}; payload=object-required; transition=not-applied` });
@@ -1109,6 +1136,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/projects/internal") return await this.authorityProjects(body);
       if (url.pathname === "/authority/workspaces/internal") return await this.authorityWorkspaces(body);
       if (url.pathname === "/authority/changes/internal") return await this.authorityChanges(body);
+      if (url.pathname === "/authority/runs/internal") return await this.authorityRun(body);
       if (url.pathname === "/authority/mirrors/internal") return await this.authorityMirrors(body);
       if (url.pathname === "/authority/promotion/execute/internal") return await this.authorityPromotionExecute(body);
       if (url.pathname === "/authority/promotion/reconcile/internal") return await this.authorityPromotionReconcile(body);

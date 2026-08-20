@@ -25,6 +25,21 @@ type StoredOutput = {
   key: string;
 };
 
+type RunnerResultContext = {
+  protocol: "anyam.runner-result-context/v1";
+  replayId: string;
+  jobId: string;
+  attemptId: string;
+  runnerId: string;
+  leaseExpiresAt: string;
+  actionId: string;
+  inputManifestDigest: string;
+  sourceSnapshotDigest: string;
+  projectViewId: string;
+  outputRoot: string;
+  outputPaths: string[];
+};
+
 type JobRecord = {
   protocol: "anyam.external-runner-qualification/v1";
   jobId: string;
@@ -205,6 +220,7 @@ function credentialFree(record: JobRecord): Record<string, unknown> {
     sourceSnapshotDigest: record.sourceSnapshotDigest,
     outputRoot: record.outputRoot,
     leaseExpiresAt: record.leaseExpiresAt,
+    resultContext: resultContext(record),
     manifest: record.manifest,
     status: record.status,
     outputs: record.outputs,
@@ -214,6 +230,23 @@ function credentialFree(record: JobRecord): Record<string, unknown> {
     updatedAt: record.updatedAt,
     credentialMaterialStored: false,
     canonicalWrite: false,
+  };
+}
+
+function resultContext(record: JobRecord): RunnerResultContext {
+  return {
+    protocol: "anyam.runner-result-context/v1",
+    replayId: `${record.jobId}:${record.attemptId}`,
+    jobId: record.jobId,
+    attemptId: record.attemptId,
+    runnerId: record.runnerId,
+    leaseExpiresAt: record.leaseExpiresAt,
+    actionId: record.actionId,
+    inputManifestDigest: record.inputManifestDigest,
+    sourceSnapshotDigest: record.sourceSnapshotDigest,
+    projectViewId: record.manifest.projectViewId,
+    outputRoot: record.outputRoot,
+    outputPaths: [...record.manifest.outputPaths],
   };
 }
 
@@ -400,6 +433,9 @@ class QualificationCoordinator extends DurableObject<Env> {
         const status = requiredString(body, "status");
         if (status !== "succeeded" && status !== "failed" && status !== "indeterminate") throw new Error("status must be succeeded, failed, or indeterminate");
         const signature = requiredString(body, "signature");
+        const submittedContext = body.context;
+        const expectedContext = resultContext(record);
+        if (!isRecord(submittedContext) || stableJson(submittedContext) !== stableJson(expectedContext)) return json({ code: "result_context_mismatch", recoveryAction: "sign and submit the exact Runner Result context issued for this Job and Attempt", receipt: `job=${jobId}; attempt=${attemptId}; context=not-matched; replayId=${expectedContext.replayId}` }, 422);
         const outputs = body.outputs;
         if (!Array.isArray(outputs)) throw new Error("outputs must be an array");
         if (outputs.length !== record.outputs.length) return json({ code: "result_output_manifest_mismatch", recoveryAction: "sign exactly the output references accepted by the coordinator before submitting the Result", receipt: `job=${jobId}; acceptedOutputs=${record.outputs.length}; resultOutputs=${outputs.length}` }, 422);
@@ -412,7 +448,7 @@ class QualificationCoordinator extends DurableObject<Env> {
           if (!accepted || item.kind !== accepted.kind || item.digest !== accepted.digest || item.bytes !== accepted.bytes || !disclosureAllows(maximumDisclosure, itemDisclosure) || !disclosureAllows(record.manifest.disclosure, itemDisclosure)) return json({ code: "result_output_manifest_mismatch", recoveryAction: "return only the exact, disclosure-safe outputs accepted for this Attempt", receipt: `job=${jobId}; path=${path}; manifest=not-matched` }, 422);
         }
         const recoveryAction = optionalString(body, "recoveryAction");
-        const resultEnvelope = { jobId, attemptId, status, outputs, ...(recoveryAction ? { recoveryAction } : {}) };
+        const resultEnvelope = { jobId, attemptId, context: expectedContext, status, outputs, ...(recoveryAction ? { recoveryAction } : {}) };
         const resultMessage = `anyam.runner-result/v1|${stableJson(resultEnvelope)}`;
         if (!(await verifyEd25519(record.publicKey, resultMessage, signature))) return json({ code: "result_signature_invalid", recoveryAction: "sign the exact result envelope with the enrolled Runner key", receipt: `job=${jobId}; attempt=${attemptId}; result=invalid-signature` }, 422);
         for (const item of record.outputs) {

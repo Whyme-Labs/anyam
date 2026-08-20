@@ -25,6 +25,7 @@ import {
 import {
   ExternalRunnerCoordinator,
   runnerResultMessage,
+  runnerResultContext,
   type RunnerResult,
 } from "../src/execution/runner.ts";
 import type { NormalizedActionInput, NormalizedActionOutput } from "../src/execution/local.ts";
@@ -127,13 +128,14 @@ function actionInput(projectViewId: string): NormalizedActionInput {
 function signedResult(input: {
   lease: ReturnType<ExternalRunnerCoordinator["claim"]>;
   privateKey: ReturnType<typeof keyPair>["privateKey"];
-  result: Omit<RunnerResult, "signature">;
+  result: Omit<RunnerResult, "signature" | "context">;
 }): RunnerResult {
+  const context = runnerResultContext({ job: input.lease.job, attempt: input.lease.attempt });
   return {
     ...input.result,
+    context,
     signature: signMessage(input.privateKey, runnerResultMessage({
-      jobId: input.lease.job.id,
-      attemptId: input.lease.attempt.id,
+      context,
       status: input.result.status,
       output: input.result.output,
       outputs: input.result.outputs,

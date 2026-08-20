@@ -46,6 +46,7 @@ export type AuthorityCommandName =
   | "workspace.create"
   | "change.create"
   | "revision.publish"
+  | "run.request"
   | "run.record"
   | "evidence.record"
   | "artifact.record"
@@ -833,6 +834,55 @@ export class AuthorityPlaneCoordinator {
         next.changeRevisions[revision.id] = revision;
         next.changes[changeId] = { ...change, latestRevisionId: revision.id, status: "submitted" };
         return success({ revision, change: next.changes[changeId] }, `change=${changeId}; revision=${revision.id}; sequence=${sequence}; canonicalWrite=false`);
+      }
+      case "run.request": {
+        const projectId = requiredString(payload.projectId, "projectId");
+        const project = next.projects[projectId];
+        if (!project) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${projectId} does not exist.`, recoveryAction: "inspect the Project through the authenticated read surface before requesting a Run", receipt: `project=${projectId}; run=request-not-created; discoverable=false` });
+        const projectRevisionId = requiredString(payload.projectRevisionId, "projectRevisionId");
+        const projectRevision = next.projectRevisions[projectRevisionId];
+        const requestedChangeRevisionId = optionalString(payload.changeRevisionId);
+        const requestedChangeRevision = requestedChangeRevisionId ? next.changeRevisions[requestedChangeRevisionId] : undefined;
+        const requestedChange = requestedChangeRevision ? next.changes[requestedChangeRevision.changeId] : undefined;
+        const revisionBoundByChange = requestedChangeRevision?.projectRevisionId === projectRevisionId && requestedChange?.projectId === project.id;
+        if ((!projectRevision || projectRevision.projectId !== project.id) && !revisionBoundByChange) throw new AuthorityPlaneError({ code: "not_found", message: `Project Revision ${projectRevisionId} is not available for Project ${project.id}.`, recoveryAction: "request the Run against an exact Project Revision in the same Project or its exact published Change Revision", receipt: `project=${project.id}; projectRevision=${projectRevisionId}; run=request-not-created; discoverable=false` });
+        const projectViewId = requiredString(payload.projectViewId, "projectViewId");
+        const projectView = next.projectViews[projectViewId];
+        if (!projectView || projectView.projectId !== project.id || (projectView.projectRevisionId !== projectRevisionId && !revisionBoundByChange)) throw new AuthorityPlaneError({ code: "not_found", message: `Project View ${projectViewId} is not available for Project Revision ${projectRevisionId}.`, recoveryAction: "request the Run against the View mounted from the exact Project Revision", receipt: `project=${project.id}; projectView=${projectViewId}; run=request-not-created; discoverable=false` });
+        const changeRevisionId = requestedChangeRevisionId;
+        const changeRevision = requestedChangeRevision;
+        const change = requestedChange;
+        if (changeRevisionId && (!changeRevision || !change || change.projectId !== project.id || changeRevision.projectRevisionId !== projectRevisionId || changeRevision.projectViewId !== projectViewId)) throw new AuthorityPlaneError({ code: "conflict", message: `Change Revision ${changeRevisionId} is not bound to the requested Run context.`, recoveryAction: "request the Run against the exact Change Revision, Project View, and Project Revision that will be executed", receipt: `project=${project.id}; changeRevision=${changeRevisionId}; run=request-not-created` });
+        const workspaceId = optionalString(payload.workspaceId);
+        const workspace = workspaceId ? next.workspaces[workspaceId] : undefined;
+        if (workspaceId && (!workspace || workspace.projectId !== project.id || workspace.projectViewId !== projectViewId || ((!projectRevision || workspace.projectRevisionId !== projectRevision.id) && !revisionBoundByChange) || (change && workspace.changeId !== change.id))) throw new AuthorityPlaneError({ code: "conflict", message: `Workspace ${workspaceId} is not bound to the requested Run context.`, recoveryAction: "request the Run from the active Workspace mounted on the exact Project View", receipt: `project=${project.id}; workspace=${workspaceId}; run=request-not-created` });
+        const runId = optionalString(payload.runId) ?? opaqueId("run");
+        if (next.runs[runId]) throw new AuthorityPlaneError({ code: "conflict", message: `Run ${runId} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Run identity", receipt: `run=${runId}; exists=true; transition=not-applied` });
+        const verifierId = optionalString(payload.verifierId);
+        const actionContractDigest = optionalString(payload.actionContractDigest);
+        const verifierContractDigest = optionalString(payload.verifierContractDigest);
+        const run: Run = {
+          protocol: CONTRACT_VERSIONS.run,
+          id: runId,
+          actionId: requiredString(payload.actionId, "actionId"),
+          projectRevisionId,
+          projectViewId,
+          runnerId: "runner:unassigned",
+          status: "queued",
+          outputDigest: undefined,
+          ...(changeRevisionId ? { changeRevisionId } : {}),
+          ...(workspaceId ? { workspaceId } : {}),
+          ...(verifierId ? { verifierId } : {}),
+          ...(actionContractDigest ? { actionContractDigest } : {}),
+          ...(verifierContractDigest ? { verifierContractDigest } : {}),
+          inputDigests: stringArray(payload.inputDigests ?? [], "inputDigests", true),
+          outputDigests: stringArray(payload.outputDigests ?? [], "outputDigests", true),
+          policyVersion: requiredString(payload.policyVersion, "policyVersion"),
+          actor: actorRef(session),
+          capabilityGrantId: requiredString(payload.capabilityGrantId, "capabilityGrantId"),
+        };
+        next.runs[run.id] = run;
+        return success({ run }, `run=${run.id}; status=queued; completion=runner-only; canonicalWrite=false`);
       }
       case "run.record": {
         const requestedRunProjectId = optionalString(payload.projectId);

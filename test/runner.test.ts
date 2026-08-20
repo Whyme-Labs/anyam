@@ -13,6 +13,7 @@ import {
   ExternalRunnerCoordinator,
   RunnerError,
   runnerResultMessage,
+  runnerResultContext,
   type RunnerResult,
 } from "../src/execution/runner.ts";
 import type { NormalizedActionInput, NormalizedActionOutput } from "../src/execution/local.ts";
@@ -137,12 +138,13 @@ function claim(coordinator: ExternalRunnerCoordinator, privateKey: ReturnType<ty
   });
 }
 
-function signedResult(lease: ReturnType<typeof claim>, privateKey: ReturnType<typeof keyPair>["privateKey"], result: Omit<RunnerResult, "signature">): RunnerResult {
+function signedResult(lease: ReturnType<typeof claim>, privateKey: ReturnType<typeof keyPair>["privateKey"], result: Omit<RunnerResult, "signature" | "context">): RunnerResult {
+  const context = runnerResultContext({ job: lease.job, attempt: lease.attempt });
   return {
     ...result,
+    context,
     signature: signMessage(privateKey, runnerResultMessage({
-      jobId: lease.job.id,
-      attemptId: lease.attempt.id,
+      context,
       status: result.status,
       output: result.output,
       outputs: result.outputs,
@@ -369,6 +371,8 @@ test("Runner Jobs reject an ineligible profile and preserve input/output scope a
   };
   const invalid = signedResult(lease, qualified.privateKey, { status: "succeeded", output, outputs: [] });
   assert.throws(() => coordinator.submit({ credential: lease.credential, result: invalid }), (error: unknown) => error instanceof RunnerError && error.code === "result-input-mismatch");
+  const contextTamper = { ...signedResult(lease, qualified.privateKey, { status: "succeeded", output: { ...output, inputDigests: ["src/main.ts=sha256:source"] }, outputs: [] }), context: { ...invalid.context, policyVersion: "policy:forged" } };
+  assert.throws(() => coordinator.submit({ credential: lease.credential, result: contextTamper }), (error: unknown) => error instanceof RunnerError && error.code === "result-input-mismatch");
   const outputScopeViolation = signedResult(lease, qualified.privateKey, {
     status: "succeeded",
     output: { ...output, inputDigests: ["src/main.ts=sha256:source"] },

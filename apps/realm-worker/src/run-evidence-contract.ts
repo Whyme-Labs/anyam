@@ -2,6 +2,7 @@ import { AUTHORITY_PLANE_PROTOCOL } from "../../../src/cloudflare/authority-plan
 import type { DisclosureClassification, EvidenceOutcome, RunStatus } from "../../../src/kernel/contracts.ts";
 
 export const RUN_RECORD_COMMAND = "run.record" as const;
+export const RUN_REQUEST_COMMAND = "run.request" as const;
 export const EVIDENCE_RECORD_COMMAND = "evidence.record" as const;
 
 export type RecordMutationKind = "auth" | "invalid_request" | "not_found" | "conflict" | "coordinator";
@@ -90,7 +91,7 @@ function disclosure(value: unknown, operation: string): { projectionId: string; 
 }
 
 export type TypedMutation = {
-  command: typeof RUN_RECORD_COMMAND | typeof EVIDENCE_RECORD_COMMAND;
+  command: typeof RUN_RECORD_COMMAND | typeof RUN_REQUEST_COMMAND | typeof EVIDENCE_RECORD_COMMAND;
   idempotencyKey: string;
   expectedVersion?: number;
   payload: Record<string, unknown>;
@@ -115,6 +116,51 @@ export function runRecordCommand(value: unknown): TypedMutation {
   const inputDigests = body.inputDigests === undefined ? undefined : stringList(body.inputDigests, "inputDigests", operation, true);
   const outputDigests = body.outputDigests === undefined ? undefined : stringList(body.outputDigests, "outputDigests", operation, true);
   return { command: operation, idempotencyKey, ...(version === undefined ? {} : { expectedVersion: version }), payload: { projectId, ...(runId ? { runId } : {}), actionId, projectRevisionId, projectViewId, runnerId, status, ...(outputDigest ? { outputDigest } : {}), changeRevisionId, workspaceId, ...(inputDigests ? { inputDigests } : {}), ...(outputDigests ? { outputDigests } : {}) } };
+}
+
+export function runRequestCommand(value: unknown): TypedMutation {
+  const operation = RUN_REQUEST_COMMAND;
+  const body = objectBody(value, operation);
+  assertAllowed(body, ["idempotencyKey", "expectedVersion", "projectId", "runId", "actionId", "actionContractDigest", "verifierId", "verifierContractDigest", "projectRevisionId", "projectViewId", "changeRevisionId", "workspaceId", "inputDigests", "outputDigests", "policyVersion", "authorizationEpoch", "capabilityGrantId"], operation);
+  const idempotencyKey = requiredString(body.idempotencyKey, "idempotencyKey", operation);
+  const version = expectedVersion(body.expectedVersion, operation);
+  const projectId = safeIdentifier(body.projectId, "projectId", operation);
+  const runId = optionalSafeIdentifier(body.runId, "runId", operation);
+  const actionId = safeIdentifier(body.actionId, "actionId", operation);
+  const actionContractDigest = requiredString(body.actionContractDigest, "actionContractDigest", operation);
+  const verifierId = optionalSafeIdentifier(body.verifierId, "verifierId", operation);
+  const verifierContractDigest = body.verifierContractDigest === undefined ? undefined : requiredString(body.verifierContractDigest, "verifierContractDigest", operation);
+  const projectRevisionId = safeIdentifier(body.projectRevisionId, "projectRevisionId", operation);
+  const projectViewId = safeIdentifier(body.projectViewId, "projectViewId", operation);
+  const changeRevisionId = optionalSafeIdentifier(body.changeRevisionId, "changeRevisionId", operation);
+  const workspaceId = optionalSafeIdentifier(body.workspaceId, "workspaceId", operation);
+  const inputDigests = requiredStringList(body, "inputDigests", operation, true);
+  const outputDigests = requiredStringList(body, "outputDigests", operation, true);
+  const policyVersion = requiredString(body.policyVersion, "policyVersion", operation);
+  const authorizationEpoch = requiredString(body.authorizationEpoch, "authorizationEpoch", operation);
+  const capabilityGrantId = safeIdentifier(body.capabilityGrantId, "capabilityGrantId", operation);
+  return {
+    command: operation,
+    idempotencyKey,
+    ...(version === undefined ? {} : { expectedVersion: version }),
+    payload: {
+      projectId,
+      ...(runId ? { runId } : {}),
+      actionId,
+      actionContractDigest,
+      ...(verifierId ? { verifierId } : {}),
+      ...(verifierContractDigest ? { verifierContractDigest } : {}),
+      projectRevisionId,
+      projectViewId,
+      ...(changeRevisionId ? { changeRevisionId } : {}),
+      ...(workspaceId ? { workspaceId } : {}),
+      inputDigests,
+      outputDigests,
+      policyVersion,
+      authorizationEpoch,
+      capabilityGrantId,
+    },
+  };
 }
 
 export function evidenceRecordCommand(value: unknown): TypedMutation {
@@ -222,6 +268,10 @@ function safeRun(value: unknown): Record<string, unknown> {
     projectViewId: valueString(run.projectViewId, "run.projectViewId"),
     runnerId: valueString(run.runnerId, "run.runnerId"),
     status: valueString(run.status, "run.status"),
+    ...(valueOptionalString(run.attemptId, "run.attemptId") ? { attemptId: valueOptionalString(run.attemptId, "run.attemptId") } : {}),
+    ...(valueOptionalString(run.verifierId, "run.verifierId") ? { verifierId: valueOptionalString(run.verifierId, "run.verifierId") } : {}),
+    ...(valueOptionalString(run.actionContractDigest, "run.actionContractDigest") ? { actionContractDigest: valueOptionalString(run.actionContractDigest, "run.actionContractDigest") } : {}),
+    ...(valueOptionalString(run.verifierContractDigest, "run.verifierContractDigest") ? { verifierContractDigest: valueOptionalString(run.verifierContractDigest, "run.verifierContractDigest") } : {}),
     ...(valueOptionalString(run.outputDigest, "run.outputDigest") ? { outputDigest: valueOptionalString(run.outputDigest, "run.outputDigest") } : {}),
     ...(valueOptionalString(run.changeRevisionId, "run.changeRevisionId") ? { changeRevisionId: valueOptionalString(run.changeRevisionId, "run.changeRevisionId") } : {}),
     ...(valueOptionalString(run.workspaceId, "run.workspaceId") ? { workspaceId: valueOptionalString(run.workspaceId, "run.workspaceId") } : {}),
@@ -266,6 +316,12 @@ export type RecordSurface = "mcp" | "rest";
 export function runRecordValue(result: Record<string, unknown>, idempotencyKey: string, surface: RecordSurface = "mcp"): Record<string, unknown> {
   const parsed = mutationResult(result, RUN_RECORD_COMMAND, idempotencyKey);
   return { protocol: AUTHORITY_PLANE_PROTOCOL, status: parsed.status, version: parsed.version, idempotencyKey, credentialFree: true, canonicalWrite: false, run: safeRun(parsed.value.run), receipt: `operation=${RUN_RECORD_COMMAND}; typedSurface=${surface}; credentialFree=true; canonicalWrite=false; authorityResult=projected` };
+}
+
+export function runRequestValue(result: Record<string, unknown>, idempotencyKey: string, surface: RecordSurface = "mcp"): Record<string, unknown> {
+  const parsed = mutationResult(result, RUN_REQUEST_COMMAND, idempotencyKey);
+  const authorityReceipt = typeof result.receipt === "string" && result.receipt.length > 0 ? result.receipt : "authority=coordinator; completion=runner-only";
+  return { protocol: AUTHORITY_PLANE_PROTOCOL, status: parsed.status, version: parsed.version, idempotencyKey, credentialFree: true, canonicalWrite: false, run: safeRun(parsed.value.run), receipt: `${authorityReceipt}; operation=${RUN_REQUEST_COMMAND}; typedSurface=${surface}; credentialFree=true; canonicalWrite=false; authorityResult=projected` };
 }
 
 export function evidenceRecordValue(result: Record<string, unknown>, idempotencyKey: string, surface: RecordSurface = "mcp"): Record<string, unknown> {

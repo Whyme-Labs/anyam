@@ -79,8 +79,32 @@ export type RunnerResult = {
   status: "succeeded" | "failed" | "indeterminate";
   output: NormalizedActionOutput;
   outputs: readonly RunnerOutputInput[];
+  /** Immutable context echoed by the Runner and covered by its signature. */
+  context: RunnerResultContext;
   recoveryAction?: string;
   signature: string;
+};
+
+export type RunnerResultContext = {
+  protocol: "anyam.runner-result-context/v1";
+  replayId: string;
+  jobId: string;
+  attemptId: string;
+  runnerId: string;
+  leaseExpiresAt: string;
+  inputManifestDigest: string;
+  sourceSpaceSnapshots: Readonly<Record<string, string>>;
+  actionId: string;
+  actionContractDigest: string;
+  verifierId?: string;
+  verifierContractDigest?: string;
+  projectRevisionId: string;
+  projectViewId: string;
+  changeRevisionId?: string;
+  workspaceId?: string;
+  policyVersion: string;
+  authorizationEpoch: string;
+  capabilityGrantId: string;
 };
 
 export type RunnerCompletion = {
@@ -338,19 +362,44 @@ function claimMessage(challenge: string): string {
 }
 
 export function runnerResultMessage(input: {
-  jobId: string;
-  attemptId: string;
+  context: RunnerResultContext;
   status: RunnerResult["status"];
   output: NormalizedActionOutput;
   outputs: readonly RunnerOutputInput[];
   recoveryAction?: string;
 }): string {
-  return `anyam.runner-result/v1|${input.jobId}|${input.attemptId}|${stableJson({
+  return `anyam.runner-result/v1|${stableJson({
+    context: input.context,
     status: input.status,
     output: input.output,
     outputs: input.outputs,
     recoveryAction: input.recoveryAction,
   })}`;
+}
+
+export function runnerResultContext(input: { job: RunnerJob; attempt: RunnerAttempt }): RunnerResultContext {
+  const { job, attempt } = input;
+  return {
+    protocol: "anyam.runner-result-context/v1",
+    replayId: `${job.id}:${attempt.id}`,
+    jobId: job.id,
+    attemptId: attempt.id,
+    runnerId: attempt.runnerId ?? job.currentRunnerId ?? "runner:unassigned",
+    leaseExpiresAt: attempt.leaseExpiresAt,
+    inputManifestDigest: job.inputManifestDigest,
+    sourceSpaceSnapshots: { ...job.sourceSpaceSnapshots },
+    actionId: job.actionId,
+    actionContractDigest: job.actionContractDigest,
+    ...(job.verifierId ? { verifierId: job.verifierId } : {}),
+    ...(job.verifierContractDigest ? { verifierContractDigest: job.verifierContractDigest } : {}),
+    projectRevisionId: job.projectRevisionId,
+    projectViewId: job.projectViewId,
+    ...(job.changeRevisionId ? { changeRevisionId: job.changeRevisionId } : {}),
+    ...(job.workspaceId ? { workspaceId: job.workspaceId } : {}),
+    policyVersion: job.policyVersion,
+    authorizationEpoch: job.authorizationEpoch,
+    capabilityGrantId: job.capabilityGrantId,
+  };
 }
 
 export function runnerInputManifestDigest(input: {
@@ -536,6 +585,9 @@ export class ExternalRunnerCoordinator {
       projectViewId: input.actionInput.projectViewId,
       runnerId: "runner:unassigned",
       attemptId,
+      ...(input.actionInput.verifier ? { verifierId: input.actionInput.verifier.id } : {}),
+      actionContractDigest: input.actionInput.action.contractDigest,
+      ...(input.actionInput.verifier ? { verifierContractDigest: input.actionInput.verifier.contractDigest } : {}),
       status: "queued",
       outputDigest: undefined,
       ...(input.actionInput.changeRevisionId ? { changeRevisionId: input.actionInput.changeRevisionId } : {}),
@@ -556,7 +608,9 @@ export class ExternalRunnerCoordinator {
       projectId: this.projectId,
       runId,
       actionId: input.actionInput.action.id,
+      actionContractDigest: input.actionInput.action.contractDigest,
       ...(input.actionInput.verifier ? { verifierId: input.actionInput.verifier.id } : {}),
+      ...(input.actionInput.verifier ? { verifierContractDigest: input.actionInput.verifier.contractDigest } : {}),
       projectRevisionId: input.actionInput.projectRevisionId,
       projectViewId: input.actionInput.projectViewId,
       sourceSpaceSnapshots: { ...input.actionInput.sourceSpaceSnapshots },
@@ -740,7 +794,11 @@ export class ExternalRunnerCoordinator {
     if (stored.job.state === "cancel-requested") {
       error({ code: "cancellation-invalid", message: `Runner Job ${stored.job.id} has a pending cancellation and cannot accept a normal result.`, affectedObject: stored.job.id, recoveryAction: "report cancellation outcome through finalizeCancellation", receipt: `job=${stored.job.id}; state=cancel-requested` });
     }
-    const message = runnerResultMessage({ jobId: stored.job.id, attemptId: attempt.id, status: input.result.status, output: input.result.output, outputs: input.result.outputs, ...(input.result.recoveryAction ? { recoveryAction: input.result.recoveryAction } : {}) });
+    const expectedContext = runnerResultContext({ job: stored.job, attempt });
+    if (stableJson(input.result.context) !== stableJson(expectedContext)) {
+      error({ code: "result-input-mismatch", message: `Runner Result for Job ${stored.job.id} does not carry the immutable execution context issued for Attempt ${attempt.id}.`, affectedObject: attempt.id, recoveryAction: "echo the exact signed Runner Result context from the claimed Job and Attempt; do not alter source, Action, Verifier, policy, lease, or replay fields", receipt: `job=${stored.job.id}; attempt=${attempt.id}; context=not-matched; replayId=${input.result.context.replayId}` });
+    }
+    const message = runnerResultMessage({ context: expectedContext, status: input.result.status, output: input.result.output, outputs: input.result.outputs, ...(input.result.recoveryAction ? { recoveryAction: input.result.recoveryAction } : {}) });
     if (!verifyProof(credentialRunnerPublicKey(this.runners, credential.runnerId), message, input.result.signature)) {
       error({ code: "result-signature-invalid", message: `Runner ${credential.runnerId} did not sign the exact Result for Attempt ${attempt.id}.`, affectedObject: attempt.id, recoveryAction: "sign the canonical Runner Result with the enrolled Runner identity and retry before the lease expires", receipt: `runner=${credential.runnerId}; attempt=${attempt.id}; resultSignature=invalid` });
     }

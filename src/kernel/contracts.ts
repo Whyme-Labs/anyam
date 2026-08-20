@@ -315,6 +315,9 @@ export type Run = {
   projectViewId: string;
   runnerId: string;
   attemptId?: string;
+  verifierId?: string;
+  actionContractDigest?: string;
+  verifierContractDigest?: string;
   status: RunStatus;
   outputDigest: string | undefined;
   changeRevisionId?: string;
@@ -373,7 +376,9 @@ export type RunnerJob = {
   projectId: string;
   runId: string;
   actionId: string;
+  actionContractDigest: string;
   verifierId?: string;
+  verifierContractDigest?: string;
   projectRevisionId: string;
   projectViewId: string;
   sourceSpaceSnapshots: Readonly<Record<string, string>>;

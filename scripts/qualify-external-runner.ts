@@ -45,6 +45,23 @@ function digest(value: string | Uint8Array): string {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
+function runnerResultContext(input: { jobId: string; attemptId: string; runnerId: string; leaseExpiresAt: string; actionId: string; inputManifestDigest: string; sourceSnapshotDigest: string; projectViewId: string; outputRoot: string; outputPaths: readonly string[] }): Json {
+  return {
+    protocol: "anyam.runner-result-context/v1",
+    replayId: `${input.jobId}:${input.attemptId}`,
+    jobId: input.jobId,
+    attemptId: input.attemptId,
+    runnerId: input.runnerId,
+    leaseExpiresAt: input.leaseExpiresAt,
+    actionId: input.actionId,
+    inputManifestDigest: input.inputManifestDigest,
+    sourceSnapshotDigest: input.sourceSnapshotDigest,
+    projectViewId: input.projectViewId,
+    outputRoot: input.outputRoot,
+    outputPaths: [...input.outputPaths],
+  };
+}
+
 function base64Url(value: Uint8Array | Buffer): string {
   return Buffer.from(value).toString("base64url");
 }
@@ -276,6 +293,7 @@ async function main(): Promise<void> {
   const resultEnvelope = {
     jobId,
     attemptId,
+    context: runnerResultContext({ jobId, attemptId, runnerId, leaseExpiresAt, actionId, inputManifestDigest, sourceSnapshotDigest, projectViewId, outputRoot, outputPaths }),
     status: "succeeded",
     outputs: [{ path: artifactPath, kind: "artifact", disclosure: "project", digest: artifactDigest, bytes: artifactBytes.byteLength }],
   };
@@ -330,7 +348,7 @@ async function main(): Promise<void> {
     const controlPulled = await pullQueue(queueUrl, queueToken, visibilityTimeoutMs, controlJobId, `${label} Queue pull`);
     const controlClaim = await requestJson(`${controlJobUrl}/claim`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ attemptId: controlAttemptId, runnerId: controlRunnerId, actionId, ...controlManifest, leaseExpiresAt, publicKey: controlPublicKey, challenge: controlChallenge, signature: controlSignature }) }, `${label} Runner claim`);
     const controlCredential = requiredString(jsonObject(controlClaim.credential, `${label} claim credential`), "token");
-    return { jobId: controlJobId, attemptId: controlAttemptId, runnerId: controlRunnerId, outputRoot: controlOutputRoot, outputPaths: controlOutputPaths, sourceSnapshotDigest: controlSourceSnapshotDigest, inputManifestDigest: controlInputManifestDigest, publicKey: controlPublicKey, privateKey: controlKeys.privateKey, jobUrl: controlJobUrl, pulled: controlPulled, credential: controlCredential };
+    return { jobId: controlJobId, attemptId: controlAttemptId, runnerId: controlRunnerId, outputRoot: controlOutputRoot, outputPaths: controlOutputPaths, sourceSnapshotDigest: controlSourceSnapshotDigest, inputManifestDigest: controlInputManifestDigest, publicKey: controlPublicKey, privateKey: controlKeys.privateKey, jobUrl: controlJobUrl, pulled: controlPulled, credential: controlCredential, leaseExpiresAt };
   };
 
   const firstOutputPath = (attempt: { outputPaths: readonly string[] }, label: string): string => {
@@ -365,7 +383,7 @@ async function main(): Promise<void> {
   const retryReadBackBytes = Buffer.from(await retryReadBack.arrayBuffer());
   const retryReadBackDigest = digest(retryReadBackBytes);
   if (retryReadBackDigest !== retryDigest) throw new Error(`Retry R2 read-back digest mismatch: declared=${retryDigest}; readBack=${retryReadBackDigest}`);
-  const retryResultEnvelope = { jobId: retryAttempt.jobId, attemptId: retryAttempt.attemptId, status: "succeeded", outputs: [{ path: retryPath, kind: "artifact", disclosure: outputDisclosure, digest: retryDigest, bytes: retryBytes.byteLength }] };
+  const retryResultEnvelope = { jobId: retryAttempt.jobId, attemptId: retryAttempt.attemptId, context: runnerResultContext({ jobId: retryAttempt.jobId, attemptId: retryAttempt.attemptId, runnerId: retryAttempt.runnerId, leaseExpiresAt: retryAttempt.leaseExpiresAt, actionId, inputManifestDigest: retryAttempt.inputManifestDigest, sourceSnapshotDigest: retryAttempt.sourceSnapshotDigest, projectViewId, outputRoot: retryAttempt.outputRoot, outputPaths: retryAttempt.outputPaths }), status: "succeeded", outputs: [{ path: retryPath, kind: "artifact", disclosure: outputDisclosure, digest: retryDigest, bytes: retryBytes.byteLength }] };
   const retryResultSignature = base64Url(sign(null, Buffer.from(`anyam.runner-result/v1|${stableJson(retryResultEnvelope)}`), retryAttempt.privateKey));
   const retryCompletion = await requestJson(`${retryAttempt.jobUrl}/result`, { method: "POST", headers: { authorization: `Bearer ${retryAttempt.credential}`, "content-type": "application/json" }, body: JSON.stringify({ ...retryResultEnvelope, signature: retryResultSignature }) }, "Retry Runner result");
   const retryStatus = jsonObject(retryCompletion.status, "Retry completion status");

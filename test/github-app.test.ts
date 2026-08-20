@@ -105,6 +105,7 @@ class FakeApi implements GitHubRestClient {
     baseCommit: "commit:one",
   };
   compareStatus: "identical" | "ahead" | "behind" | "diverged" = "ahead";
+  compareError?: Error;
   deleted: string[] = [];
 
   async getCommit(): Promise<GitHubCommitObservation> {
@@ -112,6 +113,7 @@ class FakeApi implements GitHubRestClient {
   }
 
   async compare(): Promise<{ status: "identical" | "ahead" | "behind" | "diverged"; receipt: string }> {
+    if (this.compareError) throw this.compareError;
     return { status: this.compareStatus, receipt: "github-rest=compare; providerReceipt=redacted" };
   }
 
@@ -171,6 +173,23 @@ test("GitHub App adapter uses selected-installation credentials for Smart HTTP r
   assert.equal(result.value.receipt.includes("installation-token-must-not"), false);
   assert.equal(issuer.calls[0]?.repository, "acme/video-player");
   assert.deepEqual(issuer.calls[0]?.permissions, ["contents:read", "metadata:read", "pull_requests:read"]);
+});
+
+test("GitHub App classifies a compare 404 after a rewrite as force-push", async () => {
+  const api = new FakeApi();
+  api.compareError = new GitHubAppAdapterError({ errorCode: "github_app.http_404", message: "compare missing", retryable: false, recoveryAction: "reconcile", receipt: "provider=github; compare=404; credentialMaterialStored=false" });
+  const git = new FakeGit();
+  git.refs = { generation: "remote:rewritten", refs: refs([["refs/heads/main", "commit:rewritten"]]), receipt: "git-smart-http=rewritten; provider=github" };
+  const { value } = adapter({ api, git });
+  const result = await value.inspect({
+    mirror: { protocol: "anyam.mirror/v1", id: "mirror:github-rewrite", projectId: "project:video-player", sourceSpaceId: "source:community", provider: "github", remoteRepository: "acme/video-player", direction: "bidirectional", refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }], disclosure: "public", state: "healthy", canonicalProjectRevisionId: "project-revision:one", canonicalRefs: refs([["refs/heads/main", "commit:one"]]), remoteGeneration: "remote:old", remoteRefs: refs([["refs/heads/main", "commit:one"]]), pendingInboundChangeIds: [], createdAt: "2026-08-13T00:00:00.000Z", updatedAt: "2026-08-13T00:00:00.000Z", receipt: "fixture=mirror; credentialFree=true" },
+    knownRefs: refs([["refs/heads/main", "commit:one"]]),
+    knownGeneration: "remote:old",
+  });
+  assert.equal(result.status, "succeeded");
+  if (result.status !== "succeeded") return;
+  assert.equal(result.value.updates[0]?.kind, "force-push");
+  assert.match(result.value.updates[0]?.receipt ?? "", /comparison=not-found; classification=force-push/u);
 });
 
 test("GitHub App adapter projects canonical refs through Smart HTTP CAS and rejects expired JIT credentials", async () => {

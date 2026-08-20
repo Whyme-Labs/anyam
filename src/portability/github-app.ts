@@ -394,10 +394,31 @@ export class GitHubAppProjectionAdapter implements MirrorRemoteAdapter {
           updates.push({ remoteRef: name, ...(before ? { previousOid: before } : {}), kind: "deleted", receipt: `provider=github-app; ref=${name}; state=deleted; credentialMaterialStored=false` });
           continue;
         }
-        const kind = before === undefined ? "created" : (await this.api.compare({ repository: this.installation.repository, baseOid: before, headOid: after, token: token.token })).status === "ahead" ? "fast-forward" : "force-push";
+        let kind: MirrorRefUpdate["kind"];
+        let comparisonReceipt = "comparison=not-needed";
+        if (before === undefined) {
+          kind = "created";
+        } else {
+          try {
+            const comparison = await this.api.compare({ repository: this.installation.repository, baseOid: before, headOid: after, token: token.token });
+            kind = comparison.status === "ahead" ? "fast-forward" : "force-push";
+            comparisonReceipt = comparison.receipt;
+          } catch (error) {
+            // After a forced rewrite GitHub may no longer expose the old OID
+            // to its compare endpoint. The ref read and current-commit read
+            // are still authoritative, so classify conservatively and force
+            // an explicit reconciliation instead of hiding the rewrite.
+            if (error instanceof GitHubAppAdapterError && error.errorCode === "github_app.http_404") {
+              kind = "force-push";
+              comparisonReceipt = "comparison=not-found; classification=force-push; provider-limit-not-claimed";
+            } else {
+              throw error;
+            }
+          }
+        }
         const commit = await this.api.getCommit({ repository: this.installation.repository, oid: after, ref: name, token: token.token });
         commits.push({ oid: commit.oid, ref: name, author: { ...commit.author }, disclosure: "public", ...(remote.originOperationId ? { originOperationId: remote.originOperationId } : {}), });
-        updates.push({ remoteRef: name, ...(before ? { previousOid: before } : {}), currentOid: after, kind, receipt: `provider=github-app; ref=${name}; state=${kind}; credentialMaterialStored=false` });
+        updates.push({ remoteRef: name, ...(before ? { previousOid: before } : {}), currentOid: after, kind, receipt: `provider=github-app; ref=${name}; state=${kind}; ${comparisonReceipt}; credentialMaterialStored=false` });
       }
       const providerReceipt = safeReceipt(remote.receipt, "git.receipt");
       return { status: "succeeded", value: { generation: remote.generation, refs: filteredRefs, updates, commits, ...(remote.originOperationId ? { originOperationId: remote.originOperationId } : {}), receipt: `provider=github-app; operation=inspect; installation=${this.installation.installationId}; repository=${this.installation.repository}; git=${providerReceipt}; expiresAt=${token.expiresAt}; credentialMaterialStored=false` } };

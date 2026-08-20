@@ -534,7 +534,10 @@ async function main(): Promise<void> {
     const forcePush = await adapter.push({ mirror: service.repositoryMirror, expectedGeneration: externalPush.value.generation, expectedRefs: refs([["refs/heads/main", seeded.secondOid]]), desiredRefs: refs([["refs/heads/main", seeded.divergentOid]]), operationId: "github:qualification:force-push", idempotencyKey: "github:qualification:force-push" });
     if (forcePush.status !== "succeeded") throw new Error(`force-push seed failed: ${forcePush.errorCode}; ${forcePush.recoveryAction}`);
     const forceInspection = await adapter.inspect({ mirror: service.repositoryMirror, knownRefs: refs([["refs/heads/main", seeded.secondOid]]), knownGeneration: forcePush.value.generation });
-    if (forceInspection.status !== "succeeded" || forceInspection.value.updates[0]?.kind !== "force-push") throw new Error(`force-push was not classified explicitly; state=${forceInspection.status}`);
+    if (forceInspection.status !== "succeeded" || forceInspection.value.updates[0]?.kind !== "force-push") {
+      const forceInspectionReceipt = forceInspection.status === "failed" ? forceInspection.receipt : "inspection=succeeded; updateKinds=unexpected";
+      throw new Error(`force-push was not classified explicitly; state=${forceInspection.status}; errorCode=${forceInspection.status === "failed" ? forceInspection.errorCode : "none"}; receipt=${forceInspectionReceipt}; updateKinds=${forceInspection.status === "succeeded" ? forceInspection.value.updates.map((update) => update.kind).join(",") : "not-returned"}`);
+    }
     const blockedReconciliation = await service.sync({ canonical: { projectRevisionId: "project-revision:github-app-qualification:one", sourceSpaceId: emptyMirror.sourceSpaceId, sourceSpaceClassification: "public", disclosure: "public", verified: true, verificationReceipt: "qualification=source-verified", refs: refs([["refs/heads/main", seeded.initialOid]]) }, idempotencyKey: "qualification:force-push-blocked", actor });
     if (blockedReconciliation.status !== "failed" || blockedReconciliation.errorCode !== "mirror.force_push_detected") throw new Error(`force-push did not require explicit reconciliation: state=${blockedReconciliation.status}`);
     await runGit(seeded.directory, ["update-ref", "refs/heads/main", seeded.initialOid], gitMaxBufferBytes);

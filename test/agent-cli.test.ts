@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { execFile as execFileCallback } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -364,6 +364,76 @@ test("enforceable Workspace hides unauthorized source, strips ambient credential
   assert.equal(await git(directory, ["rev-parse", "HEAD"]), originalHead);
   await agentManager.revoke(result.session.id);
   await assert.rejects(access(result.boundary.workspaceDirectory));
+});
+
+test("run.start uses the enforceable Workspace Runner and allows only declared outputs", async () => {
+  if (process.platform !== "darwin") return;
+  const directory = await projectDirectory();
+  await replaceCheckAction(directory, {
+    command: [
+      "node -e",
+      JSON.stringify([
+        "const fs=require('node:fs');",
+        "let stateBlocked=false; try { fs.readFileSync(process.env.ANYAM_WORKSPACE_STATE_PATH); } catch { stateBlocked=true; }",
+        "fs.writeFileSync('artifact.txt', JSON.stringify({stateBlocked}));",
+        "if (!stateBlocked) process.exit(9);",
+      ].join(" ")),
+    ].join(" "),
+    inputs: ["anyam.json"],
+    outputs: ["artifact.txt"],
+  });
+  const agentManager = manager(directory);
+  const started = await agentManager.startSession({ agent: "cli", mode: "enforceable", authorizedPaths: ["anyam.json", "src"], network: [] });
+  const result = await agentManager.invokeTool("run.start", { actionId: "action:check" });
+  const run = result.run as Record<string, unknown>;
+  assert.equal(run.status, "passed", String(run.receipt));
+  assert.match(String(run.receipt), /enforcement=macos-sandbox-exec; networkEnforcement=deny-all/u);
+  assert.deepEqual(JSON.parse(await readFile(join(started.session.workspaceDirectory!, "artifact.txt"), "utf8")), { stateBlocked: true });
+  await assert.rejects(access(join(directory, "artifact.txt")));
+  await agentManager.revoke(started.session.id);
+});
+
+test("enforceable Workspace rejects tracked symlink projections", async () => {
+  if (process.platform !== "darwin") return;
+  const directory = await projectDirectory();
+  const outside = join(directory, "..", "outside-secret.txt");
+  await writeFile(outside, "not source", "utf8");
+  await symlink(outside, join(directory, "src", "linked-secret.txt"));
+  await git(directory, ["add", "src/linked-secret.txt"]);
+  await git(directory, ["commit", "--quiet", "-m", "Add linked fixture"]);
+  const agentManager = manager(directory);
+  await assert.rejects(
+    agentManager.startSession({ agent: "cli", mode: "enforceable", authorizedPaths: ["anyam.json", "src"], network: [] }),
+    (error: unknown) => error instanceof Error && /symlink|non-regular|regular-file=false/u.test(`${error.message} ${"receipt" in error ? String(error.receipt) : ""}`),
+  );
+  await rm(outside, { force: true });
+});
+
+test("Linux enforceable Workspace refuses an unproxied host allowlist", async () => {
+  if (process.platform !== "linux") return;
+  const directory = await projectDirectory();
+  const agentManager = manager(directory);
+  await assert.rejects(
+    agentManager.startSession({ agent: "cli", mode: "enforceable", network: ["registry.example"] }),
+    (error: unknown) => error instanceof Error && /allowlist|egress proxy/u.test(error.message),
+  );
+});
+
+test("revoking a running run.start prevents a successful result", async () => {
+  const directory = await projectDirectory();
+  await replaceCheckAction(directory, {
+    command: "node -e \"setTimeout(() => {}, 10000)\"",
+    inputs: ["anyam.json"],
+    outputs: [],
+  });
+  const agentManager = manager(directory);
+  const started = await agentManager.startSession({ agent: "cli", mode: "supervised" });
+  const running = agentManager.invokeTool("run.start", { actionId: "action:check" });
+  await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 100));
+  const revoked = await agentManager.revoke(started.session.id);
+  assert.equal(revoked.status, "revoked");
+  const result = await running;
+  assert.notEqual((result.run as Record<string, unknown>).status, "passed");
 });
 
 test("supervised local Workspace is labelled non-enforcing", async () => {

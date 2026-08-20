@@ -8,7 +8,7 @@ import type { Readable, Writable } from "node:stream";
 import { basename, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { gitCommitIdentity, gitProjectRevisionId, gitTreeIdentity, inspectGitSource, isGitAncestor, LocalGitSourceError } from "./git-source.js";
-import { createWorkspaceBoundary, removeWorkspaceBoundary, runWorkspaceCommand, type WorkspaceBoundary, type WorkspaceBoundaryEnforcement, type WorkspaceBoundaryMode } from "./workspace-boundary.js";
+import { createWorkspaceBoundary, removeWorkspaceBoundary, runWorkspaceCommand, terminateWorkspaceProcess, WorkspaceBoundaryError, type WorkspaceBoundary, type WorkspaceBoundaryEnforcement, type WorkspaceBoundaryMode } from "./workspace-boundary.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -113,6 +113,8 @@ export type LocalAgentSession = {
   workspaceBoundaryId?: string;
   workspaceEnforcement?: WorkspaceBoundaryEnforcement;
   workspaceTemporary?: boolean;
+  processPid?: number;
+  processGroupId?: number;
   revokedAt?: string;
 };
 
@@ -522,6 +524,16 @@ function declaredStringArray(value: unknown, field: string): readonly string[] {
   return value.map((item) => item as string);
 }
 
+function declaredWorkspacePathArray(value: unknown, field: string): readonly string[] {
+  return declaredStringArray(value, field).map((item) => {
+    const normalized = item.replaceAll("\\", "/");
+    if (normalized.startsWith("/") || normalized.split("/").some((segment) => segment === ".." || segment.includes("\0"))) {
+      throw new LocalAgentError({ code: "run.manifest_invalid", message: `Declared Action path ${field} contains traversal or an absolute path; no run was started.`, affectedObject: field, recoveryAction: "use a path relative to the Project Workspace and rerun anyam check", receipt: `field=${field}; path=${item}; relative-only=true` });
+    }
+    return normalized;
+  });
+}
+
 function declaredResources(value: unknown, field: string): Readonly<Record<string, string | number | boolean>> {
   if (!isRecord(value) || Object.values(value).some((item) => !["string", "number", "boolean"].includes(typeof item))) {
     throw new LocalAgentError({ code: "run.manifest_invalid", message: `Declared Action field ${field} must contain only scalar resources; no run was started.`, affectedObject: field, recoveryAction: "repair anyam.json and rerun anyam check", receipt: `field=${field}; expected=scalar-record` });
@@ -613,30 +625,21 @@ type LocalActionCommandResult = {
   outputLimitExceeded: boolean;
 };
 
-async function executeDeclaredAction(directory: string, command: string): Promise<LocalActionCommandResult> {
-  const shell = process.platform === "win32" ? "cmd.exe" : "sh";
-  const args = process.platform === "win32" ? ["/d", "/s", "/c", command] : ["-c", command];
+async function executeDeclaredAction(boundary: WorkspaceBoundary, command: string, onProcess?: (process: ChildProcess) => void): Promise<LocalActionCommandResult> {
   try {
-    const result = await execFile(shell, args, {
-      cwd: directory,
-      encoding: "utf8",
-      timeout: LOCAL_ACTION_POLICY.timeoutMs,
-      maxBuffer: LOCAL_ACTION_POLICY.maxOutputBytes,
+    const result = await runWorkspaceCommand({
+      boundary,
+      command,
+      shell: true,
+      timeoutMs: LOCAL_ACTION_POLICY.timeoutMs,
+      ...(onProcess ? { onProcess } : {}),
     });
-    return { exitCode: 0, stdout: result.stdout, stderr: result.stderr, timedOut: false, outputLimitExceeded: false };
+    return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, timedOut: result.timedOut === true, outputLimitExceeded: result.receipt.includes("asked=output-exceeded") };
   } catch (error) {
-    const record = isRecord(error) ? error : {};
-    const rawCode = record.code;
-    const signal = typeof record.signal === "string" ? record.signal : "";
-    const stdout = typeof record.stdout === "string" ? record.stdout : "";
-    const stderr = typeof record.stderr === "string" ? record.stderr : "";
-    return {
-      exitCode: typeof rawCode === "number" ? rawCode : undefined,
-      stdout,
-      stderr,
-      timedOut: record.killed === true || signal === "SIGTERM",
-      outputLimitExceeded: rawCode === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
-    };
+    if (error instanceof WorkspaceBoundaryError) {
+      return { exitCode: undefined, stdout: "", stderr: error.message, timedOut: error.code === "workspace.command_timeout", outputLimitExceeded: error.code === "workspace.output_limit" };
+    }
+    throw error;
   }
 }
 
@@ -909,8 +912,8 @@ export class LocalAgentManager {
           moduleId,
           moduleRoot,
           command: declaredString(actionValue.command, `modules[${moduleIndex}].actions[${actionIndex}].command`),
-          inputGlobs: declaredStringArray(actionValue.inputs, `modules[${moduleIndex}].actions[${actionIndex}].inputs`),
-          outputPaths: declaredStringArray(actionValue.outputs, `modules[${moduleIndex}].actions[${actionIndex}].outputs`),
+          inputGlobs: declaredWorkspacePathArray(actionValue.inputs, `modules[${moduleIndex}].actions[${actionIndex}].inputs`),
+          outputPaths: declaredWorkspacePathArray(actionValue.outputs, `modules[${moduleIndex}].actions[${actionIndex}].outputs`),
           network: declaredStringArray(actionValue.network, `modules[${moduleIndex}].actions[${actionIndex}].network`),
           resources: declaredResources(actionValue.resources, `modules[${moduleIndex}].actions[${actionIndex}].resources`),
         };
@@ -1139,10 +1142,8 @@ export class LocalAgentManager {
     const session = state.sessions[id];
     const grant = state.grants[session.grantId];
     const running = this.runningProcesses.get(id);
-    if (running) {
-      running.kill("SIGTERM");
-      this.runningProcesses.delete(id);
-    }
+    await terminateWorkspaceProcess({ ...(running ? { process: running } : {}), ...(session.processGroupId ? { processGroupId: session.processGroupId } : {}) });
+    this.runningProcesses.delete(id);
     const revokedAt = nowIso(this.now);
     session.status = "revoked";
     session.revokedAt = revokedAt;
@@ -1184,10 +1185,30 @@ export class LocalAgentManager {
         boundary,
         command: input.command,
         ...(input.args ? { args: input.args } : {}),
-        onProcess: (child) => this.runningProcesses.set(started.session.id, child),
+        onProcess: (child) => {
+          this.runningProcesses.set(started.session.id, child);
+          void this.withStateLock(async () => {
+            const state = await this.readState();
+            const session = state.sessions[started.session.id];
+            if (session && child.pid) {
+              session.processPid = child.pid;
+              session.processGroupId = child.pid;
+              await this.writeState(state);
+            }
+          });
+        },
       });
     } finally {
       this.runningProcesses.delete(started.session.id);
+      await this.withStateLock(async () => {
+        const state = await this.readState();
+        const session = state.sessions[started.session.id];
+        if (session) {
+          delete session.processPid;
+          delete session.processGroupId;
+          await this.writeState(state);
+        }
+      });
     }
     await this.withStateLock(async () => {
       const state = await this.readState();
@@ -1265,12 +1286,178 @@ export class LocalAgentManager {
     await this.writeState(active.state);
   }
 
+  private async prepareRunStart(args: Record<string, unknown>): Promise<{
+    session: LocalAgentSession;
+    grant: LocalCapabilityGrant;
+    project: ProjectMetadata;
+    change: ChangeMetadata;
+    boundary: WorkspaceBoundary;
+    source: Awaited<ReturnType<typeof inspectGitSource>>;
+    inputs: Awaited<ReturnType<typeof localInputDigests>>;
+    action: LocalDeclaredAction;
+    verifier?: LocalDeclaredVerifier;
+    startedAt: string;
+    toolchainDigest: string;
+    environmentDigest: string;
+    runId: string;
+    evidenceId: string;
+  }> {
+    return this.withStateLock(async () => {
+      const active = await this.requireActiveSessionUnlocked();
+      if (!LOCAL_MCP_TOOLS.some((entry) => entry.name === "run.start")) return this.denial(active, "run.start");
+      const project = await this.projectMetadata();
+      const change = await this.changeMetadata();
+      const boundary = this.boundaries.get(active.session.id);
+      if (!boundary) throw new LocalAgentError({ code: "workspace.boundary_missing", message: `Agent session ${active.session.id} has no live Workspace Runner boundary; no Action run was started.`, affectedObject: active.session.id, recoveryAction: "start a new agent session through the Workspace Runner", receipt: "run=not-started; boundary=missing; canonicalWrite=false" });
+      const actionId = stringField(args.actionId, "");
+      const action = project.actions.find((candidate) => candidate.id === actionId);
+      if (!action) throw new LocalAgentError({ code: "run.action_unknown", message: `Action ${actionId || "missing"} is not declared by the Project; no run was started.`, affectedObject: actionId || "action:missing", recoveryAction: `choose one of ${project.actions.map((candidate) => candidate.id).join(", ") || "the actions in anyam.json"}`, receipt: `declared-actions=${project.actions.map((candidate) => candidate.id).join(",")}` });
+      const requestedVerifierId = stringField(args.verifierId, "");
+      const verifier = requestedVerifierId
+        ? project.verifiers.find((candidate) => candidate.id === requestedVerifierId)
+        : project.verifiers.find((candidate) => candidate.actionId === action.id);
+      if (requestedVerifierId && !verifier) throw new LocalAgentError({ code: "run.verifier_unknown", message: `Verifier ${requestedVerifierId} is not declared by the Project; no run was started.`, affectedObject: requestedVerifierId, recoveryAction: `choose one of ${project.verifiers.map((candidate) => candidate.id).join(", ") || "the verifiers in anyam.json"}`, receipt: `declared-verifiers=${project.verifiers.map((candidate) => candidate.id).join(",")}` });
+      if (verifier && verifier.actionId !== action.id) throw new LocalAgentError({ code: "run.verifier_mismatch", message: `Verifier ${verifier.id} is bound to Action ${verifier.actionId}, not ${action.id}; no run was started.`, affectedObject: verifier.id, recoveryAction: "select the Verifier bound to the requested Action", receipt: `verifier=${verifier.id}; action=${action.id}; reference=mismatch` });
+      let source: Awaited<ReturnType<typeof inspectGitSource>>;
+      try {
+        source = await inspectGitSource(boundary.workspaceDirectory);
+      } catch (error) {
+        if (error instanceof LocalGitSourceError) throw new LocalAgentError({ code: error.code, message: `${error.message} No Action run was started.`, affectedObject: change.id, recoveryAction: error.recoveryAction, receipt: `run=${action.id}; git-code=${error.code}` });
+        throw error;
+      }
+      if (!source.clean) throw new LocalAgentError({ code: "run.source_dirty", message: `Action ${action.id} requires a clean committed source revision; no run was started. budget=git.worktree; limit=clean source tree; asked=${source.changedPaths.length} changed paths.`, affectedObject: source.repositoryId, recoveryAction: "commit or discard changes before starting the Action", receipt: `git-status=dirty; changed-paths=${source.changedPaths.length}` });
+      return {
+        session: clone(active.session),
+        grant: clone(active.grant),
+        project,
+        change,
+        boundary,
+        source,
+        inputs: await localInputDigests(boundary.workspaceDirectory, action.inputGlobs),
+        action,
+        ...(verifier ? { verifier } : {}),
+        startedAt: nowIso(this.now),
+        toolchainDigest: digest({ node: process.version, platform: process.platform, arch: process.arch, execPath: process.execPath }),
+        environmentDigest: digest({ cwd: boundary.workspaceDirectory, nodeEnv: process.env.NODE_ENV ?? "", shell: process.platform === "win32" ? "cmd.exe" : "sh", workspaceMode: boundary.mode, networkEnforcement: boundary.networkEnforcement }),
+        runId: `run:${randomUUID()}`,
+        evidenceId: `evidence:${randomUUID()}`,
+      };
+    });
+  }
+
+  private async invokeRunStart(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const prepared = await this.prepareRunStart(args);
+    let processRegistration: Promise<void> | undefined;
+    let commandResult: LocalActionCommandResult;
+    try {
+      commandResult = prepared.inputs.missing.length === 0
+        ? await executeDeclaredAction(prepared.boundary, prepared.action.command, (child) => {
+          this.runningProcesses.set(prepared.session.id, child);
+          processRegistration = this.withStateLock(async () => {
+            const state = await this.readState();
+            const session = state.sessions[prepared.session.id];
+            if (session && child.pid) {
+              session.processPid = child.pid;
+              session.processGroupId = child.pid;
+              await this.writeState(state);
+            }
+          });
+        })
+        : { exitCode: undefined, stdout: "", stderr: "", timedOut: false, outputLimitExceeded: false };
+      if (processRegistration) await processRegistration;
+    } finally {
+      this.runningProcesses.delete(prepared.session.id);
+    }
+    let sourceMutated = false;
+    if (prepared.boundary.mode === "enforceable") {
+      try {
+        const after = await inspectGitSource(prepared.boundary.workspaceDirectory);
+        const allowedOutputs = new Set(prepared.action.outputPaths);
+        sourceMutated = after.commitId !== prepared.source.commitId
+          || after.treeId !== prepared.source.treeId
+          || after.changedPaths.some((path) => !path.startsWith(".anyam/") && !allowedOutputs.has(path));
+      } catch {
+        sourceMutated = true;
+      }
+    }
+    const outputs = commandResult.exitCode === 0 && !commandResult.timedOut && !commandResult.outputLimitExceeded
+      ? await localOutputDigests(prepared.boundary.workspaceDirectory, prepared.action.outputPaths)
+      : { digests: [], missing: [] };
+    const failureReason = prepared.inputs.missing.length > 0
+      ? `missing-input-patterns=${prepared.inputs.missing.join(",")}`
+      : sourceMutated
+        ? "source-mutated-during-run"
+        : commandResult.timedOut
+          ? `budget=action.timeout; limit=${LOCAL_ACTION_POLICY.timeoutMs}ms; asked=command exceeded the execution boundary`
+          : commandResult.outputLimitExceeded
+            ? `budget=action.output; limit=${LOCAL_ACTION_POLICY.maxOutputBytes}bytes; asked=stdout or stderr exceeded the execution boundary`
+            : commandResult.exitCode !== 0
+              ? `exit-code=${commandResult.exitCode ?? "unknown"}`
+              : outputs.missing.length > 0
+                ? `missing-output-paths=${outputs.missing.join(",")}`
+                : undefined;
+    const inputDigests = prepared.inputs.digests;
+    const outputDigests = outputs.digests;
+    const stdoutDigest = digest(commandResult.stdout);
+    const stderrDigest = digest(commandResult.stderr);
+    const outputDigest = digest({ outputDigests, stdoutDigest, stderrDigest, exitCode: commandResult.exitCode });
+
+    return this.withStateLock(async () => {
+      const state = await this.readState();
+      const session = state.sessions[prepared.session.id];
+      const grant = session ? state.grants[session.grantId] : undefined;
+      const revokedDuringRun = !session || !grant || session.status !== "active" || grant.status !== "active";
+      const status = revokedDuringRun ? "blocked" : failureReason ? "failed" : "passed";
+      const completedAt = nowIso(this.now);
+      const finalReason = revokedDuringRun ? "session-revoked-during-run" : failureReason;
+      const evidenceDigest = digest({ actionId: prepared.action.id, verifierId: prepared.verifier?.id ?? "verifier:missing", sourceRevision: gitCommitIdentity(prepared.source.commitId), sourceSnapshot: `git:snapshot:${prepared.source.commitId}`, inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, status, sourceMutated, actorId: prepared.session.actorId, grantId: prepared.grant.id });
+      const observation: LocalRunObservation = {
+        id: prepared.runId,
+        actionId: prepared.action.id,
+        status,
+        evidenceId: prepared.evidenceId,
+        evidenceDigest,
+        startedAt: prepared.startedAt,
+        completedAt,
+        sourceRevision: gitCommitIdentity(prepared.source.commitId),
+        sourceSnapshot: `git:snapshot:${prepared.source.commitId}`,
+        actionContractDigest: prepared.action.contractDigest,
+        verifierId: prepared.verifier?.id ?? "verifier:missing",
+        ...(prepared.verifier ? { verifierContractDigest: prepared.verifier.contractDigest } : {}),
+        ...(commandResult.exitCode !== undefined ? { exitCode: commandResult.exitCode } : {}),
+        stdoutDigest,
+        stderrDigest,
+        inputDigests,
+        outputDigests,
+        outputDigest,
+        toolchainDigest: prepared.toolchainDigest,
+        environmentDigest: prepared.environmentDigest,
+        actorId: prepared.session.actorId,
+        grantId: prepared.grant.id,
+        taskId: prepared.session.taskId,
+        receipt: `${LOCAL_ACTION_POLICY.receipt}; action=${prepared.action.id}; verifier=${prepared.verifier?.id ?? "verifier:missing"}; source=${gitCommitIdentity(prepared.source.commitId)}; boundary=${prepared.boundary.id}; enforcement=${prepared.boundary.enforcement}; networkEnforcement=${prepared.boundary.networkEnforcement}; inputs=${inputDigests.length}; outputs=${outputDigests.length}; ${finalReason ?? "status=passed"}`,
+      };
+      state.runs[prepared.runId] = observation;
+      this.record(state, { operation: "run.completed", outcome: "observed", sessionId: prepared.session.id, grantId: prepared.grant.id, taskId: prepared.session.taskId, projectId: prepared.project.id, changeId: prepared.change.id, workspaceId: prepared.change.workspaceId, actorId: prepared.session.actorId, agent: prepared.session.agent, details: { runId: prepared.runId, evidenceId: prepared.evidenceId, actionId: prepared.action.id, verifierId: prepared.verifier?.id ?? "verifier:missing", status, sourceRevision: gitCommitIdentity(prepared.source.commitId), inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, toolchainDigest: prepared.toolchainDigest, environmentDigest: prepared.environmentDigest, exitCode: commandResult.exitCode, failureReason: finalReason } });
+      this.record(state, { operation: "tool.invoked", outcome: "allowed", sessionId: prepared.session.id, grantId: prepared.grant.id, taskId: prepared.session.taskId, projectId: prepared.project.id, changeId: prepared.change.id, workspaceId: prepared.change.workspaceId, actorId: prepared.session.actorId, agent: prepared.session.agent, details: { tool: "run.start", boundary: prepared.boundary.id, enforcement: prepared.boundary.enforcement, networkEnforcement: prepared.boundary.networkEnforcement } });
+      const currentSession = state.sessions[prepared.session.id];
+      if (currentSession) {
+        delete currentSession.processPid;
+        delete currentSession.processGroupId;
+      }
+      await this.writeState(state);
+      return { run: observation, evidence: { id: prepared.evidenceId, digest: evidenceDigest, status, actionId: prepared.action.id, verifierId: prepared.verifier?.id ?? "verifier:missing", sourceRevision: gitCommitIdentity(prepared.source.commitId), actionContractDigest: prepared.action.contractDigest, ...(prepared.verifier ? { verifierContractDigest: prepared.verifier.contractDigest } : {}), inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, toolchainDigest: prepared.toolchainDigest, environmentDigest: prepared.environmentDigest, exitCode: commandResult.exitCode, actorId: prepared.session.actorId, grantId: prepared.grant.id, receipt: observation.receipt }, canonicalWrite: false };
+    });
+  }
+
   private async invokeToolUnlocked(name: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
     const active = await this.requireActiveSessionUnlocked();
     if (!LOCAL_MCP_TOOLS.some((entry) => entry.name === name)) return this.denial(active, name);
     const project = await this.projectMetadata();
     const change = await this.changeMetadata();
-    const executionDirectory = active.session.workspaceDirectory ?? this.directory;
+    const boundary = this.boundaries.get(active.session.id);
+    if (!boundary) throw new LocalAgentError({ code: "workspace.boundary_missing", message: `Agent session ${active.session.id} has no live Workspace Runner boundary; no Action run was started.`, affectedObject: active.session.id, recoveryAction: "start a new agent session through the Workspace Runner", receipt: `run=not-started; boundary=missing; canonicalWrite=false` });
+    const executionDirectory = boundary.workspaceDirectory;
     if (name === "project.inspect") {
       await this.appendToolAudit(active, name);
       return { project: { id: project.id, name: project.name, manifestDigest: project.manifestDigest }, sourceSpaces: { readable: project.sourceSpaceIds, writable: project.sourceSpaceIds, hidden: [] }, changeId: change.id, workspaceId: change.workspaceId, canonicalWrite: false };
@@ -1306,10 +1493,38 @@ export class LocalAgentManager {
       const inputs = await localInputDigests(executionDirectory, action.inputGlobs);
       const toolchainDigest = digest({ node: process.version, platform: process.platform, arch: process.arch, execPath: process.execPath });
       const environmentDigest = digest({ cwd: executionDirectory, nodeEnv: process.env.NODE_ENV ?? "", shell: process.platform === "win32" ? "cmd.exe" : "sh", workspaceMode: active.session.workspaceMode ?? "supervised" });
-      const commandResult: LocalActionCommandResult = inputs.missing.length === 0 ? await executeDeclaredAction(executionDirectory, action.command) : { exitCode: undefined, stdout: "", stderr: "", timedOut: false, outputLimitExceeded: false };
+      const commandResult: LocalActionCommandResult = inputs.missing.length === 0 ? await executeDeclaredAction(boundary, action.command, (child) => {
+        this.runningProcesses.set(active.session.id, child);
+        void this.withStateLock(async () => {
+          const state = await this.readState();
+          const session = state.sessions[active.session.id];
+          if (session && child.pid) {
+            session.processPid = child.pid;
+            session.processGroupId = child.pid;
+            await this.writeState(state);
+          }
+        });
+      }) : { exitCode: undefined, stdout: "", stderr: "", timedOut: false, outputLimitExceeded: false };
+      this.runningProcesses.delete(active.session.id);
+      delete active.session.processPid;
+      delete active.session.processGroupId;
+      let sourceMutated = false;
+      if (boundary.mode === "enforceable") {
+        try {
+          const after = await inspectGitSource(executionDirectory);
+          const allowedOutputs = new Set(action.outputPaths);
+          sourceMutated = after.commitId !== source.commitId
+            || after.treeId !== source.treeId
+            || after.changedPaths.some((path) => !path.startsWith(".anyam/") && !allowedOutputs.has(path));
+        } catch {
+          sourceMutated = true;
+        }
+      }
       const outputs = commandResult.exitCode === 0 && !commandResult.timedOut && !commandResult.outputLimitExceeded ? await localOutputDigests(executionDirectory, action.outputPaths) : { digests: [], missing: [] };
       const failureReason = inputs.missing.length > 0
         ? `missing-input-patterns=${inputs.missing.join(",")}`
+        : sourceMutated
+          ? "source-mutated-during-run"
         : commandResult.timedOut
           ? `budget=action.timeout; limit=${LOCAL_ACTION_POLICY.timeoutMs}ms; asked=command exceeded the execution boundary`
           : commandResult.outputLimitExceeded
@@ -1328,7 +1543,7 @@ export class LocalAgentManager {
       const outputDigest = digest({ outputDigests, stdoutDigest, stderrDigest, exitCode: commandResult.exitCode });
       const runId = `run:${randomUUID()}`;
       const evidenceId = `evidence:${randomUUID()}`;
-      const evidenceDigest = digest({ actionId, verifierId: verifier?.id ?? "verifier:missing", sourceRevision: gitCommitIdentity(source.commitId), sourceSnapshot: `git:snapshot:${source.commitId}`, inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, status, actorId: active.session.actorId, grantId: active.grant.id });
+      const evidenceDigest = digest({ actionId, verifierId: verifier?.id ?? "verifier:missing", sourceRevision: gitCommitIdentity(source.commitId), sourceSnapshot: `git:snapshot:${source.commitId}`, inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, status, sourceMutated, actorId: active.session.actorId, grantId: active.grant.id });
       const observation: LocalRunObservation = {
         id: runId,
         actionId,
@@ -1353,7 +1568,7 @@ export class LocalAgentManager {
         actorId: active.session.actorId,
         grantId: active.grant.id,
         taskId: active.session.taskId,
-        receipt: `${LOCAL_ACTION_POLICY.receipt}; action=${actionId}; verifier=${verifier?.id ?? "verifier:missing"}; source=${gitCommitIdentity(source.commitId)}; inputs=${inputDigests.length}; outputs=${outputDigests.length}; ${failureReason ?? "status=passed"}`,
+        receipt: `${LOCAL_ACTION_POLICY.receipt}; action=${actionId}; verifier=${verifier?.id ?? "verifier:missing"}; source=${gitCommitIdentity(source.commitId)}; boundary=${boundary.id}; enforcement=${boundary.enforcement}; networkEnforcement=${boundary.networkEnforcement}; inputs=${inputDigests.length}; outputs=${outputDigests.length}; ${failureReason ?? "status=passed"}`,
       };
       active.state.runs[runId] = observation;
       this.record(active.state, { operation: "run.completed", outcome: "observed", sessionId: active.session.id, grantId: active.grant.id, taskId: active.session.taskId, projectId: active.session.projectId, changeId: change.id, workspaceId: change.workspaceId, actorId: active.session.actorId, agent: active.session.agent, details: { runId, evidenceId, actionId, verifierId: verifier?.id ?? "verifier:missing", status, sourceRevision: gitCommitIdentity(source.commitId), inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, toolchainDigest, environmentDigest, exitCode: commandResult.exitCode, failureReason } });
@@ -1470,6 +1685,7 @@ export class LocalAgentManager {
   }
 
   async invokeTool(name: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    if (name === "run.start") return this.invokeRunStart(args);
     return this.withStateLock(() => this.invokeToolUnlocked(name, args));
   }
 }

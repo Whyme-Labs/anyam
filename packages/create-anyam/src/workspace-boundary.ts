@@ -1,7 +1,7 @@
 import { execFile as execFileCallback, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, lstat, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -10,6 +10,7 @@ const execFile = promisify(execFileCallback);
 
 export type WorkspaceBoundaryMode = "enforceable" | "supervised";
 export type WorkspaceBoundaryEnforcement = "macos-sandbox-exec" | "linux-bwrap" | "none";
+export type WorkspaceNetworkEnforcement = "deny-all" | "host-allowlist" | "not-enforced";
 export type WorkspaceMountMode = "read-only" | "read-write";
 
 export type WorkspaceMount = {
@@ -45,6 +46,7 @@ export type WorkspaceBoundary = {
   sourceDirectory: string;
   mounts: readonly WorkspaceMount[];
   network: readonly string[];
+  networkEnforcement: WorkspaceNetworkEnforcement;
   environment: Readonly<Record<string, string>>;
   executablePaths: readonly string[];
   profile?: string;
@@ -63,6 +65,9 @@ export type WorkspaceBoundaryCommandResult = {
   stderr: string;
   stdoutDigest: string;
   stderrDigest: string;
+  timedOut?: boolean;
+  processId?: number;
+  processGroupId?: number;
   receipt: string;
 };
 
@@ -171,6 +176,16 @@ async function copyProjection(input: { sourceDirectory: string; destination: str
   for (const path of selected) {
     const source = join(input.sourceDirectory, path);
     const destination = join(input.destination, path);
+    const sourceStat = await lstat(source);
+    if (!sourceStat.isFile()) {
+      throw new WorkspaceBoundaryError({
+        code: "workspace.projection_unsafe_file",
+        message: `Authorized Workspace projection refuses non-regular tracked path ${path}; symlinks and special files are not materialized.`,
+        affectedObject: path,
+        recoveryAction: "replace the symlink or special file with a regular Git blob before starting an enforceable Workspace",
+        receipt: `projection=git-blob-only; path=${path}; regular-file=false`,
+      });
+    }
     await mkdir(dirname(destination), { recursive: true });
     await writeFile(destination, await readFile(source));
   }
@@ -181,9 +196,26 @@ async function copyProjection(input: { sourceDirectory: string; destination: str
   await gitOutput(input.destination, ["commit", "--quiet", "-m", "Materialize authorized Project View"]);
 }
 
+async function rejectUnsafeTrackedFiles(directory: string): Promise<void> {
+  const files = await trackedFiles(directory);
+  for (const path of files) {
+    const entry = await lstat(join(directory, path));
+    if (!entry.isFile()) {
+      throw new WorkspaceBoundaryError({
+        code: "workspace.clone_unsafe_file",
+        message: `Enforceable Workspace clone contains non-regular tracked path ${path}; symlinks and special files are not accepted.`,
+        affectedObject: path,
+        recoveryAction: "remove the symlink or special file from the source commit and retry Workspace materialization",
+        receipt: `clone=git-blob-only; path=${path}; regular-file=false`,
+      });
+    }
+  }
+}
+
 async function cloneWorkspace(input: { sourceDirectory: string; destination: string }): Promise<void> {
   await gitOutput(dirname(input.destination), ["clone", "--no-local", "--no-hardlinks", "--no-tags", input.sourceDirectory, input.destination]);
   await gitOutput(input.destination, ["remote", "set-url", "origin", "https://workspace.anyam.local/agent.git"]);
+  await rejectUnsafeTrackedFiles(input.destination);
 }
 
 async function realPathOrResolve(path: string): Promise<string> {
@@ -246,14 +278,14 @@ function sandboxProfile(input: { workspaceDirectory: string; stateDirectory: str
     "(allow mach-lookup)",
     "(allow file-read-metadata (subpath \"/private/tmp\"))",
   ];
-  for (const root of runtimeRoots) lines.push(`(allow file-read* (subpath ${quoteProfile(root)}))`);
-  lines.push(`(allow file-read* (subpath ${quoteProfile(input.workspaceDirectory)}))`);
-  lines.push(`(allow file-write* (subpath ${quoteProfile(input.workspaceDirectory)}))`);
-  for (const host of input.network) lines.push(`(allow network-outbound (remote-name ${quoteProfile(host)}))`);
   for (const path of new Set([input.stateDirectory, input.sourceDirectory, homedir(), ...input.excludedPaths])) {
     lines.push(`(deny file-read* (subpath ${quoteProfile(path)}))`);
     lines.push(`(deny file-write* (subpath ${quoteProfile(path)}))`);
   }
+  for (const root of runtimeRoots) lines.push(`(allow file-read* (subpath ${quoteProfile(root)}))`);
+  lines.push(`(allow file-read* (subpath ${quoteProfile(input.workspaceDirectory)}))`);
+  lines.push(`(allow file-write* (subpath ${quoteProfile(input.workspaceDirectory)}))`);
+  for (const host of input.network) lines.push(`(allow network-outbound (remote-name ${quoteProfile(host)}))`);
   return lines.join(" ");
 }
 
@@ -289,6 +321,15 @@ export async function createWorkspaceBoundary(input: WorkspaceBoundaryInput): Pr
   const stateDirectory = await realPathOrResolve(input.stateDirectory);
   const network = [...new Set((input.network ?? []).map(normalizedHost))];
   const enforcement = backendForHost(input.mode);
+  if (input.mode === "enforceable" && process.platform === "linux" && network.length > 0) {
+    throw new WorkspaceBoundaryError({
+      code: "workspace.network_allowlist_unsupported",
+      message: "Linux enforceable Workspaces currently support deny-all networking only; a host allowlist would be unsafe without an egress proxy.",
+      affectedObject: network.join(","),
+      recoveryAction: "leave network empty for deny-all execution or use a qualified runner with an explicit egress proxy",
+      receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=linux-bwrap; networkEnforcement=unsupported; providerInvocation=false`,
+    });
+  }
   const executablePaths = input.mode === "enforceable" ? [...new Set(await Promise.all((input.executablePaths ?? []).map(resolveExecutablePath)))] : [];
   const executableRoots = executablePaths.map((path) => dirname(path));
   if (input.mode === "supervised") {
@@ -305,6 +346,7 @@ export async function createWorkspaceBoundary(input: WorkspaceBoundaryInput): Pr
       sourceDirectory,
       mounts: [{ sourcePath: sourceDirectory, mountPath: "/workspace", mode: "read-write" }],
       network,
+      networkEnforcement: "not-enforced",
       environment,
       executablePaths,
       temporary: false,
@@ -345,35 +387,50 @@ export async function createWorkspaceBoundary(input: WorkspaceBoundaryInput): Pr
     sourceDirectory,
     mounts,
     network,
+    networkEnforcement: network.length === 0 ? "deny-all" : "host-allowlist",
     environment,
     executablePaths,
     ...(profile ? { profile } : {}),
     temporary,
-    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; mode=${input.mode}; enforcement=${enforcement}; mounts=${mounts.length}; network-hosts=${network.length}; canonicalWrite=false; ambientCredentials=blocked`,
+    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; mode=${input.mode}; enforcement=${enforcement}; mounts=${mounts.length}; network-hosts=${network.length}; networkEnforcement=${network.length === 0 ? "deny-all" : "host-allowlist"}; canonicalWrite=false; ambientCredentials=blocked`,
   };
 }
 
-export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; command: string; args?: readonly string[]; timeoutMs?: number; onProcess?: (process: ChildProcess) => void }): Promise<WorkspaceBoundaryCommandResult> {
+export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; command: string; args?: readonly string[]; shell?: boolean; timeoutMs?: number; onProcess?: (process: ChildProcess) => void }): Promise<WorkspaceBoundaryCommandResult> {
   const args = [...(input.args ?? [])];
   const timeoutMs = input.timeoutMs ?? WORKSPACE_BOUNDARY_POLICY.commandTimeoutMs;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new WorkspaceBoundaryError({ code: "workspace.command_timeout_invalid", message: `Workspace command timeout must be positive; asked=${timeoutMs}.`, recoveryAction: "provide a positive timeout or use the provisional boundary tripwire", receipt: WORKSPACE_BOUNDARY_POLICY.receipt });
-  const command = input.boundary.enforcement === "none" ? input.command : input.boundary.executablePaths[0] ?? input.command;
-  const executable = input.boundary.enforcement === "macos-sandbox-exec" ? "sandbox-exec" : command;
+  if (input.boundary.enforcement === "linux-bwrap" && input.boundary.networkEnforcement !== "deny-all") {
+    throw new WorkspaceBoundaryError({ code: "workspace.network_allowlist_unsupported", message: "Linux enforceable Workspaces refuse host-allowlist execution without an attached egress proxy.", affectedObject: input.boundary.id, recoveryAction: "use deny-all networking or a qualified runner with an explicit egress proxy", receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=linux-bwrap; networkEnforcement=unsupported; process-start=false` });
+  }
+  const shellCommand = input.shell === true;
+  const invokedCommand = shellCommand ? (process.platform === "win32" ? "cmd.exe" : "/bin/sh") : input.boundary.enforcement === "none" ? input.command : input.boundary.executablePaths[0] ?? input.command;
+  const invokedArgs = shellCommand ? (process.platform === "win32" ? ["/d", "/s", "/c", input.command] : ["-c", input.command]) : args;
+  const executable = input.boundary.enforcement === "macos-sandbox-exec" ? "sandbox-exec" : invokedCommand;
   const executableArgs = input.boundary.enforcement === "macos-sandbox-exec"
-    ? ["-p", input.boundary.profile ?? "", command, ...args]
+    ? ["-p", input.boundary.profile ?? "", invokedCommand, ...invokedArgs]
     : input.boundary.enforcement === "linux-bwrap"
-      ? ["--die-with-parent", "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin", "--bind", input.boundary.workspaceDirectory, input.boundary.workspaceDirectory, "--chdir", input.boundary.workspaceDirectory, command, ...args]
-      : ["-c", `${input.command} ${args.map((arg) => JSON.stringify(arg)).join(" ")}`];
-  const child = spawn(executable, executableArgs, { cwd: input.boundary.workspaceDirectory, env: input.boundary.environment, stdio: ["inherit", "pipe", "pipe"] });
+      ? ["--die-with-parent", ...(input.boundary.networkEnforcement === "deny-all" ? ["--unshare-net"] : []), "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin", "--bind", input.boundary.workspaceDirectory, input.boundary.workspaceDirectory, "--chdir", input.boundary.workspaceDirectory, invokedCommand, ...invokedArgs]
+      : shellCommand ? invokedArgs : ["-c", `${input.command} ${args.map((arg) => JSON.stringify(arg)).join(" ")}`];
+  const detached = process.platform !== "win32" && input.boundary.enforcement !== "none";
+  const child = spawn(executable, executableArgs, { cwd: input.boundary.workspaceDirectory, env: input.boundary.environment, stdio: ["inherit", "pipe", "pipe"], detached });
   input.onProcess?.(child);
+  const terminate = (signal: NodeJS.Signals): void => {
+    if (child.pid && detached) {
+      try { process.kill(-child.pid, signal); return; } catch { /* fall back to the direct child */ }
+    }
+    child.kill(signal);
+  };
   let stdout = "";
   let stderr = "";
   let outputLimitExceeded = false;
+  let outputKillTimer: NodeJS.Timeout | undefined;
   const collect = (chunk: Buffer, target: "stdout" | "stderr") => {
     if (Buffer.byteLength(stdout, "utf8") + Buffer.byteLength(stderr, "utf8") + chunk.byteLength > WORKSPACE_BOUNDARY_POLICY.maxOutputBytes) {
       if (!outputLimitExceeded) {
         outputLimitExceeded = true;
-        child.kill("SIGTERM");
+        terminate("SIGTERM");
+        outputKillTimer = setTimeout(() => terminate("SIGKILL"), 250);
       }
       return;
     }
@@ -382,18 +439,29 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
   };
   child.stdout?.on("data", (chunk: Buffer) => collect(chunk, "stdout"));
   child.stderr?.on("data", (chunk: Buffer) => collect(chunk, "stderr"));
-  const result = await new Promise<{ exitCode?: number; signal?: string }>((resolveResult, reject) => {
+  const result = await new Promise<{ exitCode?: number; signal?: string; timedOut: boolean }>((resolveResult, reject) => {
+    let timedOut = false;
+    let settled = false;
+    let killTimer: NodeJS.Timeout | undefined;
     const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new WorkspaceBoundaryError({ code: "workspace.command_timeout", message: `Workspace command exceeded the execution boundary. budget=workspace.command; limit=${timeoutMs}ms; asked=running process`, affectedObject: input.command, recoveryAction: "inspect the command or request an explicitly measured larger boundary", receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; timeout-ms=${timeoutMs}` }));
+      timedOut = true;
+      terminate("SIGTERM");
+      killTimer = setTimeout(() => terminate("SIGKILL"), 250);
     }, timeoutMs);
     child.once("error", (error) => { clearTimeout(timer); reject(new WorkspaceBoundaryError({ code: "workspace.command_failed", message: `Enforceable Workspace command could not start: ${error.message}`, affectedObject: input.command, recoveryAction: "verify the agent executable is installed and allowed", receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; process-start=failed` })); });
-    child.once("close", (exitCode, signal) => { clearTimeout(timer); resolveResult({ ...(exitCode === null ? {} : { exitCode }), ...(signal ? { signal } : {}) }); });
+    child.once("close", (exitCode, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      if (outputKillTimer) clearTimeout(outputKillTimer);
+      resolveResult({ ...(exitCode === null ? {} : { exitCode }), ...(signal ? { signal } : {}), timedOut });
+    });
   });
-  const status = !outputLimitExceeded && result.exitCode === 0 ? "passed" : "failed";
+  const status = !outputLimitExceeded && !result.timedOut && result.exitCode === 0 ? "passed" : "failed";
   return {
     boundaryId: input.boundary.id,
-    command,
+    command: invokedCommand,
     args,
     status,
     ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }),
@@ -402,8 +470,26 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
     stderr,
     stdoutDigest: digest(stdout),
     stderrDigest: digest(stderr),
-    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=${input.boundary.enforcement}; status=${status};${outputLimitExceeded ? ` budget=workspace.output; limit=${WORKSPACE_BOUNDARY_POLICY.maxOutputBytes}bytes; asked=output-exceeded;` : ""}`,
+    ...(result.timedOut ? { timedOut: true } : {}),
+    ...(child.pid ? { processId: child.pid, ...(detached ? { processGroupId: child.pid } : {}) } : {}),
+    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=${input.boundary.enforcement}; networkEnforcement=${input.boundary.networkEnforcement}; status=${status};${result.timedOut ? ` budget=workspace.command; limit=${timeoutMs}ms; asked=timeout;` : ""}${outputLimitExceeded ? ` budget=workspace.output; limit=${WORKSPACE_BOUNDARY_POLICY.maxOutputBytes}bytes; asked=output-exceeded;` : ""}`,
   };
+}
+
+export async function terminateWorkspaceProcess(input: { process?: ChildProcess; processGroupId?: number }): Promise<void> {
+  const pid = input.process?.pid ?? input.processGroupId;
+  if (!pid) return;
+  const terminate = (signal: NodeJS.Signals): void => {
+    try {
+      if (process.platform !== "win32") process.kill(-(input.processGroupId ?? pid), signal);
+      else input.process?.kill(signal);
+    } catch {
+      input.process?.kill(signal);
+    }
+  };
+  terminate("SIGTERM");
+  await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 250));
+  terminate("SIGKILL");
 }
 
 export async function removeWorkspaceBoundary(boundary: WorkspaceBoundary): Promise<void> {

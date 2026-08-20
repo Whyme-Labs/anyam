@@ -56,6 +56,29 @@ export function gitInstallationAuthorizationHeader(token: string): string {
   return `Authorization: Basic ${Buffer.from(`x-access-token:${token}`, "utf8").toString("base64")}`;
 }
 
+function gitErrorClass(stderr: string): string {
+  const value = stderr.toLowerCase();
+  if (value.includes("authentication") || value.includes("auth failed") || value.includes("bad credentials")) return "authentication";
+  if (value.includes("permission") || value.includes("403")) return "permission";
+  if (value.includes("atomic")) return "atomic";
+  if (value.includes("non-fast-forward") || value.includes("rejected")) return "ref-rejected";
+  if (value.includes("repository not found") || value.includes("not found")) return "repository-not-found";
+  return "provider-or-transport";
+}
+
+export function gitTransportFailure(error: unknown, operation: "inspect" | "push"): GitHubAppAdapterError {
+  const record = error as { code?: unknown; stderr?: unknown };
+  const stderr = typeof record.stderr === "string" ? record.stderr : "";
+  const exitCode = typeof record.code === "number" || typeof record.code === "string" ? String(record.code) : "unknown";
+  return new GitHubAppAdapterError({
+    errorCode: "github_app.git_transport",
+    message: `Git Smart HTTP ${operation} failed; provider stderr is redacted.`,
+    retryable: false,
+    recoveryAction: "inspect the redacted Git transport receipt, reconcile the selected App installation and repository state, then retry the same disposable qualification",
+    receipt: `provider=github-app; transport=git-smart-http; operation=${operation}; exit=${exitCode}; stderrClass=${gitErrorClass(stderr)}; stderrDigest=${digest(stderr)}; credentialMaterialStored=false`,
+  });
+}
+
 export type GitHubCommitObservation = {
   oid: string;
   author: { name: string; email?: string };
@@ -636,7 +659,12 @@ export class NodeGitSmartHttpTransport implements GitHubSmartHttpTransport {
       throw new GitHubAppAdapterError({ errorCode: "github_app.repository_url_invalid", message: "Git Smart HTTP repository URL is malformed.", retryable: false, recoveryAction: "configure a valid https://github.com owner/name repository URL", receipt: "repositoryUrl=invalid; transition=not-applied; credentialMaterialStored=false" });
     }
     if (repositoryUrl.protocol !== "https:" || repositoryUrl.hostname !== "github.com") throw new GitHubAppAdapterError({ errorCode: "github_app.repository_host_invalid", message: "Git Smart HTTP must use the public GitHub HTTPS host.", retryable: false, recoveryAction: "configure a github.com HTTPS repository URL", receipt: `repositoryHost=${repositoryUrl.hostname}; transition=not-applied; credentialMaterialStored=false` });
-    const result = await execFile("git", ["ls-remote", "--refs", input.repositoryUrl, ...input.refs], { cwd: this.sourceDirectory, env: this.authEnv(input.token), maxBuffer: this.maxBufferBytes });
+    let result: { stdout: string };
+    try {
+      result = await execFile("git", ["ls-remote", "--refs", input.repositoryUrl, ...input.refs], { cwd: this.sourceDirectory, env: this.authEnv(input.token), maxBuffer: this.maxBufferBytes });
+    } catch (error) {
+      throw gitTransportFailure(error, "inspect");
+    }
     const refs = result.stdout.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => { const [oid, name] = line.split(/\s+/); return oid && name ? { oid, name } : undefined; }).filter((ref): ref is GitRef => ref !== undefined);
     return { generation: digest(refs), refs, receipt: `provider=github; transport=git-smart-http; refs=${refs.length}; previousGeneration=${input.knownGeneration}; credentialMaterialStored=false` };
   }
@@ -655,7 +683,11 @@ export class NodeGitSmartHttpTransport implements GitHubSmartHttpTransport {
       throw new GitHubAppAdapterError({ errorCode: "github_app.repository_url_invalid", message: "Git Smart HTTP repository URL is malformed.", retryable: false, recoveryAction: "configure a valid https://github.com owner/name repository URL", receipt: "repositoryUrl=invalid; transition=not-applied; credentialMaterialStored=false" });
     }
     if (repositoryUrl.protocol !== "https:" || repositoryUrl.hostname !== "github.com") throw new GitHubAppAdapterError({ errorCode: "github_app.repository_host_invalid", message: "Git Smart HTTP must use the public GitHub HTTPS host.", retryable: false, recoveryAction: "configure a github.com HTTPS repository URL", receipt: `repositoryHost=${repositoryUrl.hostname}; transition=not-applied; credentialMaterialStored=false` });
-    await execFile("git", args, { cwd: this.sourceDirectory, env: this.authEnv(input.token), maxBuffer: this.maxBufferBytes });
+    try {
+      await execFile("git", args, { cwd: this.sourceDirectory, env: this.authEnv(input.token), maxBuffer: this.maxBufferBytes });
+    } catch (error) {
+      throw gitTransportFailure(error, "push");
+    }
     const refs = input.refMappings.flatMap((mapping) => { const oid = desired.get(mapping.remoteRef); return oid ? [{ name: mapping.remoteRef, oid }] : []; });
     return { generation: digest(refs), refs, originOperationId: input.operationId, receipt: `provider=github; transport=git-smart-http; operation=${input.operationId}; idempotency=${digest(input.idempotencyKey)}; refs=${refs.length}; credentialMaterialStored=false` };
   }

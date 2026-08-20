@@ -18,6 +18,7 @@ import {
   FetchGitHubAppHttpClient,
   FetchGitHubRestClient,
   gitInstallationAuthorizationHeader,
+  gitTransportFailure,
 } from "../src/portability/github-app.ts";
 import { AUTHORITY_COMMAND_PROTOCOL, AuthorityPlaneCoordinator, emptyAuthorityPlaneSnapshot, type AuthoritySession } from "../src/cloudflare/authority-plane.ts";
 import type { GitRef } from "../src/kernel/contracts.ts";
@@ -41,6 +42,15 @@ function fixtureDeliveryLedger() {
 test("Git Smart HTTP binds an installation token as x-access-token Basic auth", () => {
   assert.equal(gitInstallationAuthorizationHeader("ghs_test-token"), "Authorization: Basic eC1hY2Nlc3MtdG9rZW46Z2hzX3Rlc3QtdG9rZW4=");
   assert.doesNotMatch(gitInstallationAuthorizationHeader("ghs_test-token"), /Bearer/u);
+});
+
+test("Git Smart HTTP transport failures expose a redacted diagnostic receipt", () => {
+  const failure = gitTransportFailure({ code: 128, stderr: "remote: atomic push failed: permission denied\n" }, "push");
+  assert.equal(failure.errorCode, "github_app.git_transport");
+  assert.match(failure.receipt, /operation=push/u);
+  assert.match(failure.receipt, /stderrClass=permission/u);
+  assert.match(failure.receipt, /stderrDigest=sha256:/u);
+  assert.doesNotMatch(failure.receipt, /permission denied/u);
 });
 
 class FakeTokenIssuer implements GitHubAppTokenIssuer {

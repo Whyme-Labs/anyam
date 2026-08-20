@@ -546,7 +546,7 @@ export class FetchGitHubAppHttpClient {
   async request(input: { method: "GET" | "POST" | "DELETE"; path: string; token: string; body?: unknown }): Promise<{ status: number; data: unknown; receipt: string }> {
     const path = input.path.startsWith("/") ? input.path : `/${input.path}`;
     for (let attempt = 0; attempt <= this.options.retry.delaysMs.length; attempt += 1) {
-      const response = await this.options.fetchImpl(`${this.options.baseUrl}${path}`, { method: input.method, headers: { accept: "application/vnd.github+json", authorization: `Bearer ${input.token}`, ...(input.body === undefined ? {} : { "content-type": "application/json" }) }, ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }) });
+      const response = await this.options.fetchImpl(`${this.options.baseUrl}${path}`, { method: input.method, headers: { accept: "application/vnd.github+json", authorization: `Bearer ${input.token}`, "cache-control": "no-cache", pragma: "no-cache", ...(input.body === undefined ? {} : { "content-type": "application/json" }) }, ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }) });
       const text = await response.text();
       let data: unknown = undefined;
       try { data = text.length > 0 ? JSON.parse(text) as unknown : undefined; } catch { data = undefined; }

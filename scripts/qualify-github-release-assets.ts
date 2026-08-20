@@ -365,12 +365,13 @@ async function qualifyCustomerRealmAuthority(input: {
 async function qualifyLive(): Promise<Record<string, unknown>> {
   const repository = optional("ANYAM_GITHUB_RELEASE_ASSETS_REPOSITORY");
   const disposableRepository = optional("ANYAM_GITHUB_RELEASE_ASSETS_DISPOSABLE_REPOSITORY");
+  const qualificationId = optional("ANYAM_GITHUB_RELEASE_ASSETS_QUALIFICATION_ID");
   const token = optional("ANYAM_GITHUB_RELEASE_ASSETS_TOKEN");
   const scopes = optional("ANYAM_GITHUB_RELEASE_ASSETS_SCOPES")?.split(",").map((scope) => scope.trim()).filter(Boolean);
   const expiresAt = optional("ANYAM_GITHUB_RELEASE_ASSETS_TOKEN_EXPIRES_AT");
   const scopeReceipt = optional("ANYAM_GITHUB_RELEASE_ASSETS_SCOPE_RECEIPT");
   const authorityInputs = authorityConfig();
-  if (!repository || !disposableRepository || !token || !scopes || !expiresAt || !scopeReceipt || !authorityInputs) return { status: "blocked", mode: "live", live: "not-run", recoveryAction: "set ANYAM_GITHUB_RELEASE_ASSETS_REPOSITORY, ANYAM_GITHUB_RELEASE_ASSETS_DISPOSABLE_REPOSITORY, ANYAM_GITHUB_RELEASE_ASSETS_TOKEN, ANYAM_GITHUB_RELEASE_ASSETS_SCOPES, ANYAM_GITHUB_RELEASE_ASSETS_TOKEN_EXPIRES_AT, ANYAM_GITHUB_RELEASE_ASSETS_SCOPE_RECEIPT, ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_BASE_URL, and one of ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_OWNER_SESSION_FILE or ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_OWNER_SESSION; credential values are never printed" };
+  if (!repository || !disposableRepository || !qualificationId || !token || !scopes || !expiresAt || !scopeReceipt || !authorityInputs) return { status: "blocked", mode: "live", live: "not-run", recoveryAction: "set ANYAM_GITHUB_RELEASE_ASSETS_REPOSITORY, ANYAM_GITHUB_RELEASE_ASSETS_DISPOSABLE_REPOSITORY, ANYAM_GITHUB_RELEASE_ASSETS_QUALIFICATION_ID, ANYAM_GITHUB_RELEASE_ASSETS_TOKEN, ANYAM_GITHUB_RELEASE_ASSETS_SCOPES, ANYAM_GITHUB_RELEASE_ASSETS_TOKEN_EXPIRES_AT, ANYAM_GITHUB_RELEASE_ASSETS_SCOPE_RECEIPT, ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_BASE_URL, and one of ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_OWNER_SESSION_FILE or ANYAM_GITHUB_RELEASE_ASSETS_AUTHORITY_OWNER_SESSION; credential values are never printed" };
   if (disposableRepository !== repository) throw new Error("ANYAM_GITHUB_RELEASE_ASSETS_DISPOSABLE_REPOSITORY must exactly equal the selected repository");
   const [owner, name, ...extra] = repository.split("/");
   if (!owner || !name || extra.length > 0) throw new Error("ANYAM_GITHUB_RELEASE_ASSETS_REPOSITORY must be owner/name");
@@ -378,7 +379,7 @@ async function qualifyLive(): Promise<Record<string, unknown>> {
   if (Date.parse(expiresAt) <= Date.now()) throw new Error("ANYAM_GITHUB_RELEASE_ASSETS_TOKEN_EXPIRES_AT must be future-dated");
   const bytes = new TextEncoder().encode("Anyam disposable immutable release qualification\n");
   const selected = artifact("artifact:live", bytes);
-  const verified = release("release:live", selected, "live");
+  const verified = release("release:live", selected, `live:${qualificationId}`);
   const targetValue = target("public");
   const authorityClient = new RealmAuthorityHttpClient({ baseUrl: authorityInputs.baseUrl, ownerSession: authorityInputs.ownerSession });
   const tagName = `anyam-${verified.releaseDigest.slice("sha256:".length)}`;
@@ -421,7 +422,7 @@ async function qualifyLive(): Promise<Record<string, unknown>> {
   if (!result.value.providerReleaseId) throw new Error("live release publication omitted provider release identity");
   if (cleanup.status !== "succeeded") throw new Error(`live release cleanup did not complete: ${JSON.stringify(cleanup)}`);
   if (!authorityCleanup || authorityCleanup.status !== "succeeded") throw new Error(`customer Realm Authority cleanup did not complete: ${JSON.stringify(authorityCleanup ?? { status: "not-run" })}`);
-  return { status: "succeeded", mode: "live", qualificationScope: "provider-adapter-and-customer-realm-authority", repository, seedReceipt, providerReleaseId: result.value.providerReleaseId, providerAssetId: result.value.providerAssetId, releaseDigest: result.value.releaseDigest, artifactDigest: result.value.artifactDigest, receipt: result.receipt, authority: { projectId: authorityQualification?.projectId, releaseId: authorityQualification?.releaseId, targetId: authorityQualification?.targetId, promotionStatus: authorityQualification?.promotionStatus, receipt: authorityQualification?.receipt }, cleanup: { provider: cleanup, authority: authorityCleanup } };
+  return { status: "succeeded", mode: "live", qualificationId, qualificationScope: "provider-adapter-and-customer-realm-authority", repository, seedReceipt, providerReleaseId: result.value.providerReleaseId, providerAssetId: result.value.providerAssetId, releaseDigest: result.value.releaseDigest, artifactDigest: result.value.artifactDigest, receipt: result.receipt, authority: { projectId: authorityQualification?.projectId, releaseId: authorityQualification?.releaseId, targetId: authorityQualification?.targetId, promotionStatus: authorityQualification?.promotionStatus, receipt: authorityQualification?.receipt }, cleanup: { provider: cleanup, authority: authorityCleanup } };
 }
 
 const fixture = await qualifyFixture();

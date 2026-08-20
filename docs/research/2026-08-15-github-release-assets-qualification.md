@@ -71,6 +71,7 @@ owner-supplied values are present in the invoking environment:
 ```text
 ANYAM_GITHUB_RELEASE_ASSETS_REPOSITORY=owner/disposable-repository
 ANYAM_GITHUB_RELEASE_ASSETS_DISPOSABLE_REPOSITORY=owner/disposable-repository
+ANYAM_GITHUB_RELEASE_ASSETS_QUALIFICATION_ID=unique-owner-run-id
 ANYAM_GITHUB_RELEASE_ASSETS_TOKEN=<short-lived repository-scoped credential>
 ANYAM_GITHUB_RELEASE_ASSETS_SCOPES=contents:read,contents:write
 ANYAM_GITHUB_RELEASE_ASSETS_TOKEN_EXPIRES_AT=<provider expiry timestamp>
@@ -94,8 +95,11 @@ missing capability, missing scoped credential receipt, unavailable owner
 session, non-empty Authority boundary, or provider response that cannot be
 reconciled is a visible qualification blocker. The live path must use an
 explicitly disposable repository and clean its deterministic Release before
-reporting success. No GitHub Actions runner is required; the qualification is
-a local command using the provider API, so Blacksmith is not part of this gate.
+reporting success. The qualification ID is included in the detached Release
+digest so GitHub's permanently reserved immutable-release tags cannot collide
+across owner runs; retries within one run remain deterministic. No GitHub
+Actions runner is required; the qualification is a local command using the
+provider API, so Blacksmith is not part of this gate.
 
 Until that live command succeeds with a current provider and Authority
 receipt, `github.release-assets` is locally implemented and contract-qualified

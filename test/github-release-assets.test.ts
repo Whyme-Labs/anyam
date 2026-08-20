@@ -267,7 +267,9 @@ test("GitHub release-assets qualification cleanup returns an explicit success st
   const published = await adapterValue.publish({ publicationId: "publication:cleanup", attempt: 0, release: release("release:cleanup", releaseArtifact, `sha256:${"6".repeat(64)}`), artifact: releaseArtifact, target: target("public") });
   assert.equal(published.status, "succeeded");
   if (published.status !== "succeeded") return;
-  const cleanup = await adapterValue.deleteForQualification(published.value.providerReleaseId);
+  const providerReleaseId = published.value.providerReleaseId;
+  if (typeof providerReleaseId !== "string") throw new Error("published release omitted providerReleaseId");
+  const cleanup = await adapterValue.deleteForQualification(providerReleaseId);
   assert.equal(cleanup.status, "succeeded");
   assert.match(cleanup.receipt, /operation=delete/u);
 });

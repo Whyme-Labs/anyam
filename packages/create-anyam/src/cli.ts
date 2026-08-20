@@ -46,7 +46,7 @@ function subcommandPositionals(args: readonly string[]): readonly string[] {
 }
 
 function printHelp(): void {
-  console.log(`Anyam local CLI\n\nCommands:\n  init [directory]                 create a local TypeScript Project\n  check [directory]                inspect manifest and source locally\n  change start <title>             start a local Change\n  agent setup <agent>              configure the local MCP broker and instructions\n  agent start [agent]              start or resume a local agent session\n  agent exec <agent> -- <command>  launch an agent through the Workspace boundary\n  agent handoff <agent>            revoke the current session and start another\n  agent status                     inspect the current local session\n  agent revoke                     revoke the current local session\n  mcp serve --stdio                serve the semantic MCP tools over stdio\n  auth revoke                      revoke the current local session\n  git-credential-anyam get         issue a context-bound memory-only Workspace Git credential\n\nOptions:\n  --type worker|library             choose the template (default: worker)\n  --name <name>                     choose the Project name\n  --agent codex|claude|cursor|cli   choose the local coding agent\n  --mode enforceable|supervised     choose the Workspace boundary mode\n  --directory <path>               choose a Project directory\n  --json                            print machine-readable output\n  --dry-run                         print the proposed manifest without writing\n\nThe local broker never stores bearer credentials, writes canonical Git refs, reads secret values, approves Changes, or promotes production.`);
+  console.log(`Anyam local CLI\n\nCommands:\n  init [directory]                 create a local TypeScript Project\n  doctor [directory]               inspect manifest and source metadata locally\n  check [directory]                compatibility alias for doctor\n  change start <title>             start a local Change\n  agent setup <agent>              configure the local MCP broker and instructions\n  agent start [agent]              start or resume a local agent session\n  agent exec <agent> -- <command>  launch an agent through the Workspace boundary\n  agent handoff <agent>            revoke the current session and start another\n  agent status                     inspect the current local session\n  agent revoke                     revoke the current local session\n  mcp serve --stdio                serve the semantic MCP tools over stdio\n  auth revoke                      revoke the current local session\n  git-credential-anyam get         issue a context-bound memory-only Workspace Git credential\n\nOptions:\n  --type worker|library             choose the template (default: worker)\n  --name <name>                     choose the Project name\n  --agent codex|claude|cursor|cli   choose the local coding agent\n  --mode enforceable|supervised     choose the Workspace boundary mode\n  --directory <path>               choose a Project directory\n  --json                            print machine-readable output\n  --dry-run                         print the proposed manifest without writing\n\nThe local broker never stores bearer credentials, writes canonical Git refs, reads secret values, approves Changes, or promotes production.`);
 }
 
 function agentValue(args: readonly string[], fallback?: string): string {
@@ -99,18 +99,18 @@ export async function main(args: readonly string[], cwd = process.cwd(), input: 
       ...scaffoldInput,
     });
     if (json) console.log(JSON.stringify(result, null, 2));
-    else console.log(`${result.status === "created" ? "Created" : "Already initialized"} local Project at ${result.directory}\nNext: cd ${result.directory} && npx create-anyam check && npx create-anyam change start "Describe the next Change"`);
+    else console.log(`${result.status === "created" ? "Created" : "Already initialized"} local Project at ${result.directory}\nNext: cd ${result.directory} && npx create-anyam doctor && npm run typecheck && npm test && npm run build && npx create-anyam change start "Describe the next Change"`);
     return 0;
   }
 
-  if (command === "check") {
-    const directory = positionalArgs(args, "check")[0] ?? cwd;
+  if (command === "check" || command === "doctor") {
+    const directory = positionalArgs(args, command)[0] ?? cwd;
     const result = await runLocalCheck(directory);
     if (json) console.log(JSON.stringify(result, null, 2));
     else {
       for (const receipt of result.receipts) console.log(`PASS ${receipt.name}: ${receipt.receipt}`);
       for (const item of result.blockers) console.error(`BLOCKED ${item.code}: ${item.message}`);
-      console.log(result.status === "passed" ? "Local check passed." : "Local check blocked; fix the named receipt and rerun anyam check.");
+      console.log(result.status === "passed" ? "Project doctor passed." : "Project doctor blocked; fix the named receipt and rerun anyam doctor.");
     }
     return result.status === "passed" ? 0 : 1;
   }

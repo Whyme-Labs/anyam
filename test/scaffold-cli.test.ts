@@ -55,12 +55,23 @@ for (const kind of ["worker", "library"] as const satisfies readonly ProjectTemp
     assert.equal(manifest.id, `project:local:sample-${kind}`);
     assert.ok(Array.isArray(manifest.modules));
     assert.ok(Array.isArray(manifest.verifiers));
+    assert.match(String(manifest.repositoryId), /^repository:/u);
+    const actions = (manifest.modules as Array<{ actions: Array<{ id: string; command: string }> }>)[0]!.actions;
+    assert.deepEqual(actions.map((action) => action.id), ["action:check", "action:typecheck", "action:test", "action:build"]);
+    assert.equal(actions[0]!.command, "npm run doctor");
+    assert.ok(actions.slice(1).every((action) => action.command.startsWith("npm run ") || action.command === "npm test"));
     assert.ok(Array.isArray(manifest.targets));
     assert.equal(manifest.auth, undefined);
 
-    const packageManifest = JSON.parse(await readFile(join(target, "package.json"), "utf8")) as { devDependencies?: Record<string, string> };
+    const packageManifest = JSON.parse(await readFile(join(target, "package.json"), "utf8")) as { devDependencies?: Record<string, string>; scripts?: Record<string, string> };
     const packageMetadata = JSON.parse(await readFile(packageManifestPath, "utf8")) as { version: string };
     assert.equal(packageManifest.devDependencies?.["create-anyam"], `^${packageMetadata.version}`);
+    assert.equal(packageManifest.scripts?.doctor, "anyam doctor");
+    assert.equal(packageManifest.scripts?.typecheck, "tsc --noEmit");
+    assert.equal(packageManifest.scripts?.test, "node --test");
+    assert.equal(packageManifest.scripts?.build, "tsc");
+    assert.equal(await readFile(join(target, ".gitignore"), "utf8"), "node_modules/\ndist/\n.anyam/\n.DS_Store\n");
+    await access(join(target, "test", "smoke.test.js"));
 
     const check = await runLocalCheck(target);
     assert.equal(check.status, "passed");

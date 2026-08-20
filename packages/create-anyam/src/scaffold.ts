@@ -136,6 +136,12 @@ function manifest(name: string, kind: ProjectTemplateKind, repositoryId: string)
   const target = kind === "worker"
     ? { id: "target:cloudflare-worker", adapter: "cloudflare.worker", accepts: [artifactType], requiredCapabilities: [] }
     : { id: "target:release-assets", adapter: "generic.release-assets", accepts: [artifactType], requiredCapabilities: [] };
+  const actions = [
+    { id: "action:check", command: "npm run doctor", inputs: ["anyam.json", "package.json", "tsconfig.json", "src/**/*.ts"], outputs: [], network: [], resources: {} },
+    { id: "action:typecheck", command: "npm run typecheck", inputs: ["package.json", "tsconfig.json", "src/**/*.ts"], outputs: [], network: [], resources: {} },
+    { id: "action:test", command: "npm test", inputs: ["package.json", "test/**/*.test.js", "src/**/*.ts"], outputs: [], network: [], resources: {} },
+    { id: "action:build", command: "npm run build", inputs: ["package.json", "tsconfig.json", "src/**/*.ts"], outputs: ["dist/index.js"], network: [], resources: {} },
+  ];
   return `${JSON.stringify({
     schema: projectSchema,
     id: `project:local:${name}`,
@@ -148,22 +154,13 @@ function manifest(name: string, kind: ProjectTemplateKind, repositoryId: string)
       id: "module:main",
       root: "src",
       dependencies: [],
-      actions: [{
-        id: "action:check",
-        command: "anyam check",
-        inputs: ["anyam.json", "package.json", "tsconfig.json", "src/**/*.ts"],
-        outputs: [],
-        network: [],
-        resources: {},
-      }],
+      actions,
       artifactTypes: [artifactType],
     }],
-    verifiers: [{
-      id: "verifier:local-check",
-      actionId: "action:check",
-      disclosure: "full",
-      requiredFor: ["release"],
-    }],
+    verifiers: [
+      { id: "verifier:local-check", actionId: "action:check", disclosure: "full", requiredFor: ["doctor"] },
+      ...actions.slice(1).map((action) => ({ id: `verifier:${action.id.slice("action:".length)}`, actionId: action.id, disclosure: "full", requiredFor: ["release"] })),
+    ],
     targets: [target],
   }, null, 2)}\n`;
 }
@@ -178,8 +175,8 @@ function templateFiles(name: string, kind: ProjectTemplateKind, repositoryId: st
     ? `export function handle(request: Request): Response {\n  return new Response(JSON.stringify({ project: ${JSON.stringify(name)}, path: new URL(request.url).pathname }));\n}\n`
     : `export function greet(name: string): string {\n  return \`Hello, \${name}\`;\n}\n`;
   const readme = kind === "worker"
-    ? `# ${name}\n\nA TypeScript Worker Project scaffolded by Anyam.\n\nLocal loop:\n\n\`\`\`bash\nnpm install\nnpx create-anyam check\ngit status\nnpx create-anyam change start "Describe the next change"\n\`\`\`\n\nThe globally installed command is also available as anyam check and anyam change start.\n`
-    : `# ${name}\n\nA TypeScript library Project scaffolded by Anyam.\n\nLocal loop:\n\n\`\`\`bash\nnpm install\nnpx create-anyam check\ngit status\nnpx create-anyam change start "Describe the next change"\n\`\`\`\n\nThe globally installed command is also available as anyam check and anyam change start.\n`;
+    ? `# ${name}\n\nA TypeScript Worker Project scaffolded by Anyam.\n\nLocal loop:\n\n\`\`\`bash\nnpm install\nnpx create-anyam doctor\nnpm run typecheck\nnpm test\nnpm run build\ngit status\nnpx create-anyam change start "Describe the next change"\n\`\`\`\n\nThe globally installed command is also available as anyam doctor and anyam change start.\n`
+    : `# ${name}\n\nA TypeScript library Project scaffolded by Anyam.\n\nLocal loop:\n\n\`\`\`bash\nnpm install\nnpx create-anyam doctor\nnpm run typecheck\nnpm test\nnpm run build\ngit status\nnpx create-anyam change start "Describe the next change"\n\`\`\`\n\nThe globally installed command is also available as anyam doctor and anyam change start.\n`;
   return [
     { path: "anyam.json", content: manifest(name, kind, repositoryId) },
     {
@@ -188,16 +185,17 @@ function templateFiles(name: string, kind: ProjectTemplateKind, repositoryId: st
         name,
         private: true,
         type: "module",
-        scripts: { check: "anyam check" },
-        devDependencies: { "create-anyam": `^${packageVersion}` },
+        scripts: { doctor: "anyam doctor", check: "npm run doctor", typecheck: "tsc --noEmit", test: "node --test", build: "tsc" },
+        devDependencies: { "create-anyam": `^${packageVersion}`, typescript: "^5.7.0" },
       }, null, 2)}\n`,
     },
     {
       path: "tsconfig.json",
-      content: `${JSON.stringify({ compilerOptions: { strict: true, target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext" }, include: ["src/**/*.ts"] }, null, 2)}\n`,
+      content: `${JSON.stringify({ compilerOptions: { strict: true, target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext", rootDir: "src", outDir: "dist" }, include: ["src/**/*.ts"] }, null, 2)}\n`,
     },
-    { path: ".gitignore", content: "node_modules/\ndist/\n.DS_Store\n" },
+    { path: ".gitignore", content: "node_modules/\ndist/\n.anyam/\n.DS_Store\n" },
     { path: "src/index.ts", content: entryPoint },
+    { path: "test/smoke.test.js", content: "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { readFile } from \"node:fs/promises\";\n\ntest(\"source entrypoint is present\", async () => {\n  assert.ok((await readFile(\"src/index.ts\", \"utf8\")).trim().length > 0);\n});\n" },
     { path: "README.md", content: readme },
   ];
 }

@@ -77,6 +77,10 @@ test("agent setup writes portable instructions and stdio configuration without s
   assert.equal((await setupAgent({ directory, agent: "codex" })).files.includes(".anyam/agents/manifest.json"), false);
 });
 
+test("CLI auth login requires explicit Realm and client identity before opening OAuth", async () => {
+  await assert.rejects(() => main(["auth", "login"], process.cwd()), /auth login requires --realm/);
+});
+
 test("local agent session is bound to one Change Workspace and revocation invalidates credentials", async () => {
   const directory = await projectDirectory();
   let clock = Date.parse("2026-08-03T00:00:00.000Z");

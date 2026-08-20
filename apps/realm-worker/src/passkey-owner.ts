@@ -67,6 +67,22 @@ type OwnerRow = {
   credential_id: string;
 };
 
+type OwnerClaimState = "verified-passkey" | "kernel-enrolled" | "d1-persisted";
+
+type OwnerClaimRow = {
+  claim_id: string;
+  realm_id: string;
+  user_id: string;
+  display_name: string;
+  credential_id: string;
+  public_key: string;
+  counter: number;
+  transports: string;
+  state: OwnerClaimState;
+  created_at: string;
+  updated_at: string;
+};
+
 function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body, null, 2), {
     status,
@@ -163,40 +179,6 @@ function expiredSessionCookie(): string {
   return `${COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax`;
 }
 
-function ownerSessionExportAllowed(request: Request): boolean {
-  const origin = request.headers.get("origin");
-  if (origin !== null && origin !== new URL(request.url).origin) return false;
-  const fetchSite = request.headers.get("sec-fetch-site");
-  return fetchSite === null || fetchSite === "same-origin" || fetchSite === "same-site";
-}
-
-async function exportOwnerSession(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
-  if (!ownerSessionExportAllowed(request)) return json({ code: "owner_session_export_origin_rejected", recoveryAction: "Use the owner-session download button on the authenticated Realm origin; no session material was returned.", receipt: "ownerSessionExport=origin-rejected; credentialMaterialStored=false" }, 403);
-  const ownerState = await ownerKernelSession(request, env);
-  if (ownerState instanceof Response) return ownerState;
-  const encodedSessionId = parseCookies(request)[COOKIE_NAME];
-  if (!encodedSessionId) return json({ code: "owner_session_missing", recoveryAction: "Authenticate the Realm owner before downloading the owner-session file.", receipt: "ownerSessionExport=missing; credentialMaterialStored=false" }, 401);
-  let sessionId: string;
-  try {
-    sessionId = decodeURIComponent(encodedSessionId);
-  } catch {
-    return json({ code: "owner_session_invalid", recoveryAction: "Authenticate the Realm owner again before downloading the owner-session file.", receipt: "ownerSessionExport=malformed; credentialMaterialStored=false" }, 401);
-  }
-  if (!sessionId || /[\r\n]/u.test(sessionId)) return json({ code: "owner_session_invalid", recoveryAction: "Authenticate the Realm owner again before downloading the owner-session file.", receipt: "ownerSessionExport=invalid; credentialMaterialStored=false" }, 401);
-  return new Response(`${sessionId}\n`, {
-    status: 200,
-    headers: {
-      "content-type": "text/plain; charset=utf-8",
-      "content-disposition": 'attachment; filename="owner-session.txt"',
-      "cache-control": "no-store",
-      pragma: "no-cache",
-      "x-content-type-options": "nosniff",
-      "content-security-policy": "default-src 'none'",
-      "referrer-policy": "no-referrer",
-    },
-  });
-}
-
 function ownerPage(mode: "claim" | "login"): Response {
   const claim = mode === "claim";
   const title = claim ? "Claim Anyam Realm" : "Sign in to Anyam Realm";
@@ -210,7 +192,6 @@ function ownerPage(mode: "claim" | "login"): Response {
     const mode = ${JSON.stringify(mode)};
     const result = document.getElementById("result");
     const button = document.getElementById("continue");
-    const sessionExport = document.getElementById("sessionExport");
     const status = (message) => { result.textContent = message; };
     const decode = (value) => {
       const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
@@ -275,7 +256,6 @@ function ownerPage(mode: "claim" | "login"): Response {
         const verified = await call(mode === "claim" ? "/api/owner/passkey/register/verify" : "/api/owner/passkey/auth/verify", { challengeId: options.challengeId, response: responseJSON(credential) }, bootstrap);
         status(JSON.stringify(verified, null, 2));
         button.textContent = mode === "claim" ? "Realm claimed" : "Signed in";
-        if (mode === "login" && sessionExport) sessionExport.hidden = false;
       } catch (error) {
         status(error instanceof Error ? error.message : "owner_authentication_failed");
         button.disabled = false;
@@ -284,11 +264,11 @@ function ownerPage(mode: "claim" | "login"): Response {
   `;
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
-<style>body{font:16px system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1rem;color:#17202a}main{border:1px solid #d6dbe1;border-radius:12px;padding:2rem}label{display:grid;gap:.4rem;margin:1rem 0}input{font:inherit;padding:.65rem;border:1px solid #9aa5b1;border-radius:6px}button{font:inherit;padding:.7rem 1rem;border:0;border-radius:6px;background:#14532d;color:white;cursor:pointer}button:disabled{opacity:.6;cursor:wait}.hint{font-size:.9rem;color:#52606d}.warning{font-size:.9rem;color:#7c2d12;background:#ffedd5;border-radius:6px;padding:.75rem}#sessionExport{margin-top:1.5rem;border-top:1px solid #d6dbe1;padding-top:1.5rem}pre{white-space:pre-wrap;background:#f4f6f8;padding:1rem;border-radius:6px;min-height:2rem}</style></head>
+<style>body{font:16px system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1rem;color:#17202a}main{border:1px solid #d6dbe1;border-radius:12px;padding:2rem}label{display:grid;gap:.4rem;margin:1rem 0}input{font:inherit;padding:.65rem;border:1px solid #9aa5b1;border-radius:6px}button{font:inherit;padding:.7rem 1rem;border:0;border-radius:6px;background:#14532d;color:white;cursor:pointer}button:disabled{opacity:.6;cursor:wait}.hint{font-size:.9rem;color:#52606d}pre{white-space:pre-wrap;background:#f4f6f8;padding:1rem;border-radius:6px;min-height:2rem}</style></head>
 <body><main><h1>${heading}</h1><p>Anyam verifies this Realm-bound passkey in the customer-owned Worker.</p>
 ${claim ? `<label>Display name<input id="displayName" autocomplete="name" value="Anyam Realm owner"></label>` : ""}${bootstrapField}
 <button id="continue" type="button">${claim ? "Create owner passkey" : "Use passkey"}</button><pre id="result" aria-live="polite"></pre>
-${!claim ? `<section id="sessionExport" hidden><h2>Owner session file</h2><p class="warning">This downloads a bearer session credential. Store the file securely, never commit it, and delete it when the qualification is complete.</p><form method="post" action="/api/owner/session/export"><button type="submit">Download owner-session.txt</button></form></section>` : ""}</main>
+</main>
   <script>${script.replaceAll("</script>", "<\\/script>")}</script></body></html>`;
   return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'" } });
 }
@@ -478,6 +458,21 @@ async function ensureSchema(env: AnyamRealmOAuthEnv): Promise<void> {
       created_at TEXT NOT NULL
     )
   `).run();
+  await env.ANYAM_METADATA_DB.prepare(`
+    CREATE TABLE IF NOT EXISTS anyam_realm_owner_claims (
+      claim_id TEXT PRIMARY KEY,
+      realm_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      credential_id TEXT NOT NULL,
+      public_key TEXT NOT NULL,
+      counter INTEGER NOT NULL,
+      transports TEXT NOT NULL,
+      state TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `).run();
 }
 
 async function owner(env: AnyamRealmOAuthEnv, id: string): Promise<OwnerRow | undefined> {
@@ -488,6 +483,30 @@ async function owner(env: AnyamRealmOAuthEnv, id: string): Promise<OwnerRow | un
 async function passkeys(env: AnyamRealmOAuthEnv, id: string): Promise<PasskeyRow[]> {
   const result = await env.ANYAM_METADATA_DB.prepare("SELECT credential_id, realm_id, user_id, display_name, public_key, counter, transports FROM anyam_realm_passkeys WHERE realm_id = ?1").bind(id).all<PasskeyRow>();
   return result.results;
+}
+
+async function ownerClaim(env: AnyamRealmOAuthEnv, claimId: string): Promise<OwnerClaimRow | undefined> {
+  const result = await env.ANYAM_METADATA_DB.prepare("SELECT claim_id, realm_id, user_id, display_name, credential_id, public_key, counter, transports, state, created_at, updated_at FROM anyam_realm_owner_claims WHERE claim_id = ?1").bind(claimId).first<OwnerClaimRow>();
+  return result ?? undefined;
+}
+
+async function pendingOwnerClaim(env: AnyamRealmOAuthEnv, realm: string): Promise<OwnerClaimRow | undefined> {
+  const result = await env.ANYAM_METADATA_DB.prepare("SELECT claim_id, realm_id, user_id, display_name, credential_id, public_key, counter, transports, state, created_at, updated_at FROM anyam_realm_owner_claims WHERE realm_id = ?1 AND state != 'd1-persisted' ORDER BY created_at DESC LIMIT 1").bind(realm).first<OwnerClaimRow>();
+  return result ?? undefined;
+}
+
+async function updateOwnerClaim(env: AnyamRealmOAuthEnv, claimId: string, state: OwnerClaimState): Promise<void> {
+  await env.ANYAM_METADATA_DB.prepare("UPDATE anyam_realm_owner_claims SET state = ?1, updated_at = ?2 WHERE claim_id = ?3").bind(state, new Date().toISOString(), claimId).run();
+}
+
+async function persistOwnerClaim(env: AnyamRealmOAuthEnv, claim: OwnerClaimRow): Promise<void> {
+  const existingOwner = await owner(env, claim.realm_id);
+  if (existingOwner && (existingOwner.user_id !== claim.user_id || existingOwner.credential_id !== claim.credential_id)) throw new Error("owner_claim_conflict");
+  await env.ANYAM_METADATA_DB.batch([
+    env.ANYAM_METADATA_DB.prepare("INSERT OR IGNORE INTO anyam_realm_owners (realm_id, user_id, display_name, credential_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)").bind(claim.realm_id, claim.user_id, claim.display_name, claim.credential_id, claim.created_at),
+    env.ANYAM_METADATA_DB.prepare("INSERT OR IGNORE INTO anyam_realm_passkeys (credential_id, realm_id, user_id, display_name, public_key, counter, transports, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)").bind(claim.credential_id, claim.realm_id, claim.user_id, claim.display_name, claim.public_key, claim.counter, claim.transports, claim.created_at),
+  ]);
+  await updateOwnerClaim(env, claim.claim_id, "d1-persisted");
 }
 
 async function issueSession(env: AnyamRealmOAuthEnv, input: Omit<OwnerSession, "protocol" | "sessionId" | "createdAt">): Promise<{ sessionId: string; cookie: string }> {
@@ -666,6 +685,8 @@ async function registrationOptions(request: Request, env: AnyamRealmOAuthEnv): P
   await ensureSchema(env);
   const currentOwner = await owner(env, realmId(env));
   if (currentOwner) return json({ code: "owner_already_enrolled", recoveryAction: "Authenticate the existing Realm owner instead of starting a first-owner ceremony.", receipt: "owner=already-enrolled; bootstrap=not-used" }, 409);
+  const pending = await pendingOwnerClaim(env, realmId(env));
+  if (pending) return json({ code: "owner_claim_pending", claimId: pending.claim_id, state: pending.state, recoveryAction: "Resume the pending owner claim through /api/owner/passkey/register/resume with the same bootstrap ceremony; no second owner or passkey can be created.", receipt: `ownerClaim=${pending.claim_id}; state=${pending.state}; enrollment=resumable; credentialMaterialStored=false` }, 409);
   let body: Record<string, unknown>;
   try {
     body = await readJson(request);
@@ -719,6 +740,10 @@ async function registrationVerify(request: Request, env: AnyamRealmOAuthEnv): Pr
     });
     if (!verification.verified) return json({ code: "passkey_registration_rejected", recoveryAction: "Retry with a passkey that completes user verification on the customer Realm origin.", receipt: "webauthn=verified-false; owner=not-created" }, 422);
     const credential = verification.registrationInfo.credential;
+    const claimId = randomId("owner-claim");
+    const createdAt = new Date().toISOString();
+    const claim: OwnerClaimRow = { claim_id: claimId, realm_id: challenge.realmId, user_id: challenge.userId, display_name: challenge.displayName, credential_id: credential.id, public_key: base64UrlEncode(credential.publicKey), counter: credential.counter, transports: JSON.stringify([]), state: "verified-passkey", created_at: createdAt, updated_at: createdAt };
+    await env.ANYAM_METADATA_DB.prepare("INSERT INTO anyam_realm_owner_claims (claim_id, realm_id, user_id, display_name, credential_id, public_key, counter, transports, state, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)").bind(claim.claim_id, claim.realm_id, claim.user_id, claim.display_name, claim.credential_id, claim.public_key, claim.counter, claim.transports, claim.state, claim.created_at, claim.updated_at).run();
     let kernel: Record<string, unknown>;
     try {
       kernel = await realmCoordinatorRequest(env, "/identity/owner-enroll", {
@@ -729,20 +754,54 @@ async function registrationVerify(request: Request, env: AnyamRealmOAuthEnv): Pr
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
-      if (detail.startsWith("realm_coordinator_")) return json({ code: "realm_identity_enrollment_failed", recoveryAction: "Retry the owner claim after checking the durable Realm coordinator; the passkey was verified but no host session was issued.", receipt: `webauthn=verified; kernelMembership=not-confirmed; ${detail}` }, 503);
+      if (detail.startsWith("realm_coordinator_")) return json({ code: "realm_identity_enrollment_pending", claimId, state: "verified-passkey", recoveryAction: "Resume this exact owner claim through /api/owner/passkey/register/resume; the verified passkey is durably pending and no second claim should be started.", receipt: `webauthn=verified; kernelMembership=not-confirmed; ownerClaim=${claimId}; enrollment=resumable; ${detail}` }, 503);
       throw error;
     }
     if (kernel.status === "owner-already-enrolled") return json({ code: "owner_already_enrolled", recoveryAction: "Authenticate the existing Realm owner instead of registering another first owner.", receipt: "owner=already-enrolled; ownerUniqueness=serialized; registration=not-applied" }, 409);
     const principalId = typeof kernel.principalId === "string" ? kernel.principalId : challenge.userId;
-    const createdAt = new Date().toISOString();
-    await env.ANYAM_METADATA_DB.batch([
-      env.ANYAM_METADATA_DB.prepare("INSERT INTO anyam_realm_owners (realm_id, user_id, display_name, credential_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)").bind(challenge.realmId, principalId, challenge.displayName, credential.id, createdAt),
-      env.ANYAM_METADATA_DB.prepare("INSERT INTO anyam_realm_passkeys (credential_id, realm_id, user_id, display_name, public_key, counter, transports, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)").bind(credential.id, challenge.realmId, principalId, challenge.displayName, base64UrlEncode(credential.publicKey), credential.counter, JSON.stringify([]), createdAt),
-    ]);
-    return json({ protocol: ANYAM_PASSKEY_OWNER_PROTOCOL, status: "owner-enrolled", realmId: challenge.realmId, userId: principalId, displayName: challenge.displayName, credentialId: credential.id, nextAction: "Authenticate at /owner/login before requesting OAuth authorization.", receipt: `${ANYAM_PASSKEY_SIZING_RECEIPT}; webauthn=verified; userVerification=true; ownerRecord=created; kernelMembership=verified; session=not-issued; credentialMaterialStored=false` });
+    await updateOwnerClaim(env, claimId, "kernel-enrolled");
+    try {
+      await persistOwnerClaim(env, { ...claim, user_id: principalId, state: "kernel-enrolled" });
+    } catch {
+      return json({ code: "realm_identity_d1_pending", claimId, state: "kernel-enrolled", recoveryAction: "Resume this exact owner claim through /api/owner/passkey/register/resume; Realm membership is committed and D1 persistence remains resumable.", receipt: `webauthn=verified; kernelMembership=verified; ownerClaim=${claimId}; d1=pending; enrollment=resumable; credentialMaterialStored=false` }, 503);
+    }
+    return json({ protocol: ANYAM_PASSKEY_OWNER_PROTOCOL, status: "owner-enrolled", claimId, realmId: challenge.realmId, userId: principalId, displayName: challenge.displayName, credentialId: credential.id, nextAction: "Authenticate at /owner/login before requesting OAuth authorization.", receipt: `${ANYAM_PASSKEY_SIZING_RECEIPT}; webauthn=verified; userVerification=true; ownerRecord=created; kernelMembership=verified; enrollment=saga-complete; session=not-issued; credentialMaterialStored=false` });
   } catch {
     return json({ code: "passkey_registration_failed", recoveryAction: "Start a fresh owner registration ceremony and retry; no owner session was issued.", receipt: "webauthn=verification-error; owner=not-created" }, 422);
   }
+}
+
+async function resumeOwnerClaim(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
+  if (!await ownerBootstrapTokenMatches(request, env)) return json({ code: "owner_bootstrap_required", recoveryAction: "Use the customer-owned bootstrap secret that created this owner claim.", receipt: "bootstrapToken=missing-or-invalid; ownerClaim=not-resumed" }, 401);
+  await ensureSchema(env);
+  let body: Record<string, unknown>;
+  try {
+    body = await readJson(request);
+  } catch {
+    return json({ code: "invalid_request", recoveryAction: "Send the claimId returned by the pending owner enrollment.", receipt: "ownerClaimResume=json-object-required; transition=not-applied" }, 422);
+  }
+  const claimId = requiredString(body.claimId, "claimId");
+  const claim = await ownerClaim(env, claimId);
+  if (!claim || claim.realm_id !== realmId(env)) return json({ code: "owner_claim_not_found", recoveryAction: "Use the exact pending claimId returned by the same Realm enrollment ceremony.", receipt: `ownerClaim=${claimId}; discoverable=false; transition=not-applied` }, 404);
+  if (claim.state === "d1-persisted") return json({ protocol: ANYAM_PASSKEY_OWNER_PROTOCOL, status: "owner-already-enrolled", claimId, userId: claim.user_id, credentialId: claim.credential_id, receipt: `ownerClaim=${claimId}; saga=d1-persisted; idempotent=true; credentialMaterialStored=false` });
+  if (claim.state === "verified-passkey") {
+    try {
+      const kernel = await realmCoordinatorRequest(env, "/identity/owner-enroll", { principalId: claim.user_id, displayName: claim.display_name, credentialId: claim.credential_id, relyingPartyId: configuredRelyingPartyId(env, request) });
+      if (kernel.status !== "owner-enrolled" && kernel.status !== "owner-already-enrolled") throw new Error("realm_owner_enrollment_not_confirmed");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+      if (!detail.includes("owner.exists") && !detail.includes("owner-already-enrolled")) return json({ code: "realm_identity_enrollment_pending", claimId, state: claim.state, recoveryAction: "Retry this exact resume request after checking the durable Realm coordinator; no second owner claim is permitted.", receipt: `ownerClaim=${claimId}; kernelMembership=not-confirmed; enrollment=resumable; detail=${detail}` }, 503);
+    }
+    await updateOwnerClaim(env, claimId, "kernel-enrolled");
+  }
+  const latest = await ownerClaim(env, claimId);
+  if (!latest) return json({ code: "owner_claim_not_found", recoveryAction: "Restart only after reconciling the durable owner claim ledger.", receipt: `ownerClaim=${claimId}; claim=disappeared; transition=not-applied` }, 404);
+  try {
+    await persistOwnerClaim(env, latest);
+  } catch {
+    return json({ code: "realm_identity_d1_pending", claimId, state: "kernel-enrolled", recoveryAction: "Retry this exact resume request; kernel membership is committed and D1 persistence remains pending.", receipt: `ownerClaim=${claimId}; kernelMembership=verified; d1=pending; enrollment=resumable; credentialMaterialStored=false` }, 503);
+  }
+  return json({ protocol: ANYAM_PASSKEY_OWNER_PROTOCOL, status: "owner-enrolled", claimId, realmId: latest.realm_id, userId: latest.user_id, displayName: latest.display_name, credentialId: latest.credential_id, nextAction: "Authenticate at /owner/login before requesting OAuth authorization.", receipt: `${ANYAM_PASSKEY_SIZING_RECEIPT}; ownerClaim=${claimId}; kernelMembership=verified; d1=persisted; enrollment=saga-complete; session=not-issued; credentialMaterialStored=false` });
 }
 
 async function authenticationOptions(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
@@ -935,11 +994,12 @@ export async function handleAnyamRealmOwnerRequest(request: Request, env: AnyamR
     }
     if (url.pathname === "/api/owner/passkey/register/options" && request.method === "POST") return await registrationOptions(request, env);
     if (url.pathname === "/api/owner/passkey/register/verify" && request.method === "POST") return await registrationVerify(request, env);
+    if (url.pathname === "/api/owner/passkey/register/resume" && request.method === "POST") return await resumeOwnerClaim(request, env);
     if (url.pathname === "/api/owner/passkey/auth/options" && request.method === "POST") return await authenticationOptions(request, env);
     if (url.pathname === "/api/owner/passkey/auth/verify" && request.method === "POST") return await authenticationVerify(request, env);
     if (url.pathname === "/api/operator/status" && request.method === "GET") return await operatorRead(request, env, "status");
     if (url.pathname === "/api/operator/preflight" && request.method === "GET") return await operatorRead(request, env, "preflight");
-    if (url.pathname === "/api/owner/session/export" && request.method === "POST") return await exportOwnerSession(request, env);
+    if (url.pathname === "/api/owner/session/export" && request.method === "POST") return json({ code: "owner_session_export_removed", recoveryAction: "Use OAuth authorization-code PKCE or device authorization from the Anyam CLI; no bearer session file is issued.", receipt: "ownerSessionExport=removed; credentialMaterialStored=false" }, 410);
     if (url.pathname === "/api/owner/session/revoke" && request.method === "POST") return await revokeSession(request, env);
     if (url.pathname === "/api/owner/oauth/grants" && request.method === "GET") return await listOAuthGrants(request, env);
     if (url.pathname === "/api/owner/oauth/grants/revoke" && request.method === "POST") return await revokeOAuthGrant(request, env);

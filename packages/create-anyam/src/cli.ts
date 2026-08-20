@@ -1,11 +1,18 @@
 import { proposedManifest, runLocalCheck, scaffoldProject, startChange, type ProjectTemplateKind } from "./scaffold.js";
 import { gitCredentialGet, LocalAgentManager, readGitCredentialContext, runMcpStdio, setupAgent } from "./agent.js";
+import { loginAnyam } from "./auth.js";
 import type { WorkspaceBoundaryMode } from "./workspace-boundary.js";
 import type { Readable } from "node:stream";
 
 function valueAfter(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   return index >= 0 ? args[index + 1] : undefined;
+}
+
+function requiredValue(args: readonly string[], flag: string, command: string): string {
+  const value = valueAfter(args, flag);
+  if (!value) throw new Error(`${command} requires ${flag} <value>; no credential flow was started.`);
+  return value;
 }
 
 function kindFrom(args: readonly string[]): ProjectTemplateKind {
@@ -46,7 +53,7 @@ function subcommandPositionals(args: readonly string[]): readonly string[] {
 }
 
 function printHelp(): void {
-  console.log(`Anyam local CLI\n\nCommands:\n  init [directory]                 create a local TypeScript Project\n  doctor [directory]               inspect manifest and source metadata locally\n  check [directory]                compatibility alias for doctor\n  change start <title>             start a local Change\n  agent setup <agent>              configure the local MCP broker and instructions\n  agent start [agent]              start or resume a local agent session\n  agent exec <agent> -- <command>  launch an agent through the Workspace boundary\n  agent handoff <agent>            revoke the current session and start another\n  agent status                     inspect the current local session\n  agent revoke                     revoke the current local session\n  mcp serve --stdio                serve the semantic MCP tools over stdio\n  auth revoke                      revoke the current local session\n  git-credential-anyam get         issue a context-bound memory-only Workspace Git credential\n\nOptions:\n  --type worker|library             choose the template (default: worker)\n  --name <name>                     choose the Project name\n  --agent codex|claude|cursor|cli   choose the local coding agent\n  --mode enforceable|supervised     choose the Workspace boundary mode\n  --directory <path>               choose a Project directory\n  --json                            print machine-readable output\n  --dry-run                         print the proposed manifest without writing\n\nThe local broker never stores bearer credentials, writes canonical Git refs, reads secret values, approves Changes, or promotes production.`);
+  console.log(`Anyam local CLI\n\nCommands:\n  init [directory]                 create a local TypeScript Project\n  doctor [directory]               inspect manifest and source metadata locally\n  check [directory]                compatibility alias for doctor\n  change start <title>             start a local Change\n  agent setup <agent>              configure the local MCP broker and instructions\n  agent start [agent]              start or resume a local agent session\n  agent exec <agent> -- <command>  launch an agent through the Workspace boundary\n  agent handoff <agent>            revoke the current session and start another\n  agent status                     inspect the current local session\n  agent revoke                     revoke the current local session\n  mcp serve --stdio                serve the semantic MCP tools over stdio\n  auth login --realm <url>         authenticate through OAuth PKCE and the OS keychain\n  auth revoke                      revoke the current local session\n  git-credential-anyam get         issue a context-bound memory-only Workspace Git credential\n\nOptions:\n  --type worker|library             choose the template (default: worker)\n  --name <name>                     choose the Project name\n  --agent codex|claude|cursor|cli   choose the local coding agent\n  --mode enforceable|supervised     choose the Workspace boundary mode\n  --directory <path>               choose a Project directory\n  --json                            print machine-readable output\n  --dry-run                         print the proposed manifest without writing\n\nThe local broker never stores bearer credentials, writes canonical Git refs, reads secret values, approves Changes, or promotes production.`);
 }
 
 function agentValue(args: readonly string[], fallback?: string): string {
@@ -174,6 +181,19 @@ export async function main(args: readonly string[], cwd = process.cwd(), input: 
   if ((command === "agent" && subcommand === "revoke") || (command === "auth" && subcommand === "revoke")) {
     const result = await new LocalAgentManager({ directory: agentDirectory(args, cwd) }).revoke(positionalArgs(args, subcommand ?? "revoke")[0]);
     printResult(result, json, result.status === "revoked" ? `Revoked agent session ${result.sessionId} and Grant ${result.grantId}.` : "No local agent session was active.");
+    return 0;
+  }
+
+  if (command === "auth" && subcommand === "login") {
+    const scope = valueAfter(args, "--scope");
+    const resource = valueAfter(args, "--resource");
+    const result = await loginAnyam({
+      realm: requiredValue(args, "--realm", "auth login"),
+      clientId: requiredValue(args, "--client-id", "auth login"),
+      ...(scope ? { scope } : {}),
+      ...(resource ? { resource } : {}),
+    });
+    printResult(result, json, `Authenticated to ${result.realm} through OAuth PKCE.\nCredential storage: OS keychain only.\n${result.receipt}`);
     return 0;
   }
 

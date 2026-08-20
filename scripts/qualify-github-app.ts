@@ -593,7 +593,7 @@ async function main(): Promise<void> {
     const restoredDirectory = mkdtempSync(join(tmpdir(), "anyam-github-app-restore-"));
     try {
       await runGit(restoredDirectory, ["init"], gitMaxBufferBytes);
-      await runGit(restoredDirectory, ["fetch", `file://${seeded.bundlePath}`, "refs/heads/main:refs/heads/main"], gitMaxBufferBytes);
+      await runGit(restoredDirectory, ["fetch", seeded.bundlePath, "refs/heads/main:refs/heads/main"], gitMaxBufferBytes);
       const restoredOid = await runGit(restoredDirectory, ["rev-parse", "refs/heads/main"], gitMaxBufferBytes);
       if (restoredOid !== seeded.initialOid) throw new Error(`export/restore returned ${restoredOid}, expected ${seeded.initialOid}`);
     } finally {

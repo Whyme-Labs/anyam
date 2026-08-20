@@ -41,6 +41,23 @@ export type SmartHttpCredentialIssuer = {
   }): Promise<SmartHttpCredential>;
 };
 
+export type SmartHttpCredentialStore = {
+  load(): Promise<readonly SmartHttpCredentialRecord[]>;
+  save(records: readonly SmartHttpCredentialRecord[]): Promise<void>;
+};
+
+export class MemorySmartHttpCredentialStore implements SmartHttpCredentialStore {
+  private records: SmartHttpCredentialRecord[] = [];
+
+  async load(): Promise<readonly SmartHttpCredentialRecord[]> {
+    return this.records.map((record) => clone(record));
+  }
+
+  async save(records: readonly SmartHttpCredentialRecord[]): Promise<void> {
+    this.records = records.map((record) => clone(record));
+  }
+}
+
 export type SmartHttpCredentialValidator = {
   validate(token: string, input: {
     repositoryId: string;
@@ -75,7 +92,42 @@ export type SmartHttpGatewayConfig = {
   workspaceIdForRepository?: (input: { repositoryId: string }) => string | undefined | Promise<string | undefined>;
   /** Qualification-only escape hatch for a local provider fixture. */
   allowInsecureUpstream?: boolean;
+  budgets?: Partial<Record<SmartHttpOperation, SmartHttpBudgetPolicy>>;
+  budgetTracker?: SmartHttpBudgetTracker;
 };
+
+export type SmartHttpBudgetPolicy = {
+  maxRequestBytes?: number;
+  maxResponseBytes?: number;
+  maxDurationMs?: number;
+  maxConcurrentRequests?: number;
+  receipt: string;
+};
+
+export class SmartHttpBudgetTracker {
+  private active = 0;
+
+  constructor(private readonly receipt: string) {}
+
+  acquire(limit: number | undefined): boolean {
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit <= 0)) throw new SmartHttpCredentialError("maxConcurrentRequests must be a positive safe integer");
+    if (limit !== undefined && this.active >= limit) return false;
+    this.active += 1;
+    return true;
+  }
+
+  release(): void {
+    this.active = Math.max(0, this.active - 1);
+  }
+
+  current(): number {
+    return this.active;
+  }
+
+  sizingReceipt(): string {
+    return this.receipt;
+  }
+}
 
 export type SmartHttpGatewayReceipt = {
   protocol: typeof SMART_HTTP_PROTOCOL;
@@ -132,6 +184,32 @@ function validationFailure(
  */
 export class SmartHttpCredentialAuthority implements SmartHttpCredentialIssuer, SmartHttpCredentialValidator {
   private readonly records = new Map<string, SmartHttpCredentialRecord>();
+  private readonly store: SmartHttpCredentialStore | undefined;
+  private readonly readyPromise: Promise<void>;
+  private readonly now: () => number;
+
+  constructor(options: { store?: SmartHttpCredentialStore; now?: () => number } = {}) {
+    this.store = options.store;
+    this.now = options.now ?? (() => Date.now());
+    this.readyPromise = this.hydrate();
+  }
+
+  async ready(): Promise<void> {
+    await this.readyPromise;
+  }
+
+  private async hydrate(): Promise<void> {
+    if (!this.store) return;
+    const records = await this.store.load();
+    for (const record of records) {
+      if (record.audience !== SMART_HTTP_GIT_AUDIENCE || record.canonicalWrite !== false || !record.tokenDigest) throw new SmartHttpCredentialError("durable Smart HTTP credential store contains an invalid credential-free record");
+      this.records.set(record.tokenDigest, clone(record));
+    }
+  }
+
+  private async persist(): Promise<void> {
+    if (this.store) await this.store.save([...this.records.values()].map((record) => clone(record)));
+  }
 
   async issue(input: {
     repositoryId: string;
@@ -140,10 +218,11 @@ export class SmartHttpCredentialAuthority implements SmartHttpCredentialIssuer, 
     operation: SmartHttpOperation;
     expiresAt: string;
   }): Promise<SmartHttpCredential> {
+    await this.ready();
     const repositoryId = requiredString(input.repositoryId, "repositoryId");
     const sourceSpaceId = requiredString(input.sourceSpaceId, "sourceSpaceId");
     const expiresAt = requiredString(input.expiresAt, "expiresAt");
-    if (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now()) throw new SmartHttpCredentialError("expiresAt must be a future ISO timestamp");
+    if (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= this.now()) throw new SmartHttpCredentialError("expiresAt must be a future ISO timestamp");
     if (input.operation === "write" && (!input.workspaceId || input.workspaceId.trim().length === 0)) throw new SmartHttpCredentialError("write credentials require an explicit Workspace");
     const token = tokenValue();
     const record: SmartHttpCredentialRecord = {
@@ -159,6 +238,7 @@ export class SmartHttpCredentialAuthority implements SmartHttpCredentialIssuer, 
       status: "active",
     };
     this.records.set(record.tokenDigest, record);
+    await this.persist();
     return { ...clone(record), token };
   }
 
@@ -168,12 +248,14 @@ export class SmartHttpCredentialAuthority implements SmartHttpCredentialIssuer, 
     workspaceId?: string;
     operation: SmartHttpOperation;
   }): Promise<SmartHttpCredentialValidation> {
+    await this.ready();
     if (typeof token !== "string" || token.trim().length === 0) return validationFailure("invalid", "request a fresh audience-bound Git credential", "token=missing; credentialMaterialStored=false");
     const record = this.records.get(await digestToken(token));
     if (!record) return validationFailure("invalid", "request a fresh audience-bound Git credential", "token=unrecognised; credentialMaterialStored=false");
     if (record.status === "revoked") return validationFailure("revoked", "reauthenticate and request a new Workspace credential", `credential=${record.id}; status=revoked`);
-    if (Date.parse(record.expiresAt) <= Date.now()) {
+    if (Date.parse(record.expiresAt) <= this.now()) {
       record.status = "expired";
+      await this.persist();
       return validationFailure("expired", "reauthenticate and request a fresh short-lived Workspace credential", `credential=${record.id}; status=expired; expiresAt=${record.expiresAt}`);
     }
     if (record.audience !== SMART_HTTP_GIT_AUDIENCE) return validationFailure("audience-mismatch", "use a credential issued for the Anyam Git audience", `credential=${record.id}; expectedAudience=${SMART_HTTP_GIT_AUDIENCE}; actualAudience=${record.audience}`);
@@ -186,13 +268,15 @@ export class SmartHttpCredentialAuthority implements SmartHttpCredentialIssuer, 
   }
 
   async revoke(token: string): Promise<boolean> {
+    await this.ready();
     const record = this.records.get(await digestToken(token));
     if (!record) return false;
     record.status = "revoked";
+    await this.persist();
     return true;
   }
 
-  snapshot(): { credentialCount: number; credentialMaterialStored: false; active: number; revoked: number; expired: number } {
+  snapshot(): { credentialCount: number; credentialMaterialStored: false; active: number; revoked: number; expired: number; storage: "memory-qualification" | "durable-adapter"; receipt: string } {
     const records = [...this.records.values()];
     return {
       credentialCount: records.length,
@@ -200,6 +284,8 @@ export class SmartHttpCredentialAuthority implements SmartHttpCredentialIssuer, 
       active: records.filter((record) => record.status === "active").length,
       revoked: records.filter((record) => record.status === "revoked").length,
       expired: records.filter((record) => record.status === "expired").length,
+      storage: this.store ? "durable-adapter" : "memory-qualification",
+      receipt: `credentialStore=${this.store ? "durable-adapter" : "memory-qualification"}; credentialMaterialStored=false; restartRevocation=${this.store ? "available" : "not-qualified"}`,
     };
   }
 }
@@ -271,6 +357,16 @@ function forwardHeaders(request: Request, extra: HeadersInit | undefined): Heade
   return headers;
 }
 
+function budgetValue(value: number | undefined, field: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || value <= 0) throw new SmartHttpCredentialError(`${field} must be a positive safe integer`);
+  return value;
+}
+
+function budgetFailureReceipt(input: { operation: SmartHttpOperation; policy: SmartHttpBudgetPolicy; budget: string; limit: number; asked: string | number }): string {
+  return `provider=smart-http; operation=${input.operation}; budget=${input.budget}; limit=${input.limit}; asked=${input.asked}; ${input.policy.receipt}; canonicalWrite=false; credentialMaterialStored=false`;
+}
+
 /**
  * Worker-compatible Git Smart HTTP gateway. The gateway owns the transport
  * policy and credential audience; the upstream RepositoryDriver owns Git
@@ -301,26 +397,73 @@ export async function handleSmartHttpRequest(request: Request, config: SmartHttp
     return blockedReceipt(403, "canonical_write_denied", "push only to the explicitly provisioned Workspace repository; request Landing for canonical mutation", `repository=${route.repositoryId}; operation=receive-pack; workspace=required; canonicalWrite=false`);
   }
 
+  const budget = config.budgets?.[operation];
+  if (budget && (!budget.receipt.trim() || !/(?:receipt|measure|qualification)/iu.test(budget.receipt))) return gatewayJson({ protocol: SMART_HTTP_PROTOCOL, status: "unavailable", repositoryId: route.repositoryId, operation, canonicalWrite: false, credentialFree: true, recoveryAction: "supply the measured qualification receipt for this workload-specific budget before enabling it", receipt: `repository=${route.repositoryId}; operation=${operation}; budget=receipt-required; canonicalWrite=false` }, 503);
+  if (budget) {
+    budgetValue(budget.maxRequestBytes, "maxRequestBytes");
+    budgetValue(budget.maxResponseBytes, "maxResponseBytes");
+    budgetValue(budget.maxDurationMs, "maxDurationMs");
+    budgetValue(budget.maxConcurrentRequests, "maxConcurrentRequests");
+  }
+  const budgetTracker = config.budgetTracker;
+  const acquired = budgetTracker?.acquire(budget?.maxConcurrentRequests) ?? true;
+  if (!acquired) return blockedReceipt(429, "git_budget_exceeded", "retry after an active Smart HTTP operation completes; the named concurrency budget is a tripwire", `repository=${route.repositoryId}; operation=${operation}; ${budgetFailureReceipt({ operation, policy: budget!, budget: "concurrentRequests", limit: budget!.maxConcurrentRequests!, asked: budgetTracker?.current() ?? "unknown" })}`);
+  let budgetReleased = false;
+  const releaseBudget = (): void => {
+    if (!budgetReleased) {
+      budgetReleased = true;
+      budgetTracker?.release();
+    }
+  };
+  const requestBytes = Number.parseInt(request.headers.get("content-length") ?? "", 10);
+  if (budget?.maxRequestBytes !== undefined && Number.isSafeInteger(requestBytes) && requestBytes > budget.maxRequestBytes) {
+    releaseBudget();
+    return blockedReceipt(413, "git_budget_exceeded", "reduce the Git request or use a qualified workload budget; the request was rejected before provider mutation", `repository=${route.repositoryId}; operation=${operation}; ${budgetFailureReceipt({ operation, policy: budget, budget: operation === "write" ? "packBytes" : "requestBytes", limit: budget.maxRequestBytes, asked: requestBytes })}`);
+  }
+
   const base = safeUpstreamBase(config.upstreamBase);
-  if (!base || (base.protocol === "http:" && config.allowInsecureUpstream !== true)) return gatewayJson({ protocol: SMART_HTTP_PROTOCOL, status: "unavailable", repositoryId: route.repositoryId, operation, canonicalWrite: false, credentialFree: true, recoveryAction: "configure a customer-owned HTTPS Git upstream without embedded credentials or enable the explicit qualification-only fixture path", receipt: `repository=${route.repositoryId}; provider=smart-http; upstream=invalid-or-insecure; operation=${operation}; canonicalWrite=false` }, 503);
+  if (!base || (base.protocol === "http:" && config.allowInsecureUpstream !== true)) {
+    releaseBudget();
+    return gatewayJson({ protocol: SMART_HTTP_PROTOCOL, status: "unavailable", repositoryId: route.repositoryId, operation, canonicalWrite: false, credentialFree: true, recoveryAction: "configure a customer-owned HTTPS Git upstream without embedded credentials or enable the explicit qualification-only fixture path", receipt: `repository=${route.repositoryId}; provider=smart-http; upstream=invalid-or-insecure; operation=${operation}; canonicalWrite=false` }, 503);
+  }
   let upstreamPath = config.upstreamPath?.({ repositoryId: route.repositoryId, suffix: route.suffix }) ?? `${encodeURIComponent(route.repositoryId)}.git/${route.suffix}`;
   if (upstreamPath.startsWith("/")) upstreamPath = upstreamPath.slice(1);
   const upstream = new URL(upstreamPath, base);
   upstream.search = url.search;
   let response: Response;
+  const controller = new AbortController();
+  const timeout = budget?.maxDurationMs === undefined ? undefined : setTimeout(() => controller.abort(), budget.maxDurationMs);
+  const startedAt = Date.now();
   try {
     response = await fetch(upstream, {
       method: request.method,
       headers: forwardHeaders(request, await config.upstreamHeaders?.({ repositoryId: route.repositoryId, operation })),
       ...(request.method === "GET" || request.method === "HEAD" ? {} : { body: request.body }),
+      signal: controller.signal,
       // Node's fetch requires this opt-in when the qualification harness
       // forwards a Request body stream. Workers ignores the extra hint.
       ...(request.method === "GET" || request.method === "HEAD" ? {} : { duplex: "half" as const }),
     } as RequestInit & { duplex?: "half" });
   } catch (error) {
+    if (timeout) clearTimeout(timeout);
+    releaseBudget();
     return gatewayJson({ protocol: SMART_HTTP_PROTOCOL, status: "unavailable", repositoryId: route.repositoryId, operation, canonicalWrite: false, credentialFree: true, recoveryAction: "retain the Workspace and retry the same Git operation after checking the customer-owned upstream", receipt: `repository=${route.repositoryId}; provider=smart-http; operation=${operation}; upstream=unavailable; error=${error instanceof Error ? error.name : "unknown"}; canonicalWrite=false` }, 503);
   }
-  if (!response.ok) return gatewayJson({ protocol: SMART_HTTP_PROTOCOL, status: "unavailable", repositoryId: route.repositoryId, operation, canonicalWrite: false, credentialFree: true, recoveryAction: "inspect the customer-owned upstream status and retry the same idempotent Git operation; no Anyam canonical state changed", receipt: `repository=${route.repositoryId}; provider=smart-http; operation=${operation}; upstreamStatus=${response.status}; canonicalWrite=false` }, response.status >= 500 ? 503 : response.status);
+  if (timeout) clearTimeout(timeout);
+  const durationMs = Date.now() - startedAt;
+  if (budget?.maxDurationMs !== undefined && durationMs > budget.maxDurationMs) {
+    releaseBudget();
+    return gatewayJson({ protocol: SMART_HTTP_PROTOCOL, status: "unavailable", repositoryId: route.repositoryId, operation, canonicalWrite: false, credentialFree: true, recoveryAction: "retry the same idempotent Git operation after measuring a workload-appropriate duration budget", receipt: `repository=${route.repositoryId}; operation=${operation}; ${budgetFailureReceipt({ operation, policy: budget, budget: "durationMs", limit: budget.maxDurationMs, asked: durationMs })}` }, 504);
+  }
+  const responseBytes = Number.parseInt(response.headers.get("content-length") ?? "", 10);
+  if (budget?.maxResponseBytes !== undefined && Number.isSafeInteger(responseBytes) && responseBytes > budget.maxResponseBytes) {
+    releaseBudget();
+    return gatewayJson({ protocol: SMART_HTTP_PROTOCOL, status: "unavailable", repositoryId: route.repositoryId, operation, canonicalWrite: false, credentialFree: true, recoveryAction: "request a bounded provider response or qualify a larger workload-specific response budget", receipt: `repository=${route.repositoryId}; operation=${operation}; ${budgetFailureReceipt({ operation, policy: budget, budget: "responseBytes", limit: budget.maxResponseBytes, asked: responseBytes })}` }, 502);
+  }
+  if (!response.ok) {
+    releaseBudget();
+    return gatewayJson({ protocol: SMART_HTTP_PROTOCOL, status: "unavailable", repositoryId: route.repositoryId, operation, canonicalWrite: false, credentialFree: true, recoveryAction: "inspect the customer-owned upstream status and retry the same idempotent Git operation; no Anyam canonical state changed", receipt: `repository=${route.repositoryId}; provider=smart-http; operation=${operation}; upstreamStatus=${response.status}; durationMs=${durationMs}; responseBytes=${Number.isSafeInteger(responseBytes) ? responseBytes : "unobserved"}; canonicalWrite=false` }, response.status >= 500 ? 503 : response.status);
+  }
   const headers = new Headers();
   for (const name of ["content-type", "content-encoding", "etag", "last-modified", "cache-control", "vary"]) {
     const value = response.headers.get(name);
@@ -328,6 +471,8 @@ export async function handleSmartHttpRequest(request: Request, config: SmartHttp
   }
   headers.set("x-anyam-git-operation", operation);
   headers.set("x-anyam-canonical-write", "false");
+  headers.set("x-anyam-budget-receipt", budget?.receipt ?? "not-configured");
+  releaseBudget();
   return new Response(response.body, { status: response.status, headers });
 }
 

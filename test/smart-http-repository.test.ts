@@ -10,6 +10,8 @@ import test from "node:test";
 
 import {
   SMART_HTTP_GIT_AUDIENCE,
+  MemorySmartHttpCredentialStore,
+  SmartHttpBudgetTracker,
   SmartHttpCredentialAuthority,
   handleSmartHttpRequest,
   smartHttpQualificationReceipt,
@@ -183,8 +185,19 @@ test("Smart HTTP qualifies real Git clone, fetch, Workspace push, CAS, export/re
     await mkdir(certificateDirectory, { recursive: true });
     await execFile("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(certificateDirectory, "key.pem"), "-out", join(certificateDirectory, "cert.pem"), "-days", "1", "-subj", "/CN=anyam-smart-http-fixture"]);
     const tls = { key: await readFile(join(certificateDirectory, "key.pem")), cert: await readFile(join(certificateDirectory, "cert.pem")) };
-    const authority = new SmartHttpCredentialAuthority();
+    const store = new MemorySmartHttpCredentialStore();
+    const authority = new SmartHttpCredentialAuthority({ store });
+    await authority.ready();
     const expiry = () => new Date(Date.now() + 60_000).toISOString();
+    const restartCredential = await authority.issue({ repositoryId: "canonical", sourceSpaceId: "source:test", operation: "read", expiresAt: expiry() });
+    const restarted = new SmartHttpCredentialAuthority({ store });
+    await restarted.ready();
+    assert.equal((await restarted.validate(restartCredential.token, { repositoryId: "canonical", sourceSpaceId: "source:test", operation: "read" })).valid, true);
+    assert.equal(await restarted.revoke(restartCredential.token), true);
+    const replacement = new SmartHttpCredentialAuthority({ store });
+    await replacement.ready();
+    const revokedAfterRestart = await replacement.validate(restartCredential.token, { repositoryId: "canonical", sourceSpaceId: "source:test", operation: "read" });
+    assert.equal(!revokedAfterRestart.valid && revokedAfterRestart.code === "revoked", true);
     const gatewayConfig = {
       upstreamBase: `${upstreamOrigin}/`,
       credentials: authority,
@@ -336,4 +349,32 @@ test("Smart HTTP qualifies real Git clone, fetch, Workspace push, CAS, export/re
     if (upstream) await close(upstream);
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("Smart HTTP budget tripwires reject measured request and concurrency asks with receipts", async () => {
+  const authority = new SmartHttpCredentialAuthority();
+  const expiry = new Date(Date.now() + 60_000).toISOString();
+  const credential = await authority.issue({ repositoryId: "workspace", sourceSpaceId: "source:test", workspaceId: "workspace:test", operation: "write", expiresAt: expiry });
+  const tracker = new SmartHttpBudgetTracker("measurement=smart-http-fixture; workload=write-pack; source=bounded-test");
+  const config = {
+    upstreamBase: "https://upstream.invalid/",
+    credentials: authority,
+    sourceSpaceIdForRepository: ({ repositoryId }: { repositoryId: string }) => repositoryId === "workspace" ? "source:test" : undefined,
+    workspaceIdForRepository: ({ repositoryId }: { repositoryId: string }) => repositoryId === "workspace" ? "workspace:test" : undefined,
+    budgetTracker: tracker,
+    budgets: { write: { maxRequestBytes: 4, maxConcurrentRequests: 2, receipt: "measurement=smart-http-fixture; workload=write-pack; source=bounded-test" } },
+  };
+  const oversized = await handleSmartHttpRequest(new Request("https://gateway.invalid/git/workspace.git/git-receive-pack", { method: "POST", headers: { authorization: `Bearer ${credential.token}`, "content-type": "application/x-git-receive-pack-request", "content-length": "8" }, body: new Uint8Array(8) }), config);
+  assert.ok(oversized);
+  if (oversized) {
+    assert.equal(oversized.status, 413);
+    const body = await oversized.json() as { code: string; receipt: string };
+    assert.equal(body.code, "git_budget_exceeded");
+    assert.match(body.receipt, /budget=packBytes; limit=4; asked=8/);
+  }
+  assert.equal(tracker.acquire(1), true);
+  const concurrent = await handleSmartHttpRequest(new Request("https://gateway.invalid/git/workspace.git/info/refs?service=git-upload-pack", { method: "GET", headers: { authorization: `Bearer ${credential.token}` } }), { ...config, budgets: { read: { maxConcurrentRequests: 1, receipt: "measurement=smart-http-fixture; workload=read; source=bounded-test" } } });
+  assert.ok(concurrent);
+  if (concurrent) assert.equal(concurrent.status, 429);
+  tracker.release();
 });

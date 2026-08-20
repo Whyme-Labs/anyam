@@ -131,7 +131,7 @@ function normalizedName(input: ScaffoldInput): string {
   return name;
 }
 
-function manifest(name: string, kind: ProjectTemplateKind): string {
+function manifest(name: string, kind: ProjectTemplateKind, repositoryId: string): string {
   const artifactType = kind === "worker" ? "worker.bundle" : "package.archive";
   const target = kind === "worker"
     ? { id: "target:cloudflare-worker", adapter: "cloudflare.worker", accepts: [artifactType], requiredCapabilities: [] }
@@ -139,6 +139,7 @@ function manifest(name: string, kind: ProjectTemplateKind): string {
   return `${JSON.stringify({
     schema: projectSchema,
     id: `project:local:${name}`,
+    repositoryId,
     name,
     referenceType: kind === "worker" ? "typescript-worker" : "typescript-library",
     sourceSpaceIds: ["source:local"],
@@ -168,10 +169,11 @@ function manifest(name: string, kind: ProjectTemplateKind): string {
 }
 
 export function proposedManifest(input: ScaffoldInput): Record<string, unknown> {
-  return JSON.parse(manifest(normalizedName(input), input.kind)) as Record<string, unknown>;
+  const name = normalizedName(input);
+  return JSON.parse(manifest(name, input.kind, `repository:proposal:${name}`)) as Record<string, unknown>;
 }
 
-function templateFiles(name: string, kind: ProjectTemplateKind): readonly TemplateFile[] {
+function templateFiles(name: string, kind: ProjectTemplateKind, repositoryId: string): readonly TemplateFile[] {
   const entryPoint = kind === "worker"
     ? `export function handle(request: Request): Response {\n  return new Response(JSON.stringify({ project: ${JSON.stringify(name)}, path: new URL(request.url).pathname }));\n}\n`
     : `export function greet(name: string): string {\n  return \`Hello, \${name}\`;\n}\n`;
@@ -179,7 +181,7 @@ function templateFiles(name: string, kind: ProjectTemplateKind): readonly Templa
     ? `# ${name}\n\nA TypeScript Worker Project scaffolded by Anyam.\n\nLocal loop:\n\n\`\`\`bash\nnpm install\nnpx create-anyam check\ngit status\nnpx create-anyam change start "Describe the next change"\n\`\`\`\n\nThe globally installed command is also available as anyam check and anyam change start.\n`
     : `# ${name}\n\nA TypeScript library Project scaffolded by Anyam.\n\nLocal loop:\n\n\`\`\`bash\nnpm install\nnpx create-anyam check\ngit status\nnpx create-anyam change start "Describe the next change"\n\`\`\`\n\nThe globally installed command is also available as anyam check and anyam change start.\n`;
   return [
-    { path: "anyam.json", content: manifest(name, kind) },
+    { path: "anyam.json", content: manifest(name, kind, repositoryId) },
     {
       path: "package.json",
       content: `${JSON.stringify({
@@ -224,7 +226,8 @@ async function ensureGitRepository(directory: string): Promise<"initialized" | "
 export async function scaffoldProject(input: ScaffoldInput): Promise<ScaffoldResult> {
   const directory = resolve(input.directory);
   const name = normalizedName(input);
-  const files = templateFiles(name, input.kind);
+  const repositoryId = `repository:local:${randomUUID()}`;
+  const files = templateFiles(name, input.kind, repositoryId);
   if (input.dryRun) {
     return { status: "planned", directory, name, kind: input.kind, git: "not-created", createdFiles: files.map((file) => file.path) };
   }
@@ -373,6 +376,8 @@ export async function startChange(directoryInput: string, titleInput: string): P
         baseSnapshot: gitTreeIdentity(source.treeId),
         baseSourceRevision: gitCommitIdentity(source.commitId),
         baseRepositoryId: source.repositoryId,
+        baseRepositoryIdentityBasis: source.repositoryIdentityBasis,
+        baseRepositoryIdentityReceipt: source.repositoryIdentityReceipt,
         baseGitRef: source.gitRef,
       };
     }

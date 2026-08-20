@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { execFile as execFileCallback } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,7 @@ import {
   type LocalAgentManagerOptions,
 } from "../packages/create-anyam/src/agent.ts";
 import { main } from "../packages/create-anyam/src/cli.ts";
+import { inspectGitSource } from "../packages/create-anyam/src/git-source.ts";
 import { scaffoldProject, startChange } from "../packages/create-anyam/src/scaffold.ts";
 
 const execFile = promisify(execFileCallback);
@@ -145,6 +146,23 @@ test("Change revisions use stable Git identities and reject dirty source", async
   const changedRevision = changed.revision as { sourceRevision: string; treeDigest: string };
   assert.notEqual(changedRevision.sourceRevision, firstRevision.sourceRevision);
   assert.notEqual(changedRevision.treeDigest, firstRevision.treeDigest);
+});
+
+test("Git repository identity survives a moved checkout and a fresh clone", async () => {
+  const directory = await projectDirectory({ startChange: false });
+  const moved = join(directory, "..", "moved-demo");
+  const cloned = join(directory, "..", "cloned-demo");
+  await cp(directory, moved, { recursive: true });
+  await execFile("git", ["clone", "--quiet", directory, cloned], { encoding: "utf8" });
+  const original = await inspectGitSource(directory);
+  const movedState = await inspectGitSource(moved);
+  const clonedState = await inspectGitSource(cloned);
+  assert.equal(original.repositoryIdentityBasis, "manifest");
+  assert.equal(movedState.repositoryId, original.repositoryId);
+  assert.equal(clonedState.repositoryId, original.repositoryId);
+  assert.notEqual(movedState.repositoryRoot, original.repositoryRoot);
+  assert.notEqual(clonedState.repositoryRoot, original.repositoryRoot);
+  assert.match(original.repositoryIdentityReceipt, /pathIndependent=true/u);
 });
 
 test("Change revision names missing Git metadata and stale bases", async () => {

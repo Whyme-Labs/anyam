@@ -1,7 +1,8 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 const execFile = promisify(execFileCallback);
 
@@ -10,6 +11,8 @@ const SOURCE_METADATA_EXCLUDES = [":(exclude).anyam/**"] as const;
 
 export type LocalGitSourceState = {
   repositoryId: string;
+  repositoryIdentityBasis: "manifest" | "root-lineage";
+  repositoryIdentityReceipt: string;
   repositoryRoot: string;
   objectFormat: "sha1" | "sha256";
   commitId: string;
@@ -38,7 +41,7 @@ export class LocalGitSourceError extends Error {
   }
 }
 
-function digestPath(value: string): string {
+function digestIdentity(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
@@ -80,6 +83,26 @@ async function optionalGit(directory: string, args: readonly string[]): Promise<
   } catch {
     return null;
   }
+}
+
+async function manifestRepositoryId(repositoryRoot: string): Promise<string | undefined> {
+  try {
+    const value = JSON.parse(await readFile(join(repositoryRoot, "anyam.json"), "utf8")) as { repositoryId?: unknown };
+    if (typeof value.repositoryId !== "string" || !/^repository:[A-Za-z0-9._:-]+$/u.test(value.repositoryId.trim())) return undefined;
+    return value.repositoryId.trim();
+  } catch {
+    return undefined;
+  }
+}
+
+async function rootLineage(directory: string): Promise<readonly string[]> {
+  const roots = (await git(directory, ["rev-list", "--max-parents=0", "--all"]))
+    .split("\n")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => oid(value, "root commit id", directory));
+  if (roots.length === 0) throw new LocalGitSourceError({ code: "git.revision_missing", message: `Git repository ${directory} has no root commit; a stable Repository identity cannot be derived.`, directory, recoveryAction: "create a committed Git baseline before starting a Change" });
+  return [...new Set(roots)].sort();
 }
 
 function statusPaths(value: string): string[] {
@@ -135,9 +158,19 @@ export async function inspectGitSource(directoryInput: string): Promise<LocalGit
   const gitRef = (await optionalGit(directory, ["symbolic-ref", "--quiet", "--short", "HEAD"])) || "HEAD";
   const status = await gitRaw(directory, ["status", "--porcelain=v1", "--untracked-files=all", "-z", "--", ".", ...SOURCE_METADATA_EXCLUDES]);
   const changedPaths = statusPaths(status);
+  const manifestId = await manifestRepositoryId(repositoryRoot);
+  const roots = manifestId ? [] : await rootLineage(directory);
+  const repositoryId = manifestId
+    ? `git-repository:v2:${manifestId}`
+    : `git-repository:v2:sha256:${digestIdentity(JSON.stringify({ objectFormat, roots }))}`;
+  const repositoryIdentityBasis = manifestId ? "manifest" : "root-lineage";
 
   return {
-    repositoryId: `git-repository:sha256:${digestPath(repositoryRoot)}`,
+    repositoryId,
+    repositoryIdentityBasis,
+    repositoryIdentityReceipt: manifestId
+      ? `identity=v2; basis=manifest; repositoryId=${repositoryId}; pathIndependent=true`
+      : `identity=v2; basis=root-lineage; roots=${roots.length}; objectFormat=${objectFormat}; pathIndependent=true`,
     repositoryRoot,
     objectFormat,
     commitId,

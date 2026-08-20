@@ -312,8 +312,6 @@ export async function runPrivateAlphaJourneyQualification(): Promise<PrivateAlph
     const workingDirectory = join(root, "working");
     const changeStart = await startChange(workingDirectory, "Prove private-alpha delivery");
     const changeMetadata = JSON.parse(await readFile(changeStart.path, "utf8")) as JsonObject & { id: string; projectId: string; intentId: string; baseProjectRevisionId: string; local: JsonObject };
-    delete changeMetadata.local.baseRepositoryId;
-    await writeFile(changeStart.path, JSON.stringify(changeMetadata, null, 2) + "\n", "utf8");
     await appendFile(join(workingDirectory, "src", "index.ts"), "\nexport const privateAlphaJourney = true;\n", "utf8");
     await git(workingDirectory, ["config", "user.name", "Anyam Private Alpha Agent"]);
     await git(workingDirectory, ["config", "user.email", "private-alpha-agent@anyam.invalid"]);
@@ -322,6 +320,7 @@ export async function runPrivateAlphaJourneyQualification(): Promise<PrivateAlph
     const pushed = await driver.pushRepository({ repository: working.value, idempotencyKey: "private-alpha:push:workspace" });
     if (pushed.status !== "succeeded") throw new Error("Workspace Git push failed: " + pushed.receipt);
     const source = await inspectGitSource(workingDirectory);
+    if (changeMetadata.local.baseRepositoryId !== source.repositoryId) throw new Error(`private-alpha Change repository binding mismatch: base=${String(changeMetadata.local.baseRepositoryId)}; current=${source.repositoryId}`);
     const baseCommit = /^git:project-revision:([0-9a-f]{40,64})$/.exec(changeMetadata.baseProjectRevisionId)?.[1];
     if (!baseCommit) throw new Error("Change base is not a Git Project Revision: " + changeMetadata.baseProjectRevisionId);
     const candidateProjectRevisionId = gitProjectRevisionId(source.commitId);

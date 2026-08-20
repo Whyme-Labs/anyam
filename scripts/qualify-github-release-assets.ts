@@ -290,7 +290,9 @@ async function qualifyCustomerRealmAuthority(input: {
   const project = await input.client.createProject({ projectId, name: "Anyam GitHub release-assets qualification", referenceType: "git", sourceSpaces: [{ id: sourceSpaceId, name: "Qualification public", classification: "public", snapshotId: input.verified.releaseDigest }], projectRevisionId }, `github-release-assets:${suffix}:project-create`);
   const canonical = authorityObject(project.canonicalRevision, "canonical Project Revision");
   if (authorityField(canonical.id, "canonicalRevision.id") !== projectRevisionId) throw new Error("customer Realm Authority returned a different canonical Project Revision than requested");
-  const workspace = await input.client.createWorkspace(projectId, { workspaceId, projectRevisionId, sourceSpaceIds: [sourceSpaceId], mounts: [], projectionId: `projection:github-release-assets:${suffix}`, classification: "public" }, `github-release-assets:${suffix}:workspace-create`);
+  // Omit mounts so the Authority applies the canonical Source Space mount
+  // default; an explicit empty list is not a valid Workspace boundary.
+  const workspace = await input.client.createWorkspace(projectId, { workspaceId, projectRevisionId, sourceSpaceIds: [sourceSpaceId], projectionId: `projection:github-release-assets:${suffix}`, classification: "public" }, `github-release-assets:${suffix}:workspace-create`);
   const view = authorityObject(workspace.view, "Project View");
   if (typeof view.id !== "string" || view.id.trim().length === 0) throw new Error("customer Realm Authority returned an invalid Project View identity");
   const actualProjectViewId = authorityField(view.id, "view.id");

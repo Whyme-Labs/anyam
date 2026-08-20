@@ -11,6 +11,7 @@ import {
   gitCredentialGet,
   LocalAgentError,
   LocalAgentManager,
+  LOCAL_AGENT_POLICY,
   localAgentStatePath,
   LocalMcpBroker,
   readGitCredentialContext,
@@ -452,6 +453,35 @@ test("revoking a running run.start prevents a successful result", async () => {
   assert.equal(revoked.status, "revoked");
   const result = await running;
   assert.notEqual((result.run as Record<string, unknown>).status, "passed");
+});
+
+test("a separate broker process can revoke an enforceable run and clean its Workspace", async () => {
+  if (process.platform !== "darwin") return;
+  const directory = await projectDirectory();
+  await replaceCheckAction(directory, { command: "node -e \"setTimeout(() => {}, 10000)\"", inputs: ["anyam.json"], outputs: [] });
+  const stateDirectory = agentStateDirectory(directory);
+  const agentManager = manager(directory);
+  const started = await agentManager.startSession({ agent: "cli", mode: "enforceable", authorizedPaths: ["anyam.json", "src"], network: [] });
+  const running = agentManager.invokeTool("run.start", { actionId: "action:check" });
+  const statePath = localAgentStatePath(directory, stateDirectory);
+  const deadline = Date.now() + LOCAL_AGENT_POLICY.stateLockTimeoutMs;
+  let processGroupObserved = false;
+  while (Date.now() < deadline) {
+    try {
+      const state = JSON.parse(await readFile(statePath, "utf8")) as { sessions?: Record<string, { processGroupId?: number }> };
+      processGroupObserved = typeof state.sessions?.[started.session.id]?.processGroupId === "number";
+    } catch {
+      // The runner has not persisted its process group yet.
+    }
+    if (processGroupObserved) break;
+    await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, LOCAL_AGENT_POLICY.stateLockRetryDelayMs));
+  }
+  assert.equal(processGroupObserved, true, "run.start did not persist a process group before the revocation attempt");
+  const revokeScript = `import { LocalAgentManager } from ${JSON.stringify(new URL("../packages/create-anyam/src/agent.ts", import.meta.url).href)}; const [directory, stateDirectory, sessionId] = process.argv.slice(1); const manager = new LocalAgentManager({ directory, stateDirectory }); console.log(JSON.stringify(await manager.revoke(sessionId)));`;
+  await execFile(process.execPath, ["--import", "tsx", "--eval", revokeScript, directory, stateDirectory, started.session.id], { cwd: process.cwd(), encoding: "utf8" });
+  const result = await running;
+  assert.notEqual((result.run as Record<string, unknown>).status, "passed");
+  await assert.rejects(access(started.session.workspaceDirectory!));
 });
 
 test("supervised local Workspace is labelled non-enforcing", async () => {

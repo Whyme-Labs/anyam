@@ -1152,7 +1152,21 @@ export class LocalAgentManager {
     if (state.currentSessionId === id) state.currentSessionId = null;
     this.record(state, { operation: "session.revoked", outcome: "observed", sessionId: id, grantId: session.grantId, taskId: session.taskId, projectId: session.projectId, changeId: session.changeId, workspaceId: session.workspaceId, actorId: session.actorId, agent: session.agent, details: { authorizationEpoch: state.authorizationEpoch } });
     await this.writeState(state);
-    const boundary = this.boundaries.get(id);
+    const boundary = this.boundaries.get(id) ?? (session.workspaceTemporary && session.workspaceDirectory ? {
+      protocol: "anyam.workspace-boundary/v1" as const,
+      id: session.workspaceBoundaryId ?? `boundary:restored:${id}`,
+      mode: session.workspaceMode ?? "enforceable",
+      enforcement: session.workspaceEnforcement ?? "none",
+      workspaceDirectory: session.workspaceDirectory,
+      sourceDirectory: this.directory,
+      mounts: [],
+      network: [],
+      networkEnforcement: "not-enforced" as const,
+      environment: {},
+      executablePaths: [],
+      temporary: true,
+      receipt: "boundary=restored-for-cross-process-cleanup",
+    } : undefined);
     this.boundaries.delete(id);
     if (boundary) await removeWorkspaceBoundary(boundary);
     return { sessionId: id, grantId: session.grantId, status: "revoked" };

@@ -11,7 +11,7 @@
     "ANYAM_INSTALLATION_ID": "anyam-p3-24-live-20260810",
     "ANYAM_PROTOCOL_VERSION": "anyam.customer-realm-worker/v1",
     "ANYAM_REALM_RP_ID": "anyam-p3-24-live-20260810.swmengappdev.workers.dev",
-    "ANYAM_BUILD_REVISION": "3562065f550806214efc958e8bfcc0621b9264be",
+    "ANYAM_BUILD_REVISION": "6a0e2186e716c5cc4723186de70c84a3d0c5cb19",
     "ANYAM_PROVIDER_WORKER_URL": "https://anyam-p3-24-target-20260810.swmengappdev.workers.dev"
   },
   "kv_namespaces": [

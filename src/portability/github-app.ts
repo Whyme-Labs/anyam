@@ -230,6 +230,15 @@ function refMap(refs: readonly GitRef[]): Map<string, string> {
   return new Map(refs.map((ref) => [ref.name, ref.oid]));
 }
 
+export function gitPushArguments(input: { repositoryUrl: string; expectedRefs: readonly GitRef[]; refMappings: readonly { localRef: string; remoteRef: string }[] }): string[] {
+  const expected = refMap(input.expectedRefs);
+  const args = ["push", "--atomic"];
+  for (const mapping of input.refMappings) args.push(`--force-with-lease=${mapping.remoteRef}:${expected.get(mapping.remoteRef) ?? ""}`);
+  args.push(input.repositoryUrl);
+  for (const mapping of input.refMappings) args.push(`${mapping.localRef}:${mapping.remoteRef}`);
+  return args;
+}
+
 function refsEqual(left: readonly GitRef[], right: readonly GitRef[]): boolean {
   if (left.length !== right.length) return false;
   const rightMap = refMap(right);
@@ -670,12 +679,8 @@ export class NodeGitSmartHttpTransport implements GitHubSmartHttpTransport {
   }
 
   async push(input: { repositoryUrl: string; token: string; expectedRefs: readonly GitRef[]; desiredRefs: readonly GitRef[]; refMappings: readonly { localRef: string; remoteRef: string }[]; operationId: string; idempotencyKey: string }): Promise<GitHubSmartHttpRefs> {
-    const expected = refMap(input.expectedRefs);
     const desired = refMap(input.desiredRefs);
-    const args = ["push", "--atomic"];
-    for (const mapping of input.refMappings) args.push(`--force-with-lease=${mapping.remoteRef}:${expected.get(mapping.remoteRef) ?? ""}`);
-    for (const mapping of input.refMappings) args.push(`${mapping.localRef}:${mapping.remoteRef}`);
-    args.push(input.repositoryUrl);
+    const args = gitPushArguments(input);
     let repositoryUrl: URL;
     try {
       repositoryUrl = new URL(input.repositoryUrl);

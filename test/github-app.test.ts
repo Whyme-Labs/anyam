@@ -18,6 +18,7 @@ import {
   FetchGitHubAppHttpClient,
   FetchGitHubRestClient,
   gitInstallationAuthorizationHeader,
+  gitPushArguments,
   gitTransportFailure,
 } from "../src/portability/github-app.ts";
 import { AUTHORITY_COMMAND_PROTOCOL, AuthorityPlaneCoordinator, emptyAuthorityPlaneSnapshot, type AuthoritySession } from "../src/cloudflare/authority-plane.ts";
@@ -51,6 +52,10 @@ test("Git Smart HTTP transport failures expose a redacted diagnostic receipt", (
   assert.match(failure.receipt, /stderrClass=permission/u);
   assert.match(failure.receipt, /stderrDigest=sha256:/u);
   assert.doesNotMatch(failure.receipt, /permission denied/u);
+});
+
+test("Git Smart HTTP push places the repository before refspecs", () => {
+  assert.deepEqual(gitPushArguments({ repositoryUrl: "https://github.com/acme/video-player.git", expectedRefs: [], refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }] }), ["push", "--atomic", "--force-with-lease=refs/heads/main:", "https://github.com/acme/video-player.git", "refs/heads/main:refs/heads/main"]);
 });
 
 class FakeTokenIssuer implements GitHubAppTokenIssuer {

@@ -296,7 +296,7 @@ export async function runPrivateAlphaJourneyQualification(): Promise<PrivateAlph
     upstream = createServer((request, response) => { void runGitHttpBackend(request, response, join(root, "repositories")); });
     const upstreamOrigin = await listen(upstream);
     const credentialAuthority = new SmartHttpCredentialAuthority();
-    const gatewayFixture = await gatewayServer({ upstreamBase: upstreamOrigin + "/", credentials: credentialAuthority, allowAnonymousRead: false, allowInsecureUpstream: true, workspaceIdForRepository: ({ repositoryId }) => repositoryId === "workspace" ? "workspace:private-alpha" : undefined });
+    const gatewayFixture = await gatewayServer({ upstreamBase: upstreamOrigin + "/", credentials: credentialAuthority, allowInsecureUpstream: true, sourceSpaceIdForRepository: ({ repositoryId }) => repositoryId === "canonical" || repositoryId === "workspace" ? "source:private-alpha" : undefined, workspaceIdForRepository: ({ repositoryId }) => repositoryId === "workspace" ? "workspace:private-alpha" : undefined });
     gateway = gatewayFixture.server;
     const driver = new SmartHttpRepositoryDriver({ workspaceRoot: join(root, "driver"), credentials: credentialAuthority, credentialExpiresAt: () => new Date(Date.now() + 60_000).toISOString(), allowInsecureHttp: true, workspaceIdForRepository: (repositoryId) => repositoryId === "workspace" ? "workspace:private-alpha" : undefined });
     const canonicalEndpoint = smartHttpRouteUrl(gatewayFixture.origin, "canonical");

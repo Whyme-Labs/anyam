@@ -63,6 +63,10 @@ export type SmartHttpGatewayConfig = {
    */
   upstreamPath?: (input: { repositoryId: string; suffix: string }) => string;
   upstreamHeaders?: (input: { repositoryId: string; operation: SmartHttpOperation }) => HeadersInit | Promise<HeadersInit>;
+  /** Every provider repository must resolve to one explicit Source Space. */
+  sourceSpaceIdForRepository: (input: { repositoryId: string }) => string | undefined | Promise<string | undefined>;
+  /** Public disclosure is a per-repository policy, never a global default. */
+  anonymousReadForRepository?: (input: { repositoryId: string; sourceSpaceId: string }) => boolean | Promise<boolean>;
   /**
    * Maps a provider repository to its explicit Workspace authority. A missing
    * mapping is a fail-closed canonical-write denial; read-only gateways do not
@@ -71,7 +75,6 @@ export type SmartHttpGatewayConfig = {
   workspaceIdForRepository?: (input: { repositoryId: string }) => string | undefined | Promise<string | undefined>;
   /** Qualification-only escape hatch for a local provider fixture. */
   allowInsecureUpstream?: boolean;
-  allowAnonymousRead?: boolean;
 };
 
 export type SmartHttpGatewayReceipt = {
@@ -231,10 +234,12 @@ function parseGitRoute(url: URL): { repositoryId: string; suffix: string } | und
 
 function operationFor(request: Request, suffix: string, url: URL): SmartHttpOperation | undefined {
   if (request.method === "HEAD" && suffix === "HEAD") return "read";
-  if (request.method === "GET" && suffix === "info/refs") return "read";
+  if (request.method === "GET" && suffix === "info/refs") {
+    const service = url.searchParams.get("service");
+    return service === "git-receive-pack" ? "write" : "read";
+  }
   if (request.method === "POST" && suffix === "git-upload-pack") return "read";
   if (request.method === "POST" && suffix === "git-receive-pack") return "write";
-  if (request.method === "GET" && suffix === "info/refs" && url.searchParams.get("service") === "git-upload-pack") return "read";
   return undefined;
 }
 
@@ -279,11 +284,16 @@ export async function handleSmartHttpRequest(request: Request, config: SmartHttp
   const blockedReceipt = (status: number, code: string, recoveryAction: string, receipt: string): Response => gatewayJson({ protocol: SMART_HTTP_PROTOCOL, status: "blocked", code, repositoryId: route.repositoryId, operation: operation ?? "unknown", canonicalWrite: false, credentialFree: true, recoveryAction, receipt }, status);
   if (!operation) return blockedReceipt(405, "git_operation_unsupported", "use Git Smart HTTP info/refs, upload-pack, or receive-pack for the exact repository path", `repository=${route.repositoryId}; suffix=${route.suffix}; operation=unsupported; canonicalWrite=false`);
 
+  const sourceSpaceId = await config.sourceSpaceIdForRepository({ repositoryId: route.repositoryId });
+  if (!sourceSpaceId) return blockedReceipt(403, "git_source_space_unbound", "bind the provider repository to an explicit Source Space before serving Git traffic", `repository=${route.repositoryId}; sourceSpace=unbound; canonicalWrite=false`);
+  const anonymousRead = operation === "read" && config.anonymousReadForRepository
+    ? await config.anonymousReadForRepository({ repositoryId: route.repositoryId, sourceSpaceId })
+    : false;
   let authorization: SmartHttpCredentialValidation | undefined;
   const token = bearer(request);
-  if (!(operation === "read" && config.allowAnonymousRead === true)) {
+  if (!anonymousRead) {
     if (!token) return blockedReceipt(401, "git_credential_required", "request a short-lived credential for the Anyam Git audience", `repository=${route.repositoryId}; operation=${operation}; credential=missing; canonicalWrite=false`);
-    authorization = await config.credentials.validate(token, { repositoryId: route.repositoryId, operation });
+    authorization = await config.credentials.validate(token, { repositoryId: route.repositoryId, sourceSpaceId, operation });
     if (!authorization.valid) return blockedReceipt(authorization.code === "invalid" || authorization.code === "expired" || authorization.code === "revoked" ? 401 : 403, "git_credential_denied", authorization.recoveryAction, `repository=${route.repositoryId}; operation=${operation}; ${authorization.receipt}; canonicalWrite=false`);
   }
   const expectedWorkspaceId = operation === "write" ? await config.workspaceIdForRepository?.({ repositoryId: route.repositoryId }) : undefined;

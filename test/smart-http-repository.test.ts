@@ -188,10 +188,23 @@ test("Smart HTTP qualifies real Git clone, fetch, Workspace push, CAS, export/re
     const gatewayConfig = {
       upstreamBase: `${upstreamOrigin}/`,
       credentials: authority,
-      allowAnonymousRead: false,
       allowInsecureUpstream: true,
+      sourceSpaceIdForRepository: ({ repositoryId }: { repositoryId: string }) => repositoryId === "canonical" || repositoryId === "workspace" ? "source:test" : undefined,
       workspaceIdForRepository: ({ repositoryId }: { repositoryId: string }) => repositoryId === "workspace" ? "workspace:test" : undefined,
     };
+    const publicGatewayConfig = {
+      ...gatewayConfig,
+      anonymousReadForRepository: ({ repositoryId, sourceSpaceId }: { repositoryId: string; sourceSpaceId: string }) => repositoryId === "canonical" && sourceSpaceId === "source:test",
+    };
+    const receiveAdvertisement = await handleSmartHttpRequest(new Request("https://gateway.invalid/git/canonical.git/info/refs?service=git-receive-pack", { method: "GET" }), publicGatewayConfig);
+    assert.ok(receiveAdvertisement);
+    if (receiveAdvertisement) assert.equal(receiveAdvertisement.status, 401);
+    const publicReadAdvertisement = await handleSmartHttpRequest(new Request("https://gateway.invalid/git/canonical.git/info/refs?service=git-upload-pack", { method: "GET" }), publicGatewayConfig);
+    assert.ok(publicReadAdvertisement);
+    if (publicReadAdvertisement) assert.equal(publicReadAdvertisement.status, 200);
+    const unboundRoute = await handleSmartHttpRequest(new Request("https://gateway.invalid/git/unknown.git/info/refs?service=git-upload-pack", { method: "GET" }), gatewayConfig);
+    assert.ok(unboundRoute);
+    if (unboundRoute) assert.equal(unboundRoute.status, 403);
     const gatewayFixture = await createGatewayServer(gatewayConfig, tls);
     gateway = gatewayFixture.server;
     const driver = new SmartHttpRepositoryDriver({
@@ -211,6 +224,11 @@ test("Smart HTTP qualifies real Git clone, fetch, Workspace push, CAS, export/re
     const canonicalPush = await driver.pushRepository({ repository: canonical.value, idempotencyKey: "push:canonical" });
     assert.equal(canonicalPush.status, "failed");
     if (canonicalPush.status === "failed") assert.equal(canonicalPush.errorCode, "canonical_write_denied");
+
+    const wrongSourceCredential = await authority.issue({ repositoryId: "canonical", sourceSpaceId: "source:other", operation: "read", expiresAt: expiry() });
+    const wrongSourceResponse = await handleSmartHttpRequest(new Request("https://gateway.invalid/git/canonical.git/git-upload-pack", { method: "POST", headers: { authorization: `Bearer ${wrongSourceCredential.token}`, "content-type": "application/x-git-upload-pack-request" }, body: new Uint8Array() }), gatewayConfig);
+    assert.ok(wrongSourceResponse);
+    if (wrongSourceResponse) assert.equal(wrongSourceResponse.status, 403);
 
     const directWrite = await authority.issue({ repositoryId: "canonical", sourceSpaceId: "source:test", workspaceId: "workspace:test", operation: "write", expiresAt: expiry() });
     const deniedResponse = await handleSmartHttpRequest(new Request("https://gateway.invalid/git/canonical.git/git-receive-pack", { method: "POST", headers: { authorization: `Bearer ${directWrite.token}`, "content-type": "application/x-git-receive-pack-request" }, body: new Uint8Array() }), gatewayConfig);

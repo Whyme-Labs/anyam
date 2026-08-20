@@ -9,7 +9,8 @@
     "ANYAM_PROMOTION_EXECUTOR_TARGET_ID": "replace-with-customer-target-id",
     "ANYAM_PROMOTION_EXECUTOR_SCRIPT_NAME": "replace-with-customer-worker-script",
     "ANYAM_PROMOTION_EXECUTOR_PREVIEW_SUBDOMAIN": "replace-with-customer-workers-dev-subdomain",
-    "ANYAM_PROMOTION_CREDENTIAL_EXPIRES_AT": "replace-with-future-provider-credential-expiry"
+    "ANYAM_PROMOTION_CREDENTIAL_SCOPES": "workers:read,workers:write",
+    "ANYAM_PROMOTION_CREDENTIAL_SOURCE_ID": "customer-secret-binding-v1"
   },
   "r2_buckets": [
     {

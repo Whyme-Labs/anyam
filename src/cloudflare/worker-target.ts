@@ -40,6 +40,21 @@ export type CloudflareWorkerCredential = {
   credentialId: string;
   expiresAt: string;
   audience: typeof CLOUDFLARE_WORKER_DEPLOYMENT_AUDIENCE | typeof CLOUDFLARE_WORKER_PROMOTION_AUDIENCE;
+  /** Provider scopes observed or declared by the customer-owned broker. */
+  scopes: readonly string[];
+  /** The broker must have completed a provider authorization observation. */
+  providerAuthorization: "observed";
+  /** Provider-side operation identity for the authorization observation. */
+  providerOperationId?: string;
+  receipt: string;
+};
+
+export type CloudflareWorkerCredentialObservation = {
+  credentialId: string;
+  expiresAt: string;
+  scopes: readonly string[];
+  providerAuthorization: "observed";
+  providerOperationId?: string;
   receipt: string;
 };
 
@@ -47,9 +62,15 @@ export type CloudflareWorkerCredentialBroker = {
   issue(input: {
     accountId: string;
     scriptName: string;
+    targetId: string;
     operation: CloudflareWorkerTargetOperation;
     audience: CloudflareWorkerCredential["audience"];
   }): Promise<CloudflareWorkerCredential>;
+  probe(input: {
+    accountId: string;
+    scriptName: string;
+    targetId: string;
+  }): Promise<CloudflareWorkerCredentialObservation>;
 };
 
 export type CloudflareApiError = {
@@ -103,6 +124,7 @@ export type CloudflareWorkerDeployment = {
 export type CloudflareWorkerTargetAdapterConfig = {
   accountId: string;
   scriptName: string;
+  targetId: string;
   transport: CloudflareWorkerApiTransport;
   credentialBroker: CloudflareWorkerCredentialBroker;
   artifactReader: CloudflareWorkerArtifactReader;
@@ -410,6 +432,44 @@ function responseResult<T>(response: CloudflareWorkerApiResponse<T>, operation: 
   });
 }
 
+function credentialReceipt(credential: CloudflareWorkerCredential): string {
+  return `credentialId=${credential.credentialId}; credentialExpiresAt=${credential.expiresAt}; credentialScopes=${credential.scopes.join(",") || "none"}; providerAuthorization=${credential.providerAuthorization}; ${credential.providerOperationId ? `credentialProviderOperationId=${credential.providerOperationId}; ` : ""}credentialMaterialStored=false`;
+}
+
+function responseResultWithCredential<T>(response: CloudflareWorkerApiResponse<T>, operation: CloudflareWorkerTargetOperation, credential: CloudflareWorkerCredential): T | DeliveryAdapterFailure {
+  const result = responseResult(response, operation);
+  if (!isFailure(result)) return result;
+  const authorizationFailure = response.status === 401 || response.status === 403;
+  return {
+    ...result,
+    message: authorizationFailure
+      ? `${result.message} The brokered provider credential was rejected after authorization was observed.`
+      : result.message,
+    recoveryAction: authorizationFailure
+      ? "refresh or rotate the customer-owned broker credential, re-probe provider authorization, and retry the same immutable operation only after the credential is observed active"
+      : result.recoveryAction,
+    receipt: `${result.receipt}; ${credentialReceipt(credential)}; providerAuthorization=${authorizationFailure ? "rejected-after-observation" : credential.providerAuthorization}`,
+  };
+}
+
+function credentialMetadataSafe(value: string, field: string): boolean {
+  if (/(?:cfat_[A-Za-z0-9]+|bearer\s+|(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password)\s*[:=])/iu.test(value)) {
+    throw new Error(`credential broker returned credential material in ${field}`);
+  }
+  return true;
+}
+
+function targetBindingFailure(operation: CloudflareWorkerTargetOperation, target: WorkerTarget, configuredTargetId: string): DeliveryAdapterFailure | undefined {
+  if (target.id === configuredTargetId) return undefined;
+  return failure({
+    operation,
+    code: "target.binding",
+    message: `Cloudflare Worker Target adapter received ${target.id}, but is bound to ${configuredTargetId}.`,
+    recoveryAction: "route the exact Target operation to its customer-owned adapter and broker",
+    receipt: `target=${target.id}; configuredTarget=${configuredTargetId}; providerMutation=false; credentialMaterialStored=false`,
+  });
+}
+
 function isFailure<T>(value: T | DeliveryAdapterFailure): value is DeliveryAdapterFailure {
   return typeof value === "object" && value !== null && "status" in value && (value as { status?: unknown }).status === "failed";
 }
@@ -434,6 +494,7 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
   constructor(private readonly config: CloudflareWorkerTargetAdapterConfig) {
     required(config.accountId, "accountId");
     required(config.scriptName, "scriptName");
+    required(config.targetId, "targetId");
     if (typeof config.previewUrlForVersion !== "function") throw new Error("previewUrlForVersion is required");
     if (config.routeReadinessRetry) {
       validateRouteReadinessRetry(config.routeReadinessRetry, "routeReadinessRetry");
@@ -450,6 +511,8 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
   }
 
   async preview(input: WorkerAdapterInput): Promise<DeliveryAdapterResult<WorkerPreview>> {
+    const targetBinding = targetBindingFailure("preview", input.target, this.config.targetId);
+    if (targetBinding) return targetBinding;
     const version = await this.ensureVersion(input, "preview");
     if (isFailure(version)) return version;
     const previewUrl = this.config.previewUrlForVersion(version.id);
@@ -492,6 +555,8 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
   }
 
   async apply(input: WorkerAdapterInput): Promise<DeliveryAdapterResult<WorkerDeployment>> {
+    const targetBinding = targetBindingFailure("apply", input.target, this.config.targetId);
+    if (targetBinding) return targetBinding;
     const version = await this.ensureVersion(input, "apply");
     if (isFailure(version)) return version;
     const operation = "apply" as const;
@@ -510,7 +575,7 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     } catch (error) {
       return failure({ operation, code: "cloudflare.transport", message: `Cloudflare Worker deployment transport failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "inspect the deployment by its Release tag before retrying the same immutable promotion", receipt: `providerVersionId=${version.id}; credentialMaterialStored=false` });
     }
-    const result = responseResult(response, operation);
+    const result = responseResultWithCredential(response, operation, credential);
     if (isFailure(result)) return result;
     this.deploymentsById.set(result.id, version.id);
     const providerOperationId = `deployment:${result.id}`;
@@ -530,6 +595,8 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
   }
 
   async health(input: WorkerHealthInput): Promise<DeliveryAdapterResult<HealthObservation>> {
+    const targetBinding = targetBindingFailure("health", input.target, this.config.targetId);
+    if (targetBinding) return targetBinding;
     const version = await this.versionForRelease(input.release, "health");
     if (isFailure(version)) return version;
     const healthUrl = typeof this.config.healthUrl === "string"
@@ -573,6 +640,8 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
   }
 
   async rollback(input: WorkerRollbackInput): Promise<DeliveryAdapterResult<WorkerDeployment>> {
+    const targetBinding = targetBindingFailure("rollback", input.target, this.config.targetId);
+    if (targetBinding) return targetBinding;
     const previousVersion = await this.versionForRelease(input.previousRelease, "rollback");
     if (isFailure(previousVersion)) return previousVersion;
     const operation = "rollback" as const;
@@ -591,7 +660,7 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     } catch (error) {
       return failure({ operation, code: "cloudflare.transport", message: `Cloudflare Worker rollback transport failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "inspect the active deployment and previous Release version before retrying rollback", receipt: `providerVersionId=${previousVersion.id}; credentialMaterialStored=false` });
     }
-    const result = responseResult(response, operation);
+    const result = responseResultWithCredential(response, operation, credential);
     if (isFailure(result)) return result;
     this.deploymentsById.set(result.id, previousVersion.id);
     const providerOperationId = `deployment:${result.id}`;
@@ -612,12 +681,20 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
 
   private async issueCredential(operation: CloudflareWorkerTargetOperation): Promise<CloudflareWorkerCredential | DeliveryAdapterFailure> {
     try {
-      const credential = await this.config.credentialBroker.issue({ accountId: this.config.accountId, scriptName: this.config.scriptName, operation, audience: audienceFor(operation) });
-      if (!credential.token || !credential.credentialId || !credential.expiresAt || !credential.receipt) throw new Error("credential broker returned an incomplete credential receipt");
+      const credential = await this.config.credentialBroker.issue({ accountId: this.config.accountId, scriptName: this.config.scriptName, targetId: this.config.targetId, operation, audience: audienceFor(operation) });
+      if (!credential.token || !credential.credentialId || !credential.expiresAt || !credential.receipt || credential.providerAuthorization !== "observed" || !Array.isArray(credential.scopes)) throw new Error("credential broker returned an incomplete observed credential receipt");
+      credentialMetadataSafe(credential.credentialId, "credentialId");
+      credentialMetadataSafe(credential.expiresAt, "expiresAt");
+      credentialMetadataSafe(credential.receipt, "receipt");
+      credential.scopes.forEach((scope) => { if (typeof scope !== "string" || scope.trim().length === 0) throw new Error("credential broker returned an invalid scope"); credentialMetadataSafe(scope, "scope"); });
       if (credential.audience !== audienceFor(operation)) throw new Error(`credential audience ${credential.audience} does not match ${audienceFor(operation)}`);
+      const expiry = Date.parse(credential.expiresAt);
+      if (!Number.isFinite(expiry) || expiry <= Date.parse(this.now())) throw new Error(`credential ${credential.credentialId} is expired or has an invalid provider expiry observation`);
       return credential;
     } catch (error) {
-      return failure({ operation, code: "credential.broker", message: `Cloudflare Worker credential brokering failed: ${error instanceof Error ? error.message : String(error)}`, retryable: true, recoveryAction: "restore the customer-owned deployment or promotion capability and retry without changing the immutable Release", receipt: "credentialMaterialStored=false; providerMutation=false" });
+      const message = error instanceof Error ? error.message : String(error);
+      const authorization = /revoked|expired|unauthorized|forbidden|scope|authorization/iu.test(message) ? "providerAuthorization=rejected" : "providerAuthorization=unobserved";
+      return failure({ operation, code: "credential.broker", message: `Cloudflare Worker credential brokering failed: ${message}`, retryable: true, recoveryAction: "refresh or rotate the customer-owned broker credential, re-probe provider authorization, and retry without changing the immutable Release", receipt: `${authorization}; providerMutation=false; credentialMaterialStored=false` });
     }
   }
 
@@ -661,7 +738,7 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     } catch (error) {
       return failure({ operation, code: "cloudflare.transport", message: `Cloudflare Worker version upload transport failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "list Worker versions by the Anyam Release tag before retrying the same immutable operation", receipt: `artifactDigest=${artifact.digest}; providerMutation=unknown; credentialMaterialStored=false` });
     }
-    const result = responseResult(response, operation);
+    const result = responseResultWithCredential(response, operation, credential);
     if (isFailure(result)) return result;
     if (!result.id) return failure({ operation, code: "cloudflare.response", message: "Cloudflare accepted the Worker version request without returning a version identity.", outcome: "indeterminate", retryable: true, recoveryAction: "inspect the Worker versions list and reconcile the version tagged with this Release digest", receipt: `artifactDigest=${artifact.digest}; providerMutation=accepted; providerVersionId=missing` });
     this.versionsByPromotion.set(input.release.releaseDigest, result);
@@ -683,7 +760,7 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     } catch (error) {
       return failure({ operation, code: "cloudflare.transport", message: `Cloudflare Worker version lookup transport failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "inspect provider reachability and retry the same immutable Release operation", receipt: "providerOperation=version-list; credentialMaterialStored=false" });
     }
-    const result = responseResult(response, operation);
+    const result = responseResultWithCredential(response, operation, credential);
     if (isFailure(result)) return result;
     const tag = tagForRelease(release);
     const version = (result.items ?? []).find((candidate) => candidate.metadata?.annotations?.["workers/tag"] === tag);

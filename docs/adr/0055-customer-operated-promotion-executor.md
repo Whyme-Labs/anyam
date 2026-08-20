@@ -25,8 +25,9 @@ internal service binding. The executor:
    lineage before provider invocation;
 3. selects the configured customer-owned `cloudflare.worker` Target adapter;
 4. reads digest-addressed Worker Artifacts from the customer-owned R2 binding;
-5. obtains Cloudflare credentials only through an in-process customer broker
-   backed by the executor Worker's secret, never through Authority or a result;
+5. obtains Cloudflare credentials only through an explicit customer-owned
+   broker boundary backed by the customer's secret source, never through
+   Authority or a result;
 6. invokes the qualified `CloudflareWorkerTargetAdapter` and
    `WorkerPromotionCoordinator` with immutable Release, Artifact, Evidence,
    and previous-Release inputs;
@@ -55,9 +56,10 @@ be qualified against the same `/execute` route by setting
 - Artifact bytes must be published to the executor's digest-addressed R2 store
   before Promotion execution; recording an Artifact without storage remains a
   blocked operation.
-- Provider credential lifetime is an explicit customer configuration receipt,
-  not an Anyam-wide limit. It must be a future ISO timestamp and be remeasured
-  before production.
+- Provider credential expiry, status, scopes, and Target authorization are
+  observed by the broker on every issue/probe. The executor never accepts a
+  caller-supplied expiry timestamp and does not claim a universal provider
+  lifetime.
 - Durable reconciliation, late-callback rejection, and operator status are
   defined in ADR 0056 / #179. This boundary returns safe checkpoints but does
   not pretend to own provider mechanics or credential material.

@@ -152,12 +152,14 @@ test("Cloudflare Worker Target uploads digest-bound versions, promotes after pre
     const configuredAdapter = new CloudflareWorkerTargetAdapter({
       accountId: "account:test",
       scriptName: "anyam-target-test",
+      targetId: "target:worker",
       transport: api,
       credentialBroker: {
         async issue(input) {
           issued.push({ operation: input.operation, audience: input.audience });
-          return { token: "provider-secret-never-in-receipt", credentialId: `credential:${issued.length}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, receipt: `credential=${input.operation}; token=redacted` };
+          return { token: "provider-secret-never-in-receipt", credentialId: `credential:${issued.length}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: `credential=${input.operation}; providerAuthorization=observed; credentialMaterialStored=false` };
         },
+        async probe() { return { credentialId: "credential:probe", expiresAt: "2099-01-01T00:00:00.000Z", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=probe; providerAuthorization=observed; credentialMaterialStored=false" }; },
       },
       artifactReader: {
         async read(artifact) {
@@ -259,11 +261,13 @@ test("Cloudflare Worker Target rejects a stale 2xx health response from a previo
     const adapter = new CloudflareWorkerTargetAdapter({
       accountId: "account:stale-health",
       scriptName: "anyam-stale-health",
+      targetId: "target:stale-health",
       transport: api,
       credentialBroker: {
         async issue(input) {
-          return { token: "stale-health-token", credentialId: `credential:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, receipt: "credential=brokered; token=redacted" };
+          return { token: "stale-health-token", credentialId: `credential:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=brokered; providerAuthorization=observed; credentialMaterialStored=false" };
         },
+        async probe() { return { credentialId: "credential:probe", expiresAt: "2099-01-01T00:00:00.000Z", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=probe; providerAuthorization=observed; credentialMaterialStored=false" }; },
       },
       artifactReader: { async read() { return bytes; } },
       previewUrlForVersion: (versionId) => `https://${versionId}.preview.workers.dev`,
@@ -317,11 +321,13 @@ test("Cloudflare Worker Target retries transient preview transport failures when
     const adapter = new CloudflareWorkerTargetAdapter({
       accountId: "account:transport-retry",
       scriptName: "anyam-transport-retry",
+      targetId: "target:transport-retry",
       transport: api,
       credentialBroker: {
         async issue(input) {
-          return { token: "transport-retry-token", credentialId: `credential:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, receipt: "credential=brokered; token=redacted" };
+          return { token: "transport-retry-token", credentialId: `credential:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=brokered; providerAuthorization=observed; credentialMaterialStored=false" };
         },
+        async probe() { return { credentialId: "credential:probe", expiresAt: "2099-01-01T00:00:00.000Z", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=probe; providerAuthorization=observed; credentialMaterialStored=false" }; },
       },
       artifactReader: { async read() { return bytes; } },
       previewUrlForVersion: (versionId) => `https://${versionId}.preview.workers.dev`,
@@ -351,11 +357,13 @@ test("Cloudflare Worker Target fails a non-2xx preview before deployment", async
     const adapter = new CloudflareWorkerTargetAdapter({
       accountId: "account:preview-failure",
       scriptName: "anyam-preview-failure",
+      targetId: "target:preview-failure",
       transport: api,
       credentialBroker: {
         async issue(input) {
-          return { token: "preview-token", credentialId: `credential:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, receipt: "credential=brokered; token=redacted" };
+          return { token: "preview-token", credentialId: `credential:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=brokered; providerAuthorization=observed; credentialMaterialStored=false" };
         },
+        async probe() { return { credentialId: "credential:probe", expiresAt: "2099-01-01T00:00:00.000Z", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=probe; providerAuthorization=observed; credentialMaterialStored=false" }; },
       },
       artifactReader: {
         async read() {

@@ -17,7 +17,8 @@ import {
   CLOUDFLARE_WORKER_TARGET_ADAPTER_ID,
   CloudflareWorkerTargetAdapter,
   createCloudflareWorkerRestTransport,
-  type CloudflareWorkerCredential,
+  type CloudflareWorkerCredentialBroker,
+  type CloudflareWorkerCredentialObservation,
   type CloudflareWorkerHealthResponseValidator,
   type CloudflareWorkerRouteReadinessRetry,
 } from "./worker-target.ts";
@@ -53,8 +54,8 @@ export type PromotionExecutorConfig = {
   adapterId?: string;
   previewSubdomain: string;
   healthUrl?: string;
-  providerToken: string;
-  providerCredentialExpiresAt: string;
+  /** Provider authority is available only through this customer-owned broker. */
+  credentialBroker: CloudflareWorkerCredentialBroker;
   artifactStore: PromotionExecutorArtifactStore;
   fetch?: typeof fetch;
   now?: () => string;
@@ -262,23 +263,6 @@ function createArtifactReader(store: PromotionExecutorArtifactStore) {
   };
 }
 
-function createCredentialBroker(config: PromotionExecutorConfig): { issue(input: { accountId: string; scriptName: string; operation: "preview" | "apply" | "health" | "rollback" | "version-read"; audience: CloudflareWorkerCredential["audience"] }): Promise<CloudflareWorkerCredential> } {
-  return {
-    async issue(input) {
-      if (Date.parse(config.providerCredentialExpiresAt) <= Date.now()) {
-        throw new Error("customer-owned provider credential expiry is not in the future");
-      }
-      return {
-        token: config.providerToken,
-        credentialId: `credential:customer-broker:${input.operation}`,
-        expiresAt: config.providerCredentialExpiresAt,
-        audience: input.audience,
-        receipt: `credential=customer-broker; operation=${input.operation}; token=redacted; credentialMaterialStored=false`,
-      };
-    },
-  };
-}
-
 function targetForContext(context: PromotionExecutionContext, config: PromotionExecutorConfig): WorkerTarget {
   const target = safeObject(context.target, "target") as unknown as Target;
   if (target.id !== config.targetId) {
@@ -440,18 +424,11 @@ function mapPromotionResult(context: PromotionExecutionContext, local: Promotion
 }
 
 export function createPromotionExecutor(config: PromotionExecutorConfig): { execute(context: Readonly<PromotionExecutionContext>): Promise<PromotionExecutionResult> } {
-  if (!config.accountId || !config.scriptName || !config.targetId || !config.previewSubdomain || !config.providerToken || !config.handoffSecret || !config.handoffNonceStore) {
+  if (!config.accountId || !config.scriptName || !config.targetId || !config.previewSubdomain || !config.credentialBroker || !config.handoffSecret || !config.handoffNonceStore) {
     throw new PromotionExecutorConfigurationError(
       "Customer-operated Promotion executor configuration is incomplete.",
-      "configure account ID, Worker script, Target ID, preview subdomain, provider credential secret, handoff secret, nonce store, and credential expiry before binding the service",
+      "configure account ID, Worker script, Target ID, preview subdomain, customer-owned credential broker, handoff secret, and nonce store before binding the service",
       `executor=config-incomplete; handoff=${config.handoffSecret ? "present" : "missing"}; nonceStore=${config.handoffNonceStore ? "present" : "missing"}; providerInvocation=false; credentialMaterialStored=false`,
-    );
-  }
-  if (Date.parse(config.providerCredentialExpiresAt) <= Date.now()) {
-    throw new PromotionExecutorConfigurationError(
-      "Customer-owned provider credential expiry is not in the future.",
-      "set a future provider credential expiry receipt and restart the executor",
-      "executor=credential-expired; providerInvocation=false; credentialMaterialStored=false",
     );
   }
   const adapterId = config.adapterId ?? CLOUDFLARE_WORKER_TARGET_ADAPTER_ID;
@@ -466,8 +443,9 @@ export function createPromotionExecutor(config: PromotionExecutorConfig): { exec
   const adapter = new CloudflareWorkerTargetAdapter({
     accountId: config.accountId,
     scriptName: config.scriptName,
+    targetId: config.targetId,
     transport,
-    credentialBroker: createCredentialBroker(config),
+    credentialBroker: config.credentialBroker,
     artifactReader: createArtifactReader(config.artifactStore),
     previewUrlForVersion: (versionId) => `https://${versionId.slice(0, 8)}-${config.scriptName}.${config.previewSubdomain}.workers.dev/?anyam_preview=1`,
     healthUrl: config.healthUrl ?? `https://${config.scriptName}.${config.previewSubdomain}.workers.dev/health`,
@@ -513,6 +491,10 @@ export function createPromotionExecutor(config: PromotionExecutorConfig): { exec
       return mapPromotionResult(context, local, coordinator.getTarget(), candidate);
     },
   };
+}
+
+export async function probePromotionExecutorProviderAuthorization(config: PromotionExecutorConfig): Promise<CloudflareWorkerCredentialObservation> {
+  return config.credentialBroker.probe({ accountId: config.accountId, scriptName: config.scriptName, targetId: config.targetId });
 }
 
 export function createPromotionExecutorHandler(config: PromotionExecutorConfig): (request: Request) => Promise<Response> {

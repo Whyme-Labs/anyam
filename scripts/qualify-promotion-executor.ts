@@ -93,8 +93,14 @@ async function localQualification(): Promise<Record<string, unknown>> {
     scriptName: "worker-promotion-executor-qualification",
     targetId: "target:promotion-executor-qualification",
     previewSubdomain: "qualification",
-    providerToken: "qualification-token-kept-inside-executor",
-    providerCredentialExpiresAt: "2099-01-01T00:00:00.000Z",
+    credentialBroker: {
+      async probe() {
+        return { credentialId: "credential:qualification", expiresAt: "2099-01-01T00:00:00.000Z", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credentialBroker=qualification-fixture; providerAuthorization=observed; credentialMaterialStored=false" };
+      },
+      async issue(input) {
+        return { token: "qualification-token-kept-inside-broker", credentialId: `credential:qualification:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: `credentialBroker=qualification-fixture; operation=${input.operation}; providerAuthorization=observed; credentialMaterialStored=false` };
+      },
+    },
     handoffSecret,
     handoffNonceStore: { async claim(input) { if (claimed.has(input.nonce)) return false; claimed.add(input.nonce); return true; } },
     fetch: fakeFetch(context.release.id),

@@ -5,9 +5,9 @@ import {
   createCloudflareWorkerRestTransport,
   createMapWorkerArtifactReader,
   type CloudflareWorkerApiResponse,
-  type CloudflareWorkerCredential,
   type CloudflareWorkerHealthResponseValidator,
 } from "../src/cloudflare/worker-target.ts";
+import { createCloudflareApiTokenCredentialBroker } from "../src/cloudflare/promotion-credential-broker.ts";
 import {
   CONTRACT_VERSIONS,
   type Artifact,
@@ -128,19 +128,14 @@ function release(input: { id: string; fileName: string; bytes: Uint8Array }): { 
   return { artifact, immutable: sealVerifiedRelease({ projectId, release: base, artifacts: [artifact], evidence: [], target }) };
 }
 
-/** Build a broker without putting the token into any Anyam state or receipt. */
-function qualificationBroker(token: string): { issue(input: { accountId: string; scriptName: string; operation: "preview" | "apply" | "health" | "rollback" | "version-read"; audience: CloudflareWorkerCredential["audience"] }): Promise<CloudflareWorkerCredential> } {
-  return {
-    async issue(input) {
-      return {
-        token,
-        credentialId: `credential:qualification:${input.operation}`,
-        expiresAt: "2099-01-01T00:00:00.000Z",
-        audience: input.audience,
-        receipt: `credential=brokered; operation=${input.operation}; token=redacted; credentialMaterialStored=false`,
-      };
-    },
-  };
+/** Build a provider-observing broker without putting the token into Anyam state or receipts. */
+function qualificationBroker(token: string, accountId: string, scriptName: string, targetId: string) {
+  return createCloudflareApiTokenCredentialBroker({
+    accountId,
+    scriptName,
+    targetId,
+    tokenSource: async () => ({ token, sourceId: "qualification-env-token", scopes: ["workers:read", "workers:write"] }),
+  });
 }
 
 async function run(): Promise<Record<string, unknown>> {
@@ -193,8 +188,9 @@ async function run(): Promise<Record<string, unknown>> {
   const adapter = new CloudflareWorkerTargetAdapter({
     accountId,
     scriptName,
+    targetId: "target:cloudflare-worker-target-qualification",
     transport,
-    credentialBroker: qualificationBroker(token),
+    credentialBroker: qualificationBroker(token, accountId, scriptName, "target:cloudflare-worker-target-qualification"),
     artifactReader: createMapWorkerArtifactReader(contents),
     previewUrlForVersion: (versionId) => `https://${versionId.slice(0, 8)}-${scriptName}.${previewSubdomain}.workers.dev/?anyam_preview=1`,
     healthUrl,

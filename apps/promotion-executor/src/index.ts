@@ -4,9 +4,11 @@ import { DurableObject } from "cloudflare:workers";
 
 import {
   createPromotionExecutorHandler,
+  probePromotionExecutorProviderAuthorization,
   type PromotionExecutorArtifactStore,
   type PromotionExecutorConfig,
 } from "../../../src/cloudflare/promotion-executor.ts";
+import { createCloudflareApiTokenCredentialBroker } from "../../../src/cloudflare/promotion-credential-broker.ts";
 
 export interface Env {
   ANYAM_PROMOTION_EXECUTOR_ACCOUNT_ID?: string;
@@ -16,7 +18,8 @@ export interface Env {
   ANYAM_PROMOTION_EXECUTOR_HEALTH_URL?: string;
   ANYAM_PROMOTION_EXECUTOR_ADAPTER_ID?: string;
   ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN?: string;
-  ANYAM_PROMOTION_CREDENTIAL_EXPIRES_AT?: string;
+  ANYAM_PROMOTION_CREDENTIAL_SCOPES?: string;
+  ANYAM_PROMOTION_CREDENTIAL_SOURCE_ID?: string;
   ANYAM_PROMOTION_HANDOFF_SECRET?: string;
   ANYAM_PROMOTION_NONCE_STORE?: DurableObjectNamespace;
   ANYAM_PROMOTION_ARTIFACTS: R2Bucket;
@@ -30,16 +33,32 @@ function required(value: string | undefined, field: string): string {
   return value.trim();
 }
 
+function scopes(value: string | undefined): readonly string[] {
+  const parsed = (value ?? "").split(",").map((scope) => scope.trim()).filter(Boolean);
+  if (parsed.length === 0) throw new Error("ANYAM_PROMOTION_CREDENTIAL_SCOPES is required and must list the customer-declared provider scopes");
+  return parsed;
+}
+
 function configFromEnv(env: Env): PromotionExecutorConfig {
   const artifactStore = env.ANYAM_PROMOTION_ARTIFACTS as unknown as PromotionExecutorArtifactStore;
   if (!artifactStore || typeof artifactStore.get !== "function") throw new Error("ANYAM_PROMOTION_ARTIFACTS binding is required");
+  const accountId = required(env.ANYAM_PROMOTION_EXECUTOR_ACCOUNT_ID, "ANYAM_PROMOTION_EXECUTOR_ACCOUNT_ID");
+  const targetId = required(env.ANYAM_PROMOTION_EXECUTOR_TARGET_ID, "ANYAM_PROMOTION_EXECUTOR_TARGET_ID");
+  const scriptName = required(env.ANYAM_PROMOTION_EXECUTOR_SCRIPT_NAME, "ANYAM_PROMOTION_EXECUTOR_SCRIPT_NAME");
+  const credentialToken = required(env.ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN, "ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN");
+  const credentialScopes = scopes(env.ANYAM_PROMOTION_CREDENTIAL_SCOPES);
+  const credentialSourceId = env.ANYAM_PROMOTION_CREDENTIAL_SOURCE_ID?.trim() || "customer-secret-binding";
   return {
-    accountId: required(env.ANYAM_PROMOTION_EXECUTOR_ACCOUNT_ID, "ANYAM_PROMOTION_EXECUTOR_ACCOUNT_ID"),
-    targetId: required(env.ANYAM_PROMOTION_EXECUTOR_TARGET_ID, "ANYAM_PROMOTION_EXECUTOR_TARGET_ID"),
-    scriptName: required(env.ANYAM_PROMOTION_EXECUTOR_SCRIPT_NAME, "ANYAM_PROMOTION_EXECUTOR_SCRIPT_NAME"),
+    accountId,
+    targetId,
+    scriptName,
     previewSubdomain: required(env.ANYAM_PROMOTION_EXECUTOR_PREVIEW_SUBDOMAIN, "ANYAM_PROMOTION_EXECUTOR_PREVIEW_SUBDOMAIN"),
-    providerToken: required(env.ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN, "ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN"),
-    providerCredentialExpiresAt: required(env.ANYAM_PROMOTION_CREDENTIAL_EXPIRES_AT, "ANYAM_PROMOTION_CREDENTIAL_EXPIRES_AT"),
+    credentialBroker: createCloudflareApiTokenCredentialBroker({
+      accountId,
+      scriptName,
+      targetId,
+      tokenSource: async () => ({ token: credentialToken, sourceId: credentialSourceId, scopes: credentialScopes }),
+    }),
     handoffSecret: required(env.ANYAM_PROMOTION_HANDOFF_SECRET, "ANYAM_PROMOTION_HANDOFF_SECRET"),
     handoffNonceStore: {
       async claim(input) {
@@ -63,11 +82,19 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
+      let config: PromotionExecutorConfig;
       try {
-        configFromEnv(env);
-        return json({ protocol: "anyam.promotion-executor-health/v1", status: "healthy", handoff: "signed-and-replay-protected", providerCredentials: "brokered-only", canonicalWrite: false, credentialMaterialStored: false });
+        config = configFromEnv(env);
       } catch (error) {
-        return json({ protocol: "anyam.promotion-executor-health/v1", status: "blocked", code: "executor_configuration_invalid", recoveryAction: "configure the signed Authority handoff and durable nonce store before binding the Realm service", receipt: `executor=config-invalid; field=${error instanceof Error ? error.message : "unknown"}; providerInvocation=false; credentialMaterialStored=false` }, 503);
+        const message = error instanceof Error ? error.message : String(error);
+        return json({ protocol: "anyam.promotion-executor-health/v1", status: "blocked", code: "executor_configuration_invalid", message, recoveryAction: "configure the customer-owned executor bindings and secrets before binding the Realm service", receipt: `executor=config-invalid; providerAuthorization=not-probed; providerInvocation=false; credentialMaterialStored=false` }, 503);
+      }
+      try {
+        const observation = await probePromotionExecutorProviderAuthorization(config);
+        return json({ protocol: "anyam.promotion-executor-health/v1", status: "healthy", handoff: "signed-and-replay-protected", providerCredentials: "brokered-only", providerAuthorization: "observed", credentialId: observation.credentialId, credentialScopes: observation.scopes, providerCredentialExpiresAt: observation.expiresAt, providerOperationId: observation.providerOperationId, receipt: observation.receipt, canonicalWrite: false, credentialMaterialStored: false });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return json({ protocol: "anyam.promotion-executor-health/v1", status: "blocked", code: "provider_authorization_unobserved", message, recoveryAction: "repair or rotate the customer-owned provider credential, then rerun the provider authorization probe before accepting this executor as healthy", receipt: `executor=provider-probe; providerAuthorization=unobserved; providerInvocation=false; credentialMaterialStored=false` }, 503);
       }
     }
     try {

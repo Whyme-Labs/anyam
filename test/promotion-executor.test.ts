@@ -72,8 +72,14 @@ function handlerFor(context: ReturnType<typeof createPromotionExecutionContext>,
     scriptName: "worker-executor",
     targetId: "target:executor",
     previewSubdomain: "customer",
-    providerToken: "provider-token-kept-in-executor",
-    providerCredentialExpiresAt: "2099-01-01T00:00:00.000Z",
+    credentialBroker: {
+      async probe() {
+        return { credentialId: "credential:fixture", expiresAt: "2099-01-01T00:00:00.000Z", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credentialBroker=fixture; providerAuthorization=observed; credentialMaterialStored=false" };
+      },
+      async issue(input) {
+        return { token: "provider-token-kept-in-executor", credentialId: `credential:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: `credentialBroker=fixture; operation=${input.operation}; providerAuthorization=observed; credentialMaterialStored=false` };
+      },
+    },
     handoffSecret: "promotion-executor-test-handoff-secret",
     handoffNonceStore: { async claim(input) { if (claimed.has(input.nonce)) return false; claimed.add(input.nonce); return true; } },
     fetch: fakeFetch(context.release.id),

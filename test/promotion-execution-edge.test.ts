@@ -116,6 +116,17 @@ test("owner Mirror configuration preserves the coordinator receipt when the Dura
       fetch: async (request: Request): Promise<Response> => {
         assert.equal(new URL(request.url).pathname, "/authority/command/internal");
         assert.equal(request.headers.get(REALM_COORDINATOR_INTERNAL_HEADER), REALM_COORDINATOR_INTERNAL_VALUE);
+        const body = await request.json() as Record<string, unknown>;
+        const payload = body.payload as Record<string, unknown> | undefined;
+        if (payload?.operationId === "operation:blocked") {
+          return new Response(JSON.stringify({
+            protocol: "anyam.authority-plane/v1",
+            status: "blocked",
+            recoveryAction: "choose canonical-wins after inspecting the explicit remote rewrite",
+            receipt: "mirror=mirror:detail; operation=force-push; state=blocked; credentialFree=true",
+            value: { mirror: { id: "mirror:detail", state: "blocked" } },
+          }), { status: 409, headers: { "content-type": "application/json" } });
+        }
         return new Response(JSON.stringify({
           protocol: "anyam.authority-plane/v1",
           code: "conflict",
@@ -172,6 +183,42 @@ test("owner Mirror configuration preserves the coordinator receipt when the Dura
   assert.match(decodeURIComponent(String(value.receipt)), /Repository Mirror mirror:detail already exists/);
   assert.match(decodeURIComponent(String(value.receipt)), /transition=not-applied/);
   assert.equal(JSON.stringify(value).includes("credentialMaterial"), false);
+
+  const blockedResponse = await handleAuthorityRequest(new Request("https://realm.example/api/mirrors/mirror%3Adetail/sync", {
+    method: "POST",
+    headers: {
+      cookie: `anyam_owner_session=${encodeURIComponent(hostSessionId)}`,
+      "content-type": "application/json",
+      "idempotency-key": "mirror:detail:blocked",
+    },
+    body: JSON.stringify({
+      mirrorId: "mirror:detail",
+      projectId: "project:detail",
+      sourceSpaceId: "source:detail",
+      provider: "github",
+      remoteRepository: "Whyme-Labs/detail",
+      refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }],
+      disclosure: "public",
+      canonicalProjectRevisionId: "project-revision:detail",
+      canonicalRefs: [],
+      expectedRemoteGeneration: "qualification:force-push",
+      remoteGeneration: "qualification:force-push",
+      remoteRefs: [],
+      operationId: "operation:blocked",
+      checkpointId: "checkpoint:blocked",
+      operationState: "failed",
+      mirrorState: "divergent",
+      pendingInboundChangeIds: [],
+      receipt: "qualification=mirror-detail; operation=force-push; credentialMaterialStored=false",
+    }),
+  }), env);
+
+  if (!blockedResponse) throw new Error("mirror authority edge did not return the blocked response");
+  assert.equal(blockedResponse.status, 409);
+  const blockedValue = await blockedResponse.json() as Record<string, unknown>;
+  assert.equal(blockedValue.status, "blocked");
+  assert.ok(blockedValue.value, JSON.stringify(blockedValue));
+  assert.equal((blockedValue.value as { mirror: { state: string } }).mirror.state, "blocked");
 });
 
 test("owner Promotion status is a read-only credential-free surface", async () => {

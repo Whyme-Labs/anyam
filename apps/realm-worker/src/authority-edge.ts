@@ -312,7 +312,7 @@ async function mirrorMutation(request: Request, env: AnyamRealmOAuthEnv, operati
     return mirrorError(422, "invalid_request", "Correct the typed Mirror request and retry; no provider authority was accepted.", "arguments=invalid; transition=not-applied");
   }
   try {
-    const result = await requestAnyamRealmCoordinator(env, "/authority/command/internal", { protocol: AUTHORITY_COMMAND_PROTOCOL, command: command.command, idempotencyKey: command.idempotencyKey, ...(command.expectedVersion === undefined ? {} : { expectedVersion: command.expectedVersion }), payload: command.payload, sessionId });
+    const result = await requestAnyamRealmCoordinator(env, "/authority/command/internal", { protocol: AUTHORITY_COMMAND_PROTOCOL, command: command.command, idempotencyKey: command.idempotencyKey, ...(command.expectedVersion === undefined ? {} : { expectedVersion: command.expectedVersion }), payload: command.payload, sessionId }, { allowBlocked: operation !== "configure" });
     return json(mirrorMutationValue(result, idempotencyKey), result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";

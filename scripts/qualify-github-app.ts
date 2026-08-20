@@ -500,6 +500,12 @@ async function main(): Promise<void> {
     const initialInspection = await adapter.inspect({ mirror: emptyMirror, knownRefs: [], knownGeneration: "qualification:empty" });
     if (initialInspection.status !== "succeeded") throw new Error(`initial GitHub ref inspection failed: ${initialInspection.errorCode}; ${initialInspection.recoveryAction}`);
     if (initialInspection.value.refs.length !== 0) throw new Error(`disposable repository is not empty; observed ${initialInspection.value.refs.length} mapped refs`);
+    // The provider's verified empty generation is authoritative. Seeding the
+    // Mirror with the local placeholder would make the first canonical
+    // projection look like a remote-and-canonical divergence before any
+    // provider mutation occurred.
+    emptyMirror.remoteGeneration = initialInspection.value.generation;
+    emptyMirror.receipt = `${emptyMirror.receipt}; remoteGeneration=verified-empty; providerReceipt=${initialInspection.value.receipt}`;
 
     const changes: Change[] = [];
     const service = new MirrorCoordinator({ mirror: emptyMirror, remote: adapter, changeSink: changeSink(changes), sourceSpaceClassification: "public" });

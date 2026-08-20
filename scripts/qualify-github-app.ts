@@ -19,7 +19,7 @@ import {
 } from "../src/portability/github-app.ts";
 import { MirrorCoordinator, type MirrorChangeSink } from "../src/portability/mirror.ts";
 import { CONTRACT_VERSIONS, type Change, type GitRef, type RepositoryMirror } from "../src/kernel/contracts.ts";
-import { RealmAuthorityHttpClient, type JsonObject } from "../src/portability/realm-authority-client.ts";
+import { RealmAuthorityHttpClient, RealmAuthorityRequestError, type JsonObject } from "../src/portability/realm-authority-client.ts";
 
 const protocol = "anyam.github-app-qualification/v1" as const;
 const execFile = promisify(execFileCallback);
@@ -282,7 +282,15 @@ async function qualifyCustomerRealmAuthority(input: {
   const createdWorkspace = await client.createWorkspace(projectId, { workspaceId, projectRevisionId, sourceSpaceIds: [sourceSpaceId], projectionId, classification: "public" }, `github-app:${input.qualificationId}:authority:workspace-create`);
   const createdView = authorityObject(createdWorkspace.view, "createdWorkspace.view");
   const projectViewId = authorityField(createdView.id, "createdWorkspace.view.id");
-  const configuredMirror = await client.configureMirror({ mirrorId, projectId, sourceSpaceId, provider: "github", remoteRepository: input.repository, refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }], disclosure: "public", state: "healthy", canonicalProjectRevisionId: projectRevisionId, canonicalRefs: [{ name: "refs/heads/main", oid: input.seeded.initialOid }], remoteGeneration: "qualification:empty", remoteRefs: [], pendingInboundChangeIds: [], receipt: "qualification=github-app-authority; setup=disposable-mirror; credentialMaterialStored=false" }, `github-app:${input.qualificationId}:authority:mirror-configure`);
+  const mirrorPayload = { mirrorId, projectId, sourceSpaceId, provider: "github", remoteRepository: input.repository, refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }], disclosure: "public", state: "healthy", canonicalProjectRevisionId: projectRevisionId, canonicalRefs: [{ name: "refs/heads/main", oid: input.seeded.initialOid }], remoteGeneration: "qualification:empty", remoteRefs: [], pendingInboundChangeIds: [], receipt: "qualification=github-app-authority; setup=disposable-mirror; credentialMaterialStored=false" };
+  const mirrorIdempotencyKey = `github-app:${input.qualificationId}:authority:mirror-configure`;
+  let configuredMirror: JsonObject;
+  try {
+    configuredMirror = await client.configureMirror(mirrorPayload, mirrorIdempotencyKey);
+  } catch (error) {
+    if (!(error instanceof RealmAuthorityRequestError) || error.status < 500) throw error;
+    configuredMirror = await client.configureMirror(mirrorPayload, mirrorIdempotencyKey);
+  }
   authorityMirrorFromResponse(configuredMirror);
   const config = { ...input.authorityConfig, projectId, sourceSpaceId, projectRevisionId, projectViewId, mirrorId };
   const state = await client.inspectState();

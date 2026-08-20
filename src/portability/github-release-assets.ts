@@ -573,7 +573,7 @@ export class FetchGitHubReleaseAssetsClient implements GitHubReleaseAssetsClient
   }
 
   private async requestJson(method: "GET" | "POST" | "PATCH", path: string, token: string, body?: unknown, notFoundIsNull = false): Promise<unknown | null> {
-    const response = await this.requestRaw(method, `${this.apiBaseUrl}${path}`, token, body === undefined ? undefined : Buffer.from(JSON.stringify(body), "utf8"), body === undefined ? undefined : "application/json");
+    const response = await this.requestRaw(method, `${this.apiBaseUrl}${path}`, token, body === undefined ? undefined : Buffer.from(JSON.stringify(body), "utf8"), body === undefined ? undefined : "application/json", notFoundIsNull);
     if (notFoundIsNull && response.status === 404) return null;
     return response.body.length === 0 ? {} : JSON.parse(response.body) as unknown;
   }

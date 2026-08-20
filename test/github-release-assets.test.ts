@@ -275,3 +275,13 @@ test("fetch-backed GitHub client retries a transient provider response with a vi
   assert.equal(attempts, 2);
   assert.deepEqual(sleeps, [0]);
 });
+
+test("fetch-backed GitHub client treats a missing release tag as an empty lookup", async () => {
+  const client = new FetchGitHubReleaseAssetsClient({
+    retry: { delaysMs: [], sizingReceipt: "qualification=fixture; retry=none" },
+    fetchImpl: async () => new Response(JSON.stringify({ message: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } }),
+  });
+
+  const found = await client.findReleaseByTag({ owner, repository, tagName: "missing-release", token: "fixture-token" });
+  assert.equal(found, null);
+});

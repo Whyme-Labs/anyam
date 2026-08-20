@@ -35,6 +35,35 @@ function jsonDigest(value: unknown): string {
   return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
 }
 
+async function seedDisposableReleaseRepository(input: { owner: string; repository: string; token: string }): Promise<string> {
+  const path = ".anyam-release-assets-qualification.txt";
+  const bytes = new TextEncoder().encode("Anyam immutable release-assets qualification seed\n");
+  const url = `https://api.github.com/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repository)}/contents/${path}`;
+  const headers = { accept: "application/vnd.github+json", authorization: `Bearer ${input.token}` };
+  const existingResponse = await fetch(url, { headers });
+  const existingBody = await existingResponse.json().catch(() => ({})) as Record<string, unknown>;
+  if (existingResponse.status === 200) {
+    const existingContent = typeof existingBody.content === "string" ? existingBody.content.replaceAll("\n", "") : "";
+    const existingBytes = existingContent.length > 0 ? Buffer.from(existingContent, "base64") : Buffer.alloc(0);
+    if (digest(existingBytes) !== digest(bytes)) throw new Error(`disposable repository seed ${path} already exists with a different digest; reconcile the owner-controlled repository before retrying`);
+    return `provider=github; operation=seed; path=${path}; bytes=${bytes.byteLength}; digest=${digest(bytes)}; existing=true; credentialMaterialStored=false`;
+  }
+  if (existingResponse.status !== 404) throw new Error(`disposable repository seed lookup returned HTTP ${existingResponse.status}`);
+  const createResponse = await fetch(url, {
+    method: "PUT",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ message: "Seed disposable release-assets qualification repository", branch: "main", content: Buffer.from(bytes).toString("base64") }),
+  });
+  const createBody = await createResponse.json().catch(() => ({})) as Record<string, unknown>;
+  if (!createResponse.ok) {
+    const message = typeof createBody.message === "string" ? createBody.message : "provider error";
+    throw new Error(`disposable repository seed returned HTTP ${createResponse.status}: ${message}`);
+  }
+  const commit = createBody.commit as Record<string, unknown> | undefined;
+  const commitSha = typeof commit?.sha === "string" ? commit.sha : "not-returned";
+  return `provider=github; operation=seed; path=${path}; bytes=${bytes.byteLength}; digest=${digest(bytes)}; commit=${commitSha}; existing=false; credentialMaterialStored=false`;
+}
+
 function artifact(id: string, bytes: Uint8Array, disclosure: DisclosureClassification = "public"): Artifact {
   return {
     protocol: CONTRACT_VERSIONS.artifact,
@@ -354,6 +383,7 @@ async function qualifyLive(): Promise<Record<string, unknown>> {
   const authorityClient = new RealmAuthorityHttpClient({ baseUrl: authorityInputs.baseUrl, ownerSession: authorityInputs.ownerSession });
   const tagName = `anyam-${verified.releaseDigest.slice("sha256:".length)}`;
   const client = new FetchGitHubReleaseAssetsClient({ retry: { delaysMs: [], sizingReceipt: "qualification=caller-supplied; retry=none" } });
+  const seedReceipt = await seedDisposableReleaseRepository({ owner, repository: name, token });
   const existing = await client.findReleaseByTag({ owner, repository: name, tagName, token });
   if (existing) throw new Error(`disposable Release already exists for deterministic tag ${tagName}; reconcile it before retrying without deleting an owner object`);
   let authorityQualification: Awaited<ReturnType<typeof qualifyCustomerRealmAuthority>> | undefined;
@@ -391,7 +421,7 @@ async function qualifyLive(): Promise<Record<string, unknown>> {
   if (!result.value.providerReleaseId) throw new Error("live release publication omitted provider release identity");
   if (cleanup.status !== "succeeded") throw new Error(`live release cleanup did not complete: ${JSON.stringify(cleanup)}`);
   if (!authorityCleanup || authorityCleanup.status !== "succeeded") throw new Error(`customer Realm Authority cleanup did not complete: ${JSON.stringify(authorityCleanup ?? { status: "not-run" })}`);
-  return { status: "succeeded", mode: "live", qualificationScope: "provider-adapter-and-customer-realm-authority", repository, providerReleaseId: result.value.providerReleaseId, providerAssetId: result.value.providerAssetId, releaseDigest: result.value.releaseDigest, artifactDigest: result.value.artifactDigest, receipt: result.receipt, authority: { projectId: authorityQualification?.projectId, releaseId: authorityQualification?.releaseId, targetId: authorityQualification?.targetId, promotionStatus: authorityQualification?.promotionStatus, receipt: authorityQualification?.receipt }, cleanup: { provider: cleanup, authority: authorityCleanup } };
+  return { status: "succeeded", mode: "live", qualificationScope: "provider-adapter-and-customer-realm-authority", repository, seedReceipt, providerReleaseId: result.value.providerReleaseId, providerAssetId: result.value.providerAssetId, releaseDigest: result.value.releaseDigest, artifactDigest: result.value.artifactDigest, receipt: result.receipt, authority: { projectId: authorityQualification?.projectId, releaseId: authorityQualification?.releaseId, targetId: authorityQualification?.targetId, promotionStatus: authorityQualification?.promotionStatus, receipt: authorityQualification?.receipt }, cleanup: { provider: cleanup, authority: authorityCleanup } };
 }
 
 const fixture = await qualifyFixture();

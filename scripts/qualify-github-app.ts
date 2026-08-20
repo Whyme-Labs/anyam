@@ -413,10 +413,7 @@ async function waitForSecondProposalRevision(input: { adapter: GitHubAppProjecti
   let attempts = 1;
   let lastHeadCommit = input.first.headCommit;
   if (input.fallbackHeadCommit && input.fallbackHeadCommit !== input.first.headCommit) {
-    const current = await input.adapter.observePullRequest({ number: input.number });
-    if (current.status === "succeeded" && current.value.number === input.number && current.value.state === "open" && current.value.repository === input.first.repository) {
-      return { first, second: proposalRevision({ ...current.value, headCommit: input.fallbackHeadCommit }), attempts, lastHeadCommit: input.fallbackHeadCommit, headSource: "git-ref-readback" };
-    }
+    return { first, second: proposalRevision({ ...input.first, headCommit: input.fallbackHeadCommit }), attempts, lastHeadCommit: input.fallbackHeadCommit, headSource: "git-ref-readback" };
   }
   while (Date.now() - started < input.waitMs) {
     await new Promise((resolve) => setTimeout(resolve, input.pollMs));
@@ -581,6 +578,7 @@ async function main(): Promise<void> {
 
     const observedPr = await adapter.observePullRequest({ number: pullRequestNumber });
     if (observedPr.status !== "succeeded") throw new Error(`pull-request observation failed: ${observedPr.errorCode}; ${observedPr.recoveryAction}`);
+    if (observedPr.value.headRef !== seeded.proposalBranch) throw new Error(`pull-request ${pullRequestNumber} head ref did not match the seeded qualification branch; observed=${observedPr.value.headRef}; expected=${seeded.proposalBranch}`);
     const proposal = adapter.externalProposal(observedPr.value, { projectViewId: "project-view:github-app-qualification-public", baseProjectRevisionId: "project-revision:github-app-qualification:one", disclosure: "public", deliveryId: "delivery:github-app:pr", sourceSpaceSnapshots: { [emptyMirror.sourceSpaceId]: observedPr.value.headCommit } });
     if (proposal.proposalKey !== String(pullRequestNumber) || proposal.remoteRepository !== repository || JSON.stringify(proposal).includes("title")) throw new Error("pull-request proposal was not stable and metadata-minimal");
     await runGit(seeded.directory, ["update-ref", `refs/heads/${seeded.proposalBranch}`, seeded.proposalSecondOid], gitMaxBufferBytes);

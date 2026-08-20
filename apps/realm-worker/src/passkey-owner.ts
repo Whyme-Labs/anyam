@@ -17,6 +17,7 @@ import type {
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "./coordinator-protocol.ts";
 import { toOAuthSubject } from "../../../src/identity/oauth-subject.ts";
 import { customerRealmOperatorPreflight, inspectCustomerRealmOperatorStatus, type CustomerRealmOperatorIdentityObservation } from "../../../src/cloudflare/realm-operator.ts";
+import { parseMcpDeliveryBinding } from "./mcp-delivery-grant.ts";
 
 export const ANYAM_PASSKEY_OWNER_PROTOCOL = "anyam.passkey-owner/v1" as const;
 export const ANYAM_PASSKEY_CHALLENGE_TTL_SECONDS = 300;
@@ -816,14 +817,25 @@ async function authenticationVerify(request: Request, env: AnyamRealmOAuthEnv): 
   }
 }
 
-export const anyamPasskeyOwnerAuthorization: AnyamRealmOAuthAuthorizationAdapter = async ({ rawRequest, env }: AnyamRealmOAuthAuthorization): Promise<AnyamRealmOAuthAuthorizationDecision> => {
+export const anyamPasskeyOwnerAuthorization: AnyamRealmOAuthAuthorizationAdapter = async ({ rawRequest, env, request }: AnyamRealmOAuthAuthorization): Promise<AnyamRealmOAuthAuthorizationDecision> => {
   const session = await readSession(rawRequest, env);
   if (!session || session.realmId !== realmId(env) || !session.kernelSessionId) return { status: "blocked", code: "owner_authentication_required", recoveryAction: "Complete the customer-owned passkey ceremony at /owner/login, then retry OAuth authorization.", receipt: "ownerSession=missing-or-invalid; kernelSession=missing" };
   try {
     const kernel = await realmCoordinatorRequest(env, "/identity/session/validate", { sessionId: session.kernelSessionId });
     const kernelSession = kernel.session as Record<string, unknown> | undefined;
     if (!kernelSession || kernelSession.id !== session.kernelSessionId || kernelSession.actorId !== session.actorId || kernelSession.principalId !== session.userId) return { status: "blocked", code: "owner_kernel_session_mismatch", recoveryAction: "Re-authenticate through /owner/login after inspecting the Realm coordinator session chain.", receipt: "kernelSession=identity-mismatch; oauthGrant=not-created" };
-    return { status: "authorized", userId: session.userId, displayName: session.displayName, realmId: session.realmId, sessionId: session.kernelSessionId, scopes: ["project.read", "project.write", "workspace.inspect", "workspace.write", "change.inspect", "source.read", "change.write", "run.invoke", "landing.request", "release.create", "target.configure", "promotion.request"], props: { kernelSessionId: session.kernelSessionId }, authorizationReceipt: `ownerAuth=passkey; ownerRecord=verified; policy=qualification-owner-default; kernelMembership=verified; kernelSession=${session.kernelSessionId}; session=${session.sessionId}; credential=${session.credentialId}` };
+    const resourceValue = typeof request.resource === "string" ? request.resource : Array.isArray(request.resource) && request.resource.length === 1 ? request.resource[0] : undefined;
+    const binding = parseMcpDeliveryBinding(resourceValue, session.realmId);
+    const mutationScopes = ["workspace.write", "change.write", "run.invoke", "landing.request", "release.create", "target.configure", "promotion.request"];
+    const mutationRequested = mutationScopes.some((scope) => request.scope.includes(scope));
+    if (mutationRequested && (!binding?.agentId || !binding.agentSessionId || !binding.taskId || !binding.capabilityGrantId)) return { status: "blocked", code: "mcp_agent_delegation_required", recoveryAction: "authorize the MCP resource with agentId, agentSessionId, taskId, capabilityGrantId, and Source Space disclosure from an owner-approved delegation", receipt: "oauthGrant=agent-task-required; mutation=not-authorized; canonicalWrite=false" };
+    const delegatedCapability = request.scope.includes("workspace.write") ? "workspace.write" : request.scope.includes("change.write") ? "change.publish_revision" : request.scope.includes("run.invoke") ? "run.invoke" : request.scope.includes("landing.request") ? "landing.request" : request.scope.includes("release.create") ? "release.create" : request.scope.includes("target.configure") ? "target.configure" : "promotion.request";
+    let props: Record<string, unknown> = { kernelSessionId: session.kernelSessionId, realmId: session.realmId };
+    if (mutationRequested && binding?.agentId && binding.agentSessionId && binding.taskId && binding.capabilityGrantId) {
+      const delegated = await realmCoordinatorRequest(env, "/identity/agent/delegation/validate", { humanSessionId: session.kernelSessionId, agentId: binding.agentId, agentSessionId: binding.agentSessionId, taskId: binding.taskId, grantId: binding.capabilityGrantId, capability: delegatedCapability, resource: binding.resourceRef, sourceSpaceIds: binding.sourceSpaceIds });
+      props = { kernelSessionId: binding.agentSessionId, realmId: session.realmId, agentId: binding.agentId, taskId: binding.taskId, capabilityGrantId: binding.capabilityGrantId, resource: binding.resourceRef, sourceSpaceIds: binding.sourceSpaceIds, delegatedBySessionId: session.kernelSessionId, ...(typeof delegated.modelProvider === "string" ? { modelProvider: delegated.modelProvider } : {}) };
+    }
+    return { status: "authorized", userId: session.userId, displayName: session.displayName, realmId: session.realmId, sessionId: session.kernelSessionId, scopes: ["project.read", "project.write", "workspace.inspect", "workspace.write", "change.inspect", "source.read", "change.write", "run.invoke", "landing.request", "release.create", "target.configure", "promotion.request"], props, authorizationReceipt: `ownerAuth=passkey; ownerRecord=verified; policy=agent-task-bound; kernelMembership=verified; kernelSession=${session.kernelSessionId}; session=${session.sessionId}; credential=${session.credentialId}` };
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
     return { status: "blocked", code: "owner_kernel_session_invalid", recoveryAction: "Re-authenticate through /owner/login and retry after checking the Realm coordinator.", receipt: `kernelSession=invalid; oauthGrant=not-created; detail=${detail}` };

@@ -301,7 +301,8 @@ async function authorizeRequest(request: Request, env: AnyamRealmOAuthEnv, adapt
     const providerGrant = (await provider.listUserGrants(userSubject)).items.find((grant) => grant.metadata?.anyamGrantId === localGrantId);
     if (!providerGrant) return jsonResponse({ code: "oauth_grant_persistence_unverified", recoveryAction: "Provider authorization completed without a discoverable grant mapping; retry only after checking provider grant storage.", receipt: `${ANYAM_REALM_OAUTH_CONSENT_RECEIPT}; providerGrant=unmapped; localGrant=${localGrantId}` }, 503);
     try {
-      await requestAnyamRealmCoordinator(env, "/identity/oauth-grant/record", { sessionId: authorization.sessionId, grantId: localGrantId, providerGrantId: providerGrant.id, clientId: client.clientId, scopes: grantedScopes, ...(mcpResource ? { resource: mcpResource } : {}) });
+      const authorizationProps = authorization.props ?? {};
+      await requestAnyamRealmCoordinator(env, "/identity/oauth-grant/record", { sessionId: typeof authorizationProps.kernelSessionId === "string" ? authorizationProps.kernelSessionId : authorization.sessionId, grantId: localGrantId, providerGrantId: providerGrant.id, clientId: client.clientId, scopes: grantedScopes, ...(mcpResource ? { resource: mcpResource } : {}), ...(typeof authorizationProps.agentId === "string" ? { agentId: authorizationProps.agentId } : {}), ...(typeof authorizationProps.taskId === "string" ? { taskId: authorizationProps.taskId } : {}), ...(typeof authorizationProps.capabilityGrantId === "string" ? { capabilityGrantId: authorizationProps.capabilityGrantId } : {}), ...(Array.isArray(authorizationProps.sourceSpaceIds) ? { sourceSpaceIds: authorizationProps.sourceSpaceIds } : {}) });
     } catch (error) {
       await provider.revokeGrant(providerGrant.id, userSubject).catch(() => undefined);
       const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";

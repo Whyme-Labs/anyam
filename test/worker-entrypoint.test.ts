@@ -661,7 +661,7 @@ test("Realm Worker MCP entrypoint validates the live delivery grant before autho
         const body = await request.json() as Record<string, unknown>;
         if (body.sessionId !== sessionId) return new Response(JSON.stringify({ code: "session.invalid" }), { status: 403 });
         if (path === "/identity/oauth-grant/validate-delivery") return new Response(JSON.stringify({ protocol: "anyam.realm-coordinator/v1", status: "delivery-grant-valid", credentialFree: true, canonicalWrite: false, providerExecution: "not-performed", receipt: "mcpDelivery=task-grant-live; oauthGrant=resource-bound; canonicalWrite=false" }), { status: 200, headers: { "content-type": "application/json" } });
-        if (path === "/authority/command/internal") return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "succeeded", version: 1, value: {
+        if (path === "/authority/mcp-command/internal" || path === "/authority/command/internal") return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "succeeded", version: 1, value: {
           landing: { protocol: "anyam.landing/v1", id: "landing:entrypoint", projectId: "project:entrypoint", changeId: "change:entrypoint", changeRevisionId: "change-revision:entrypoint", previousProjectRevisionId: "project-revision:entrypoint:1", projectRevisionId: "project-revision:entrypoint:2" },
           canonicalRevision: { protocol: "anyam.kernel/v1", id: "project-revision:entrypoint:2", projectId: "project:entrypoint" },
           change: { protocol: "anyam.change/v1", id: "change:entrypoint", projectId: "project:entrypoint", intentId: "intent:entrypoint", baseProjectRevisionId: "project-revision:entrypoint:1", status: "landed", latestRevisionId: "change-revision:entrypoint" },
@@ -671,13 +671,13 @@ test("Realm Worker MCP entrypoint validates the live delivery grant before autho
     }),
   };
   const env = { ANYAM_INSTALLATION_ID: "mcp-entrypoint-delivery-test", REALM_COORDINATOR: namespace } as unknown as AnyamRealmMcpEnv;
-  const props: AnyamRealmMcpProps = { scopes: ["landing.request"], kernelSessionId: sessionId, anyamGrantId: "grant:mcp-entrypoint-delivery", mcpResource: "https://realm.example/mcp/projects/project:entrypoint?sourceSpaceId=source:public" };
+  const props: AnyamRealmMcpProps = { scopes: ["landing.request"], realmId: "realm:mcp-entrypoint-delivery-test", kernelSessionId: sessionId, agentId: "agent:mcp-entrypoint-delivery", taskId: "task:mcp-entrypoint-delivery", capabilityGrantId: "grant:mcp-entrypoint-task", resource: { realmId: "realm:mcp-entrypoint-delivery-test", projectId: "project:entrypoint" }, sourceSpaceIds: ["source:public"], anyamGrantId: "grant:mcp-entrypoint-delivery", mcpResource: "https://realm.example/mcp/projects/project:entrypoint?sourceSpaceId=source:public" };
   const response = await handleAnyamRealmMcpRequest(new Request("https://realm.example/mcp/projects/project:entrypoint", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "landing.apply", arguments: { idempotencyKey: "entrypoint-landing", projectId: "project:entrypoint", changeId: "change:entrypoint", changeRevisionId: "change-revision:entrypoint", expectedCanonicalProjectRevisionId: "project-revision:entrypoint:1", projectRevisionId: "project-revision:entrypoint:2" } } }) }), env, props);
   assert.equal(response.status, 200);
   const body = await response.json() as Record<string, unknown>;
   assert.equal((body.result as Record<string, unknown>).isError, false);
   assert.equal(calls[0], "/identity/oauth-grant/validate-delivery");
-  assert.equal(calls[1], "/authority/command/internal");
+  assert.equal(calls[1], "/authority/mcp-command/internal");
   assert.equal(calls.length, 2);
   assert.equal(JSON.stringify(body).includes("grant:mcp-entrypoint-delivery"), false);
   assert.equal(JSON.stringify(body).includes("session:mcp-entrypoint-delivery"), false);

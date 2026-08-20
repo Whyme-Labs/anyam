@@ -189,6 +189,18 @@ function coordinatorCapabilityArray(body: CoordinatorRequestBody, key: string): 
   return values as Capability[];
 }
 
+function commandNameForMcp(body: CoordinatorRequestBody): string {
+  return coordinatorString(body, "command");
+}
+
+function capabilityForMcpCommand(command: string): Capability | undefined {
+  if (command === "workspace.create") return "workspace.write";
+  if (command === "change.create" || command === "revision.publish") return "change.publish_revision";
+  if (command === "run.request") return "run.invoke";
+  if (isMcpDeliveryOperation(command)) return mcpDeliveryScope(command);
+  return undefined;
+}
+
 function delegationCredentialClasses(body: CoordinatorRequestBody): CredentialClass[] {
   const values = body.allowedCredentialClasses === undefined ? [...GENERIC_AGENT_CREDENTIAL_CLASSES] : coordinatorStringArray(body, "allowedCredentialClasses") as CredentialClass[];
   const allowed = new Set(GENERIC_AGENT_CREDENTIAL_CLASSES);
@@ -1085,6 +1097,55 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     });
   }
 
+  private async authorityMcpCommand(body: CoordinatorRequestBody): Promise<Response> {
+    if (coordinatorString(body, "surface") !== "mcp") throw new AuthorityPlaneError({ code: "invalid_request", message: "The MCP Authority boundary requires surface=mcp.", recoveryAction: "send the mutation through the remote MCP handler; no transition was accepted", receipt: "authority=mcp; surface=mismatch; transition=not-applied" });
+    const sessionId = coordinatorString(body, "sessionId");
+    const taskId = coordinatorString(body, "taskId");
+    const capabilityGrantId = coordinatorString(body, "capabilityGrantId");
+    const agentId = coordinatorString(body, "agentId");
+    const commandName = commandNameForMcp(body);
+    const capability = coordinatorString(body, "capability") as Capability;
+    const expectedCapability = capabilityForMcpCommand(commandName);
+    if (!expectedCapability || capability !== expectedCapability) throw new AuthorityPlaneError({ code: "invalid_request", message: "The MCP command and capability do not match the declared mutation boundary.", recoveryAction: "use the documented Agent capability for this MCP command; no transition was accepted", receipt: `authority=mcp; command=${commandName}; capability=${capability}; expected=${expectedCapability ?? "unsupported"}; transition=not-applied` });
+    const sourceSpaceIds = coordinatorStringArray(body, "sourceSpaceIds");
+    const resourceValue = body.resource;
+    if (resourceValue === null || typeof resourceValue !== "object" || Array.isArray(resourceValue)) throw new AuthorityPlaneError({ code: "invalid_request", message: "MCP mutation resource must be an object.", recoveryAction: "send the exact delegated Project, Workspace, Change, and Source Space resource; no transition was accepted", receipt: "authority=mcp; resource=object-required; transition=not-applied" });
+    const resourceBody = resourceValue as Record<string, unknown>;
+    const resource: ResourceRef = {
+      realmId: this.requireIdentity().realm.id,
+      ...(typeof resourceBody.organizationId === "string" ? { organizationId: resourceBody.organizationId } : {}),
+      ...(typeof resourceBody.projectId === "string" ? { projectId: resourceBody.projectId } : {}),
+      ...(typeof resourceBody.sourceSpaceId === "string" ? { sourceSpaceId: resourceBody.sourceSpaceId } : {}),
+      ...(typeof resourceBody.workspaceId === "string" ? { workspaceId: resourceBody.workspaceId } : {}),
+      ...(typeof resourceBody.changeId === "string" ? { changeId: resourceBody.changeId } : {}),
+      ...(typeof resourceBody.runId === "string" ? { runId: resourceBody.runId } : {}),
+      ...(typeof resourceBody.releaseId === "string" ? { releaseId: resourceBody.releaseId } : {}),
+      ...(typeof resourceBody.targetId === "string" ? { targetId: resourceBody.targetId } : {}),
+    };
+    const identity = this.requireIdentity();
+    const session = identity.validateSession(sessionId);
+    const identitySnapshot = identity.getRecoverySnapshot();
+    const actor = identitySnapshot.actors[session.actorId];
+    if (!actor || actor.kind !== "agent" || actor.agentId !== agentId) throw new RealmIdentityError({ code: "mcp.agent_identity_invalid", message: "The MCP mutation session is not the delegated Agent Actor named by the grant.", recoveryAction: "reauthorize the MCP client with the exact delegated Agent Session, Task, and Grant", receipt: "authority=mcp; agent-session=invalid; transition=not-applied" });
+    const validation = identity.validateTaskGrant({ principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, taskId, grantId: capabilityGrantId, resource, sourceSpaceIds, action: capability, effects: Array.isArray(body.effects) ? body.effects.filter((value): value is string => typeof value === "string") : [] });
+    if (!validation.valid) throw new RealmIdentityError({ code: validation.code, message: "The MCP Agent Task/Grant is not live for this mutation.", recoveryAction: validation.recoveryAction, receipt: `${validation.receipt}; authority=mcp; transition=not-applied` });
+    const modelProvider = identitySnapshot.agents[agentId]?.modelProvider;
+    for (const sourceSpaceId of sourceSpaceIds) identity.authorize({ operation: commandNameForMcp(body), capability, principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, taskId, grantId: capabilityGrantId, resource, sourceSpaceId, ...(modelProvider ? { modelProvider } : {}), ...(Array.isArray(body.effects) && typeof body.effects[0] === "string" ? { effect: body.effects[0] } : {}) });
+    const payload = body.payload;
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new AuthorityPlaneError({ code: "invalid_request", message: "Authority command payload must be a JSON object.", recoveryAction: "send the typed command payload as an object; no transition was accepted", receipt: "authority=mcp; payload=object-required; transition=not-applied" });
+    const command: AuthorityCommand = { protocol: body.protocol === undefined ? AUTHORITY_COMMAND_PROTOCOL : coordinatorString(body, "protocol") as typeof AUTHORITY_COMMAND_PROTOCOL, command: commandName as AuthorityCommandName, idempotencyKey: coordinatorString(body, "idempotencyKey"), ...(typeof body.expectedVersion === "number" ? { expectedVersion: body.expectedVersion } : {}), payload: payload as Record<string, unknown> };
+    const result = await this.ctx.blockConcurrencyWhile(async () => {
+      const current = await this.authoritySnapshot();
+      const coordinator = new AuthorityPlaneCoordinator(current);
+      const delegatedBySessionId = typeof body.delegatedBySessionId === "string" && body.delegatedBySessionId.length > 0 ? body.delegatedBySessionId : undefined;
+      const authoritySession: AuthoritySession = { realmId: session.realmId, principalId: session.principalId, actorId: session.actorId, sessionId: session.id, clientId: session.clientId, authorizationEpoch: validation.authorizationEpoch, taskId, capabilityGrantId, ...(delegatedBySessionId ? { delegatedBySessionId } : {}), ...(modelProvider ? { modelProvider } : {}) };
+      const accepted = coordinator.execute(command, authoritySession);
+      await this.ctx.storage.put(REALM_AUTHORITY_SNAPSHOT_KEY, coordinator.snapshot());
+      return accepted;
+    });
+    return coordinatorJson({ ...result, provenance: { principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, agentId, taskId, capabilityGrantId, authorizationEpoch: validation.authorizationEpoch }, credentialFree: true, canonicalWrite: false, receipt: `${result.receipt}; authority=mcp; taskGrant=validated; agent=${agentId}; task=${taskId}; grant=${capabilityGrantId}; canonicalWrite=false` }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
+  }
+
   private providerInput(body: CoordinatorRequestBody, authorization: CustomerProviderOwnerAuthorization): {
     realmId: string;
     installationId: string;
@@ -1141,6 +1202,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/promotion/execute/internal") return await this.authorityPromotionExecute(body);
       if (url.pathname === "/authority/promotion/reconcile/internal") return await this.authorityPromotionReconcile(body);
       if (url.pathname === "/authority/promotion/status/internal") return await this.authorityPromotionStatus(body);
+      if (url.pathname === "/authority/mcp-command/internal") return await this.authorityMcpCommand(body);
       if (url.pathname === "/authority/command/internal") return await this.authorityCommand(body);
 
       if (url.pathname === "/identity/passkey-challenge/issue") {
@@ -1255,9 +1317,11 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
           const deliveryOperations = MCP_DELIVERY_OPERATIONS.filter((operation) => scopes.includes(mcpDeliveryScope(operation)));
           const deliveryScopes = deliveryOperations.map((operation) => mcpDeliveryScope(operation)) as Capability[];
           const requestedResource = body.resource === undefined ? undefined : coordinatorString(body, "resource");
-          const binding = deliveryOperations.length > 0 ? parseMcpDeliveryBinding(requestedResource, identity.realm.id) : undefined;
-          if (deliveryOperations.length > 0 && !binding) throw new RealmIdentityError({ code: "oauth.grant_delivery_binding_required", message: "A delivery-capable MCP OAuth grant must name a project-scoped resource.", recoveryAction: "authorize the MCP client with a resource such as /mcp/projects/<projectId> (optionally narrowed to a Workspace or Change); no grant was recorded", receipt: "oauthGrant=delivery-binding-required; taskGrant=not-created; canonicalWrite=false" });
-          const authority = deliveryOperations.length > 0 ? await this.authoritySnapshot() : undefined;
+          const mutationScopes = ["workspace.write", "change.write", "run.invoke", "landing.request", "release.create", "target.configure", "promotion.request"];
+          const mutationRequested = mutationScopes.some((scope) => scopes.includes(scope));
+          const binding = mutationRequested ? parseMcpDeliveryBinding(requestedResource, identity.realm.id) : undefined;
+          if (mutationRequested && (!binding || !binding.agentId || !binding.agentSessionId || !binding.taskId || !binding.capabilityGrantId)) throw new RealmIdentityError({ code: "oauth.grant_agent_binding_required", message: "A mutation-capable MCP OAuth grant must name an owner-approved Agent Task, Session, Grant, Project, and Source Space resource.", recoveryAction: "authorize the MCP client with agentId, agentSessionId, taskId, capabilityGrantId, and Source Space disclosure in the project-scoped resource; no grant was recorded", receipt: "oauthGrant=agent-task-binding-required; taskGrant=not-created; canonicalWrite=false" });
+          const authority = mutationRequested ? await this.authoritySnapshot() : undefined;
           let sourceSpaceIds: string[] = [];
           if (binding && authority) {
             const project = authority.projects[binding.projectId];
@@ -1269,12 +1333,19 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
             const change = binding.changeId ? authority.changes[binding.changeId] : undefined;
             if (binding.changeId && (!change || change.projectId !== binding.projectId || (binding.workspaceId !== undefined && change.workspaceId !== binding.workspaceId))) throw new RealmIdentityError({ code: "oauth.grant_delivery_resource_not_found", message: "The delivery MCP Change is not available for this Project and Workspace.", recoveryAction: "use a discoverable Project Change resource and restart OAuth authorization", receipt: "oauthGrant=delivery-change-not-found; discoverable=false; taskGrant=not-created" });
           }
-          const record: StoredOAuthGrant = { protocol: "anyam.oauth-grant/v1", id, providerGrantId, realmId: identity.realm.id, principalId: session.principalId, clientId, scopes, status: "active", createdAt, sessionId: session.id, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch, expiresAt: session.expiresAt, ...(binding ? { mcpResource: binding.resource, resource: binding.resourceRef } : {}), sourceSpaceIds, deliveryActions: deliveryOperations };
+          if (mutationRequested && binding) {
+            const actor = identity.getRecoverySnapshot().actors[session.actorId];
+            if (!actor || actor.kind !== "agent" || actor.agentId !== binding.agentId || session.id !== binding.agentSessionId) throw new RealmIdentityError({ code: "oauth.grant_agent_session_invalid", message: "The OAuth grant session is not the delegated Agent Session named by the resource.", recoveryAction: "reuse the exact delegated Agent Session and restart authorization", receipt: "oauthGrant=agent-session-mismatch; taskGrant=not-created" });
+            const capability = deliveryOperations[0] ? mcpDeliveryScope(deliveryOperations[0]) : scopes.includes("workspace.write") ? "workspace.write" : scopes.includes("change.write") ? "change.publish_revision" : "run.invoke";
+            const validation = identity.validateTaskGrant({ principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, taskId: binding.taskId, grantId: binding.capabilityGrantId, resource: binding.resourceRef, sourceSpaceIds, action: capability });
+            if (!validation.valid) throw new RealmIdentityError({ code: validation.code, message: "The delegated Agent Task/Grant is not live for this OAuth resource.", recoveryAction: validation.recoveryAction, receipt: validation.receipt });
+          }
+          const record: StoredOAuthGrant = { protocol: "anyam.oauth-grant/v1", id, providerGrantId, realmId: identity.realm.id, principalId: session.principalId, clientId, scopes, status: "active", createdAt, sessionId: session.id, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch, expiresAt: session.expiresAt, ...(binding ? { mcpResource: binding.resource, resource: binding.resourceRef } : {}), sourceSpaceIds, deliveryActions: deliveryOperations, ...(mutationRequested && binding ? { taskId: binding.taskId, capabilityGrantId: binding.capabilityGrantId } : {}) };
           if (existing) {
             if (existing.providerGrantId !== providerGrantId || existing.principalId !== record.principalId || existing.clientId !== clientId || JSON.stringify(existing.scopes) !== JSON.stringify(scopes) || existing.mcpResource !== record.mcpResource || JSON.stringify(existing.sourceSpaceIds) !== JSON.stringify(record.sourceSpaceIds)) throw new RealmIdentityError({ code: "oauth.grant_conflict", message: `OAuth grant ${id} is already bound to different provider state.`, recoveryAction: "do not reuse a local grant identity; reconcile the provider grant before retrying", receipt: `grant=${id}; conflict=true; authority=unchanged` });
             return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-recorded", grant: storedOAuthGrantProjection(existing), receipt: "oauthGrant=idempotent; revocable=true; credentialMaterialStored=false" });
           }
-          if (binding && authority) {
+          if (binding && authority && !mutationRequested) {
             const created = await this.transitionIdentity(async (next) => {
               const ownerGrant = next.createOwnerTaskGrant({ sessionId: session.id, purpose: `Remote MCP delivery OAuth grant ${id}`, resource: binding.resourceRef, sourceSpaceIds, actions: deliveryScopes, effects: deliveryOperations.map((operation) => String(operation)), expiresAt: session.expiresAt });
               const boundRecord: StoredOAuthGrant = { ...record, taskId: ownerGrant.task.id, capabilityGrantId: ownerGrant.grant.id };
@@ -1631,6 +1702,31 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
           const credentials = classes.map((credentialClass) => next.issueCredential({ class: credentialClass, principalId: humanSession.principalId, actorId: agentSession.actorId, clientId: agentSession.clientId, sessionId: agentSession.id, taskId: task.id, grantId: grant.id, resource }));
           return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "credentials-issued", agentId, agentSessionId, taskId, grantId, workspaceId: REALM_QUALIFICATION_WORKSPACE_ID, credentials: credentials.map((credential) => ({ id: credential.id, class: credential.class, audience: CREDENTIAL_AUDIENCES[credential.class], token: credential.token, expiresAt: credential.expiresAt })), identity: identitySummary(next), receipt: `kernelMembership=verified; credentialExchange=delegated-agent; classes=${classes.join(",")}; workspace=${REALM_QUALIFICATION_WORKSPACE_ID}; canonicalWrite=false; credentialMaterialStored=false` });
         });
+      }
+
+      if (url.pathname === "/identity/agent/delegation/validate") {
+        const humanSessionId = coordinatorString(body, "humanSessionId");
+        const agentId = coordinatorString(body, "agentId");
+        const agentSessionId = coordinatorString(body, "agentSessionId");
+        const taskId = coordinatorString(body, "taskId");
+        const grantId = coordinatorString(body, "grantId");
+        const capability = coordinatorString(body, "capability") as Capability;
+        const sourceSpaceIds = coordinatorStringArray(body, "sourceSpaceIds");
+        const resourceValue = body.resource;
+        if (resourceValue === null || typeof resourceValue !== "object" || Array.isArray(resourceValue)) throw new RealmIdentityError({ code: "delegation.resource_invalid", message: "Delegation validation requires the exact resource object.", recoveryAction: "reuse the resource returned by the owner-approved delegation", receipt: "delegation=resource-object-required; validation=not-accepted" });
+        const resourceBody = resourceValue as Record<string, unknown>;
+        const resource: ResourceRef = { realmId: identity.realm.id, ...(typeof resourceBody.projectId === "string" ? { projectId: resourceBody.projectId } : {}), ...(typeof resourceBody.sourceSpaceId === "string" ? { sourceSpaceId: resourceBody.sourceSpaceId } : {}), ...(typeof resourceBody.workspaceId === "string" ? { workspaceId: resourceBody.workspaceId } : {}), ...(typeof resourceBody.changeId === "string" ? { changeId: resourceBody.changeId } : {}) };
+        const humanSession = identity.validateSession(humanSessionId);
+        const agentSession = identity.validateSession(agentSessionId);
+        const state = identity.getRecoverySnapshot();
+        const agent = state.agents[agentId];
+        const actor = state.actors[agentSession.actorId];
+        const task = state.tasks[taskId];
+        const grant = state.grants[grantId];
+        if (!agent || agent.status !== "active" || agent.principalId !== humanSession.principalId || !actor || actor.kind !== "agent" || actor.agentId !== agentId || agentSession.principalId !== humanSession.principalId || agentSession.delegatedBySessionId !== humanSession.id || !task || task.agentId !== agentId || task.sessionId !== agentSession.id || !grant || grant.agentId !== agentId || grant.taskId !== task.id || grant.sessionId !== agentSession.id) throw new RealmIdentityError({ code: "delegation.chain_invalid", message: "The Agent Session, Task, and Capability Grant do not form the owner-approved delegation chain.", recoveryAction: "reuse the exact delegated Agent identifiers or create a fresh delegation", receipt: "delegation=principal-actor-session-task-grant-chain-invalid; validation=not-accepted" });
+        const validation = identity.validateTaskGrant({ principalId: humanSession.principalId, actorId: agentSession.actorId, clientId: agentSession.clientId, sessionId: agentSession.id, taskId, grantId, resource, sourceSpaceIds, action: capability });
+        if (!validation.valid) throw new RealmIdentityError({ code: validation.code, message: "The delegated Agent Task/Grant is not live for this resource.", recoveryAction: validation.recoveryAction, receipt: validation.receipt });
+        return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "delegation-valid", agentId, agentSessionId, taskId, grantId, modelProvider: agent.modelProvider, authorizationEpoch: validation.authorizationEpoch, sourceSpaceCount: validation.sourceSpaceCount, resource, receipt: `${validation.receipt}; delegation=validated; agent=${agentId}; task=${taskId}; grant=${grantId}; canonicalWrite=false` });
       }
 
       if (url.pathname === "/identity/qualification/revoke") {

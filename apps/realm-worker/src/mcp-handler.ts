@@ -7,6 +7,8 @@ import { releaseCreateCommand, releaseCreateValue, RELEASE_CREATE_COMMAND } from
 import { targetConfigureCommand, targetConfigureValue, TARGET_CONFIGURE_COMMAND } from "./target-contract.ts";
 import { promotionRequestCommand, promotionRequestValue, PROMOTION_REQUEST_COMMAND } from "./promotion-contract.ts";
 import { MCP_DELIVERY_SCOPE_BY_OPERATION } from "./mcp-delivery-grant.ts";
+import type { Capability } from "../../../src/identity/realm.ts";
+import type { ResourceRef } from "../../../src/kernel/contracts.ts";
 
 export const ANYAM_MCP_PROTOCOL_VERSION = "2025-06-18" as const;
 export const ANYAM_MCP_PROTOCOL = "anyam.remote-mcp/v1" as const;
@@ -39,11 +41,19 @@ const MCP_DELIVERY_SCOPE_BY_TOOL: Record<string, string> = { ...MCP_DELIVERY_SCO
 
 export type AnyamRealmMcpProps = {
   readonly scopes: readonly string[];
+  readonly realmId?: string;
   readonly kernelSessionId?: string;
   /** Provider-issued grant handle carried in the encrypted OAuth grant. */
   readonly anyamGrantId?: string;
   /** Canonical OAuth resource indicator; required for delivery mutations. */
   readonly mcpResource?: string;
+  /** Delegated agent identity carried by mutation-capable OAuth grants. */
+  readonly agentId?: string;
+  readonly taskId?: string;
+  readonly capabilityGrantId?: string;
+  readonly delegatedBySessionId?: string;
+  readonly resource?: ResourceRef;
+  readonly sourceSpaceIds?: readonly string[];
 };
 
 export type AnyamRealmMcpEnv = {
@@ -186,6 +196,36 @@ async function requestMcpCoordinator(env: AnyamRealmMcpEnv, path: string, body: 
   return payload;
 }
 
+function mcpMutationContext(props: AnyamRealmMcpProps, operation: string, payload: Record<string, unknown>, effects: readonly string[] = []): Record<string, unknown> {
+  if (!props.kernelSessionId || !props.realmId || !props.agentId || !props.taskId || !props.capabilityGrantId) throw new McpBootstrapError("auth", "The MCP mutation is not bound to a delegated Agent Task and Capability Grant.", "authorize the MCP client through an owner-approved Agent Task, then retry; no transition was accepted", `mcp=${operation}; agent=${props.agentId ? "present" : "missing"}; task=${props.taskId ? "present" : "missing"}; grant=${props.capabilityGrantId ? "present" : "missing"}; transition=not-applied`);
+  const capability: Capability = operation === "workspace.create" ? "workspace.write" : operation === "change.create" || operation === "revision.publish" ? "change.publish_revision" : operation === "run.request" ? "run.invoke" : operation as Capability;
+  if (operation === "project.create") throw new McpBootstrapError("auth", "Project creation is an owner operation, not an Agent Task mutation.", "create the Project through the authenticated owner surface before delegating a Workspace Task", "mcp=project.create; agentMutation=not-supported; transition=not-applied");
+  const resource: ResourceRef = props.resource ?? {
+    realmId: props.realmId,
+    ...(typeof payload.projectId === "string" ? { projectId: payload.projectId } : {}),
+    ...(typeof payload.workspaceId === "string" ? { workspaceId: payload.workspaceId } : {}),
+    ...(typeof payload.changeId === "string" ? { changeId: payload.changeId } : {}),
+  };
+  return {
+    surface: "mcp",
+    sessionId: props.kernelSessionId,
+    agentId: props.agentId,
+    taskId: props.taskId,
+    capabilityGrantId: props.capabilityGrantId,
+    ...(props.delegatedBySessionId ? { delegatedBySessionId: props.delegatedBySessionId } : {}),
+    capability,
+    resource,
+    sourceSpaceIds: [...(props.sourceSpaceIds ?? [])],
+    effects: [...effects],
+  };
+}
+
+async function requestMcpMutationCoordinator(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, command: Record<string, unknown>, operation: string, effects: readonly string[] = []): Promise<Record<string, unknown>> {
+  const payload = command.payload;
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new McpBootstrapError("invalid_request", "The MCP mutation payload must be an object.", "send the documented typed mutation payload; no transition was accepted", `mcp=${operation}; payload=object-required; transition=not-applied`);
+  return requestMcpCoordinator(env, "/authority/mcp-command/internal", { ...command, ...mcpMutationContext(props, operation, payload as Record<string, unknown>, effects) });
+}
+
 async function mcpProjectInspect(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, projectId: string): Promise<Record<string, unknown>> {
   if (!props.kernelSessionId) throw new Error("mcp_kernel_session_missing");
   const result = await requestMcpCoordinator(env, "/authority/project/internal", { sessionId: props.kernelSessionId, projectId });
@@ -278,7 +318,7 @@ async function mcpRunRequest(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, a
     throw new RunEvidenceInputError("The typed Run request arguments are invalid.", "send an object containing only the documented typed Run request arguments; no transition was accepted", "mcp=run.request; arguments=invalid; transition=not-applied");
   }
   try {
-    const result = await requestMcpCoordinator(env, "/authority/command/internal", { protocol: "anyam.authority-command/v1", command: input.command, idempotencyKey: input.idempotencyKey, ...(input.expectedVersion === undefined ? {} : { expectedVersion: input.expectedVersion }), payload: input.payload, sessionId: props.kernelSessionId });
+    const result = await requestMcpMutationCoordinator(env, props, { protocol: "anyam.authority-command/v1", command: input.command, idempotencyKey: input.idempotencyKey, ...(input.expectedVersion === undefined ? {} : { expectedVersion: input.expectedVersion }), payload: input.payload }, "run.request");
     const value = runRequestValue(result, input.idempotencyKey, "mcp");
     return { ...value, protocol: ANYAM_MCP_PROTOCOL, receipt: `${String(value.receipt)}; oauth=audience-validated` };
   } catch (error) {
@@ -336,7 +376,9 @@ async function mcpBootstrap(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, op
   const { command, idempotencyKey } = input;
   let result: Record<string, unknown>;
   try {
-    result = await requestMcpCoordinator(env, "/authority/command/internal", { protocol: "anyam.authority-command/v1", command: command.command, idempotencyKey, ...(command.expectedVersion === undefined ? {} : { expectedVersion: command.expectedVersion }), payload: command.payload, sessionId: props.kernelSessionId });
+    result = operation === "project.create" && !props.agentId
+      ? await requestMcpCoordinator(env, "/authority/command/internal", { protocol: "anyam.authority-command/v1", command: command.command, idempotencyKey, ...(command.expectedVersion === undefined ? {} : { expectedVersion: command.expectedVersion }), payload: command.payload, sessionId: props.kernelSessionId })
+      : await requestMcpMutationCoordinator(env, props, { protocol: "anyam.authority-command/v1", command: command.command, idempotencyKey, ...(command.expectedVersion === undefined ? {} : { expectedVersion: command.expectedVersion }), payload: command.payload }, operation);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
     const kind: McpBootstrapErrorKind = detail.includes("not_found") ? "not_found" : detail.includes("idempotency_conflict") || detail.includes("stale_state") || detail.includes("conflict") ? "conflict" : detail.includes("invalid_request") ? "invalid_request" : detail.includes("session.") || detail.includes("session_") ? "auth" : "coordinator";
@@ -361,7 +403,7 @@ async function mcpRevisionPublish(env: AnyamRealmMcpEnv, props: AnyamRealmMcpPro
   }
   let result: Record<string, unknown>;
   try {
-    result = await requestMcpCoordinator(env, "/authority/command/internal", { protocol: "anyam.authority-command/v1", command: input.command, idempotencyKey: input.idempotencyKey, ...(input.expectedVersion === undefined ? {} : { expectedVersion: input.expectedVersion }), payload: input.payload, sessionId: props.kernelSessionId });
+    result = await requestMcpMutationCoordinator(env, props, { protocol: "anyam.authority-command/v1", command: input.command, idempotencyKey: input.idempotencyKey, ...(input.expectedVersion === undefined ? {} : { expectedVersion: input.expectedVersion }), payload: input.payload }, "revision.publish");
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
     const kind: RevisionPublishInputError["kind"] = detail.includes("not_found") ? "not_found" : detail.includes("idempotency_conflict") || detail.includes("stale_state") || detail.includes("conflict") ? "conflict" : detail.includes("invalid_request") ? "invalid_request" : detail.includes("session.") || detail.includes("session_") ? "auth" : "coordinator";
@@ -477,14 +519,13 @@ async function mcpDeliveryMutation(
   }
   let result: Record<string, unknown>;
   try {
-    result = await requestMcpCoordinator(env, "/authority/command/internal", {
+    result = await requestMcpMutationCoordinator(env, props, {
       protocol: "anyam.authority-command/v1",
       command: input.command,
       idempotencyKey: input.idempotencyKey,
       ...(input.expectedVersion === undefined ? {} : { expectedVersion: input.expectedVersion }),
       payload: input.payload,
-      sessionId: props.kernelSessionId,
-    });
+    }, operation, [operation]);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
     const kind: McpDeliveryErrorKind = detail.includes("not_found") ? "not_found" : detail.includes("idempotency_conflict") || detail.includes("stale_state") || detail.includes("conflict") ? "conflict" : detail.includes("invalid_request") ? "invalid_request" : detail.includes("session.") || detail.includes("session_") ? "auth" : "coordinator";

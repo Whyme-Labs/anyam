@@ -19,6 +19,10 @@ export type McpDeliveryBinding = {
   readonly workspaceId?: string;
   readonly changeId?: string;
   readonly sourceSpaceIds: readonly string[];
+  readonly agentId?: string;
+  readonly agentSessionId?: string;
+  readonly taskId?: string;
+  readonly capabilityGrantId?: string;
 };
 
 function safePathIdentifier(value: string): string | undefined {
@@ -74,9 +78,17 @@ export function parseMcpDeliveryBinding(value: unknown, realmId: string): McpDel
   }
   const sourceSpaceIds = [...new Set(parsed.searchParams.getAll("sourceSpaceId").map((entry) => entry.trim()))];
   if (sourceSpaceIds.some((entry) => !safePathIdentifier(entry))) return undefined;
+  const agentId = parsed.searchParams.get("agentId")?.trim() || undefined;
+  const agentSessionId = parsed.searchParams.get("agentSessionId")?.trim() || undefined;
+  const taskId = parsed.searchParams.get("taskId")?.trim() || undefined;
+  const capabilityGrantId = parsed.searchParams.get("capabilityGrantId")?.trim() || undefined;
+  const delegatedValues = [agentId, agentSessionId, taskId, capabilityGrantId];
+  if (delegatedValues.some((entry) => entry !== undefined && !safePathIdentifier(entry))) return undefined;
+  if (delegatedValues.some((entry) => entry !== undefined) && delegatedValues.some((entry) => entry === undefined)) return undefined;
   const resourceRef: ResourceRef = {
     realmId,
     projectId,
+    ...(sourceSpaceIds.length === 1 ? { sourceSpaceId: sourceSpaceIds[0] } : {}),
     ...(workspaceId ? { workspaceId } : {}),
     ...(changeId ? { changeId } : {}),
   };
@@ -88,6 +100,10 @@ export function parseMcpDeliveryBinding(value: unknown, realmId: string): McpDel
     ...(workspaceId ? { workspaceId } : {}),
     ...(changeId ? { changeId } : {}),
     sourceSpaceIds,
+    ...(agentId ? { agentId } : {}),
+    ...(agentSessionId ? { agentSessionId } : {}),
+    ...(taskId ? { taskId } : {}),
+    ...(capabilityGrantId ? { capabilityGrantId } : {}),
   };
 }
 

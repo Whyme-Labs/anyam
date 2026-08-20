@@ -67,6 +67,10 @@ export type AuthoritySession = {
   sessionId: string;
   clientId: string;
   authorizationEpoch: number;
+  taskId?: string;
+  capabilityGrantId?: string;
+  delegatedBySessionId?: string;
+  modelProvider?: string;
 };
 
 export type AuthorityAuditEvent = {
@@ -77,6 +81,10 @@ export type AuthorityAuditEvent = {
   outcome: "succeeded" | "blocked" | "indeterminate";
   stateVersion: number;
   occurredAt: string;
+  taskId?: string;
+  capabilityGrantId?: string;
+  delegatedBySessionId?: string;
+  modelProvider?: string;
   receipt: string;
 };
 
@@ -455,6 +463,10 @@ export class AuthorityPlaneCoordinator {
       outcome: result.status,
       stateVersion: next.version,
       occurredAt: now(),
+      ...(session.taskId ? { taskId: session.taskId } : {}),
+      ...(session.capabilityGrantId ? { capabilityGrantId: session.capabilityGrantId } : {}),
+      ...(session.delegatedBySessionId ? { delegatedBySessionId: session.delegatedBySessionId } : {}),
+      ...(session.modelProvider ? { modelProvider: session.modelProvider } : {}),
       receipt: result.receipt,
     });
     this.state = next;

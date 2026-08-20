@@ -71,7 +71,7 @@ export class RealmAuthorityHttpClient {
     return new URL(pathname, this.baseUrl).toString();
   }
 
-  private async request(pathname: string, input: { method: "GET" | "POST"; body?: JsonObject; idempotencyKey?: string; allowStatuses?: readonly number[] }): Promise<JsonObject> {
+  private async request(pathname: string, input: { method: "GET" | "POST"; body?: JsonObject; idempotencyKey?: string; allowStatuses?: readonly number[]; allowBlocked?: boolean }): Promise<JsonObject> {
     const headers = new Headers({ accept: "application/json", cookie: this.cookie });
     if (input.body !== undefined) {
       headers.set("content-type", "application/json");
@@ -86,7 +86,8 @@ export class RealmAuthorityHttpClient {
     });
     const parsed: unknown = await response.json().catch(() => ({}));
     const payload = object(parsed, "response");
-    if (!response.ok && !(input.allowStatuses ?? []).includes(response.status)) {
+    const allowedStatus = (input.allowStatuses ?? []).includes(response.status) && (!input.allowBlocked || payload.status === "blocked");
+    if (!response.ok && !allowedStatus) {
       throw new RealmAuthorityRequestError({
         status: response.status,
         code: safeField(payload.code, `http_${response.status}`),
@@ -122,11 +123,11 @@ export class RealmAuthorityHttpClient {
   }
 
   syncMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> {
-    return this.request(`/api/mirrors/${encodeURIComponent(mirrorId)}/sync`, { method: "POST", body, idempotencyKey });
+    return this.request(`/api/mirrors/${encodeURIComponent(mirrorId)}/sync`, { method: "POST", body, idempotencyKey, allowStatuses: [409], allowBlocked: true });
   }
 
   reconcileMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> {
-    return this.request(`/api/mirrors/${encodeURIComponent(mirrorId)}/reconcile`, { method: "POST", body, idempotencyKey });
+    return this.request(`/api/mirrors/${encodeURIComponent(mirrorId)}/reconcile`, { method: "POST", body, idempotencyKey, allowStatuses: [409], allowBlocked: true });
   }
 
   exportAuthoritySnapshot(): Promise<JsonObject> {

@@ -83,6 +83,31 @@ test("Realm Authority client can inspect an expected blocked command without hid
   assert.equal(result.receipt, "promotion=blocked; credentialFree=true");
 });
 
+test("Realm Authority client returns expected blocked Mirror checkpoints as typed results", async () => {
+  const client = new RealmAuthorityHttpClient({
+    baseUrl: "https://realm.example",
+    ownerSession: "session:owner",
+    fetchImpl: async () => new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "blocked", recoveryAction: "choose canonical-wins after inspecting the explicit remote rewrite", receipt: "mirror=mirror:qualification; operation=force-push; state=blocked; credentialFree=true", value: { mirror: { id: "mirror:qualification", state: "blocked" } } }), { status: 409, headers: { "content-type": "application/json" } }),
+  });
+
+  const result = await client.syncMirror("mirror:qualification", { operationId: "operation:force-push" }, "qualification:force-push");
+  assert.equal(result.status, "blocked");
+  assert.equal((result.value as { mirror: { state: string } }).mirror.state, "blocked");
+});
+
+test("Realm Authority client does not reinterpret an unexpected Mirror 409 as a checkpoint", async () => {
+  const client = new RealmAuthorityHttpClient({
+    baseUrl: "https://realm.example",
+    ownerSession: "session:owner",
+    fetchImpl: async () => new Response(JSON.stringify({ code: "mirror_conflict", recoveryAction: "read the current Mirror checkpoint", receipt: "mirror=mirror:qualification; conflict=true; credentialFree=true" }), { status: 409, headers: { "content-type": "application/json" } }),
+  });
+
+  await assert.rejects(
+    () => client.syncMirror("mirror:qualification", { operationId: "operation:unexpected-conflict" }, "qualification:unexpected-conflict"),
+    (error: unknown) => error instanceof RealmAuthorityRequestError && error.status === 409 && error.code === "mirror_conflict",
+  );
+});
+
 test("Realm Authority client refuses insecure remote endpoints and cookie-header injection", () => {
   assert.throws(
     () => new RealmAuthorityHttpClient({ baseUrl: "http://realm.example", ownerSession: "session:owner" }),

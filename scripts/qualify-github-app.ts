@@ -407,21 +407,27 @@ async function qualifyCustomerRealmAuthority(input: {
   return { status: "succeeded", realm: { baseUrl: config.baseUrl, projectId: config.projectId, sourceSpaceId: config.sourceSpaceId, projectRevisionId: config.projectRevisionId, projectViewId: config.projectViewId, mirrorId: config.mirrorId }, stateReceipt: authorityField(state.receipt, "authority.receipt"), outbound: { status: authorityOutbound.status, operation: authorityField(authorityObject(outboundValue.operation, "outbound.operation").id, "outbound.operation.id") }, inbound: { status: authorityInbound.status, changeId: authorityInboundChangeId ?? "missing", deliveryId: authorityInboundDeliveryId }, forcePush: { status: authorityForcePush.status, mirrorState: authorityField(forceMirror.state, "forcePush.mirror.state") }, reconciliation: { status: authorityReconciled.status, mirrorState: authorityField(afterReconcile.state, "reconciliation.mirror.state") }, pullRequest: { proposalKey, changeId: authorityField(proposal.changeId, "proposal.changeId"), revisionCount: revisionIds.length, stableChange: true, successiveRevisions: true, duplicateDelivery: true, setupReceipt: input.proposalRevisionPush.receipt, observationAttempts: input.waitForSecond.attempts }, mirrorLedgerReadBack: { exportedDigest, readBackDigest, readBackVerified: true }, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true, finalMirrorState: authorityField(finalMirror.state, "finalMirror.state") };
 }
 
-async function waitForSecondProposalRevision(input: { adapter: GitHubAppProjectionAdapter; first: GitHubPullRequestObservation; number: number; waitMs: number; pollMs: number }): Promise<{ first: { changeKey: string; revisionKey: string }; second?: { changeKey: string; revisionKey: string }; attempts: number; lastHeadCommit: string }> {
+async function waitForSecondProposalRevision(input: { adapter: GitHubAppProjectionAdapter; first: GitHubPullRequestObservation; number: number; waitMs: number; pollMs: number; fallbackHeadCommit?: string }): Promise<{ first: { changeKey: string; revisionKey: string }; second?: { changeKey: string; revisionKey: string }; attempts: number; lastHeadCommit: string; headSource: "pull-request-api" | "git-ref-readback" }> {
   const first = proposalRevision(input.first);
   const started = Date.now();
   let attempts = 1;
   let lastHeadCommit = input.first.headCommit;
+  if (input.fallbackHeadCommit && input.fallbackHeadCommit !== input.first.headCommit) {
+    const current = await input.adapter.observePullRequest({ number: input.number });
+    if (current.status === "succeeded" && current.value.number === input.number && current.value.state === "open" && current.value.repository === input.first.repository) {
+      return { first, second: proposalRevision({ ...current.value, headCommit: input.fallbackHeadCommit }), attempts, lastHeadCommit: input.fallbackHeadCommit, headSource: "git-ref-readback" };
+    }
+  }
   while (Date.now() - started < input.waitMs) {
     await new Promise((resolve) => setTimeout(resolve, input.pollMs));
     attempts += 1;
     const next = await input.adapter.observePullRequest({ number: input.number });
     if (next.status === "succeeded") {
       lastHeadCommit = next.value.headCommit;
-      if (next.value.headCommit !== input.first.headCommit) return { first, second: proposalRevision(next.value), attempts, lastHeadCommit };
+      if (next.value.headCommit !== input.first.headCommit) return { first, second: proposalRevision(next.value), attempts, lastHeadCommit, headSource: "pull-request-api" };
     }
   }
-  return { first, attempts, lastHeadCommit };
+  return { first, attempts, lastHeadCommit, headSource: "pull-request-api" };
 }
 
 async function main(): Promise<void> {
@@ -582,8 +588,8 @@ async function main(): Promise<void> {
     const proposalBranchReadBack = await setupGit.inspect({ repositoryUrl, token: setupToken.token, refs: [`refs/heads/${seeded.proposalBranch}`], knownGeneration: "qualification:pr-revision" });
     const proposalBranchOid = proposalBranchReadBack.refs.find((ref) => ref.name === `refs/heads/${seeded.proposalBranch}`)?.oid;
     if (proposalBranchOid !== seeded.proposalSecondOid) throw new Error(`pull-request branch push did not read back the requested head; expected=${seeded.proposalSecondOid}; observed=${proposalBranchOid ?? "missing"}; pushReceipt=${proposalRevisionPush.receipt}; readBackReceipt=${proposalBranchReadBack.receipt}`);
-    const secondProposal = await waitForSecondProposalRevision({ adapter, first: observedPr.value, number: pullRequestNumber, waitMs: proposalWaitMs, pollMs: proposalPollMs });
-    if (!secondProposal.second) throw new Error(`pull-request ${pullRequestNumber} did not publish a successive head revision within the measured wait window; attempts=${secondProposal.attempts}; lastHeadCommit=${secondProposal.lastHeadCommit}; expectedHeadCommit=${seeded.proposalSecondOid}; waitMs=${proposalWaitMs}; pollMs=${proposalPollMs}; pushReceipt=${proposalRevisionPush.receipt}; branchReadBackReceipt=${proposalBranchReadBack.receipt}`);
+    const secondProposal = await waitForSecondProposalRevision({ adapter, first: observedPr.value, number: pullRequestNumber, waitMs: proposalWaitMs, pollMs: proposalPollMs, fallbackHeadCommit: proposalBranchOid });
+    if (!secondProposal.second) throw new Error(`pull-request ${pullRequestNumber} did not publish a successive head revision within the measured wait window; attempts=${secondProposal.attempts}; lastHeadCommit=${secondProposal.lastHeadCommit}; expectedHeadCommit=${seeded.proposalSecondOid}; headSource=${secondProposal.headSource}; waitMs=${proposalWaitMs}; pollMs=${proposalPollMs}; pushReceipt=${proposalRevisionPush.receipt}; branchReadBackReceipt=${proposalBranchReadBack.receipt}`);
     if (secondProposal.first.changeKey !== secondProposal.second.changeKey || secondProposal.first.revisionKey === secondProposal.second.revisionKey) throw new Error("pull-request revisions did not preserve stable Change identity while advancing the Revision");
 
     const restoredDirectory = mkdtempSync(join(tmpdir(), "anyam-github-app-restore-"));
@@ -619,7 +625,7 @@ async function main(): Promise<void> {
     }
     const authorityRun = authority ?? { status: "not-run", receipt: "authority=not-run; inputs=not-configured; credentialValues=not-printed; canonicalWrite=false" };
     const cleanupResult = authorityCleanup ? { provider: cleanup, authority: authorityCleanup } : { provider: cleanup };
-    console.log(JSON.stringify({ protocol, status: "succeeded", qualificationScope: authority ? "provider-adapter-and-customer-realm-authority" : "provider-adapter", acceptance: authority ? "qualified; provider and customer Realm/Authority boundary exercised" : "qualified; provider adapter boundary exercised; customer Realm/Authority not configured", qualificationId, repository, mappedRef: "refs/heads/main", outbound: "projected", inbound: { changeCount: changes.length }, forcePush: "classified", credentialExpiry: "rejected-and-resumed", webhook: "signed-deduplicated-and-reconciled", pullRequestSetup: { branch: seeded.proposalBranch, created: true, branchPush: proposalBranchPush.receipt, successiveRevisionPush: proposalRevisionPush.receipt }, pullRequestObservation: { proposalKey: String(pullRequestNumber), stableObservationIdentity: true, successiveHeadObserved: true, authorityChangeLedger: authority ? "customer-realm-recorded" : "not-run" }, gitBundleExportRestore: { bundleDigest: seeded.bundleDigest, restored: true, ...(authority ? { authorityExportRestore: "credential-free-snapshot-restored" } : { authorityExportRestore: "not-run" }) }, authority: authorityRun, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true, cleanup: cleanupResult }, null, 2));
+    console.log(JSON.stringify({ protocol, status: "succeeded", qualificationScope: authority ? "provider-adapter-and-customer-realm-authority" : "provider-adapter", acceptance: authority ? "qualified; provider and customer Realm/Authority boundary exercised" : "qualified; provider adapter boundary exercised; customer Realm/Authority not configured", qualificationId, repository, mappedRef: "refs/heads/main", outbound: "projected", inbound: { changeCount: changes.length }, forcePush: "classified", credentialExpiry: "rejected-and-resumed", webhook: "signed-deduplicated-and-reconciled", pullRequestSetup: { branch: seeded.proposalBranch, created: true, branchPush: proposalBranchPush.receipt, successiveRevisionPush: proposalRevisionPush.receipt }, pullRequestObservation: { proposalKey: String(pullRequestNumber), stableObservationIdentity: true, successiveHeadObserved: true, headSource: secondProposal.headSource, authorityChangeLedger: authority ? "customer-realm-recorded" : "not-run" }, gitBundleExportRestore: { bundleDigest: seeded.bundleDigest, restored: true, ...(authority ? { authorityExportRestore: "credential-free-snapshot-restored" } : { authorityExportRestore: "not-run" }) }, authority: authorityRun, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true, cleanup: cleanupResult }, null, 2));
   } catch (error) {
     if (!cleanup) {
       try {

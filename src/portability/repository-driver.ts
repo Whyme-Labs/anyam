@@ -33,6 +33,22 @@ export type RepositoryDriverFailure = {
 
 export type RepositoryDriverResult<T> = RepositoryDriverSuccess<T> | RepositoryDriverFailure;
 
+/**
+ * A capability state is deliberately not boolean. `unverified` means the
+ * driver may provide the behavior but Anyam has no receipt for this provider
+ * boundary; `unsupported` means the driver does not provide it.
+ */
+export type RepositoryDriverCapabilityState = "observed" | "unverified" | "unsupported";
+
+export type RepositoryDriverConsistencyCapabilities = {
+  durableBeforeAcknowledgement: RepositoryDriverCapabilityState;
+  linearizableRefPublication: RepositoryDriverCapabilityState;
+  readAfterWrite: RepositoryDriverCapabilityState;
+  replayAfterCacheLoss: RepositoryDriverCapabilityState;
+  exactExportRestore: RepositoryDriverCapabilityState;
+  receipt: string;
+};
+
 export type RepositoryDriverCapabilities = {
   git: {
     clone: boolean;
@@ -56,6 +72,7 @@ export type RepositoryDriverCapabilities = {
     export: boolean;
     restore: boolean;
   };
+  consistency: RepositoryDriverConsistencyCapabilities;
 };
 
 export type RepositoryDriverDescriptor = {

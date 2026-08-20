@@ -89,6 +89,14 @@ export class InMemoryRepositoryDriver implements RepositoryDriver {
           git: { clone: false, fetch: false, push: false, branch: false, tag: false, diff: false, commit: false, objectFormats: ["sha1"] },
           lifecycle: { create: true, import: false, export: false, restore: false, verify: false },
           lfs: { enumerate: false, export: false, restore: false },
+          consistency: {
+            durableBeforeAcknowledgement: "unsupported",
+            linearizableRefPublication: "unsupported",
+            readAfterWrite: "unsupported",
+            replayAfterCacheLoss: "unsupported",
+            exactExportRestore: "unsupported",
+            receipt: "provider=in-memory; consistency=unsupported; providerFactsAreNotAnyamLimits=true",
+          },
         },
       },
     };

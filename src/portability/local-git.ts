@@ -730,6 +730,14 @@ export class LocalGitRepositoryDriver implements RepositoryDriver {
       },
       lifecycle: { create: true, import: true, export: true, restore: true, verify: true },
       lfs: { enumerate: true, export: true, restore: true },
+      consistency: {
+        durableBeforeAcknowledgement: "unverified",
+        linearizableRefPublication: "observed",
+        readAfterWrite: "observed",
+        replayAfterCacheLoss: "unsupported",
+        exactExportRestore: "observed",
+        receipt: "provider=local-git; consistency=local-conformance; durableBeforeAcknowledgement=unverified; linearizableRefPublication=observed; readAfterWrite=observed; replayAfterCacheLoss=unsupported; exactExportRestore=observed; providerFactsAreNotAnyamLimits=true",
+      },
     };
   }
 

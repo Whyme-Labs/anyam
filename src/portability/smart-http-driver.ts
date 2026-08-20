@@ -333,6 +333,14 @@ export class SmartHttpRepositoryDriver implements RepositoryDriver {
       git: { clone: true, fetch: true, push: true, branch: true, tag: true, diff: true, commit: true, objectFormats: ["sha1", "sha256"] },
       lifecycle: { create: false, import: true, export: true, restore: true, verify: true },
       lfs: { enumerate: true, export: true, restore: true },
+      consistency: {
+        durableBeforeAcknowledgement: "unverified",
+        linearizableRefPublication: "unverified",
+        readAfterWrite: "unverified",
+        replayAfterCacheLoss: "unsupported",
+        exactExportRestore: "observed",
+        receipt: "provider=smart-http; consistency=provider-conformance-required; durableBeforeAcknowledgement=unverified; linearizableRefPublication=unverified; readAfterWrite=unverified; replayAfterCacheLoss=unsupported; exactExportRestore=observed; providerFactsAreNotAnyamLimits=true",
+      },
     };
   }
 

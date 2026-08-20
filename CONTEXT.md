@@ -141,7 +141,7 @@ An isolated writable Git repository materialized from an exact Source Space Snap
 _Avoid_: Canonical repository, shared agent branch namespace
 
 **Repository Driver**:
-The replaceable provider adapter that creates and inspects Git repositories, transfers source, issues credentials, verifies integrity, exports, restores, and reconciles provider state. A Repository Driver reports capabilities but never decides Anyam authorization, policy, Change identity, cross-space atomicity, or disclosure.
+The replaceable provider adapter that creates and inspects Git repositories, transfers source, issues credentials, verifies integrity, exports, restores, and reconciles provider state. A Repository Driver reports Git, lifecycle, consistency, and recovery capabilities with receipts; `unverified` is not `observed`, and `unsupported` is never silently emulated. It never decides Anyam authorization, policy, Change identity, cross-space atomicity, or disclosure.
 _Avoid_: Project repository abstraction, authorization service
 
 **Git Gateway**:

@@ -21,6 +21,7 @@
     "qualification:hosted-saas": "tsx scripts/qualify-hosted-saas.ts",
     "qualification:github-app": "tsx scripts/qualify-github-app.ts",
     "qualification:github-release-assets": "tsx scripts/qualify-github-release-assets.ts",
+    "qualification:agent-scale-workspaces": "tsx scripts/qualify-agent-scale-workspaces.ts",
     "typecheck:scripts": "tsc -p tsconfig.scripts.json --noEmit",
     "typecheck:qualification-worker": "tsc -p apps/runner-qualification/tsconfig.json --noEmit",
     "typecheck:worker-tests": "tsc -p tsconfig.worker-tests.json --noEmit",

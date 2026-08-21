@@ -60,6 +60,41 @@ anyam init --dry-run --type worker --name demo
 The local workflow uses familiar Git vocabulary. Anyam adds the Project
 manifest, checks, and Change metadata without replacing normal Git editing.
 
+## Connect a private GitHub repository without a GitHub App
+
+For a customer-operated Realm, the Actions Bridge is the default GitHub
+connection path. Anyam generates a reviewable workflow; it does not create a
+GitHub App, receive a private key, store a PAT, or push to the repository.
+
+From the existing GitHub checkout:
+
+```bash
+anyam connect github \
+  --method actions \
+  --realm https://source.acme.com \
+  --project project:atlas \
+  --connection github-bridge:pending \
+  --action-ref acme/anyam-bridge-action@<immutable-commit-sha>
+```
+
+Use `--dry-run` to inspect the generated workflow without writing it. The
+command detects the `origin` GitHub remote and current branch, writes
+`.github/workflows/anyam-bridge.yml` only when the path is absent, and refuses
+to overwrite a different existing workflow. Review and commit the generated
+file through the normal GitHub process, then return to Anyam for OIDC
+verification and history reconciliation.
+
+Outbound synchronization is manual until a measured schedule is selected:
+
+```bash
+anyam connect github ... --schedule "<customer-approved-cron>"
+```
+
+The workflow uses job-scoped GitHub permissions and a customer-owned Realm
+connection. Anyam remains canonical; GitHub is a mirror and contribution
+surface. Live GitHub OIDC/JWKS verification and bundle import are separate
+provider qualification and Realm integration stages.
+
 ## Connect a local coding agent
 
 From an initialized Project with an active Change, configure the agent you want

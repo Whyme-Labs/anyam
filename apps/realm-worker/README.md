@@ -167,21 +167,16 @@ are omitted. Publication does not transfer Git objects or change the canonical
 Project Revision pointer; Landing, Release creation, and Target Promotion
 remain separate operations.
 
-The same `run.invoke` grant now exposes typed `run.record` and
-`evidence.record` MCP mutations. `run.record` records the result of a declared
-Action against its Project, Project View, Workspace, Change Revision, Runner,
-and exact Project Revision; it does not execute arbitrary commands. A
-successful determinate Run is required before `evidence.record` can attach
-passing Evidence, and the Coordinator checks the Action, Runner, output
-digest, Project View, Workspace, and Change Revision relationships before
-accepting it. Both tools require an idempotency key, return credential-free
-redacted projections, and never transfer source objects or advance canonical
-state. Raw receipts, actor metadata, source snapshots, credentials, logs, and
-model prompts are omitted from the MCP result. Landing, Artifact, Release, and
-Target Promotion remain separate operations. `artifact.record` is exposed
-under the same `run.invoke` scope and binds an immutable Artifact to its exact
-Project Revision or Change Revision and, when supplied, Run, Action, and
-Workspace.
+The `run.invoke` grant exposes typed `run.request` and `run.inspect` MCP
+surfaces. Caller-authoritative `run.record`, `evidence.record`, and
+`artifact.record` mutations remain denied: only the internal enrolled Runner
+service may submit `runner.complete`. That transition verifies the signed
+Runner Result, exact Attempt/Project/View/Workspace/Change/Action/Verifier
+lineage, output scope, replay identity, and result digest before atomically
+recording the terminal Run, Evidence, Artifacts, Attempt closure, and audit
+event. Raw receipts, actor metadata, source snapshots, credentials, logs, and
+model prompts are omitted from the MCP result. Landing, Release, and Target
+Promotion remain separate operations.
 
 The owner-authenticated REST surface exposes the same Change query boundary at
 `GET /api/changes` and `GET /api/changes/{changeId}`. The list accepts optional
@@ -256,14 +251,12 @@ promote a Target. The remote MCP surface exposes the same typed
 `landing.request`; the MCP projection is `canonicalWrite=false` and remains
 provider-execution-free.
 
-The owner-authenticated REST surface also exposes typed `POST /api/artifacts`.
-It requires the owner host session, one `Idempotency-Key` header, a closed
-`artifact.record` JSON body, and an explicit disclosure policy. The Coordinator
-checks the Project Revision or exact Change Revision plus any supplied Run,
-Action, and Workspace relationships before recording the immutable Artifact.
-The response is a credential-free Artifact projection that omits output paths,
-provenance digests, actor/session data, and raw receipts; Artifact storage,
-Landing, Release creation, and Target Promotion remain separate.
+The legacy `POST /api/runs`, `/api/evidence`, and `/api/artifacts` routes remain
+present only as migration tripwires: they return `410 runner_completion_only`
+and never mutate Authority. Artifact registration now occurs inside the
+internal `runner.complete` transition, where the signed Runner output, digest,
+Attempt, and Project lineage are checked together. Landing, Release creation,
+and Target Promotion remain separate.
 
 The owner-authenticated REST surface also exposes typed `POST /api/releases`.
 It requires the owner host session, one `Idempotency-Key` header, and a closed
@@ -438,10 +431,12 @@ The command envelope is:
 }
 ```
 
-The current command names are `project.create`, `workspace.create`,
-`change.create`, `revision.publish`, `run.record`, `evidence.record`,
-`artifact.record`, `landing.apply`, `release.create`, `target.configure`, and
-`promotion.request`. Commands are serialized by the Realm Durable Object,
+The current public command names are `project.create`, `workspace.create`,
+`change.create`, `revision.publish`, `run.request`, `landing.apply`,
+`release.create`, `target.configure`, and `promotion.request`. The internal
+`runner.complete` transition is available only through the bound Runner
+service; it cannot be submitted through the generic command or MCP surfaces.
+Commands are serialized by the Realm Durable Object,
 persisted as a credential-free snapshot, guarded by optional version checks,
 deduplicated by idempotency key, and appended to the audit ledger. Only
 `landing.apply` changes the canonical Project Revision pointer. A

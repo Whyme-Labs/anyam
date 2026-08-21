@@ -36,6 +36,10 @@ satisfy a Release gate.
 
 - `run.request`: creates a queued Run with immutable execution context.
 - `run.inspect`: reads safe Run status through the Realm Coordinator.
+- `runner.complete`: internal Runner-service transition only. It re-verifies
+  the signed Result and atomically creates terminal Run, Evidence, Artifact,
+  Attempt, and audit state. The transition is idempotent and does not expose
+  Runner credentials.
 - `run.record`, `evidence.record`, and `artifact.record`: no longer exposed as
   caller-authoritative MCP tools; the REST record routes fail closed.
 
@@ -49,6 +53,9 @@ remain separately qualified boundaries.
 
 - Local Runner tests cover signed context, input/output scope, lease,
   revocation, replay, and indeterminate outcomes.
+- Authority completion tests cover one-shot signed consumption, replay,
+  session-boundary denial, context/signature/output tampering, and the
+  no-partial-state invariant.
 - Realm MCP tests prove request/inspect exposure and legacy mutation denial.
 - Realm Worker tests prove REST mutation denial and coordinator request/status
   routing.

@@ -21,6 +21,8 @@ import {
 } from "../kernel/contracts.ts";
 import { base64Url } from "../kernel/encoding.ts";
 import type { NormalizedActionInput, NormalizedActionOutput } from "./local.ts";
+import { runnerResultMessage } from "./runner-proof.ts";
+export { runnerResultMessage } from "./runner-proof.ts";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -42,6 +44,8 @@ export type RunnerEnrollmentInput = {
 
 export type ExternalRunRequest = {
   idempotencyKey: string;
+  /** Authority may preallocate the Run identity before the Runner Job exists. */
+  runId?: string;
   actionInput: NormalizedActionInput;
   runnerRequirements: readonly string[];
   secretUseAliases?: readonly string[];
@@ -119,7 +123,16 @@ export type RunnerCompletion = {
   run: Run;
   outputs: readonly RunnerOutputReference[];
   resultDigest: string;
+  /** The job credential has been revoked before this handoff is returned. */
+  credentialState: "closed";
   receipt: string;
+};
+
+export type SignedRunnerCompletion = RunnerCompletion & {
+  /** The exact signed envelope already verified by the Runner coordinator. */
+  result: RunnerResult;
+  /** Credential-free enrollment material used by Authority to recheck the proof. */
+  runnerProfile: RunnerProfile;
 };
 
 export type RunnerCancellationOutcome = "stopped" | "forced" | "unknown";
@@ -367,22 +380,6 @@ function claimMessage(challenge: string): string {
   return `anyam.runner-claim/v1|${challenge}`;
 }
 
-export function runnerResultMessage(input: {
-  context: RunnerResultContext;
-  status: RunnerResult["status"];
-  output: NormalizedActionOutput;
-  outputs: readonly RunnerOutputInput[];
-  recoveryAction?: string;
-}): string {
-  return `anyam.runner-result/v1|${stableJson({
-    context: input.context,
-    status: input.status,
-    output: input.output,
-    outputs: input.outputs,
-    recoveryAction: input.recoveryAction,
-  })}`;
-}
-
 export function runnerResultContext(input: { job: RunnerJob; attempt: RunnerAttempt }): RunnerResultContext {
   const { job, attempt } = input;
   if (!job.networkEnforcement || !job.networkBoundaryReceipt) {
@@ -595,7 +592,8 @@ export class ExternalRunnerCoordinator {
       error({ code: "invalid-input", message: "Action network destinations must be non-empty.", affectedObject: input.actionInput.action.id, recoveryAction: "remove empty network destinations from the Action contract", receipt: `action=${input.actionInput.action.id}; network=invalid` });
     }
     const runnerRequirements = unique(input.runnerRequirements, "runnerRequirements");
-    const runId = opaqueId("run");
+    const runId = input.runId ?? opaqueId("run");
+    nonEmpty(runId, "runId");
     const attemptId = opaqueId("runner-attempt");
     const jobId = opaqueId("runner-job");
     const createdAt = this.now();
@@ -807,7 +805,7 @@ export class ExternalRunnerCoordinator {
     return this.completion(stored, attempt, input.receipt);
   }
 
-  submit(input: { credential: RunnerJobCredential; result: RunnerResult }): RunnerCompletion {
+  submit(input: { credential: RunnerJobCredential; result: RunnerResult }): SignedRunnerCompletion {
     const { stored, attempt, credential } = this.authorizeCredential(input.credential);
     if (stored.job.state !== "running" && stored.job.state !== "cancel-requested") {
       if (["succeeded", "failed", "indeterminate", "cancelled", "expired", "quarantined"].includes(stored.job.state)) {
@@ -846,7 +844,7 @@ export class ExternalRunnerCoordinator {
       receipt: output.receipt,
     }));
     this.outputs.set(attempt.id, normalizedOutputs);
-    return this.completion(stored, attempt, `runnerResult=${runStatus}; outputs=${normalizedOutputs.length}`);
+    return this.completion(stored, attempt, `runnerResult=${runStatus}; outputs=${normalizedOutputs.length}`, { result: input.result, runnerProfile: this.requireRunner(credential.runnerId) }) as SignedRunnerCompletion;
   }
 
   expire(jobId: string): never {
@@ -1096,9 +1094,10 @@ export class ExternalRunnerCoordinator {
     this.emit({ type: `runner.job.${jobState}`, runnerId, jobId: stored.job.id, attemptId: attempt.id, runId: stored.run.id, from: previousJobState, to: jobState, receipt: stored.job.receipt });
   }
 
-  private completion(stored: StoredJob, attempt: RunnerAttempt, receipt: string): RunnerCompletion {
+  private completion(stored: StoredJob, attempt: RunnerAttempt, receipt: string, proof?: { result: RunnerResult; runnerProfile: RunnerProfile }): RunnerCompletion | SignedRunnerCompletion {
     const outputs = (this.outputs.get(attempt.id) ?? []).map(copyOutput);
-    return { job: copyJob(stored.job), attempt: copyAttempt(attempt), run: copyRun(stored.run), outputs, resultDigest: attempt.resultDigest ?? digest(receipt), receipt };
+    const completion: RunnerCompletion = { job: copyJob(stored.job), attempt: copyAttempt(attempt), run: copyRun(stored.run), outputs, resultDigest: attempt.resultDigest ?? digest(receipt), credentialState: "closed", receipt };
+    return proof ? { ...completion, result: clone(proof.result), runnerProfile: copyProfile(proof.runnerProfile) } : completion;
   }
 
   private revokeAttemptCredentials(attemptId: string): void {

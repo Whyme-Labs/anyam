@@ -21,6 +21,10 @@ import {
   type ProjectView,
   type Release,
   type Run,
+  type RunnerAttempt,
+  type RunnerProfile,
+  type RunnerJob,
+  type RunnerOutputReference,
   type SourceSpace,
   type Target,
   type Workspace,
@@ -37,6 +41,8 @@ import {
   type PromotionExecutionResult,
   PromotionExecutionValidationError,
 } from "./promotion-execution.ts";
+import { runnerResultDigest, runnerResultMessage, verifyRunnerResultSignature } from "../execution/runner-proof.ts";
+import type { RunnerResult } from "../execution/runner.ts";
 
 export const AUTHORITY_PLANE_PROTOCOL = "anyam.authority-plane/v1" as const;
 export const AUTHORITY_COMMAND_PROTOCOL = "anyam.authority-command/v1" as const;
@@ -46,7 +52,9 @@ export type AuthorityCommandName =
   | "workspace.create"
   | "change.create"
   | "revision.publish"
+  | "runner.register"
   | "run.request"
+  | "runner.complete"
   | "run.record"
   | "evidence.record"
   | "artifact.record"
@@ -71,6 +79,8 @@ export type AuthoritySession = {
   capabilityGrantId?: string;
   delegatedBySessionId?: string;
   modelProvider?: string;
+  /** Only the internal Runner service may use the asynchronous completion path. */
+  kind?: "human" | "agent" | "runner";
 };
 
 export type AuthorityAuditEvent = {
@@ -105,6 +115,10 @@ export type AuthorityPlaneSnapshot = {
   changes: Record<string, Change>;
   changeRevisions: Record<string, ChangeRevision>;
   runs: Record<string, Run>;
+  /** Enrolled Runner public identities mirrored into the Authority boundary. */
+  runnerProfiles: Record<string, RunnerProfile>;
+  /** Credential-free Attempt terminal state consumed by runner.complete. */
+  runnerAttempts: Record<string, RunnerAttempt>;
   evidence: Record<string, Evidence>;
   artifacts: Record<string, Artifact>;
   landings: Record<string, Landing>;
@@ -274,6 +288,73 @@ function fingerprint(command: AuthorityCommand): string {
   });
 }
 
+function stableJson(value: unknown): string {
+  if (value === undefined) return "undefined";
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function disclosureRank(value: DisclosureClassification): number {
+  return value === "public" ? 0 : value === "project" ? 1 : 2;
+}
+
+function disclosureAllows(outer: DisclosureClassification, inner: DisclosureClassification): boolean {
+  return disclosureRank(inner) <= disclosureRank(outer);
+}
+
+function safeRunnerLocation(value: unknown, field: string): string {
+  const location = requiredString(value, field).replaceAll("\\", "/").replace(/\/+$/u, "");
+  if (!location || location.startsWith("/") || /^[A-Za-z]:\//u.test(location) || location.split("/").some((part) => part === "." || part === ".." || part.length === 0)) {
+    throw new AuthorityPlaneError({ code: "conflict", message: `${field} is not a safe relative Runner output location.`, recoveryAction: "submit only a normalized path below the coordinator-assigned output root; no Authority state was changed", receipt: `${field}=unsafe; runnerCompletion=not-applied` });
+  }
+  return location;
+}
+
+function locationWithin(location: string, root: string): boolean {
+  const normalizedRoot = root.replace(/\/$/u, "");
+  return location === normalizedRoot || location.startsWith(`${normalizedRoot}/`);
+}
+
+function pathFromDigest(value: string): string | undefined {
+  const separator = value.lastIndexOf("=");
+  return separator > 0 ? value.slice(0, separator) : undefined;
+}
+
+function validateRunnerCompletionOutputScope(job: RunnerJob, result: RunnerResult, outputs: readonly RunnerOutputReference[]): void {
+  if (result.output.status !== result.status || !sameStrings(result.output.inputDigests, job.inputDigests)) {
+    throw new AuthorityPlaneError({ code: "conflict", message: `Runner Result output does not match the immutable Job inputs or status.`, recoveryAction: "return the exact normalized output produced for this Runner Job; no Authority state was changed", receipt: `job=${job.id}; output=status-or-input-mismatch; runnerCompletion=not-applied` });
+  }
+  const expectedPaths = new Set(job.outputPaths);
+  const receivedPaths = result.output.outputDigests.map(pathFromDigest);
+  if (result.status === "succeeded" && (receivedPaths.some((path) => path === undefined || !expectedPaths.has(path)) || new Set(receivedPaths).size !== receivedPaths.length || receivedPaths.length !== expectedPaths.size)) {
+    throw new AuthorityPlaneError({ code: "conflict", message: `Runner Result output paths do not exactly match the declared Action outputs.`, recoveryAction: "produce one digest for every declared output path and no undeclared paths; no Authority state was changed", receipt: `job=${job.id}; expectedOutputs=${job.outputPaths.join(",")}; receivedOutputs=${result.output.outputDigests.join(",")}; runnerCompletion=not-applied` });
+  }
+  for (const output of outputs) {
+    const location = safeRunnerLocation(output.location, "runnerOutput.location");
+    const root = output.kind === "log" ? job.outputLocations.logs : output.kind === "artifact" ? job.outputLocations.artifacts : job.outputLocations.evidence;
+    if (!locationWithin(location, root) || !disclosureAllows(job.disclosure.classification, output.disclosure.classification)) {
+      throw new AuthorityPlaneError({ code: "conflict", message: `Runner output ${output.id} is outside the declared output or disclosure boundary.`, recoveryAction: "return output references below the Run-scoped root and within the Project View disclosure; no Authority state was changed", receipt: `job=${job.id}; output=${output.id}; root=${root}; runnerCompletion=not-applied` });
+    }
+    requiredString(output.digest, `runnerOutput.${output.id}.digest`);
+    if (output.attemptId !== job.currentAttemptId) {
+      throw new AuthorityPlaneError({ code: "conflict", message: `Runner output ${output.id} is bound to a different Attempt.`, recoveryAction: "submit only output references produced by the current Runner Attempt; no Authority state was changed", receipt: `job=${job.id}; output=${output.id}; expectedAttempt=${job.currentAttemptId}; receivedAttempt=${output.attemptId}; runnerCompletion=not-applied` });
+    }
+    if (output.kind === "artifact" && !location.includes(attemptToken(output.attemptId))) {
+      throw new AuthorityPlaneError({ code: "conflict", message: `Artifact output ${output.id} is not bound to its Attempt.`, recoveryAction: "include the current Attempt identity in the artifact output location; no Authority state was changed", receipt: `output=${output.id}; attempt=${output.attemptId}; runnerCompletion=not-applied` });
+    }
+  }
+}
+
+function attemptToken(attemptId: string): string {
+  return requiredString(attemptId, "runnerOutput.attemptId");
+}
+
 function actorRef(session: AuthoritySession): ActorRef {
   return {
     principalId: session.principalId,
@@ -350,6 +431,8 @@ export function emptyAuthorityPlaneSnapshot(realmId: string): AuthorityPlaneSnap
     changes: {},
     changeRevisions: {},
     runs: {},
+    runnerProfiles: {},
+    runnerAttempts: {},
     evidence: {},
     artifacts: {},
     landings: {},
@@ -391,6 +474,8 @@ export function normalizeAuthorityPlaneSnapshot(snapshot: AuthorityPlaneSnapshot
   const mirrorDeliveries = Object.fromEntries(mirrorDeliveryEntries);
   return {
     ...snapshot,
+    runnerProfiles: snapshot.runnerProfiles ?? {},
+    runnerAttempts: snapshot.runnerAttempts ?? {},
     mirrors: snapshot.mirrors ?? {},
     mirrorOperations: snapshot.mirrorOperations ?? {},
     mirrorCheckpoints: snapshot.mirrorCheckpoints ?? {},
@@ -410,7 +495,49 @@ export class AuthorityPlaneCoordinator {
     return clone(this.state);
   }
 
+  /**
+   * Copy an already enrolled Runner identity into the durable Authority
+   * snapshot. This is intentionally an in-process adapter seam: there is no
+   * public Authority command that lets a browser, agent, or MCP client enroll
+   * a signing key. The Runner service must perform its own enrollment and
+   * then synchronize the credential-free profile here.
+   */
+  registerRunnerProfile(profile: RunnerProfile, session: AuthoritySession): void {
+    if (session.kind !== "runner" || session.clientId !== "anyam-runner-coordinator") {
+      throw new AuthorityPlaneError({ code: "invalid_request", message: "Only the internal Runner coordinator may synchronize Runner enrollment.", recoveryAction: "synchronize the enrolled profile through the bound Runner service; no Authority state was changed", receipt: `client=${session.clientId}; kind=${session.kind ?? "unspecified"}; runner=${profile.id}; enrollment=not-applied` });
+    }
+    if (profile.realmId !== this.state.realmId) {
+      throw new AuthorityPlaneError({
+        code: "invalid_request",
+        message: `Runner ${profile.id} belongs to a different Realm.`,
+        recoveryAction: "synchronize only an enrolled Runner profile from the current Realm; no Authority state was changed",
+        receipt: `runner=${profile.id}; profileRealm=${profile.realmId}; authorityRealm=${this.state.realmId}; enrollment=not-applied`,
+      });
+    }
+    const existing = this.state.runnerProfiles[profile.id];
+    if (existing && existing.profileDigest !== profile.profileDigest) {
+      throw new AuthorityPlaneError({
+        code: "conflict",
+        message: `Runner ${profile.id} is already enrolled with a different profile digest.`,
+        recoveryAction: "rotate the Runner through an explicit enrollment ceremony; do not replace an enrolled public key implicitly",
+        receipt: `runner=${profile.id}; existingProfileDigest=${existing.profileDigest}; receivedProfileDigest=${profile.profileDigest}; enrollment=not-applied`,
+      });
+    }
+    if (existing) return;
+    this.state.runnerProfiles[profile.id] = clone(profile);
+    this.state.version += 1;
+    this.state.audit.push({ id: opaqueId("authority-audit"), command: "runner.register", idempotencyKey: `runner.register:${profile.id}:${profile.profileDigest}`, actor: actorRef(session), outcome: "succeeded", stateVersion: this.state.version, occurredAt: now(), receipt: `runner=${profile.id}; enrollment=synchronized; profileDigest=${profile.profileDigest}; credentialMaterialStored=false` });
+  }
+
   execute(command: AuthorityCommand, session: AuthoritySession): AuthorityCommandResult {
+    if (command.command === "runner.complete") {
+      throw new AuthorityPlaneError({
+        code: "invalid_request",
+        message: "runner.complete is an internal asynchronous transition and cannot be executed through the generic Authority command path.",
+        recoveryAction: "submit the signed completion through the bound Runner service; no Authority state was changed",
+        receipt: "command=runner.complete; surface=generic-authority; transition=not-applied; internalOnly=true",
+      });
+    }
     if (command.protocol !== AUTHORITY_COMMAND_PROTOCOL) {
       throw new AuthorityPlaneError({
         code: "invalid_request",
@@ -471,6 +598,205 @@ export class AuthorityPlaneCoordinator {
     });
     this.state = next;
     return clone(result);
+  }
+
+  /**
+   * Consume one signed Runner completion. This is deliberately asynchronous
+   * because Ed25519 verification is performed with Web Crypto. The state is
+   * cloned and committed only after every Run, Evidence, Artifact, Attempt,
+   * and digest check succeeds, so a rejected completion cannot leave a
+   * half-terminal Authority snapshot behind.
+   */
+  async completeRunner(command: AuthorityCommand, session: AuthoritySession): Promise<AuthorityCommandResult> {
+    if (command.protocol !== AUTHORITY_COMMAND_PROTOCOL) {
+      throw new AuthorityPlaneError({ code: "invalid_request", message: `Unsupported authority command protocol ${command.protocol}.`, recoveryAction: "send an anyam.authority-command/v1 envelope; no authority transition was accepted", receipt: `protocol=${command.protocol}; command=runner.complete; transition=not-applied` });
+    }
+    if (command.command !== "runner.complete") {
+      throw new AuthorityPlaneError({ code: "invalid_request", message: "The Runner completion boundary accepts only runner.complete.", recoveryAction: "send command=runner.complete through the internal Runner service; no authority transition was accepted", receipt: `command=${command.command}; runnerCompletion=not-accepted` });
+    }
+    if (session.realmId !== this.state.realmId) {
+      throw new AuthorityPlaneError({ code: "invalid_request", message: "The Runner completion session belongs to a different Realm.", recoveryAction: "route the completion through the Durable Object bound to the Runner Realm", receipt: `sessionRealm=${session.realmId}; stateRealm=${this.state.realmId}; runnerCompletion=not-accepted` });
+    }
+    if (session.kind !== "runner" || session.clientId !== "anyam-runner-coordinator") {
+      throw new AuthorityPlaneError({ code: "invalid_request", message: "Only the internal Runner coordinator may submit runner.complete.", recoveryAction: "submit the signed completion through the bound Runner service; browser, agent, OAuth, and MCP sessions cannot complete Runs", receipt: `client=${session.clientId}; kind=${session.kind ?? "unspecified"}; runnerCompletion=not-accepted` });
+    }
+    const idempotencyKey = requiredString(command.idempotencyKey, "idempotencyKey");
+    const existing = this.state.idempotency[idempotencyKey];
+    const requestFingerprint = fingerprint({ ...command, idempotencyKey });
+    if (existing) {
+      if (existing.fingerprint !== requestFingerprint) {
+        throw new AuthorityPlaneError({ code: "idempotency_conflict", message: `Idempotency key ${idempotencyKey} was already used for a different Runner completion.`, recoveryAction: "reuse the original signed completion or choose a new idempotency key; authoritative state was unchanged", receipt: `idempotencyKey=${idempotencyKey}; conflict=true; runnerCompletion=not-applied` });
+      }
+      return clone(existing.result);
+    }
+    if (command.expectedVersion !== undefined && command.expectedVersion !== this.state.version) {
+      throw new AuthorityPlaneError({ code: "stale_state", message: `Authority state changed before Runner completion ${idempotencyKey} was accepted.`, recoveryAction: "read the current Authority version and retry the same signed completion with a fresh idempotency key", receipt: `expectedVersion=${command.expectedVersion}; actualVersion=${this.state.version}; runnerCompletion=not-applied` });
+    }
+    const next = clone(this.state);
+    const result = await this.applyRunnerCompletion(next, command, session);
+    next.version += 1;
+    result.version = next.version;
+    next.idempotency[idempotencyKey] = { fingerprint: requestFingerprint, result: clone(result) };
+    next.audit.push({
+      id: opaqueId("authority-audit"),
+      command: command.command,
+      idempotencyKey,
+      actor: actorRef(session),
+      outcome: result.status,
+      stateVersion: next.version,
+      occurredAt: now(),
+      ...(session.taskId ? { taskId: session.taskId } : {}),
+      ...(session.capabilityGrantId ? { capabilityGrantId: session.capabilityGrantId } : {}),
+      ...(session.delegatedBySessionId ? { delegatedBySessionId: session.delegatedBySessionId } : {}),
+      ...(session.modelProvider ? { modelProvider: session.modelProvider } : {}),
+      receipt: result.receipt,
+    });
+    this.state = next;
+    return clone(result);
+  }
+
+  private async applyRunnerCompletion(next: AuthorityPlaneSnapshot, command: AuthorityCommand, session: AuthoritySession): Promise<AuthorityCommandResult> {
+    const payload = command.payload;
+    const completionValue = record(payload.completion, "completion");
+    const result = record(completionValue.result, "completion.result") as unknown as RunnerResult;
+    const job = completionValue.job as unknown as RunnerJob;
+    const attempt = completionValue.attempt as unknown as RunnerAttempt;
+    const runner = completionValue.runnerProfile as unknown as RunnerProfile;
+    const completionRun = completionValue.run as unknown as Run;
+    const outputsValue = completionValue.outputs;
+    if (!Array.isArray(outputsValue)) throw new AuthorityPlaneError({ code: "invalid_request", message: "completion.outputs must be an array.", recoveryAction: "send the exact credential-free output references returned by the Runner coordinator", receipt: "runnerCompletion=invalid; outputs=array-required; transition=not-applied" });
+    const outputs = outputsValue as RunnerOutputReference[];
+    const resultDigest = requiredString(completionValue.resultDigest, "completion.resultDigest");
+    const credentialState = requiredString(completionValue.credentialState, "completion.credentialState");
+    if (credentialState !== "closed") throw new AuthorityPlaneError({ code: "conflict", message: "Runner completion arrived while its Attempt credential was not closed.", recoveryAction: "revoke the Attempt credential in the Runner coordinator before submitting completion; no Authority state was changed", receipt: `attempt=${attempt?.id ?? "unknown"}; credentialState=${credentialState}; runnerCompletion=not-applied` });
+    const completionReceipt = receiptString(completionValue.receipt, "completion.receipt");
+    const runnerId = requiredString(runner?.id, "completion.runnerProfile.id");
+    const registeredRunner = next.runnerProfiles[runnerId];
+    if (!registeredRunner) throw new AuthorityPlaneError({ code: "not_found", message: `Runner ${runnerId} is not enrolled in the Authority Realm.`, recoveryAction: "enroll and synchronize the Runner profile before submitting a completion", receipt: `runner=${runnerId}; enrolled=false; runnerCompletion=not-applied` });
+    if (registeredRunner.profileDigest !== runner.profileDigest || registeredRunner.publicKey !== runner.publicKey) throw new AuthorityPlaneError({ code: "conflict", message: `Runner ${runnerId} completion uses a different enrolled profile.`, recoveryAction: "submit with the exact credential-free profile synchronized during Runner enrollment", receipt: `runner=${runnerId}; profileDigest=not-matched; runnerCompletion=not-applied` });
+    if (registeredRunner.status !== "active" && registeredRunner.status !== "enrolled") throw new AuthorityPlaneError({ code: "blocked", message: `Runner ${runnerId} is ${registeredRunner.status} and cannot complete a Run.`, recoveryAction: "reactivate or replace the Runner, reconcile provider state, and retry from a fresh Attempt", receipt: `runner=${runnerId}; status=${registeredRunner.status}; runnerCompletion=not-applied` });
+    if (job?.id === undefined || attempt?.id === undefined || completionRun?.id === undefined) throw new AuthorityPlaneError({ code: "invalid_request", message: "Runner completion is missing its Job, Attempt, or Run identity.", recoveryAction: "send the complete credential-free Runner completion envelope; no Authority state was changed", receipt: "runnerCompletion=identity-missing; transition=not-applied" });
+    const run = next.runs[completionRun.id];
+    if (!run) throw new AuthorityPlaneError({ code: "not_found", message: `Queued Run ${completionRun.id} is not present in Authority.`, recoveryAction: "request a fresh Run and submit its matching Runner completion; no Authority state was changed", receipt: `run=${completionRun.id}; runnerCompletion=not-applied; discoverable=false` });
+    if (run.status !== "queued" && run.status !== "running") throw new AuthorityPlaneError({ code: "conflict", message: `Run ${run.id} is already ${run.status}; this Runner completion is a replay or stale Attempt.`, recoveryAction: "inspect the accepted Run result and do not replay the signed completion", receipt: `run=${run.id}; status=${run.status}; attempt=${attempt.id}; runnerCompletion=not-applied` });
+    if (job.runId !== run.id || attempt.runId !== run.id || completionRun.id !== job.runId) throw new AuthorityPlaneError({ code: "conflict", message: "Runner Job, Attempt, and Run identities do not agree.", recoveryAction: "submit the completion produced for the exact queued Run; no Authority state was changed", receipt: `run=${run.id}; jobRun=${job.runId}; attemptRun=${attempt.runId}; runnerCompletion=not-applied` });
+    if (attempt.jobId !== job.id || job.currentAttemptId !== attempt.id || attempt.runnerId !== runnerId || job.currentRunnerId !== runnerId) throw new AuthorityPlaneError({ code: "conflict", message: "Runner Job and Attempt are not the current enrolled Runner Attempt.", recoveryAction: "submit only the current Attempt returned by the Runner coordinator; no Authority state was changed", receipt: `job=${job.id}; attempt=${attempt.id}; runner=${runnerId}; runnerCompletion=not-applied` });
+    if (job.state !== result.status || attempt.state !== result.status || completionRun.status !== result.status) throw new AuthorityPlaneError({ code: "conflict", message: "Runner completion states do not agree across Job, Attempt, Result, and Run.", recoveryAction: "return one immutable completion with matching succeeded, failed, or indeterminate states", receipt: `jobState=${job.state}; attemptState=${attempt.state}; resultStatus=${result.status}; runStatus=${completionRun.status}; runnerCompletion=not-applied` });
+    const expectedRunFields: Array<[string, unknown, unknown]> = [
+      ["actionId", run.actionId, job.actionId],
+      ["projectRevisionId", run.projectRevisionId, job.projectRevisionId],
+      ["projectViewId", run.projectViewId, job.projectViewId],
+      ["changeRevisionId", run.changeRevisionId, job.changeRevisionId],
+      ["workspaceId", run.workspaceId, job.workspaceId],
+      ["verifierId", run.verifierId, job.verifierId],
+      ["actionContractDigest", run.actionContractDigest, job.actionContractDigest],
+      ["verifierContractDigest", run.verifierContractDigest, job.verifierContractDigest],
+      ["policyVersion", run.policyVersion, job.policyVersion],
+      ["capabilityGrantId", run.capabilityGrantId, job.capabilityGrantId],
+    ];
+    for (const [field, expected, received] of expectedRunFields) if (expected !== received) throw new AuthorityPlaneError({ code: "conflict", message: `Runner completion ${field} does not match queued Run ${run.id}.`, recoveryAction: "re-run the exact Authority Run request and submit its matching Runner Job; no Authority state was changed", receipt: `run=${run.id}; field=${field}; expected=${String(expected)}; received=${String(received)}; runnerCompletion=not-applied` });
+    if (!sameStrings(run.inputDigests ?? [], job.inputDigests) || !sameStrings(run.effectDigests ?? [], job.effectDigests)) throw new AuthorityPlaneError({ code: "conflict", message: `Runner Job inputs or effects do not match queued Run ${run.id}.`, recoveryAction: "submit the result from the immutable input manifest recorded for this Run", receipt: `run=${run.id}; inputOrEffects=not-matched; runnerCompletion=not-applied` });
+    const context = result.context;
+    const expectedContext = {
+      protocol: "anyam.runner-result-context/v1",
+      replayId: `${job.id}:${attempt.id}`,
+      jobId: job.id,
+      attemptId: attempt.id,
+      runnerId,
+      leaseExpiresAt: attempt.leaseExpiresAt,
+      inputManifestDigest: job.inputManifestDigest,
+      sourceSpaceSnapshots: { ...job.sourceSpaceSnapshots },
+      actionId: job.actionId,
+      actionContractDigest: job.actionContractDigest,
+      ...(job.verifierId ? { verifierId: job.verifierId } : {}),
+      ...(job.verifierContractDigest ? { verifierContractDigest: job.verifierContractDigest } : {}),
+      projectRevisionId: job.projectRevisionId,
+      projectViewId: job.projectViewId,
+      ...(job.changeRevisionId ? { changeRevisionId: job.changeRevisionId } : {}),
+      ...(job.workspaceId ? { workspaceId: job.workspaceId } : {}),
+      policyVersion: job.policyVersion,
+      authorizationEpoch: job.authorizationEpoch,
+      capabilityGrantId: job.capabilityGrantId,
+      networkEnforcement: job.networkEnforcement,
+      networkBoundaryReceipt: job.networkBoundaryReceipt,
+    };
+    if (!context || stableJson(context) !== stableJson(expectedContext)) throw new AuthorityPlaneError({ code: "conflict", message: `Runner Result context does not match Attempt ${attempt.id}.`, recoveryAction: "echo the exact signed context issued by the enrolled Runner coordinator; no Authority state was changed", receipt: `job=${job.id}; attempt=${attempt.id}; context=not-matched; runnerCompletion=not-applied` });
+    const message = runnerResultMessage({ context: result.context, status: result.status, output: result.output, outputs: result.outputs, ...(result.recoveryAction ? { recoveryAction: result.recoveryAction } : {}) });
+    if (!(await verifyRunnerResultSignature({ publicKey: registeredRunner.publicKey, message, signature: requiredString(result.signature, "completion.result.signature") }))) throw new AuthorityPlaneError({ code: "blocked", message: `Runner ${runnerId} signed Result verification failed.`, recoveryAction: "submit the exact Result signed by the enrolled Runner key before the Attempt lease expires", receipt: `runner=${runnerId}; attempt=${attempt.id}; resultSignature=invalid; runnerCompletion=not-applied` });
+    const recomputedDigest = await runnerResultDigest({ jobId: job.id, attemptId: attempt.id, result });
+    if (recomputedDigest !== resultDigest || (attempt.resultDigest && attempt.resultDigest !== resultDigest)) throw new AuthorityPlaneError({ code: "conflict", message: `Runner Result digest does not match Attempt ${attempt.id}.`, recoveryAction: "submit the unchanged signed Result returned by the Runner coordinator; no Authority state was changed", receipt: `job=${job.id}; attempt=${attempt.id}; expectedDigest=${attempt.resultDigest ?? recomputedDigest}; receivedDigest=${resultDigest}; runnerCompletion=not-applied` });
+    const signedOutputShape = result.outputs.map((output) => ({ kind: output.kind, location: output.location, digest: output.digest, disclosure: output.disclosure, receipt: output.receipt }));
+    const receivedOutputShape = outputs.map((output) => ({ kind: output.kind, location: output.location, digest: output.digest, disclosure: output.disclosure, receipt: output.receipt }));
+    if (stableJson(signedOutputShape) !== stableJson(receivedOutputShape)) throw new AuthorityPlaneError({ code: "conflict", message: `Runner completion outputs differ from the signed Result envelope.`, recoveryAction: "forward the exact output references returned by the Runner coordinator; no Authority state was changed", receipt: `job=${job.id}; attempt=${attempt.id}; outputs=signed-shape-mismatch; runnerCompletion=not-applied` });
+    validateRunnerCompletionOutputScope(job, result, outputs);
+    const terminalRun: Run = {
+      ...run,
+      runnerId,
+      attemptId: attempt.id,
+      status: result.status,
+      outputDigest: result.output.outputDigest,
+      inputDigests: [...result.output.inputDigests],
+      outputDigests: [...result.output.outputDigests],
+      effectDigests: [...job.effectDigests],
+      dependencyDigest: job.dependencyDigest,
+      toolchainDigest: job.toolchainDigest,
+      environmentDigest: job.environmentDigest,
+      actor: { ...job.actor },
+      capabilityGrantId: job.capabilityGrantId,
+      ...(result.output.exitCode === undefined ? {} : { exitCode: result.output.exitCode }),
+      stdoutDigest: result.output.stdoutDigest,
+      stderrDigest: result.output.stderrDigest,
+      ...(job.targetId ? { targetId: job.targetId } : {}),
+    };
+    const evidenceId = `evidence:${attempt.id}`;
+    if (next.evidence[evidenceId]) throw new AuthorityPlaneError({ code: "conflict", message: `Evidence ${evidenceId} already exists for Attempt ${attempt.id}.`, recoveryAction: "reuse the original Authority idempotency key or inspect the accepted completion; no state was changed", receipt: `evidence=${evidenceId}; attempt=${attempt.id}; runnerCompletion=not-applied` });
+    const evidence: Evidence = {
+      protocol: CONTRACT_VERSIONS.evidence,
+      version: "v1",
+      id: evidenceId,
+      key: `runner:${job.actionId}:${job.verifierId ?? "action"}`,
+      criterion: "The enrolled Runner signed the exact Action result for the recorded Project Revision.",
+      outcome: result.status === "succeeded" ? "passed" : result.status === "failed" ? "failed" : "indeterminate",
+      validityKey: `${job.projectRevisionId}:${job.actionContractDigest}:${job.verifierContractDigest ?? "none"}:${resultDigest}`,
+      actionId: job.actionId,
+      verifierId: job.verifierId ?? "verifier:runner-result",
+      toolchainDigest: job.toolchainDigest,
+      dependencyDigest: job.dependencyDigest,
+      environmentDigest: job.environmentDigest,
+      inputDigests: [...job.inputDigests],
+      effectDigests: [...job.effectDigests],
+      outputDigest: result.output.outputDigest,
+      createdAt: now(),
+      producer: { kind: "run", id: run.id, version: CONTRACT_VERSIONS.run },
+      projectRevisionId: run.projectRevisionId,
+      projectViewId: run.projectViewId,
+      ...(run.changeRevisionId ? { changeRevisionId: run.changeRevisionId } : {}),
+      runId: run.id,
+      actor: { ...job.actor },
+      runnerId,
+      policyVersion: job.policyVersion,
+      authorizationEpoch: job.authorizationEpoch,
+      capabilityGrantId: job.capabilityGrantId,
+      disclosure: { ...job.disclosure },
+      receipt: `${completionReceipt}; runnerSignature=verified; resultDigest=${resultDigest}; outputReadBack=runner-attested; credentialState=closed`,
+      invalidators: ["project-revision", "action-contract", "verifier-contract", "runner-profile", "policy-version"],
+      owner: runnerId,
+      ...(job.targetId ? { targetId: job.targetId } : {}),
+      ...(job.workspaceId ? { workspaceId: job.workspaceId } : {}),
+      sourceSpaceSnapshots: { ...job.sourceSpaceSnapshots },
+      actionContractDigest: job.actionContractDigest,
+      ...(job.verifierContractDigest ? { verifierContractDigest: job.verifierContractDigest } : {}),
+    };
+    const artifacts: Artifact[] = outputs.filter((output) => output.kind === "artifact").map((output, index) => {
+      const id = output.id || `artifact:${attempt.id}:${index + 1}`;
+      if (next.artifacts[id]) throw new AuthorityPlaneError({ code: "conflict", message: `Artifact ${id} already exists for Attempt ${attempt.id}.`, recoveryAction: "reuse the original Authority idempotency key or inspect the accepted completion; no state was changed", receipt: `artifact=${id}; attempt=${attempt.id}; runnerCompletion=not-applied` });
+      return { protocol: CONTRACT_VERSIONS.artifact, id, type: "runner.output", digest: output.digest, projectRevisionId: run.projectRevisionId, ...(run.changeRevisionId ? { changeRevisionId: run.changeRevisionId } : {}), runId: run.id, actionId: job.actionId, outputPath: output.location, provenanceDigest: resultDigest, disclosure: { ...output.disclosure } };
+    });
+    next.runs[run.id] = terminalRun;
+    next.evidence[evidence.id] = evidence;
+    for (const artifact of artifacts) next.artifacts[artifact.id] = artifact;
+    next.runnerAttempts[attempt.id] = clone(attempt);
+    return { protocol: AUTHORITY_PLANE_PROTOCOL, command: command.command, status: result.status === "indeterminate" ? "indeterminate" : "succeeded", version: next.version, value: { run: terminalRun, evidence, artifacts, attempt: clone(attempt), runner: clone(registeredRunner) }, receipt: `run=${run.id}; attempt=${attempt.id}; runner=${runnerId}; status=${result.status}; evidence=${evidence.id}; artifacts=${artifacts.length}; resultDigest=${resultDigest}; credentialState=closed; outputReadBack=runner-attested; canonicalWrite=false`, ...(result.status === "indeterminate" ? { recoveryAction: result.recoveryAction ?? "reconcile the Runner provider result before using this Evidence or Artifact" } : {}) };
   }
 
   /**
@@ -847,6 +1173,14 @@ export class AuthorityPlaneCoordinator {
         next.changes[changeId] = { ...change, latestRevisionId: revision.id, status: "submitted" };
         return success({ revision, change: next.changes[changeId] }, `change=${changeId}; revision=${revision.id}; sequence=${sequence}; canonicalWrite=false`);
       }
+      case "runner.register": {
+        throw new AuthorityPlaneError({
+          code: "invalid_request",
+          message: "runner.register is an internal Runner-service enrollment sync and cannot be submitted through execute().",
+          recoveryAction: "use registerRunnerProfile through the bound Runner service; no Authority state was changed",
+          receipt: "command=runner.register; surface=generic-authority; transition=not-applied; internalOnly=true",
+        });
+      }
       case "run.request": {
         const projectId = requiredString(payload.projectId, "projectId");
         const project = next.projects[projectId];
@@ -873,6 +1207,10 @@ export class AuthorityPlaneCoordinator {
         const verifierId = optionalString(payload.verifierId);
         const actionContractDigest = optionalString(payload.actionContractDigest);
         const verifierContractDigest = optionalString(payload.verifierContractDigest);
+        const dependencyDigest = optionalString(payload.dependencyDigest);
+        const toolchainDigest = optionalString(payload.toolchainDigest);
+        const environmentDigest = optionalString(payload.environmentDigest);
+        const targetId = optionalString(payload.targetId);
         const run: Run = {
           protocol: CONTRACT_VERSIONS.run,
           id: runId,
@@ -889,12 +1227,25 @@ export class AuthorityPlaneCoordinator {
           ...(verifierContractDigest ? { verifierContractDigest } : {}),
           inputDigests: stringArray(payload.inputDigests ?? [], "inputDigests", true),
           outputDigests: stringArray(payload.outputDigests ?? [], "outputDigests", true),
+          effectDigests: stringArray(payload.effectDigests ?? [], "effectDigests", true),
+          ...(dependencyDigest ? { dependencyDigest } : {}),
+          ...(toolchainDigest ? { toolchainDigest } : {}),
+          ...(environmentDigest ? { environmentDigest } : {}),
+          ...(targetId ? { targetId } : {}),
           policyVersion: requiredString(payload.policyVersion, "policyVersion"),
           actor: actorRef(session),
           capabilityGrantId: requiredString(payload.capabilityGrantId, "capabilityGrantId"),
         };
         next.runs[run.id] = run;
         return success({ run }, `run=${run.id}; status=queued; completion=runner-only; canonicalWrite=false`);
+      }
+      case "runner.complete": {
+        throw new AuthorityPlaneError({
+          code: "invalid_request",
+          message: "runner.complete is an internal asynchronous transition and cannot be submitted through execute().",
+          recoveryAction: "use completeRunner through the bound Runner service; no Authority state was changed",
+          receipt: "command=runner.complete; surface=generic-authority; transition=not-applied; internalOnly=true",
+        });
       }
       case "run.record": {
         const requestedRunProjectId = optionalString(payload.projectId);
@@ -1325,6 +1676,8 @@ export function authorityStateSummary(snapshot: AuthorityPlaneSnapshot): Record<
       changes: Object.keys(normalized.changes).length,
       revisions: Object.keys(normalized.changeRevisions).length,
       runs: Object.keys(normalized.runs).length,
+      runnerProfiles: Object.keys(normalized.runnerProfiles).length,
+      runnerAttempts: Object.keys(normalized.runnerAttempts).length,
       evidence: Object.keys(normalized.evidence).length,
       artifacts: Object.keys(normalized.artifacts).length,
       landings: Object.keys(normalized.landings).length,

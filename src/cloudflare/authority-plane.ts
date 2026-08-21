@@ -1359,6 +1359,8 @@ export class AuthorityPlaneCoordinator {
         const mirrorCanonicalProjectRevision = next.projectRevisions[mirrorCanonicalProjectRevisionId];
         if (!mirrorCanonicalProjectRevision || mirrorCanonicalProjectRevision.projectId !== mirrorProjectId) throw new AuthorityPlaneError({ code: "indeterminate", message: `Canonical Project Revision ${mirrorCanonicalProjectRevisionId} is not readable for Project ${mirrorProjectId}.`, recoveryAction: "restore the canonical Project Revision before configuring the Repository Mirror", receipt: `project=${mirrorProjectId}; canonicalRevision=${mirrorCanonicalProjectRevisionId}; mirror=not-configured; lineage=incomplete` });
         const disclosure = enumString(payload.disclosure, "disclosure", ["public", "project", "restricted"] as const);
+        if (payload.canonicalAuthority !== undefined && payload.canonicalAuthority !== "anyam") throw new AuthorityPlaneError({ code: "invalid_request", message: "Provider-authoritative Repository Mirrors are not supported.", recoveryAction: "configure the external repository as an Anyam projection; provider branch protection is optional and never replaces Anyam Landing", receipt: `canonicalAuthority=${typeof payload.canonicalAuthority === "string" ? payload.canonicalAuthority : "invalid"}; providerRole=projection; transition=not-applied` });
+        const canonicalAuthority = "anyam";
         if (disclosure === "public" && mirrorSourceSpace.classification !== "public") throw new AuthorityPlaneError({ code: "conflict", message: `Public Mirror disclosure is not permitted for ${mirrorSourceSpace.classification} Source Space ${mirrorSourceSpaceId}.`, recoveryAction: "choose a Project or restricted disclosure, or configure a public Source Space", receipt: `project=${mirrorProjectId}; sourceSpace=${mirrorSourceSpaceId}; disclosure=public; mirror=not-configured` });
         const mappingValue = payload.refMappings;
         if (!Array.isArray(mappingValue) || mappingValue.length === 0) throw new AuthorityPlaneError({ code: "invalid_request", message: "refMappings must contain at least one local and remote ref mapping.", recoveryAction: "declare the exact Git refs the Mirror may project", receipt: "refMappings=non-empty-required; mirror=not-configured" });
@@ -1376,6 +1378,7 @@ export class AuthorityPlaneCoordinator {
           provider: requiredString(payload.provider, "provider"),
           remoteRepository: requiredString(payload.remoteRepository, "remoteRepository"),
           direction: "bidirectional",
+          canonicalAuthority,
           refMappings,
           disclosure,
           state: enumString(payload.state, "state", ["healthy", "lagging", "divergent", "force-pushed", "blocked", "credential-failed", "disabled"] as const, "healthy"),
@@ -1399,7 +1402,7 @@ export class AuthorityPlaneCoordinator {
         if (next.mirrors[mirror.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Repository Mirror ${mirror.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Mirror identity", receipt: `mirror=${mirror.id}; exists=true; transition=not-applied` });
         const configuredMirror = { ...mirror, pendingInboundChangeIds: configuredPendingChangeIds };
         next.mirrors[mirror.id] = configuredMirror;
-        return success({ mirror: configuredMirror }, `mirror=${mirror.id}; project=${mirror.projectId}; sourceSpace=${mirror.sourceSpaceId}; canonicalWrite=false; credentialFree=true`);
+        return success({ mirror: configuredMirror }, `mirror=${mirror.id}; project=${mirror.projectId}; sourceSpace=${mirror.sourceSpaceId}; canonicalAuthority=${mirror.canonicalAuthority}; providerRole=projection; providerProtection=not-required; canonicalWrite=false; credentialFree=true`);
       }
       case "mirror.sync":
       case "mirror.reconcile": {

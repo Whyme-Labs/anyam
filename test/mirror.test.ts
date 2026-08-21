@@ -43,6 +43,7 @@ function mirror(overrides: Partial<RepositoryMirror> = {}): RepositoryMirror {
     provider: "github",
     remoteRepository: "wms2537/video-player",
     direction: "bidirectional",
+    canonicalAuthority: "anyam",
     refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }],
     disclosure: "public",
     state: "healthy",

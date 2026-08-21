@@ -187,6 +187,7 @@ test("Project Export includes Git bundles, lineage, and recovery metadata and re
       provider: "github",
       remoteRepository: "acme/round-trip",
       direction: "bidirectional",
+      canonicalAuthority: "anyam",
       refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }],
       disclosure: "public",
       state: "healthy",

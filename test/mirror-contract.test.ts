@@ -46,6 +46,20 @@ test("mirror configure whitelists provider observations and excludes credential 
   assert.equal("credential" in command.payload, false);
   assert.equal("arbitraryProviderPayload" in command.payload, false);
   assert.deepEqual(command.payload.refMappings, [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }]);
+  assert.equal(command.payload.canonicalAuthority, "anyam");
+});
+
+test("mirror configure rejects a provider-authoritative canonical mode", () => {
+  assert.throws(
+    () => mirrorCommand({
+      operation: "configure",
+      idempotencyKey: "idem:provider-authority",
+      body: { ...configureBody(), canonicalAuthority: "provider" },
+    }),
+    (error: unknown) => error instanceof MirrorInputError
+      && error.receipt.includes("canonicalAuthority=provider")
+      && error.recoveryAction.includes("projection"),
+  );
 });
 
 test("mirror sync parses delivery and external proposal identity into typed observations", () => {

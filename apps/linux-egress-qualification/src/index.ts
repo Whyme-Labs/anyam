@@ -27,8 +27,6 @@ type EgressRequest = {
 };
 
 export class AnyamEgressSandbox extends Sandbox<Env> {
-  defaultPort = undefined;
-  requiredPorts = [];
   enableInternet = false;
   interceptHttps = true;
 }

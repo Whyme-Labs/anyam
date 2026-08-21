@@ -1332,11 +1332,14 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
           const deliveryOperations = MCP_DELIVERY_OPERATIONS.filter((operation) => scopes.includes(mcpDeliveryScope(operation)));
           const deliveryScopes = deliveryOperations.map((operation) => mcpDeliveryScope(operation)) as Capability[];
           const requestedResource = body.resource === undefined ? undefined : coordinatorString(body, "resource");
-          const mutationScopes = ["workspace.write", "change.write", "run.invoke", "landing.request", "release.create", "target.configure", "promotion.request"];
-          const mutationRequested = mutationScopes.some((scope) => scopes.includes(scope));
-          const binding = mutationRequested ? parseMcpDeliveryBinding(requestedResource, identity.realm.id) : undefined;
-          if (mutationRequested && (!binding || !binding.agentId || !binding.agentSessionId || !binding.taskId || !binding.capabilityGrantId)) throw new RealmIdentityError({ code: "oauth.grant_agent_binding_required", message: "A mutation-capable MCP OAuth grant must name an owner-approved Agent Task, Session, Grant, Project, and Source Space resource.", recoveryAction: "authorize the MCP client with agentId, agentSessionId, taskId, capabilityGrantId, and Source Space disclosure in the project-scoped resource; no grant was recorded", receipt: "oauthGrant=agent-task-binding-required; taskGrant=not-created; canonicalWrite=false" });
-          const authority = mutationRequested ? await this.authoritySnapshot() : undefined;
+          const agentMutationScopes = ["workspace.write", "change.write", "run.invoke"];
+          const agentMutationRequested = agentMutationScopes.some((scope) => scopes.includes(scope));
+          const deliveryRequested = deliveryOperations.length > 0;
+          if (agentMutationRequested && deliveryRequested) throw new RealmIdentityError({ code: "oauth.grant_scope_conflict", message: "An OAuth grant cannot combine delegated coding-agent mutations with human delivery mutations.", recoveryAction: "request either an Agent Task grant or an owner-created delivery grant, not both; no grant was recorded", receipt: "oauthGrant=agent-and-delivery-scope-conflict; taskGrant=not-created" });
+          const binding = agentMutationRequested || deliveryRequested ? parseMcpDeliveryBinding(requestedResource, identity.realm.id) : undefined;
+          if (agentMutationRequested && (!binding || !binding.agentId || !binding.agentSessionId || !binding.taskId || !binding.capabilityGrantId)) throw new RealmIdentityError({ code: "oauth.grant_agent_binding_required", message: "A delegated Agent mutation grant must name an owner-approved Agent Task, Session, Grant, Project, and Source Space resource.", recoveryAction: "authorize the MCP client with agentId, agentSessionId, taskId, capabilityGrantId, and Source Space disclosure in the project-scoped resource; no grant was recorded", receipt: "oauthGrant=agent-task-binding-required; taskGrant=not-created; canonicalWrite=false" });
+          if (deliveryRequested && (!binding || binding.agentId || binding.agentSessionId || binding.taskId || binding.capabilityGrantId)) throw new RealmIdentityError({ code: "oauth.grant_delivery_binding_invalid", message: "A human delivery grant must use a project-scoped resource without delegated Agent identity fields.", recoveryAction: "authorize the delivery MCP resource without agentId, agentSessionId, taskId, or capabilityGrantId; no grant was recorded", receipt: "oauthGrant=owner-delivery-binding-invalid; taskGrant=not-created; canonicalWrite=false" });
+          const authority = agentMutationRequested || deliveryRequested ? await this.authoritySnapshot() : undefined;
           let sourceSpaceIds: string[] = [];
           if (binding && authority) {
             const project = authority.projects[binding.projectId];
@@ -1348,19 +1351,23 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
             const change = binding.changeId ? authority.changes[binding.changeId] : undefined;
             if (binding.changeId && (!change || change.projectId !== binding.projectId || (binding.workspaceId !== undefined && change.workspaceId !== binding.workspaceId))) throw new RealmIdentityError({ code: "oauth.grant_delivery_resource_not_found", message: "The delivery MCP Change is not available for this Project and Workspace.", recoveryAction: "use a discoverable Project Change resource and restart OAuth authorization", receipt: "oauthGrant=delivery-change-not-found; discoverable=false; taskGrant=not-created" });
           }
-          if (mutationRequested && binding) {
+          if (agentMutationRequested && binding) {
             const actor = identity.getRecoverySnapshot().actors[session.actorId];
             if (!actor || actor.kind !== "agent" || actor.agentId !== binding.agentId || session.id !== binding.agentSessionId) throw new RealmIdentityError({ code: "oauth.grant_agent_session_invalid", message: "The OAuth grant session is not the delegated Agent Session named by the resource.", recoveryAction: "reuse the exact delegated Agent Session and restart authorization", receipt: "oauthGrant=agent-session-mismatch; taskGrant=not-created" });
             const capability = deliveryOperations[0] ? mcpDeliveryScope(deliveryOperations[0]) : scopes.includes("workspace.write") ? "workspace.write" : scopes.includes("change.write") ? "change.publish_revision" : "run.invoke";
             const validation = identity.validateTaskGrant({ principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, taskId: binding.taskId, grantId: binding.capabilityGrantId, resource: binding.resourceRef, sourceSpaceIds, action: capability });
             if (!validation.valid) throw new RealmIdentityError({ code: validation.code, message: "The delegated Agent Task/Grant is not live for this OAuth resource.", recoveryAction: validation.recoveryAction, receipt: validation.receipt });
           }
-          const record: StoredOAuthGrant = { protocol: "anyam.oauth-grant/v1", id, providerGrantId, realmId: identity.realm.id, principalId: session.principalId, clientId, scopes, status: "active", createdAt, sessionId: session.id, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch, expiresAt: session.expiresAt, ...(binding ? { mcpResource: binding.resource, resource: binding.resourceRef } : {}), sourceSpaceIds, deliveryActions: deliveryOperations, ...(mutationRequested && binding ? { taskId: binding.taskId, capabilityGrantId: binding.capabilityGrantId } : {}) };
+          if (deliveryRequested && binding) {
+            const actor = identity.getRecoverySnapshot().actors[session.actorId];
+            if (!actor || actor.kind !== "human") throw new RealmIdentityError({ code: "oauth.grant_delivery_owner_required", message: "Delivery OAuth grants must be created by an authenticated human Realm Session.", recoveryAction: "authenticate the human release owner and restart authorization", receipt: "oauthGrant=owner-delivery-session-required; taskGrant=not-created; canonicalWrite=false" });
+          }
+          const record: StoredOAuthGrant = { protocol: "anyam.oauth-grant/v1", id, providerGrantId, realmId: identity.realm.id, principalId: session.principalId, clientId, scopes, status: "active", createdAt, sessionId: session.id, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch, expiresAt: session.expiresAt, ...(binding ? { mcpResource: binding.resource, resource: binding.resourceRef } : {}), sourceSpaceIds, deliveryActions: deliveryOperations, ...(agentMutationRequested && binding ? { taskId: binding.taskId, capabilityGrantId: binding.capabilityGrantId } : {}) };
           if (existing) {
             if (existing.providerGrantId !== providerGrantId || existing.principalId !== record.principalId || existing.clientId !== clientId || JSON.stringify(existing.scopes) !== JSON.stringify(scopes) || existing.mcpResource !== record.mcpResource || JSON.stringify(existing.sourceSpaceIds) !== JSON.stringify(record.sourceSpaceIds)) throw new RealmIdentityError({ code: "oauth.grant_conflict", message: `OAuth grant ${id} is already bound to different provider state.`, recoveryAction: "do not reuse a local grant identity; reconcile the provider grant before retrying", receipt: `grant=${id}; conflict=true; authority=unchanged` });
             return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "grant-recorded", grant: storedOAuthGrantProjection(existing), receipt: "oauthGrant=idempotent; revocable=true; credentialMaterialStored=false" });
           }
-          if (binding && authority && !mutationRequested) {
+          if (binding && authority && deliveryRequested) {
             const created = await this.transitionIdentity(async (next) => {
               const ownerGrant = next.createOwnerTaskGrant({ sessionId: session.id, purpose: `Remote MCP delivery OAuth grant ${id}`, resource: binding.resourceRef, sourceSpaceIds, actions: deliveryScopes, effects: deliveryOperations.map((operation) => String(operation)), expiresAt: session.expiresAt });
               const boundRecord: StoredOAuthGrant = { ...record, taskId: ownerGrant.task.id, capabilityGrantId: ownerGrant.grant.id };

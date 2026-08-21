@@ -182,3 +182,42 @@ test("revocation and expiry are visible at capability authorization", async () =
   assert.equal(expired.status, "failed");
   if (expired.status === "failed") assert.equal(expired.code, "capability_expired");
 });
+
+test("persisted Bridge snapshot rejects a replay after coordinator restart", async () => {
+  const first = authority();
+  const pending = first.createPendingConnection(connectionInput());
+  assert.equal(pending.status, "succeeded");
+  if (pending.status !== "succeeded") return;
+  const exchanged = await first.exchange({ connectionId: pending.value.id, operation: "inbound", token: "token-1", verifier: verifier(claims()) });
+  assert.equal(exchanged.status, "succeeded");
+  const restored = new GitHubActionsBridgeAuthority({ now: () => now, snapshot: first.snapshot() });
+  const verification = await verifier(claims()).verify({ token: "never-stored", audience: connectionInput().audience });
+  const replay = await restored.exchangeVerified({ connectionId: pending.value.id, operation: "inbound", verification });
+  assert.equal(replay.status, "failed");
+  if (replay.status === "failed") assert.equal(replay.code, "oidc_replay");
+  assert.equal(JSON.stringify(first.snapshot()).includes("token-1"), false);
+});
+
+test("proposal capability is independently bound from inbound and outbound", async () => {
+  const value = authority();
+  const pending = value.createPendingConnection(connectionInput({ id: "github-bridge:proposal", allowedOperations: ["proposal"] }));
+  assert.equal(pending.status, "succeeded");
+  if (pending.status !== "succeeded") return;
+  const exchanged = await value.exchange({ connectionId: pending.value.id, operation: "proposal", token: "proposal-token-never-stored", verifier: verifier(claims({ jti: "jti-proposal" })) });
+  assert.equal(exchanged.status, "succeeded");
+  if (exchanged.status === "succeeded") assert.equal(exchanged.value.capability.operation, "proposal");
+  const inbound = await value.exchange({ connectionId: pending.value.id, operation: "inbound", token: "inbound-token-never-stored", verifier: verifier(claims({ jti: "jti-inbound" })) });
+  assert.equal(inbound.status, "failed");
+  if (inbound.status === "failed") assert.equal(inbound.code, "operation_denied");
+});
+
+test("OIDC verifier receipts cannot carry credential-shaped material", async () => {
+  const value = authority();
+  const pending = value.createPendingConnection(connectionInput());
+  assert.equal(pending.status, "succeeded");
+  if (pending.status !== "succeeded") return;
+  const result = await value.exchangeVerified({ connectionId: pending.value.id, operation: "inbound", verification: { status: "verified", claims: {}, receipt: "token=secret-material" } });
+  assert.equal(result.status, "failed");
+  if (result.status === "failed") assert.equal(result.code, "receipt_credential_material");
+  assert.equal(value.snapshot().connections[pending.value.id]?.status, "pending");
+});

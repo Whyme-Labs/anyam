@@ -10,6 +10,7 @@ export * from "./portability/project-export.ts";
 export * from "./portability/mirror.ts";
 export * from "./portability/github-app.ts";
 export * from "./portability/github-actions-bridge.ts";
+export * from "./portability/github-actions-bridge-import.ts";
 export * from "./change-control/local.ts";
 export * from "./change-control/collaboration.ts";
 export * from "./execution/local.ts";

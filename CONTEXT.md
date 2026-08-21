@@ -178,6 +178,13 @@ blocked reconciliation checkpoints. Bridge capabilities are operation
 specific (`inbound`, `proposal`, or `outbound`), persisted by the Realm
 coordinator, and always `canonicalWrite=false`.
 
+Outbound projection uses a signed exact bundle with expected remote generation
+and mapped refs. The customer workflow pushes with its job-scoped
+`GITHUB_TOKEN`, reports read-back, and receives a blocked checkpoint rather
+than false success for protected branches, stale state, revoked connections,
+or mismatched refs. Anyam CI remains authoritative unless the customer
+explicitly enables this projection.
+
 **Mirror Operation**:
 An immutable, idempotent attempt to inspect, project, propose, reconcile, or recover a Repository Mirror. It records the expected remote generation, actual provider receipt, origin operation, inbound Change IDs, outcome, and policy-safe recovery action.
 _Avoid_: Provider webhook, hidden background retry

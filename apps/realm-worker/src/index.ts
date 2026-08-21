@@ -37,9 +37,10 @@ import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } f
 import { handleAuthorityRequest } from "./authority-edge.ts";
 import { isMcpDeliveryOperation, mcpDeliveryScope, parseMcpDeliveryBinding, MCP_DELIVERY_OPERATIONS, type McpDeliveryOperation } from "./mcp-delivery-grant.ts";
 import { AUTHORITY_RECOVERY_PROTOCOL, createAuthorityRecoveryBundle, verifyAuthorityRecoveryBundle, type AuthorityRecoveryBundle } from "../../../src/cloudflare/authority-recovery.ts";
-import { GitHubActionsBridgeAuthority, type GitHubActionsBridgeConnectionInput, type GitHubActionsBridgeOperation, type GitHubActionsBridgeSnapshot, type GitHubActionsOidcVerification } from "../../../src/portability/github-actions-bridge.ts";
+import { GitHubActionsBridgeAuthority, type GitHubActionsBridgeConnectionInput, type GitHubActionsEventName, type GitHubActionsBridgeOperation, type GitHubActionsBridgeSnapshot, type GitHubActionsOidcVerification } from "../../../src/portability/github-actions-bridge.ts";
 import { GitHubActionsBridgeImportCoordinator, MemoryGitHubActionsBridgeImportLedger, type GitHubActionsBridgeImportSnapshot, type GitHubActionsBridgeOwnerConfirmation, type GitHubActionsBridgeRepositoryImportReceipt } from "../../../src/portability/github-actions-bridge-import.ts";
-import { encodeGitHubActionsBridgeSourcePackage, parseGitHubActionsBridgeHistory, parseGitHubActionsBridgeMode, parseGitHubActionsBridgePlan, parseGitHubActionsBridgeSourcePackage } from "./github-actions-bridge-contract.ts";
+import { GitHubActionsBridgeOutboundCoordinator, MemoryGitHubActionsBridgeOutboundReplayLedger, type GitHubActionsBridgeOutboundSnapshot } from "../../../src/portability/github-actions-bridge-outbound.ts";
+import { encodeGitHubActionsBridgeHistory, encodeGitHubActionsBridgeOutboundBundle, encodeGitHubActionsBridgeSourcePackage, parseGitHubActionsBridgeHistory, parseGitHubActionsBridgeMode, parseGitHubActionsBridgeOutboundBundle, parseGitHubActionsBridgeOutboundPlan, parseGitHubActionsBridgeOutboundProvider, parseGitHubActionsBridgeOutboundRun, parseGitHubActionsBridgePlan, parseGitHubActionsBridgeSourcePackage } from "./github-actions-bridge-contract.ts";
 import { handleGitHubActionsBridgeRequest } from "./github-actions-bridge-route.ts";
 
 export type Env = AnyamRealmOAuthEnv;
@@ -54,6 +55,7 @@ const REALM_AUTHORITY_RECOVERY_STATUS_KEY = "anyam/realm-authority/recovery-stat
 const REALM_AUTHORITY_RECOVERY_RESTORE_PREFIX = "anyam/realm-authority/recovery-restore/v1:";
 const REALM_GITHUB_ACTIONS_BRIDGE_SNAPSHOT_KEY = "anyam/github-actions-bridge/snapshot/v1";
 const REALM_GITHUB_ACTIONS_BRIDGE_IMPORT_SNAPSHOT_KEY = "anyam/github-actions-bridge/import-snapshot/v1";
+const REALM_GITHUB_ACTIONS_BRIDGE_OUTBOUND_SNAPSHOT_KEY = "anyam/github-actions-bridge/outbound-snapshot/v1";
 const REALM_COORDINATOR_PROTOCOL = "anyam.realm-coordinator/v1" as const;
 const REALM_QUALIFICATION_PROJECT_ID = "project:realm-qualification";
 const REALM_QUALIFICATION_SOURCE_SPACE_ID = "source:realm-qualification";
@@ -191,12 +193,12 @@ function bridgeConnectionInput(value: unknown): GitHubActionsBridgeConnectionInp
   const input = value as Record<string, unknown>;
   const required = (key: string): string => coordinatorString(input, key);
   const array = (key: string): string[] => coordinatorStringArray(input, key);
-  const allowedEvents: GitHubActionsBridgeConnectionInput["allowedEvents"] = [];
+  const allowedEvents: GitHubActionsEventName[] = [];
   for (const event of array("allowedEvents")) {
     if (event !== "push" && event !== "pull_request" && event !== "workflow_dispatch") throw new RealmIdentityError({ code: "github_bridge.event_invalid", message: `Bridge event ${event} is unsupported.`, recoveryAction: "choose push, pull_request, or workflow_dispatch for the owner-approved connection", receipt: `event=${event}; transition=not-applied; credentialMaterialStored=false` });
     allowedEvents.push(event);
   }
-  const allowedOperations: GitHubActionsBridgeConnectionInput["allowedOperations"] = [];
+  const allowedOperations: GitHubActionsBridgeOperation[] = [];
   for (const operation of array("allowedOperations")) {
     if (operation !== "inbound" && operation !== "outbound" && operation !== "proposal") throw new RealmIdentityError({ code: "github_bridge.operation_invalid", message: `Bridge operation ${operation} is unsupported.`, recoveryAction: "choose inbound, proposal, or outbound for the owner-approved connection", receipt: `operation=${operation}; transition=not-applied; credentialMaterialStored=false` });
     allowedOperations.push(operation);
@@ -211,6 +213,9 @@ function bridgeConnectionInput(value: unknown): GitHubActionsBridgeConnectionInp
     repositoryOwnerId: required("repositoryOwnerId"),
     repository: required("repository"),
     repositoryId: required("repositoryId"),
+    mirrorId: input.mirrorId === null || input.mirrorId === undefined ? null : required("mirrorId"),
+    outboundSigningKeyId: input.outboundSigningKeyId === null || input.outboundSigningKeyId === undefined ? null : required("outboundSigningKeyId"),
+    outboundSigningPublicKey: input.outboundSigningPublicKey === null || input.outboundSigningPublicKey === undefined ? null : required("outboundSigningPublicKey"),
     workflowRef: required("workflowRef"),
     expectedJobWorkflowRef,
     ref: required("ref"),
@@ -676,6 +681,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   private identity: RealmIdentityPolicy | undefined;
   private githubActionsBridge!: GitHubActionsBridgeAuthority;
   private githubActionsBridgeImports!: GitHubActionsBridgeImportCoordinator;
+  private githubActionsBridgeOutbound!: GitHubActionsBridgeOutboundCoordinator;
   private recoveryStatus: RealmRecoveryStatus = "active";
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -694,6 +700,8 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       this.githubActionsBridge = new GitHubActionsBridgeAuthority(bridgeSnapshot ? { snapshot: bridgeSnapshot } : {});
       const importSnapshot = await ctx.storage.get<GitHubActionsBridgeImportSnapshot>(REALM_GITHUB_ACTIONS_BRIDGE_IMPORT_SNAPSHOT_KEY);
       this.githubActionsBridgeImports = new GitHubActionsBridgeImportCoordinator({ ledger: new MemoryGitHubActionsBridgeImportLedger(importSnapshot?.completedOperationIds ?? []) });
+      const outboundSnapshot = await ctx.storage.get<GitHubActionsBridgeOutboundSnapshot>(REALM_GITHUB_ACTIONS_BRIDGE_OUTBOUND_SNAPSHOT_KEY);
+      this.githubActionsBridgeOutbound = new GitHubActionsBridgeOutboundCoordinator({ ledger: new MemoryGitHubActionsBridgeOutboundReplayLedger(outboundSnapshot?.completedOperationIds ?? []) });
     });
   }
 
@@ -718,6 +726,15 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
 
   private async persistGitHubActionsBridgeImports(): Promise<void> {
     await this.ctx.storage.put(REALM_GITHUB_ACTIONS_BRIDGE_IMPORT_SNAPSHOT_KEY, this.requireGitHubActionsBridgeImports().snapshot());
+  }
+
+  private requireGitHubActionsBridgeOutbound(): GitHubActionsBridgeOutboundCoordinator {
+    if (!this.githubActionsBridgeOutbound) throw new Error("github_actions_bridge_outbound_not_hydrated");
+    return this.githubActionsBridgeOutbound;
+  }
+
+  private async persistGitHubActionsBridgeOutbound(): Promise<void> {
+    await this.ctx.storage.put(REALM_GITHUB_ACTIONS_BRIDGE_OUTBOUND_SNAPSHOT_KEY, this.requireGitHubActionsBridgeOutbound().snapshot());
   }
 
   private async persistIdentity(): Promise<void> {
@@ -1470,6 +1487,31 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return bridgeObject(value, `service.${path}`);
   }
 
+  private async githubActionsBridgeOutboundBundle(body: CoordinatorRequestBody): Promise<Response> {
+    const capabilityId = coordinatorString(body, "capabilityId");
+    const run = parseGitHubActionsBridgeOutboundRun(body.run);
+    const authorized = this.requireGitHubActionsBridge().authorize(capabilityId, "outbound");
+    if (authorized.status === "failed") return coordinatorJson(authorized, 403);
+    const service = await this.bridgeService(this.env.ANYAM_GITHUB_BRIDGE_OUTBOUND, "/bundle", { protocol: "anyam.github-actions-bridge-service/v1", operation: "signed-outbound-bundle", capability: authorized.value, run });
+    const bundle = parseGitHubActionsBridgeOutboundBundle(service.bundle);
+    const prepared = await this.requireGitHubActionsBridgeOutbound().prepare({ capability: authorized.value, bundle, run });
+    await this.persistGitHubActionsBridgeOutbound();
+    if (prepared.status !== "succeeded") return coordinatorJson(prepared, 409);
+    return coordinatorJson({ protocol: "anyam.github-actions-bridge-outbound/v1", status: "succeeded", plan: prepared.value, bundle: encodeGitHubActionsBridgeOutboundBundle(bundle), run, receipt: `${prepared.receipt}; bundle=issued; credentialMaterialStored=false; canonicalWrite=false` });
+  }
+
+  private async githubActionsBridgeOutboundComplete(body: CoordinatorRequestBody): Promise<Response> {
+    const bundle = parseGitHubActionsBridgeOutboundBundle(body.bundle);
+    const plan = parseGitHubActionsBridgeOutboundPlan(body.plan);
+    const run = parseGitHubActionsBridgeOutboundRun(body.run);
+    const provider = parseGitHubActionsBridgeOutboundProvider(body.provider);
+    const authorized = this.requireGitHubActionsBridge().authorize(bundle.capabilityId, "outbound");
+    if (authorized.status === "failed") return coordinatorJson(authorized, 403);
+    const result = await this.requireGitHubActionsBridgeOutbound().complete({ plan, capability: authorized.value, bundle, run, provider });
+    await this.persistGitHubActionsBridgeOutbound();
+    return coordinatorJson(result, result.status === "succeeded" ? 200 : result.status === "blocked" || result.status === "degraded" ? 409 : 422);
+  }
+
   private async githubActionsBridgeActivate(body: CoordinatorRequestBody): Promise<Response> {
     const ownerSessionId = coordinatorString(body, "sessionId");
     const owner = this.authorityOwnerSession(ownerSessionId);
@@ -1550,6 +1592,8 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/github-actions-bridge/connection/revoke/internal") return await this.githubActionsBridgeRevokeConnection(body);
       if (url.pathname === "/github-actions-bridge/exchange/internal") return await this.githubActionsBridgeExchange(body);
       if (url.pathname === "/github-actions-bridge/prepare/internal") return await this.githubActionsBridgePrepare(body);
+      if (url.pathname === "/github-actions-bridge/outbound/bundle/internal") return await this.githubActionsBridgeOutboundBundle(body);
+      if (url.pathname === "/github-actions-bridge/outbound/complete/internal") return await this.githubActionsBridgeOutboundComplete(body);
       if (url.pathname === "/github-actions-bridge/activate/internal") return await this.githubActionsBridgeActivate(body);
       if (url.pathname === "/github-actions-bridge/proposal/internal") return await this.githubActionsBridgeProposal(body);
       if (url.pathname === "/authority/promotion/status/internal") return await this.authorityPromotionStatus(body);

@@ -181,6 +181,8 @@ ${scheduleBlock}  workflow_dispatch:
 
 # The Realm binds this workflow path and SHA through GitHub OIDC. Do not use
 # pull_request_target or replace the pinned bridge action with a mutable tag.
+# Anyam CI remains authoritative; this outbound job is an explicit customer
+# opt-in projection. GITHUB_TOKEN pushes do not recursively trigger workflows.
 permissions: {}
 
 jobs:
@@ -200,6 +202,10 @@ jobs:
           connection: ${yaml(connection)}
           repository: ${yaml(`${owner}/${name}`)}
           workflow: ${yaml(path)}
+          run-id: \${{ github.run_id }}
+          event: \${{ github.event_name }}
+          bundle-endpoint: ${yaml(`${realm}/api/integrations/github-actions/bridge/outbound/bundle`)}
+          completion-endpoint: ${yaml(`${realm}/api/integrations/github-actions/bridge/outbound/complete`)}
 
   outbound:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -215,6 +221,11 @@ jobs:
           connection: ${yaml(connection)}
           repository: ${yaml(`${owner}/${name}`)}
           workflow: ${yaml(path)}
+          run-id: \${{ github.run_id }}
+          event: \${{ github.event_name }}
+          bundle-endpoint: ${yaml(`${realm}/api/integrations/github-actions/bridge/outbound/bundle`)}
+          completion-endpoint: ${yaml(`${realm}/api/integrations/github-actions/bridge/outbound/complete`)}
+          protected-branch-policy: refuse-and-report
 `;
 }
 

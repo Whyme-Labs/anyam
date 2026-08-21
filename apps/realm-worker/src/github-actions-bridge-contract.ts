@@ -6,6 +6,13 @@ import {
   type GitHubActionsBridgeLfsObjectUpload,
   type GitHubActionsBridgeSourcePackage,
 } from "../../../src/portability/github-actions-bridge-import.ts";
+import {
+  GITHUB_ACTIONS_BRIDGE_OUTBOUND_PROTOCOL,
+  type GitHubActionsBridgeOutboundBundle,
+  type GitHubActionsBridgeOutboundPlan,
+  type GitHubActionsBridgeOutboundProviderResult,
+  type GitHubActionsBridgeOutboundRunObservation,
+} from "../../../src/portability/github-actions-bridge-outbound.ts";
 
 export type GitHubActionsBridgeWirePackage = Omit<GitHubActionsBridgeSourcePackage, "bundle" | "lfs"> & {
   bundle: { base64: string; digest: string; declaredBytes: number };
@@ -15,6 +22,10 @@ export type GitHubActionsBridgeWirePackage = Omit<GitHubActionsBridgeSourcePacka
 export type GitHubActionsBridgeWireHistory = Omit<GitHubActionsBridgeHistoryObservation, "canonicalRefs" | "githubRefs"> & {
   canonicalRefs: readonly GitRef[];
   githubRefs: readonly GitRef[];
+};
+
+export type GitHubActionsBridgeWireOutboundBundle = Omit<GitHubActionsBridgeOutboundBundle, "bundle"> & {
+  bundle: { base64: string; digest: string; declaredBytes: number };
 };
 
 function record(value: unknown, field: string): Record<string, unknown> {
@@ -144,6 +155,83 @@ export function parseGitHubActionsBridgeMode(value: unknown): "initial-import" |
   const mode = text(value, "mode");
   if (mode !== "initial-import" && mode !== "proposal") throw new Error("mode=unsupported");
   return mode;
+}
+
+function outboundMappings(value: unknown): GitHubActionsBridgeOutboundBundle["refMappings"] {
+  if (!Array.isArray(value)) throw new Error("refMappings=array-required");
+  return value.map((entry, index) => {
+    const mapping = record(entry, `refMappings[${index}]`);
+    return { localRef: text(mapping.localRef, `refMappings[${index}].localRef`), remoteRef: text(mapping.remoteRef, `refMappings[${index}].remoteRef`) };
+  });
+}
+
+function stringList(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`${field}=array-required`);
+  return value.map((entry, index) => text(entry, `${field}[${index}]`));
+}
+
+export function parseGitHubActionsBridgeOutboundBundle(value: unknown): GitHubActionsBridgeOutboundBundle {
+  const source = record(value, "outboundBundle");
+  const bundle = record(source.bundle, "outboundBundle.bundle");
+  const signing = record(source.signing, "outboundBundle.signing");
+  const protocol = text(source.protocol, "outboundBundle.protocol");
+  if (protocol !== GITHUB_ACTIONS_BRIDGE_OUTBOUND_PROTOCOL) throw new Error("outboundBundle.protocol=unsupported");
+  const algorithm = text(signing.algorithm, "outboundBundle.signing.algorithm");
+  if (algorithm !== "Ed25519") throw new Error("outboundBundle.signing.algorithm=unsupported");
+  return {
+    protocol,
+    operationId: text(source.operationId, "outboundBundle.operationId"),
+    capabilityId: text(source.capabilityId, "outboundBundle.capabilityId"),
+    realmId: text(source.realmId, "outboundBundle.realmId"),
+    projectId: text(source.projectId, "outboundBundle.projectId"),
+    sourceSpaceId: text(source.sourceSpaceId, "outboundBundle.sourceSpaceId"),
+    repositoryOwnerId: text(source.repositoryOwnerId, "outboundBundle.repositoryOwnerId"),
+    repositoryId: text(source.repositoryId, "outboundBundle.repositoryId"),
+    runId: text(source.runId, "outboundBundle.runId"),
+    mirrorId: text(source.mirrorId, "outboundBundle.mirrorId"),
+    remoteRepository: text(source.remoteRepository, "outboundBundle.remoteRepository"),
+    objectFormat: objectFormat(source.objectFormat),
+    defaultBranch: optionalText(source.defaultBranch, "outboundBundle.defaultBranch"),
+    expectedRemoteGeneration: text(source.expectedRemoteGeneration, "outboundBundle.expectedRemoteGeneration"),
+    expectedRemoteRefs: refs(source.expectedRemoteRefs, "outboundBundle.expectedRemoteRefs"),
+    refs: refs(source.refs, "outboundBundle.refs"),
+    refMappings: outboundMappings(source.refMappings),
+    protectedRemoteRefs: stringList(source.protectedRemoteRefs, "outboundBundle.protectedRemoteRefs"),
+    bundle: { bytes: base64(bundle.base64, "outboundBundle.bundle.base64"), digest: text(bundle.digest, "outboundBundle.bundle.digest"), declaredBytes: numberValue(bundle.declaredBytes, "outboundBundle.bundle.declaredBytes") },
+    signing: { algorithm, keyId: text(signing.keyId, "outboundBundle.signing.keyId"), publicKey: text(signing.publicKey, "outboundBundle.signing.publicKey"), signature: text(signing.signature, "outboundBundle.signing.signature"), messageDigest: text(signing.messageDigest, "outboundBundle.signing.messageDigest") },
+  };
+}
+
+export function encodeGitHubActionsBridgeOutboundBundle(bundle: GitHubActionsBridgeOutboundBundle): GitHubActionsBridgeWireOutboundBundle {
+  let binary = "";
+  for (const byte of bundle.bundle.bytes) binary += String.fromCharCode(byte);
+  return { ...bundle, bundle: { base64: btoa(binary), digest: bundle.bundle.digest, declaredBytes: bundle.bundle.declaredBytes } };
+}
+
+export function parseGitHubActionsBridgeOutboundRun(value: unknown): GitHubActionsBridgeOutboundRunObservation {
+  const run = record(value, "run");
+  const state = text(run.state, "run.state");
+  if (state !== "received" && state !== "no-run" && state !== "stale" && state !== "disabled" && state !== "revoked") throw new Error("run.state=unsupported");
+  return { state, receipt: text(run.receipt, "run.receipt") };
+}
+
+export function parseGitHubActionsBridgeOutboundProvider(value: unknown): GitHubActionsBridgeOutboundProviderResult {
+  const provider = record(value, "provider");
+  const status = text(provider.status, "provider.status");
+  if (status === "succeeded") return { status, generation: text(provider.generation, "provider.generation"), refs: refs(provider.refs, "provider.refs"), receipt: text(provider.receipt, "provider.receipt") };
+  if (status !== "failed") throw new Error("provider.status=unsupported");
+  const code = text(provider.code, "provider.code");
+  if (code !== "protected-branch" && code !== "stale" && code !== "revoked" && code !== "disabled" && code !== "no-run" && code !== "provider-error") throw new Error("provider.code=unsupported");
+  return { status, code, recoveryAction: text(provider.recoveryAction, "provider.recoveryAction"), receipt: text(provider.receipt, "provider.receipt"), remoteMayHaveChanged: provider.remoteMayHaveChanged === true };
+}
+
+export function parseGitHubActionsBridgeOutboundPlan(value: unknown): GitHubActionsBridgeOutboundPlan {
+  const plan = record(value, "outboundPlan");
+  const protocol = text(plan.protocol, "outboundPlan.protocol");
+  if (protocol !== GITHUB_ACTIONS_BRIDGE_OUTBOUND_PROTOCOL) throw new Error("outboundPlan.protocol=unsupported");
+  const status = text(plan.status, "outboundPlan.status");
+  if (status !== "ready" && status !== "blocked" && status !== "degraded") throw new Error("outboundPlan.status=unsupported");
+  return { protocol, operationId: text(plan.operationId, "outboundPlan.operationId"), capabilityId: text(plan.capabilityId, "outboundPlan.capabilityId"), realmId: text(plan.realmId, "outboundPlan.realmId"), projectId: text(plan.projectId, "outboundPlan.projectId"), sourceSpaceId: text(plan.sourceSpaceId, "outboundPlan.sourceSpaceId"), repositoryId: text(plan.repositoryId, "outboundPlan.repositoryId"), mirrorId: text(plan.mirrorId, "outboundPlan.mirrorId"), remoteRepository: text(plan.remoteRepository, "outboundPlan.remoteRepository"), runId: text(plan.runId, "outboundPlan.runId"), expectedRemoteGeneration: text(plan.expectedRemoteGeneration, "outboundPlan.expectedRemoteGeneration"), expectedRemoteRefs: refs(plan.expectedRemoteRefs, "outboundPlan.expectedRemoteRefs"), desiredRemoteRefs: refs(plan.desiredRemoteRefs, "outboundPlan.desiredRemoteRefs"), protectedRemoteRefs: stringList(plan.protectedRemoteRefs, "outboundPlan.protectedRemoteRefs"), status, canonicalWrite: false, nextAction: text(plan.nextAction, "outboundPlan.nextAction"), receipt: text(plan.receipt, "outboundPlan.receipt") };
 }
 
 export function parseGitHubActionsBridgePlan(value: unknown): GitHubActionsBridgeImportPlan {

@@ -14,6 +14,9 @@ export type GitHubActionsBridgeConnectionInput = {
   repositoryOwnerId: string;
   repository: string;
   repositoryId: string;
+  mirrorId: string | null;
+  outboundSigningKeyId: string | null;
+  outboundSigningPublicKey: string | null;
   workflowRef: string;
   expectedJobWorkflowRef: string | null;
   ref: string;
@@ -33,6 +36,9 @@ type ConnectionBase = {
   repositoryOwnerId: string;
   repository: string;
   repositoryId: string;
+  mirrorId: string | null;
+  outboundSigningKeyId: string | null;
+  outboundSigningPublicKey: string | null;
   workflowRef: string;
   expectedJobWorkflowRef: string | null;
   ref: string;
@@ -86,6 +92,9 @@ export type GitHubActionsBridgeCapability = {
   operation: GitHubActionsBridgeOperation;
   repositoryOwnerId: string;
   repositoryId: string;
+  mirrorId: string | null;
+  outboundSigningKeyId: string | null;
+  outboundSigningPublicKey: string | null;
   workflowRef: string;
   workflowSha: string;
   runId: string;
@@ -248,14 +257,19 @@ function connectionFields(input: GitHubActionsBridgeConnectionInput, now: number
   const repositoryOwnerId = nonEmpty(input.repositoryOwnerId, "repositoryOwnerId");
   const repository = nonEmpty(input.repository, "repository");
   const repositoryId = nonEmpty(input.repositoryId, "repositoryId");
+  const mirrorId = input.mirrorId === null ? null : nonEmpty(input.mirrorId, "mirrorId");
+  const outboundSigningKeyId = input.outboundSigningKeyId === null ? null : nonEmpty(input.outboundSigningKeyId, "outboundSigningKeyId");
+  const outboundSigningPublicKey = input.outboundSigningPublicKey === null ? null : nonEmpty(input.outboundSigningPublicKey, "outboundSigningPublicKey");
   const workflowRef = nonEmpty(input.workflowRef, "workflowRef");
   const expectedJobWorkflowRef = input.expectedJobWorkflowRef === null ? null : nonEmpty(input.expectedJobWorkflowRef, "expectedJobWorkflowRef");
   const ref = nonEmpty(input.ref, "ref");
   const audience = nonEmpty(input.audience, "audience");
   const allowedEvents = list(input.allowedEvents, "allowedEvents", ["push", "pull_request", "workflow_dispatch"] as const);
   const allowedOperations = list(input.allowedOperations, "allowedOperations", ["inbound", "outbound", "proposal"] as const);
+  if (allowedOperations.includes("outbound") && mirrorId === null) throw new GitHubActionsBridgeInputError({ code: "mirror_required", message: "An outbound Bridge connection must name its exact Repository Mirror.", recoveryAction: "create the outbound connection with the owner-approved Mirror ID", receipt: "mirrorId=required-for-outbound; capability=not-issued" });
+  if (allowedOperations.includes("outbound") && (outboundSigningKeyId === null || outboundSigningPublicKey === null)) throw new GitHubActionsBridgeInputError({ code: "signing_key_required", message: "An outbound Bridge connection must name its Realm-authorized signing key.", recoveryAction: "configure the outbound signing key ID and public key before enabling Mirror projection", receipt: "outboundSigningKey=required; capability=not-issued" });
   const expiresAt = timestamp(input.expiresAt, "expiresAt", now, "future");
-  return { protocol: CONTRACT_VERSIONS.githubActionsBridge, realmId, projectId, sourceSpaceId, repositoryOwner, repositoryOwnerId, repository, repositoryId, workflowRef, expectedJobWorkflowRef, ref, audience, allowedEvents, allowedOperations, expiresAt };
+  return { protocol: CONTRACT_VERSIONS.githubActionsBridge, realmId, projectId, sourceSpaceId, repositoryOwner, repositoryOwnerId, repository, repositoryId, mirrorId, outboundSigningKeyId, outboundSigningPublicKey, workflowRef, expectedJobWorkflowRef, ref, audience, allowedEvents, allowedOperations, expiresAt };
 }
 
 function stateFailure(connection: GitHubActionsBridgeConnection): GitHubActionsBridgeFailure {
@@ -374,7 +388,7 @@ export class GitHubActionsBridgeAuthority {
       ? { ...connection, status: "active", workflowSha: claims.workflowSha, expiresAt: null, activatedAt: nowText }
       : connection;
     this.connections.set(connection.id, activeConnection);
-    const capability: GitHubActionsBridgeCapability = { protocol: CONTRACT_VERSIONS.githubActionsBridge, id: opaqueId("github-bridge-capability"), connectionId: connection.id, realmId: connection.realmId, projectId: connection.projectId, sourceSpaceId: connection.sourceSpaceId, operation: input.operation, repositoryOwnerId: connection.repositoryOwnerId, repositoryId: connection.repositoryId, workflowRef: connection.workflowRef, workflowSha: claims.workflowSha, runId: claims.runId, jtiDigest, issuedAt: claims.issuedAt, expiresAt: claims.expiresAt, status: "active", canonicalWrite: false, receipt: `capability=issued; connection=${connection.id}; operation=${input.operation}; repositoryId=${connection.repositoryId}; workflowSha=${claims.workflowSha}; jtiDigest=${jtiDigest}; canonicalWrite=false; credentialMaterialStored=false` };
+    const capability: GitHubActionsBridgeCapability = { protocol: CONTRACT_VERSIONS.githubActionsBridge, id: opaqueId("github-bridge-capability"), connectionId: connection.id, realmId: connection.realmId, projectId: connection.projectId, sourceSpaceId: connection.sourceSpaceId, operation: input.operation, repositoryOwnerId: connection.repositoryOwnerId, repositoryId: connection.repositoryId, mirrorId: connection.mirrorId, outboundSigningKeyId: connection.outboundSigningKeyId, outboundSigningPublicKey: connection.outboundSigningPublicKey, workflowRef: connection.workflowRef, workflowSha: claims.workflowSha, runId: claims.runId, jtiDigest, issuedAt: claims.issuedAt, expiresAt: claims.expiresAt, status: "active", canonicalWrite: false, receipt: `capability=issued; connection=${connection.id}; operation=${input.operation}; repositoryId=${connection.repositoryId}; mirrorId=${connection.mirrorId ?? "none"}; outboundSigningKey=${connection.outboundSigningKeyId ?? "none"}; workflowSha=${claims.workflowSha}; jtiDigest=${jtiDigest}; canonicalWrite=false; credentialMaterialStored=false` };
     this.capabilities.set(capability.id, capability);
     return success({ connection: clone(activeConnection), capability: clone(capability) }, `${capability.receipt}; provider=github-actions-oidc; liveProviderQualification=not-claimed`);
   }

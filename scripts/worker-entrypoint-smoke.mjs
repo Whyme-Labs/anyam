@@ -15,8 +15,8 @@ const workers = [
   {
     id: "realm",
     config: "apps/realm-worker/wrangler.example.jsonc",
-    sources: ["apps/realm-worker/src/index.ts", "apps/realm-worker/src/passkey-owner.ts", "apps/realm-worker/src/authority-edge.ts", "src/cloudflare/realm-worker.ts"],
-    routes: ["/health", "/mcp", "/authorize", "/owner/login", "/api/projects", "/api/projects/"],
+    sources: ["apps/realm-worker/src/index.ts", "apps/realm-worker/src/passkey-owner.ts", "apps/realm-worker/src/authority-edge.ts", "apps/realm-worker/src/github-actions-bridge-route.ts", "apps/realm-worker/src/github-actions-bridge-contract.ts", "src/cloudflare/realm-worker.ts"],
+    routes: ["/health", "/mcp", "/authorize", "/owner/login", "/api/projects", "/api/projects/", "/api/integrations/github-actions/bridge/exchange", "/api/integrations/github-actions/bridge/outbound/bundle", "/api/integrations/github-actions/bridge/outbound/complete"],
   },
   {
     id: "public-gateway",

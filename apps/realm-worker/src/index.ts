@@ -1097,6 +1097,46 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     });
   }
 
+  /** Internal Runner-service enrollment sync. No public or MCP surface can
+   * register a signing key; the bound Runner service must perform enrollment
+   * and then mirror only the credential-free profile into Authority. */
+  private async authorityRunnerProfile(body: CoordinatorRequestBody): Promise<Response> {
+    const profileValue = body.runnerProfile;
+    if (profileValue === null || typeof profileValue !== "object" || Array.isArray(profileValue)) throw new AuthorityPlaneError({ code: "invalid_request", message: "runnerProfile must be an object.", recoveryAction: "send the credential-free enrolled Runner profile through the bound Runner service", receipt: "runnerProfile=object-required; enrollment=not-applied" });
+    const profile = profileValue as import("../../../src/kernel/contracts.ts").RunnerProfile;
+    if (profile.realmId !== this.requireIdentity().realm.id) throw new AuthorityPlaneError({ code: "invalid_request", message: "Runner profile Realm does not match this Authority Realm.", recoveryAction: "synchronize a Runner profile enrolled in this Realm", receipt: "runnerProfile=realm-mismatch; enrollment=not-applied" });
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      const current = await this.authoritySnapshot();
+      const coordinator = new AuthorityPlaneCoordinator(current);
+      const identitySnapshot = this.requireIdentity().getRecoverySnapshot();
+      coordinator.registerRunnerProfile(profile, { realmId: identitySnapshot.realm.id, principalId: `runner-service:${profile.id}`, actorId: profile.id, sessionId: `runner-service:${profile.id}`, clientId: "anyam-runner-coordinator", authorizationEpoch: identitySnapshot.realm.authorizationEpoch, kind: "runner" });
+      await this.ctx.storage.put(REALM_AUTHORITY_SNAPSHOT_KEY, coordinator.snapshot());
+      return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "succeeded", runner: { id: profile.id, profileDigest: profile.profileDigest, status: profile.status }, credentialFree: true, canonicalWrite: false, receipt: `runner=${profile.id}; enrollment=synchronized; profileDigest=${profile.profileDigest}; credentialMaterialStored=false; canonicalWrite=false` });
+    });
+  }
+
+  /** Internal Runner-service completion route. The route constructs a
+   * non-human session and delegates all proof, binding, replay, and atomic
+   * state checks to AuthorityPlaneCoordinator.completeRunner(). */
+  private async authorityRunnerComplete(body: CoordinatorRequestBody): Promise<Response> {
+    const completionValue = body.completion;
+    if (completionValue === null || typeof completionValue !== "object" || Array.isArray(completionValue)) throw new AuthorityPlaneError({ code: "invalid_request", message: "completion must be an object.", recoveryAction: "send the exact credential-free Signed Runner completion envelope", receipt: "runnerCompletion=object-required; transition=not-applied" });
+    const profileValue = (completionValue as Record<string, unknown>).runnerProfile;
+    if (profileValue === null || typeof profileValue !== "object" || Array.isArray(profileValue)) throw new AuthorityPlaneError({ code: "invalid_request", message: "completion.runnerProfile must be an object.", recoveryAction: "synchronize the enrolled Runner profile before submitting completion", receipt: "runnerCompletion=runner-profile-missing; transition=not-applied" });
+    const profile = profileValue as Record<string, unknown>;
+    const runnerId = coordinatorString(profile, "id");
+    const identitySnapshot = this.requireIdentity().getRecoverySnapshot();
+    const session: AuthoritySession = { realmId: identitySnapshot.realm.id, principalId: `runner-service:${runnerId}`, actorId: runnerId, sessionId: `runner-service:${runnerId}`, clientId: "anyam-runner-coordinator", authorizationEpoch: identitySnapshot.realm.authorizationEpoch, kind: "runner" };
+    const payload: Record<string, unknown> = { completion: completionValue };
+    const command: AuthorityCommand = { protocol: body.protocol === undefined ? AUTHORITY_COMMAND_PROTOCOL : coordinatorString(body, "protocol") as typeof AUTHORITY_COMMAND_PROTOCOL, command: "runner.complete", idempotencyKey: coordinatorString(body, "idempotencyKey"), ...(typeof body.expectedVersion === "number" ? { expectedVersion: body.expectedVersion } : {}), payload };
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      const coordinator = new AuthorityPlaneCoordinator(await this.authoritySnapshot());
+      const result = await coordinator.completeRunner(command, session);
+      await this.ctx.storage.put(REALM_AUTHORITY_SNAPSHOT_KEY, coordinator.snapshot());
+      return coordinatorJson({ ...result, provenance: { runnerId, clientId: session.clientId, sessionId: session.sessionId, authorizationEpoch: session.authorizationEpoch }, credentialFree: true, canonicalWrite: false, receipt: `${result.receipt}; authority=runner-completion; runner=${runnerId}; canonicalWrite=false` }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
+    });
+  }
+
   private async authorityMcpCommand(body: CoordinatorRequestBody): Promise<Response> {
     if (coordinatorString(body, "surface") !== "mcp") throw new AuthorityPlaneError({ code: "invalid_request", message: "The MCP Authority boundary requires surface=mcp.", recoveryAction: "send the mutation through the remote MCP handler; no transition was accepted", receipt: "authority=mcp; surface=mismatch; transition=not-applied" });
     const sessionId = coordinatorString(body, "sessionId");
@@ -1217,6 +1257,8 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/promotion/reconcile/internal") return await this.authorityPromotionReconcile(body);
       if (url.pathname === "/authority/promotion/status/internal") return await this.authorityPromotionStatus(body);
       if (url.pathname === "/authority/mcp-command/internal") return await this.authorityMcpCommand(body);
+      if (url.pathname === "/authority/runner-profile/internal") return await this.authorityRunnerProfile(body);
+      if (url.pathname === "/authority/runner-complete/internal") return await this.authorityRunnerComplete(body);
       if (url.pathname === "/public-gateway/authorize") return await this.publicGatewayAuthorize(body);
       if (url.pathname === "/authority/command/internal") return await this.authorityCommand(body);
 

@@ -10,7 +10,7 @@ on:
         options:
           - github-hosted
           - blacksmith
-        default: github-hosted
+        default: blacksmith
   pull_request:
   push:
     branches:
@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 env:
-  ANYAM_REPOSITORY_GATE_PROVIDER: ${{ inputs.provider || vars.ANYAM_REPOSITORY_GATE_PROVIDER || 'github-hosted' }}
+  ANYAM_REPOSITORY_GATE_PROVIDER: ${{ inputs.provider || vars.ANYAM_REPOSITORY_GATE_PROVIDER || 'blacksmith' }}
 
 concurrency:
   group: repository-gate-${{ github.ref }}
@@ -29,7 +29,7 @@ concurrency:
 jobs:
   check:
     name: Anyam repository gate
-    runs-on: ${{ (inputs.provider == 'blacksmith' || (inputs.provider == '' && vars.ANYAM_REPOSITORY_GATE_PROVIDER == 'blacksmith')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ (inputs.provider == 'github-hosted' || (inputs.provider == '' && vars.ANYAM_REPOSITORY_GATE_PROVIDER == 'github-hosted')) && 'ubuntu-latest' || 'blacksmith-2vcpu-ubuntu-2404' }}
     timeout-minutes: 15
     steps:
       - name: Check out the exact revision

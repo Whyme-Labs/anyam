@@ -24,17 +24,17 @@ failed audit with a silent allow-list or a production-only scan.
 
 ## Remote provider selection
 
-The default is GitHub-hosted `ubuntu-latest`. If the organization has installed
-the Blacksmith GitHub integration, set this repository variable:
+The default is Blacksmith's `blacksmith-2vcpu-ubuntu-2404`. The organization
+must install the Blacksmith GitHub integration. To use GitHub-hosted execution
+as an explicit recovery fallback, set this repository variable:
 
 ```text
-ANYAM_REPOSITORY_GATE_PROVIDER=blacksmith
+ANYAM_REPOSITORY_GATE_PROVIDER=github-hosted
 ```
 
-The workflow then uses the fixed Blacksmith label
-`blacksmith-2vcpu-ubuntu-2404`. A manual `workflow_dispatch` run can select
-`blacksmith` without changing repository state. No Blacksmith credential is
-stored in the repository.
+The workflow then uses `ubuntu-latest`. A manual `workflow_dispatch` run can
+select `github-hosted` without changing repository state. No Blacksmith
+credential is stored in the repository.
 
 Blacksmith requires an organization integration; it is not available for
 personal repositories. If the integration is absent, a Blacksmith run is a

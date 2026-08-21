@@ -26,10 +26,10 @@ increased.” That is a provider receipt, not a TypeScript or Anyam gate result.
    validator before the type, test, package, and Worker checks.
 4. The gate records a provider-neutral runner receipt containing the selected
    provider, runner identity, exact commit, and no credential material.
-5. GitHub-hosted execution remains the default. A Realm/organization operator
-   may select Blacksmith by installing its GitHub organization integration and
-   setting the repository variable `ANYAM_REPOSITORY_GATE_PROVIDER=blacksmith`,
-   or by choosing `blacksmith` for a manual `workflow_dispatch` run.
+5. Blacksmith execution is the default. A Realm/organization operator must
+   install its GitHub organization integration; the repository variable
+   `ANYAM_REPOSITORY_GATE_PROVIDER=github-hosted` or an explicit
+   `github-hosted` manual `workflow_dispatch` run is the recovery fallback.
 6. The Blacksmith runner label is an adapter fact, not an Anyam limit. The
    provider may be replaced without changing the gate contract.
 

@@ -519,13 +519,14 @@ async function mcpDeliveryMutation(
   }
   let result: Record<string, unknown>;
   try {
-    result = await requestMcpMutationCoordinator(env, props, {
+    result = await requestMcpCoordinator(env, "/authority/command/internal", {
       protocol: "anyam.authority-command/v1",
       command: input.command,
       idempotencyKey: input.idempotencyKey,
       ...(input.expectedVersion === undefined ? {} : { expectedVersion: input.expectedVersion }),
       payload: input.payload,
-    }, operation, [operation]);
+      sessionId: props.kernelSessionId,
+    });
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
     const kind: McpDeliveryErrorKind = detail.includes("not_found") ? "not_found" : detail.includes("idempotency_conflict") || detail.includes("stale_state") || detail.includes("conflict") ? "conflict" : detail.includes("invalid_request") ? "invalid_request" : detail.includes("session.") || detail.includes("session_") ? "auth" : "coordinator";
@@ -567,12 +568,18 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
   const canWriteChanges = props.scopes.includes(MCP_CHANGE_WRITE_SCOPE);
   const canRecordRuns = props.scopes.includes(MCP_RUN_SCOPE);
   const hasLiveGrant = typeof props.anyamGrantId === "string" && props.anyamGrantId.trim().length > 0;
-  const canRequestLanding = hasLiveGrant && props.scopes.includes(MCP_LANDING_SCOPE);
-  const canCreateRelease = hasLiveGrant && props.scopes.includes(MCP_RELEASE_SCOPE);
-  const canConfigureTarget = hasLiveGrant && props.scopes.includes(MCP_TARGET_SCOPE);
-  const canRequestPromotion = hasLiveGrant && props.scopes.includes(MCP_PROMOTION_SCOPE);
+  const delegatedAgent = typeof props.agentId === "string" && props.agentId.trim().length > 0;
+  // v1 has no privileged release-agent grant path. Delivery authority is an
+  // owner-created, project-scoped OAuth Task/Grant and is therefore not
+  // advertised to delegated coding agents until that path is qualified.
+  const hasHumanDeliveryGrant = hasLiveGrant && !delegatedAgent;
+  const canCreateProjects = canWriteProjects && !delegatedAgent;
+  const canRequestLanding = hasHumanDeliveryGrant && props.scopes.includes(MCP_LANDING_SCOPE);
+  const canCreateRelease = hasHumanDeliveryGrant && props.scopes.includes(MCP_RELEASE_SCOPE);
+  const canConfigureTarget = hasHumanDeliveryGrant && props.scopes.includes(MCP_TARGET_SCOPE);
+  const canRequestPromotion = hasHumanDeliveryGrant && props.scopes.includes(MCP_PROMOTION_SCOPE);
   const hasDeliveryScope = props.scopes.some((scope) => Object.values(MCP_DELIVERY_SCOPE_BY_TOOL).includes(scope));
-  if (!canReadProjects && !canReadWorkspaces && !canReadChanges && !canWriteProjects && !canWriteWorkspaces && !canWriteChanges && !canRecordRuns && !canRequestLanding && !canCreateRelease && !canConfigureTarget && !canRequestPromotion) return mcpError(null, -32001, "The MCP grant does not include a supported Project, Workspace, Change, Run, Artifact, or live delivery capability.", { code: "mcp.scope_denied", recoveryAction: hasDeliveryScope && !hasLiveGrant ? "reauthorize the MCP client so the live OAuth grant handle is present, then retry" : "authorize a documented read scope, write scope, or live delivery grant and retry", receipt: `oauth=validated; mcp=scope-denied; grant=${hasDeliveryScope ? (hasLiveGrant ? "present" : "missing") : "not-requested"}; required=project.read|project.write|workspace.inspect|workspace.write|change.inspect|change.write|run.invoke|landing.request|release.create|target.configure|promotion.request; canonicalWrite=false` });
+  if (!canReadProjects && !canReadWorkspaces && !canReadChanges && !canCreateProjects && !canWriteWorkspaces && !canWriteChanges && !canRecordRuns && !canRequestLanding && !canCreateRelease && !canConfigureTarget && !canRequestPromotion) return mcpError(null, -32001, "The MCP grant does not include a supported Project, Workspace, Change, Run, Artifact, or live delivery capability.", { code: "mcp.scope_denied", recoveryAction: delegatedAgent && hasDeliveryScope ? "use the owner-created delivery MCP resource; generic delegated agents cannot request Landing, Release, Target, or Promotion in v1" : hasDeliveryScope && !hasLiveGrant ? "reauthorize the MCP client so the live OAuth grant handle is present, then retry" : "authorize a documented read scope, write scope, or live delivery grant and retry", receipt: `oauth=validated; mcp=scope-denied; grant=${hasDeliveryScope ? (hasLiveGrant ? "present" : "missing") : "not-requested"}; delegatedAgent=${delegatedAgent}; required=project.read|project.write|workspace.inspect|workspace.write|change.inspect|change.write|run.invoke|landing.request|release.create|target.configure|promotion.request; canonicalWrite=false` });
   if (request.method !== "POST") return mcpJson({ code: "method_not_allowed", recoveryAction: "Use POST with a JSON-RPC 2.0 request for the Realm MCP surface.", receipt: "mcp=read-only; method=post-required; canonicalWrite=false" }, 405);
 
   let parsed: unknown;
@@ -602,7 +609,7 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
         { name: MCP_READ_TOOL, description: "Inspect one project summary through the authenticated Realm Coordinator.", inputSchema: { type: "object", additionalProperties: false, required: ["projectId"], properties: { projectId: { type: "string", minLength: 1 } } } },
       );
     }
-    if (canWriteProjects) {
+    if (canCreateProjects) {
       tools.push({ name: MCP_PROJECT_CREATE_TOOL, description: "Create a Project through the authenticated Coordinator using a typed, idempotent bootstrap command.", inputSchema: { type: "object", additionalProperties: false, required: ["idempotencyKey", "name", "sourceSpaces"], properties: { idempotencyKey: { type: "string", minLength: 1 }, projectId: { type: "string", minLength: 1 }, name: { type: "string", minLength: 1 }, referenceType: { type: "string", minLength: 1 }, projectRevisionId: { type: "string", minLength: 1 }, sourceSpaces: { type: "array", minItems: 1, items: { type: "object", additionalProperties: false, required: ["id", "name", "classification", "snapshotId"], properties: { id: { type: "string", minLength: 1 }, name: { type: "string", minLength: 1 }, classification: { type: "string", enum: ["public", "internal", "restricted", "result-only"] }, snapshotId: { type: "string", minLength: 1 } } } }, expectedVersion: { type: "integer", minimum: 0 } } } });
     }
     if (canReadWorkspaces) {
@@ -657,8 +664,10 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
     if (typeof name !== "string" || name.trim().length === 0) return mcpError(id, -32602, "tools/call requires a tool name.", { code: "mcp.tool_name_required", recoveryAction: "call one of the listed project.list or project.inspect tools", receipt: "mcp=tool-call-invalid; canonicalWrite=false" });
     const deliveryScope = MCP_DELIVERY_SCOPE_BY_TOOL[name];
     const isDeliveryTool = deliveryScope !== undefined;
+    if (isDeliveryTool && delegatedAgent) return mcpError(id, -32601, `Tool ${name} is not available to delegated coding agents in v1.`, { code: "mcp.agent_delivery_not_supported", recoveryAction: "use the owner-created project-scoped delivery MCP resource or request the typed delivery operation through the human release workflow", receipt: `mcp=${name}; delegatedAgent=true; delivery=not-advertised; transition=not-applied; canonicalWrite=false` });
     if (isDeliveryTool && (!props.scopes.includes(deliveryScope) || !hasLiveGrant)) return mcpError(id, -32001, `The MCP grant does not include the live capability for ${name}.`, { code: "mcp.scope_denied", recoveryAction: `authorize ${deliveryScope} through a live OAuth grant and retry`, receipt: `oauth=validated; mcp=${name}; grant=${hasLiveGrant ? "present" : "missing"}; scope=${props.scopes.includes(deliveryScope) ? "present" : "missing"}; transition=not-applied; canonicalWrite=false` });
     const isProjectBootstrap = name === MCP_PROJECT_CREATE_TOOL;
+    if (isProjectBootstrap && delegatedAgent) return mcpError(id, -32601, "Project creation is not available to delegated coding agents in v1.", { code: "mcp.agent_project_create_not_supported", recoveryAction: "create the Project through the owner surface before delegating a Workspace Task", receipt: "mcp=project.create; delegatedAgent=true; tool=not-advertised; transition=not-applied; canonicalWrite=false" });
     const isWorkspaceBootstrap = name === MCP_WORKSPACE_CREATE_TOOL;
     const isChangeBootstrap = name === MCP_CHANGE_CREATE_TOOL;
     const isProjectTool = name === MCP_READ_TOOL || name === MCP_LIST_TOOL || isProjectBootstrap;

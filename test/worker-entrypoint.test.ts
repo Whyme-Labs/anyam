@@ -671,13 +671,13 @@ test("Realm Worker MCP entrypoint validates the live delivery grant before autho
     }),
   };
   const env = { ANYAM_INSTALLATION_ID: "mcp-entrypoint-delivery-test", REALM_COORDINATOR: namespace } as unknown as AnyamRealmMcpEnv;
-  const props: AnyamRealmMcpProps = { scopes: ["landing.request"], realmId: "realm:mcp-entrypoint-delivery-test", kernelSessionId: sessionId, agentId: "agent:mcp-entrypoint-delivery", taskId: "task:mcp-entrypoint-delivery", capabilityGrantId: "grant:mcp-entrypoint-task", resource: { realmId: "realm:mcp-entrypoint-delivery-test", projectId: "project:entrypoint" }, sourceSpaceIds: ["source:public"], anyamGrantId: "grant:mcp-entrypoint-delivery", mcpResource: "https://realm.example/mcp/projects/project:entrypoint?sourceSpaceId=source:public" };
+  const props: AnyamRealmMcpProps = { scopes: ["landing.request"], realmId: "realm:mcp-entrypoint-delivery-test", kernelSessionId: sessionId, resource: { realmId: "realm:mcp-entrypoint-delivery-test", projectId: "project:entrypoint" }, sourceSpaceIds: ["source:public"], anyamGrantId: "grant:mcp-entrypoint-delivery", mcpResource: "https://realm.example/mcp/projects/project:entrypoint?sourceSpaceId=source:public" };
   const response = await handleAnyamRealmMcpRequest(new Request("https://realm.example/mcp/projects/project:entrypoint", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "landing.apply", arguments: { idempotencyKey: "entrypoint-landing", projectId: "project:entrypoint", changeId: "change:entrypoint", changeRevisionId: "change-revision:entrypoint", expectedCanonicalProjectRevisionId: "project-revision:entrypoint:1", projectRevisionId: "project-revision:entrypoint:2" } } }) }), env, props);
   assert.equal(response.status, 200);
   const body = await response.json() as Record<string, unknown>;
   assert.equal((body.result as Record<string, unknown>).isError, false);
   assert.equal(calls[0], "/identity/oauth-grant/validate-delivery");
-  assert.equal(calls[1], "/authority/mcp-command/internal");
+  assert.equal(calls[1], "/authority/command/internal");
   assert.equal(calls.length, 2);
   assert.equal(JSON.stringify(body).includes("grant:mcp-entrypoint-delivery"), false);
   assert.equal(JSON.stringify(body).includes("session:mcp-entrypoint-delivery"), false);

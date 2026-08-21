@@ -288,7 +288,10 @@ test("remote MCP exposes scope-filtered typed bootstrap mutations with idempoten
   const ownerWriteProps: AnyamRealmMcpProps = { scopes: ["project.write"], realmId: "realm:mcp-test", kernelSessionId: "kernel-session:owner" };
   const listed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }), fixture.env, writeProps);
   const listedTools = ((await body(listed)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
-  assert.deepEqual(listedTools.map((tool) => tool.name), ["project.create", "workspace.create", "change.create", "change.publish_revision"]);
+  assert.deepEqual(listedTools.map((tool) => tool.name), ["workspace.create", "change.create", "change.publish_revision"]);
+  const agentDeliveryListed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 1.1, method: "tools/list" }), fixture.env, { ...writeProps, scopes: ["project.read", "landing.request"], anyamGrantId: "grant:mcp:delivery", mcpResource: "https://realm.example/mcp/projects/project:mcp?sourceSpaceId=source:mcp-public" });
+  const agentDeliveryTools = ((await body(agentDeliveryListed)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
+  assert.equal(agentDeliveryTools.some((tool) => tool.name === "landing.apply"), false);
 
   const projectArguments = { idempotencyKey: "mcp-project-1", projectId: "project:mcp", name: "MCP Project", referenceType: "git", sourceSpaces: [{ id: "source:mcp-public", name: "public", classification: "public", snapshotId: "git:mcp-base" }] };
   const createdProject = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "project.create", arguments: projectArguments } }), fixture.env, ownerWriteProps);
@@ -374,7 +377,7 @@ test("remote MCP exposes scope-filtered typed bootstrap mutations with idempoten
   const beforeInvalid = fixture.calls.length;
   const malformed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "project.create", arguments: { ...projectArguments, command: "raw" } } }), fixture.env, writeProps);
   const malformedError = (await body(malformed)).error as Record<string, unknown>;
-  assert.equal(malformedError.code, -32602);
+  assert.equal(malformedError.code, -32601);
   assert.equal(fixture.calls.length, beforeInvalid);
 
   const missingKey = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "change.create", arguments: { projectId: "project:mcp", intentId: "intent:mcp" } } }), fixture.env, writeProps);
@@ -390,7 +393,9 @@ test("remote MCP exposes scope-filtered typed bootstrap mutations with idempoten
   const readOnlyTools = ((await body(readOnly)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
   assert.deepEqual(readOnlyTools.map((tool) => tool.name), ["project.list", "project.inspect", "workspace.list", "workspace.inspect", "change.list", "change.inspect"]);
   const projectWriteOnly = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 11, method: "tools/list" }), fixture.env, { ...writeProps, scopes: ["project.write"] });
-  assert.deepEqual((((await body(projectWriteOnly)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>).map((tool) => tool.name), ["project.create"]);
+  const projectWriteOnlyBody = await body(projectWriteOnly);
+  assert.equal((projectWriteOnlyBody.error as Record<string, unknown>).code, -32001);
+  assert.match(String(((projectWriteOnlyBody.error as Record<string, unknown>).data as Record<string, unknown>).receipt), /delegatedAgent=true/);
   const changeWriteOnly = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 12, method: "tools/list" }), fixture.env, { ...writeProps, scopes: ["change.write"] });
   assert.deepEqual((((await body(changeWriteOnly)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>).map((tool) => tool.name), ["change.create", "change.publish_revision"]);
 });
@@ -400,10 +405,7 @@ test("remote MCP exposes authenticated typed delivery mutations with grant-bound
   const deliveryProps: AnyamRealmMcpProps = {
     scopes: ["landing.request", "release.create", "target.configure", "promotion.request"],
     realmId: "realm:mcp-test",
-    kernelSessionId: "kernel-session:agent",
-    agentId: "agent:mcp",
-    taskId: "task:mcp",
-    capabilityGrantId: "grant:mcp:delivery",
+    kernelSessionId: "kernel-session:owner",
     resource: { realmId: "realm:mcp-test", projectId: "project:mcp" },
     sourceSpaceIds: ["source:public"],
     anyamGrantId: "grant:mcp:delivery",
@@ -448,8 +450,8 @@ test("remote MCP exposes authenticated typed delivery mutations with grant-bound
     assert.match(String(content.receipt), /typedSurface=mcp/);
     assert.match(String(content.receipt), /grant=validated/);
     assert.match(String(content.receipt), /providerExecution=not-performed/);
-    assert.equal(fixture.calls.at(-1)?.path, "/authority/mcp-command/internal");
-    assert.equal(fixture.calls.at(-1)?.body.taskId, "task:mcp");
+    assert.equal(fixture.calls.at(-1)?.path, "/authority/command/internal");
+    assert.equal(fixture.calls.at(-1)?.body.sessionId, "kernel-session:owner");
     assert.equal(JSON.stringify(result).includes("grant:mcp:delivery"), false);
     assert.equal(JSON.stringify(result).includes("kernel-session"), false);
     assert.equal(fixture.calls.at(-1)?.body.command, entry.name);

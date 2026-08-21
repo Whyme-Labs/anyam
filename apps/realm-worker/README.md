@@ -136,7 +136,8 @@ Coordinator sorts Workspace discovery by Workspace identifier using code-unit
 ordering and owns the single query boundary for list and inspect.
 
 The same MCP resource exposes typed bootstrap tools only when their explicit
-write scope is present: `project.create` requires `project.write`,
+write scope is present: owner MCP sessions may use `project.create` with
+`project.write`, delegated coding agents cannot advertise or invoke it,
 `workspace.create` requires `workspace.write`, and `change.create` requires
 `change.write`. Each tool has a closed argument schema, requires an
 `idempotencyKey`, and is translated into the validated Coordinator command
@@ -314,9 +315,11 @@ does not execute or reconcile a provider promotion.
 
 ## Authenticated MCP delivery mutations
 
-The remote `/mcp` resource exposes four delivery mutations when the encrypted
-OAuth grant contains both the matching delivery scope and the provider-issued
-`anyamGrantId` handle:
+The remote `/mcp` resource exposes four delivery mutations only to a human
+owner-created, project-scoped OAuth Task/Grant with the matching delivery
+scope and provider-issued `anyamGrantId` handle. Delegated coding-agent grants
+do not advertise these tools in v1 because no privileged release-agent path is
+qualified:
 
 | Tool | Scope | Boundary |
 |---|---|---|
@@ -327,10 +330,10 @@ OAuth grant contains both the matching delivery scope and the provider-issued
 
 Each tool reuses the closed REST-compatible command parser and the
 Coordinator's Project/Change/Artifact/Evidence/Release/Target lineage checks.
-The request carries the authenticated kernel session, expected version when
-provided, and idempotency key; the OAuth grant handle is validated at the
-provider boundary and is never forwarded to the Coordinator or returned to
-the agent. Results use the safe MCP projections with `canonicalWrite=false`,
+The request carries the authenticated owner kernel session, expected version
+when provided, and idempotency key; the OAuth grant handle is validated at the
+Realm delivery boundary and is never forwarded to the Authority command or
+returned to the agent. Results use the safe MCP projections with `canonicalWrite=false`,
 `credentialFree=true`, and `providerExecution=not-performed`. Replays return
 the same projection, changed payloads are conflicts, hidden resources are not
 disclosed, and malformed fields fail before a Coordinator call.

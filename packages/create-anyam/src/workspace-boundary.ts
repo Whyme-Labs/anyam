@@ -111,7 +111,7 @@ export const WORKSPACE_BOUNDARY_POLICY = {
 } as const;
 
 /** Namespace/capability controls qualified by the Linux repository gate. */
-export const LINUX_BWRAP_CONTAINMENT_RECEIPT = "pid=unshared; ipc=unshared; uts=unshared; cgroup=try; session=new; capabilities=drop-all; sizing=qualification-tripwire; remeasure-before-production";
+export const LINUX_BWRAP_CONTAINMENT_RECEIPT = "user=try; pid=unshared; ipc=unshared; uts=unshared; cgroup=try; session=new; capabilities=drop-all; sizing=qualification-tripwire; remeasure-before-production";
 
 const SAFE_ENVIRONMENT_KEYS = new Set([
   "CI",
@@ -280,7 +280,7 @@ function appendReadonlyBind(args: string[], path: string): void {
 }
 
 function linuxBwrapRuntimeArgs(input: { boundary: WorkspaceBoundary; invokedCommand: string }): string[] {
-  const args = ["--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try", "--unshare-net", "--cap-drop", "ALL"];
+  const args = ["--die-with-parent", "--new-session", "--unshare-user-try", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try", "--unshare-net", "--cap-drop", "ALL"];
   for (const path of ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"]) appendReadonlyBind(args, path);
   args.push("--proc", "/proc", "--dev", "/dev");
 
@@ -597,7 +597,7 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
   let stderr = "";
   let outputLimitExceeded = false;
   let outputKillTimer: NodeJS.Timeout | undefined;
-  let resourceLimitExceeded: { budget: string; limit: number; asked: number } | undefined;
+  let resourceLimitExceeded: { budget: string; limit: number; asked: number | string } | undefined;
   let resourceMonitorError: string | undefined;
   let workspaceMonitor: ReturnType<typeof setInterval> | undefined;
   let workspaceMonitorBusy = false;
@@ -680,6 +680,7 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
     clearInterval(workspaceMonitor);
     await monitorWorkspaceUsage();
   }
+  if (resourceLimits && !resourceLimitExceeded && result.signal === "SIGXFSZ") resourceLimitExceeded = { budget: "workspace.file-bytes", limit: resourceLimits.maxFileBytes, asked: "kernel-signal-SIGXFSZ" };
   const status = !outputLimitExceeded && !result.timedOut && !resourceLimitExceeded && !resourceMonitorError && result.exitCode === 0 ? "passed" : "failed";
   const resourceReceipt = resourceLimits
     ? ` resourceLimits=${resourceLimitExceeded ? "exceeded" : resourceMonitorError ? "indeterminate" : "enforced"}; ${resourceLimits.receipt};${resourceLimitExceeded ? ` budget=${resourceLimitExceeded.budget}; limit=${resourceLimitExceeded.limit}; asked=${resourceLimitExceeded.asked};` : ""}${resourceMonitorError ? ` resourceMonitorError=${resourceMonitorError.slice(0, 120)};` : ""}`

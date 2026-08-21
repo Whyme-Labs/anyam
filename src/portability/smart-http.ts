@@ -367,6 +367,78 @@ function budgetFailureReceipt(input: { operation: SmartHttpOperation; policy: Sm
   return `provider=smart-http; operation=${input.operation}; budget=${input.budget}; limit=${input.limit}; asked=${input.asked}; ${input.policy.receipt}; canonicalWrite=false; credentialMaterialStored=false`;
 }
 
+type CountedStreamState = {
+  bytes: number;
+  ended: boolean;
+  exceeded?: number;
+};
+
+/**
+ * Count bytes at the stream boundary. Headers are only a hint: chunked and
+ * provider-generated bodies are charged as they actually flow. The lifecycle
+ * hooks are called exactly once for close, cancellation, or error.
+ */
+function countedStream(input: {
+  body: ReadableStream<Uint8Array> | null;
+  maxBytes?: number;
+  onExceeded: (asked: number) => string | void;
+  onFinished: (state: CountedStreamState) => void;
+}): { body: ReadableStream<Uint8Array> | null; state: CountedStreamState; cancel: (reason?: unknown) => Promise<void> } {
+  const state: CountedStreamState = { bytes: 0, ended: false };
+  if (!input.body) {
+    state.ended = true;
+    input.onFinished(state);
+    return { body: null, state, cancel: async () => undefined };
+  }
+  const reader = input.body.getReader();
+  let finished = false;
+  let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const finish = (): void => {
+    if (finished) return;
+    finished = true;
+    state.ended = true;
+    input.onFinished(state);
+  };
+  return {
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+      },
+      async pull(controller) {
+        try {
+          const next = await reader.read();
+          if (next.done) {
+            finish();
+            controller.close();
+            return;
+          }
+          const chunk = next.value;
+          const asked = state.bytes + chunk.byteLength;
+          if (input.maxBytes !== undefined && asked > input.maxBytes) {
+            state.exceeded = asked;
+            const failureReceipt = input.onExceeded(asked);
+            await reader.cancel("smart-http-byte-budget-exceeded").catch(() => undefined);
+            finish();
+            controller.error(new Error(failureReceipt ?? "smart-http-byte-budget-exceeded"));
+            return;
+          }
+          state.bytes = asked;
+          controller.enqueue(chunk);
+        } catch (error) {
+          finish();
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        finish();
+        await reader.cancel(reason).catch(() => undefined);
+      },
+    }),
+    state,
+    cancel: async (reason?: unknown) => { streamController?.error(new Error(String(reason ?? "smart-http-stream-cancelled"))); finish(); await reader.cancel(reason).catch(() => undefined); },
+  };
+}
+
 /**
  * Worker-compatible Git Smart HTTP gateway. The gateway owns the transport
  * policy and credential audience; the upstream RepositoryDriver owns Git
@@ -409,11 +481,16 @@ export async function handleSmartHttpRequest(request: Request, config: SmartHttp
   const acquired = budgetTracker?.acquire(budget?.maxConcurrentRequests) ?? true;
   if (!acquired) return blockedReceipt(429, "git_budget_exceeded", "retry after an active Smart HTTP operation completes; the named concurrency budget is a tripwire", `repository=${route.repositoryId}; operation=${operation}; ${budgetFailureReceipt({ operation, policy: budget!, budget: "concurrentRequests", limit: budget!.maxConcurrentRequests!, asked: budgetTracker?.current() ?? "unknown" })}`);
   let budgetReleased = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   const releaseBudget = (): void => {
     if (!budgetReleased) {
       budgetReleased = true;
       budgetTracker?.release();
     }
+  };
+  const finishLifecycle = (): void => {
+    if (timeout) clearTimeout(timeout);
+    releaseBudget();
   };
   const requestBytes = Number.parseInt(request.headers.get("content-length") ?? "", 10);
   if (budget?.maxRequestBytes !== undefined && Number.isSafeInteger(requestBytes) && requestBytes > budget.maxRequestBytes) {
@@ -432,38 +509,55 @@ export async function handleSmartHttpRequest(request: Request, config: SmartHttp
   upstream.search = url.search;
   let response: Response;
   const controller = new AbortController();
-  const timeout = budget?.maxDurationMs === undefined ? undefined : setTimeout(() => controller.abort(), budget.maxDurationMs);
+  let cancelResponseBody: (() => Promise<void>) | undefined;
+  let requestBudgetAsked: number | undefined;
+  const requestBody = countedStream({
+    body: request.body,
+    ...(budget?.maxRequestBytes === undefined ? {} : { maxBytes: budget.maxRequestBytes }),
+    onExceeded: (asked) => { requestBudgetAsked = asked; controller.abort(); return budget && budget.maxRequestBytes !== undefined ? budgetFailureReceipt({ operation, policy: budget, budget: operation === "write" ? "packBytes" : "requestBytes", limit: budget.maxRequestBytes, asked }) : undefined; },
+    onFinished: () => undefined,
+  });
+  timeout = budget?.maxDurationMs === undefined ? undefined : setTimeout(() => { controller.abort(); void cancelResponseBody?.(); }, budget.maxDurationMs);
   const startedAt = Date.now();
   try {
     response = await fetch(upstream, {
       method: request.method,
       headers: forwardHeaders(request, await config.upstreamHeaders?.({ repositoryId: route.repositoryId, operation })),
-      ...(request.method === "GET" || request.method === "HEAD" ? {} : { body: request.body }),
+      ...(request.method === "GET" || request.method === "HEAD" ? {} : { body: requestBody.body }),
       signal: controller.signal,
       // Node's fetch requires this opt-in when the qualification harness
       // forwards a Request body stream. Workers ignores the extra hint.
       ...(request.method === "GET" || request.method === "HEAD" ? {} : { duplex: "half" as const }),
     } as RequestInit & { duplex?: "half" });
   } catch (error) {
-    if (timeout) clearTimeout(timeout);
-    releaseBudget();
+    finishLifecycle();
+    if (requestBudgetAsked !== undefined && budget?.maxRequestBytes !== undefined) return blockedReceipt(413, "git_budget_exceeded", "reduce the Git request or use a qualified workload budget; the stream exceeded its measured request budget", `repository=${route.repositoryId}; operation=${operation}; ${budgetFailureReceipt({ operation, policy: budget, budget: operation === "write" ? "packBytes" : "requestBytes", limit: budget.maxRequestBytes, asked: requestBudgetAsked })}`);
     return gatewayJson({ protocol: SMART_HTTP_PROTOCOL, status: "unavailable", repositoryId: route.repositoryId, operation, canonicalWrite: false, credentialFree: true, recoveryAction: "retain the Workspace and retry the same Git operation after checking the customer-owned upstream", receipt: `repository=${route.repositoryId}; provider=smart-http; operation=${operation}; upstream=unavailable; error=${error instanceof Error ? error.name : "unknown"}; canonicalWrite=false` }, 503);
   }
-  if (timeout) clearTimeout(timeout);
   const durationMs = Date.now() - startedAt;
   if (budget?.maxDurationMs !== undefined && durationMs > budget.maxDurationMs) {
-    releaseBudget();
+    await response.body?.cancel().catch(() => undefined);
+    finishLifecycle();
     return gatewayJson({ protocol: SMART_HTTP_PROTOCOL, status: "unavailable", repositoryId: route.repositoryId, operation, canonicalWrite: false, credentialFree: true, recoveryAction: "retry the same idempotent Git operation after measuring a workload-appropriate duration budget", receipt: `repository=${route.repositoryId}; operation=${operation}; ${budgetFailureReceipt({ operation, policy: budget, budget: "durationMs", limit: budget.maxDurationMs, asked: durationMs })}` }, 504);
   }
   const responseBytes = Number.parseInt(response.headers.get("content-length") ?? "", 10);
   if (budget?.maxResponseBytes !== undefined && Number.isSafeInteger(responseBytes) && responseBytes > budget.maxResponseBytes) {
-    releaseBudget();
+    await response.body?.cancel().catch(() => undefined);
+    finishLifecycle();
     return gatewayJson({ protocol: SMART_HTTP_PROTOCOL, status: "unavailable", repositoryId: route.repositoryId, operation, canonicalWrite: false, credentialFree: true, recoveryAction: "request a bounded provider response or qualify a larger workload-specific response budget", receipt: `repository=${route.repositoryId}; operation=${operation}; ${budgetFailureReceipt({ operation, policy: budget, budget: "responseBytes", limit: budget.maxResponseBytes, asked: responseBytes })}` }, 502);
   }
   if (!response.ok) {
-    releaseBudget();
+    await response.body?.cancel().catch(() => undefined);
+    finishLifecycle();
     return gatewayJson({ protocol: SMART_HTTP_PROTOCOL, status: "unavailable", repositoryId: route.repositoryId, operation, canonicalWrite: false, credentialFree: true, recoveryAction: "inspect the customer-owned upstream status and retry the same idempotent Git operation; no Anyam canonical state changed", receipt: `repository=${route.repositoryId}; provider=smart-http; operation=${operation}; upstreamStatus=${response.status}; durationMs=${durationMs}; responseBytes=${Number.isSafeInteger(responseBytes) ? responseBytes : "unobserved"}; canonicalWrite=false` }, response.status >= 500 ? 503 : response.status);
   }
+  const responseBody = countedStream({
+    body: response.body,
+    ...(budget?.maxResponseBytes === undefined ? {} : { maxBytes: budget.maxResponseBytes }),
+    onExceeded: (asked) => { controller.abort(); return budget && budget.maxResponseBytes !== undefined ? budgetFailureReceipt({ operation, policy: budget, budget: "responseBytes", limit: budget.maxResponseBytes, asked }) : undefined; },
+    onFinished: () => { finishLifecycle(); },
+  });
+  cancelResponseBody = () => responseBody.cancel("smart-http-duration-budget-exceeded");
   const headers = new Headers();
   for (const name of ["content-type", "content-encoding", "etag", "last-modified", "cache-control", "vary"]) {
     const value = response.headers.get(name);
@@ -471,9 +565,11 @@ export async function handleSmartHttpRequest(request: Request, config: SmartHttp
   }
   headers.set("x-anyam-git-operation", operation);
   headers.set("x-anyam-canonical-write", "false");
-  headers.set("x-anyam-budget-receipt", budget?.receipt ?? "not-configured");
-  releaseBudget();
-  return new Response(response.body, { status: response.status, headers });
+  headers.set("x-anyam-budget-receipt", budget ? `${budget.receipt}; stream=request-and-response-counted; duration=body-lifecycle` : "not-configured");
+  headers.set("x-anyam-response-bytes", Number.isSafeInteger(responseBytes) ? String(responseBytes) : "stream-counted");
+  // The response body owns timeout and concurrency release. A consumer that
+  // cancels after headers still closes the slot through countedStream.cancel.
+  return new Response(responseBody.body, { status: response.status, headers });
 }
 
 export function smartHttpRouteUrl(origin: string, repositoryId: string): string {

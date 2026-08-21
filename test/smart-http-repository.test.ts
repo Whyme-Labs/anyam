@@ -378,3 +378,59 @@ test("Smart HTTP budget tripwires reject measured request and concurrency asks w
   if (concurrent) assert.equal(concurrent.status, 429);
   tracker.release();
 });
+
+test("Smart HTTP counts chunked bodies and holds concurrency until response close", async () => {
+  const authority = new SmartHttpCredentialAuthority();
+  const credential = await authority.issue({ repositoryId: "workspace", sourceSpaceId: "source:test", workspaceId: "workspace:test", operation: "write", expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  const tracker = new SmartHttpBudgetTracker("measurement=smart-http-stream-fixture; workload=chunked-pack; source=bounded-test");
+  const config = {
+    upstreamBase: "https://upstream.invalid/",
+    credentials: authority,
+    sourceSpaceIdForRepository: () => "source:test",
+    workspaceIdForRepository: () => "workspace:test",
+    budgetTracker: tracker,
+    budgets: { write: { maxRequestBytes: 4, maxResponseBytes: 4, maxDurationMs: 500, maxConcurrentRequests: 1, receipt: "measurement=smart-http-stream-fixture; workload=chunked-pack; source=bounded-test" } },
+  };
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = init?.body as ReadableStream<Uint8Array> | null | undefined;
+      if (body) {
+        const reader = body.getReader();
+        while (!(await reader.read()).done) { /* consume the counted request stream */ }
+      }
+      return new Response("upstream", { status: 200, headers: { "content-type": "application/octet-stream" } });
+    }) as typeof fetch;
+    const oversized = await handleSmartHttpRequest(new Request("https://gateway.invalid/git/workspace.git/git-receive-pack", { method: "POST", headers: { authorization: `Bearer ${credential.token}`, "content-type": "application/x-git-receive-pack-request" }, body: new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(3)); controller.enqueue(new Uint8Array(3)); controller.close(); } }), duplex: "half" } as RequestInit & { duplex: "half" }), config);
+    assert.ok(oversized);
+    assert.equal(oversized.status, 413);
+    const oversizedBody = await oversized.json() as { receipt: string };
+    assert.match(oversizedBody.receipt, /budget=packBytes; limit=4; asked=6/);
+
+    globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(2)); setTimeout(() => { controller.enqueue(new Uint8Array(2)); controller.close(); }, 20); } }), { status: 200, headers: { "content-type": "application/octet-stream" } })) as typeof fetch;
+    const response = await handleSmartHttpRequest(new Request("https://gateway.invalid/git/workspace.git/git-receive-pack", { method: "POST", headers: { authorization: `Bearer ${credential.token}`, "content-type": "application/x-git-receive-pack-request" }, body: new Uint8Array(0) }), { ...config, budgets: { write: { maxResponseBytes: 4, maxDurationMs: 500, maxConcurrentRequests: 1, receipt: "measurement=smart-http-stream-fixture; workload=chunked-response; source=bounded-test" } } });
+    assert.ok(response);
+    assert.equal(tracker.current(), 1, "the concurrency slot remains held after response headers");
+    assert.equal(new Uint8Array(await response.arrayBuffer()).byteLength, 4);
+    assert.equal(tracker.current(), 0, "the concurrency slot is released after response close");
+
+    globalThis.fetch = (async () => {
+      let slowTimer: ReturnType<typeof setTimeout> | undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          slowTimer = setTimeout(() => { controller.enqueue(new Uint8Array(1)); controller.close(); }, 50);
+        },
+        cancel() {
+          if (slowTimer) clearTimeout(slowTimer);
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "application/octet-stream" } });
+    }) as typeof fetch;
+    const slow = await handleSmartHttpRequest(new Request("https://gateway.invalid/git/workspace.git/git-receive-pack", { method: "POST", headers: { authorization: `Bearer ${credential.token}`, "content-type": "application/x-git-receive-pack-request" }, body: new Uint8Array(0) }), { ...config, budgets: { write: { maxResponseBytes: 4, maxDurationMs: 10, maxConcurrentRequests: 1, receipt: "measurement=smart-http-stream-fixture; workload=slow-response; source=bounded-test" } } });
+    assert.ok(slow);
+    await assert.rejects(() => slow.arrayBuffer());
+    assert.equal(tracker.current(), 0, "the duration timeout releases the slot after cancelling the slow body");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

@@ -11,6 +11,8 @@ const stateDirectory = join(root, "state");
 const workspaceDirectory = join(root, "workspace");
 
 let boundary: Awaited<ReturnType<typeof createWorkspaceBoundary>> | undefined;
+let receipt: Record<string, unknown> | undefined;
+let failure: unknown;
 try {
   await mkdir(stateDirectory, { recursive: true });
   boundary = await createWorkspaceBoundary({
@@ -28,7 +30,7 @@ try {
     shell: true,
     command: "node -e \"require('node:fs').mkdirSync('dist',{recursive:true});require('node:fs').writeFileSync('dist/worker.bundle','private-alpha')\"",
   });
-  const receipt = {
+  receipt = {
     protocol,
     status: result.status === "passed" ? "succeeded" : "blocked",
     enforcement: boundary.enforcement,
@@ -41,9 +43,22 @@ try {
     canonicalWrite: false,
     cleanup: "pending",
   };
-  console.log(JSON.stringify(receipt, null, 2));
-  if (result.status !== "passed") throw new Error(`Linux Workspace command failed: ${result.stderr || result.receipt}`);
+  if (result.status !== "passed") failure = new Error(`Linux Workspace command failed: ${result.stderr || result.receipt}`);
+} catch (error) {
+  failure = error;
+  receipt ??= {
+    protocol,
+    status: "blocked",
+    credentialMaterialStored: false,
+    canonicalWrite: false,
+    cleanup: "pending",
+    error: error instanceof Error ? error.message : String(error),
+  };
 } finally {
   if (boundary) await removeWorkspaceBoundary(boundary).catch(() => undefined);
   await rm(root, { recursive: true, force: true });
+  if (receipt) receipt.cleanup = "destroyed";
 }
+
+console.log(JSON.stringify(receipt, null, 2));
+if (failure) throw failure;

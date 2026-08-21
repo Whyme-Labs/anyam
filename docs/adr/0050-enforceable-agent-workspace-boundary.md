@@ -13,6 +13,12 @@ Anyam exposes two visibly different local agent modes:
 
 The first qualified host adapter is macOS `sandbox-exec`. Linux `bwrap` is used only when the executable is present; unsupported hosts fail closed for enforceable mode. No platform is described as isolated merely because it has a supervised mode.
 
+Linux enforceable mode additionally requires a measured `WorkspaceResourceLimits`
+policy. The boundary wraps `bwrap` with `prlimit` and monitors process-group
+usage plus Workspace regular-file bytes. Missing `prlimit`, missing policy, or
+missing measurement receipt fails closed; namespace qualification alone is not
+treated as resource containment.
+
 The child receives a sanitized environment in enforceable mode. `SSH_AUTH_SOCK`, cloud provider credentials, and deployment credentials are empty; `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL`, and `GIT_CONFIG_SYSTEM` prevent ambient Git configuration. The Workspace Git identity is brokered and context-bound; it cannot write canonical refs or change Anyam authority state.
 
 Revocation marks the Session and Grant revoked, kills the tracked child process, invalidates outstanding Workspace credentials, and removes only a temporary Workspace whose path is proven to remain beneath the system temporary root. A caller-supplied Workspace directory is never deleted implicitly.

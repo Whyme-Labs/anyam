@@ -8,7 +8,7 @@ import type { Readable, Writable } from "node:stream";
 import { basename, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { gitCommitIdentity, gitProjectRevisionId, gitTreeIdentity, inspectGitSource, isGitAncestor, LocalGitSourceError, trackedGitPaths } from "./git-source.js";
-import { createWorkspaceBoundary, removeWorkspaceBoundary, runWorkspaceCommand, terminateWorkspaceProcess, WorkspaceBoundaryError, type WorkspaceBoundary, type WorkspaceBoundaryEnforcement, type WorkspaceBoundaryMode } from "./workspace-boundary.js";
+import { createWorkspaceBoundary, removeWorkspaceBoundary, runWorkspaceCommand, terminateWorkspaceProcess, WorkspaceBoundaryError, type WorkspaceBoundary, type WorkspaceBoundaryEnforcement, type WorkspaceBoundaryMode, type WorkspaceResourceLimits } from "./workspace-boundary.js";
 import { createTrustedGitMetadata, trustedGitArgs, trustedGitEnvironment } from "./trusted-git.js";
 
 const execFile = promisify(execFileCallback);
@@ -319,6 +319,7 @@ export type LocalAgentManagerOptions = {
   credentialLifetimeMs?: number;
   sessionLifetimeMs?: number;
   now?: () => Date;
+  resourceLimits?: WorkspaceResourceLimits;
 };
 
 export type AgentLaunchInput = {
@@ -329,6 +330,7 @@ export type AgentLaunchInput = {
   authorizedPaths?: readonly string[];
   network?: readonly string[];
   workspaceDirectory?: string;
+  resourceLimits?: WorkspaceResourceLimits;
 };
 
 export type AgentLaunchResult = {
@@ -798,6 +800,7 @@ export class LocalAgentManager {
   private readonly credentialLifetimeMs: number;
   private readonly sessionLifetimeMs: number;
   private readonly now: () => Date;
+  private readonly resourceLimits: WorkspaceResourceLimits | undefined;
   private readonly boundaries = new Map<string, WorkspaceBoundary>();
   private readonly runningProcesses = new Map<string, ChildProcess>();
 
@@ -809,6 +812,7 @@ export class LocalAgentManager {
     this.credentialLifetimeMs = options.credentialLifetimeMs ?? LOCAL_AGENT_POLICY.credentialLifetimeMs;
     this.sessionLifetimeMs = options.sessionLifetimeMs ?? LOCAL_AGENT_POLICY.sessionLifetimeMs;
     this.now = options.now ?? (() => new Date());
+    this.resourceLimits = options.resourceLimits;
     if (!Number.isFinite(this.credentialLifetimeMs) || this.credentialLifetimeMs <= 0) {
       throw new LocalAgentError({ code: "agent.policy.invalid", message: `credential lifetime must be positive; asked=${this.credentialLifetimeMs}`, recoveryAction: "set a positive credentialLifetimeMs", receipt: LOCAL_AGENT_POLICY.receipt });
     }
@@ -1029,9 +1033,10 @@ export class LocalAgentManager {
     return { state, session: active.session, grant: active.grant, context: active.context };
   }
 
-  private async startSessionUnlocked(input: { agent: string; changeId?: string; mode?: WorkspaceBoundaryMode; authorizedPaths?: readonly string[]; network?: readonly string[]; executablePaths?: readonly string[]; workspaceDirectory?: string }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+  private async startSessionUnlocked(input: { agent: string; changeId?: string; mode?: WorkspaceBoundaryMode; authorizedPaths?: readonly string[]; network?: readonly string[]; executablePaths?: readonly string[]; workspaceDirectory?: string; resourceLimits?: WorkspaceResourceLimits }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
     const agent = ensureAgent(input.agent);
     const mode = input.mode ?? "supervised";
+    const resourceLimits = input.resourceLimits ?? this.resourceLimits;
     const project = await this.projectMetadata();
     const change = await this.changeMetadata();
     if (change.projectId !== project.id) throw new LocalAgentError({ code: "change.project_mismatch", message: `Change ${change.id} belongs to ${change.projectId}, not ${project.id}.`, affectedObject: change.id, recoveryAction: "start the agent from the Change's Project directory", receipt: `manifest-project=${project.id}; change-project=${change.projectId}` });
@@ -1065,6 +1070,7 @@ export class LocalAgentManager {
       ...(input.network ? { network: input.network } : {}),
       ...(input.executablePaths ? { executablePaths: input.executablePaths } : {}),
       ...(input.workspaceDirectory ? { workspaceDirectory: input.workspaceDirectory } : {}),
+      ...(resourceLimits ? { resourceLimits } : {}),
       excludedPaths: [this.statePath(), resolve(this.statePath(), "..")],
     });
     boundary.environment = {
@@ -1147,7 +1153,7 @@ export class LocalAgentManager {
     return { session, grant, context };
   }
 
-  async startSession(input: { agent: string; changeId?: string; mode?: WorkspaceBoundaryMode; authorizedPaths?: readonly string[]; network?: readonly string[]; executablePaths?: readonly string[]; workspaceDirectory?: string }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+  async startSession(input: { agent: string; changeId?: string; mode?: WorkspaceBoundaryMode; authorizedPaths?: readonly string[]; network?: readonly string[]; executablePaths?: readonly string[]; workspaceDirectory?: string; resourceLimits?: WorkspaceResourceLimits }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
     return this.withStateLock(() => this.startSessionUnlocked(input));
   }
 
@@ -1214,6 +1220,7 @@ export class LocalAgentManager {
       ...(input.network ? { network: input.network } : {}),
       executablePaths: [input.command],
       ...(input.workspaceDirectory ? { workspaceDirectory: input.workspaceDirectory } : {}),
+      ...(input.resourceLimits ? { resourceLimits: input.resourceLimits } : {}),
     });
     const boundary = this.boundaries.get(started.session.id);
     if (!boundary) throw new LocalAgentError({ code: "workspace.boundary_missing", message: `Agent session ${started.session.id} has no live Workspace boundary; no process was started.`, affectedObject: started.session.id, recoveryAction: "revoke the session and start the agent again through the boundary launcher", receipt: `mode=${mode}; boundary=missing` });

@@ -13,6 +13,7 @@ export * from "./change-control/local.ts";
 export * from "./change-control/collaboration.ts";
 export * from "./execution/local.ts";
 export * from "./execution/runner.ts";
+export * from "./execution/cloudflare-sandbox-egress.ts";
 export * from "./identity/realm.ts";
 export * from "./installation/customer-realm.ts";
 export * from "./installation/customer-realm-control.ts";

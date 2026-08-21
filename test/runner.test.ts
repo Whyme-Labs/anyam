@@ -105,6 +105,8 @@ function coordinatorWithRunner(now: () => string) {
     platform: { operatingSystem: "macos", architecture: "arm64", isolation: "vm" },
     capabilities: ["os:macos", "arch:arm64", "isolation:vm", "toolchain:node"],
     networkDestinations: ["registry.example"],
+    networkEnforcement: "customer-egress-proxy",
+    networkBoundaryReceipt: "fixture=customer-egress-proxy; networkEnforcement=customer-egress-proxy",
     secretUse: "brokered",
     canUploadArtifacts: true,
     canUploadEvidence: true,
@@ -129,13 +131,17 @@ function enqueue(coordinator: ExternalRunnerCoordinator, idempotencyKey = "job:c
 function claim(coordinator: ExternalRunnerCoordinator, privateKey: ReturnType<typeof keyPair>["privateKey"], jobId: string) {
   const offer = coordinator.pull("runner:macos-builder");
   assert.ok(offer);
-  return coordinator.claim({
+  const lease = coordinator.claim({
     runnerId: "runner:macos-builder",
     jobId,
     attemptId: offer.attempt.id,
     challenge: offer.challenge,
     signature: signMessage(privateKey, `anyam.runner-claim/v1|${offer.challenge}`),
   });
+  assert.equal(lease.job.networkEnforcement, "customer-egress-proxy");
+  assert.match(lease.job.networkBoundaryReceipt ?? "", /networkEnforcement=customer-egress-proxy/);
+  assert.equal(runnerResultContext({ job: lease.job, attempt: lease.attempt }).networkEnforcement, "customer-egress-proxy");
+  return lease;
 }
 
 function signedResult(lease: ReturnType<typeof claim>, privateKey: ReturnType<typeof keyPair>["privateKey"], result: Omit<RunnerResult, "signature" | "context">): RunnerResult {
@@ -202,6 +208,8 @@ test("external pull Runner executes an immutable non-web Action and publishes it
     platform: { operatingSystem: "macos", architecture: "arm64", isolation: "vm" },
     capabilities: ["os:macos", "arch:arm64", "isolation:vm", "toolchain:node"],
     networkDestinations: ["registry.example"],
+    networkEnforcement: "customer-egress-proxy",
+    networkBoundaryReceipt: "fixture=customer-egress-proxy; networkEnforcement=customer-egress-proxy",
     secretUse: "brokered",
     canUploadArtifacts: true,
     canUploadEvidence: true,
@@ -326,6 +334,8 @@ test("Runner Jobs reject an ineligible profile and preserve input/output scope a
     platform: { operatingSystem: "linux", architecture: "amd64", isolation: "container" },
     capabilities: ["os:linux", "arch:amd64"],
     networkDestinations: [],
+    networkEnforcement: "deny-all",
+    networkBoundaryReceipt: "fixture=deny-all; networkEnforcement=deny-all",
     secretUse: "none",
     canUploadArtifacts: false,
     canUploadEvidence: false,
@@ -344,6 +354,8 @@ test("Runner Jobs reject an ineligible profile and preserve input/output scope a
     platform: { operatingSystem: "macos", architecture: "arm64", isolation: "vm" },
     capabilities: ["os:macos", "arch:arm64", "isolation:vm", "toolchain:node"],
     networkDestinations: ["registry.example"],
+    networkEnforcement: "customer-egress-proxy",
+    networkBoundaryReceipt: "fixture=customer-egress-proxy; networkEnforcement=customer-egress-proxy",
     secretUse: "brokered",
     canUploadArtifacts: true,
     canUploadEvidence: true,
@@ -388,6 +400,26 @@ test("Runner Jobs reject an ineligible profile and preserve input/output scope a
   assert.equal(coordinator.getJob(queued.job.id)?.state, "running");
 });
 
+test("Runner enrollment rejects a host allowlist without an actual egress boundary receipt", () => {
+  const coordinator = new ExternalRunnerCoordinator({ realmId, projectId, now: () => "2026-08-03T00:00:00.000Z" });
+  const keys = keyPair();
+  assert.throws(() => coordinator.enrollRunner({
+    id: "runner:unqualified-egress",
+    provider: "customer-runner",
+    publicKey: keys.publicKey,
+    platform: { operatingSystem: "linux", architecture: "amd64", isolation: "container" },
+    capabilities: ["os:linux", "arch:amd64", "isolation:container"],
+    networkDestinations: ["registry.example"],
+    networkEnforcement: "deny-all",
+    networkBoundaryReceipt: "fixture=wrong; networkEnforcement=deny-all",
+    secretUse: "none",
+    canUploadArtifacts: false,
+    canUploadEvidence: false,
+    approvedBy: actor,
+    enrollmentReceipt: "operator-approved=fixture",
+  }), (error: unknown) => error instanceof Error && /deny-all|network boundary|failClosed/u.test(error.message));
+});
+
 test("Runner cancellation, provider unavailability, quarantine, and replay remain visible and recoverable", () => {
   const coordinator = new ExternalRunnerCoordinator({ realmId, projectId, now: () => "2026-08-03T00:00:00.000Z" });
   const keys = keyPair();
@@ -398,6 +430,8 @@ test("Runner cancellation, provider unavailability, quarantine, and replay remai
     platform: { operatingSystem: "macos", architecture: "arm64", isolation: "vm" },
     capabilities: ["os:macos", "arch:arm64", "isolation:vm", "toolchain:node"],
     networkDestinations: ["registry.example"],
+    networkEnforcement: "customer-egress-proxy",
+    networkBoundaryReceipt: "fixture=customer-egress-proxy; networkEnforcement=customer-egress-proxy",
     secretUse: "brokered",
     canUploadArtifacts: true,
     canUploadEvidence: true,

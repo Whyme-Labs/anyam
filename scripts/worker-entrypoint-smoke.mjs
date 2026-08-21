@@ -54,6 +54,13 @@ const workers = [
     source: "apps/promotion-executor/src/index.ts",
     routes: ["/health", "/execute", "anyam.promotion-execution/v1"],
   },
+  {
+    id: "linux-egress-qualification",
+    config: "apps/linux-egress-qualification/wrangler.example.jsonc",
+    source: "apps/linux-egress-qualification/src/index.ts",
+    routes: ["/run", "anyam.workspace-egress/v1", "enableInternet=false"],
+    containersRolloutNone: true,
+  },
 ];
 
 async function ensureFile(path, label) {
@@ -77,7 +84,7 @@ async function qualifyWorker(worker, tempRoot) {
   }
 
   const outdir = join(tempRoot, worker.id);
-  const result = await execFile(process.execPath, [
+  const args = [
     join(root, "node_modules/wrangler/bin/wrangler.js"),
     "deploy",
     "--dry-run",
@@ -85,7 +92,9 @@ async function qualifyWorker(worker, tempRoot) {
     worker.config,
     "--outdir",
     outdir,
-  ], { cwd: root });
+  ];
+  if (worker.containersRolloutNone) args.push("--containers-rollout=none");
+  const result = await execFile(process.execPath, args, { cwd: root });
   const output = `${result.stdout}\n${result.stderr}`;
   if (!output.includes("Total Upload:")) throw new Error(`${worker.id} Wrangler output did not report a bundle upload size`);
   const bundlePath = join(outdir, "index.js");

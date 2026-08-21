@@ -268,6 +268,8 @@ test("external Runner completion composes through Authority into a non-web Targe
     platform: { operatingSystem: "linux", architecture: "amd64", isolation: "container" },
     capabilities: ["os:linux", "arch:amd64", "isolation:container", "toolchain:node"],
     networkDestinations: [],
+    networkEnforcement: "deny-all",
+    networkBoundaryReceipt: "fixture=deny-all; networkEnforcement=deny-all",
     secretUse: "none",
     canUploadArtifacts: true,
     canUploadEvidence: true,

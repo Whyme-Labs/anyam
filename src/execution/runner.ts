@@ -12,6 +12,7 @@ import {
   type RunnerEvent,
   type RunnerJob,
   type RunnerJobState,
+  type RunnerNetworkEnforcement,
   type RunnerOutputKind,
   type RunnerOutputLocations,
   type RunnerOutputReference,
@@ -29,6 +30,8 @@ export type RunnerEnrollmentInput = {
   platform: RunnerProfile["platform"];
   capabilities: readonly string[];
   networkDestinations: readonly string[];
+  networkEnforcement: RunnerNetworkEnforcement;
+  networkBoundaryReceipt: string;
   secretUse: RunnerProfile["secretUse"];
   canUploadArtifacts: boolean;
   canUploadEvidence: boolean;
@@ -105,6 +108,8 @@ export type RunnerResultContext = {
   policyVersion: string;
   authorizationEpoch: string;
   capabilityGrantId: string;
+  networkEnforcement: RunnerNetworkEnforcement;
+  networkBoundaryReceipt: string;
 };
 
 export type RunnerCompletion = {
@@ -379,6 +384,9 @@ export function runnerResultMessage(input: {
 
 export function runnerResultContext(input: { job: RunnerJob; attempt: RunnerAttempt }): RunnerResultContext {
   const { job, attempt } = input;
+  if (!job.networkEnforcement || !job.networkBoundaryReceipt) {
+    error({ code: "result-input-mismatch", message: `Runner Job ${job.id} has no enrolled network boundary receipt after claim.`, affectedObject: job.id, recoveryAction: "claim the Job through a Runner with a qualified network boundary before producing a Result", receipt: `job=${job.id}; networkBoundary=missing; resultContext=not-issued` });
+  }
   return {
     protocol: "anyam.runner-result-context/v1",
     replayId: `${job.id}:${attempt.id}`,
@@ -399,6 +407,8 @@ export function runnerResultContext(input: { job: RunnerJob; attempt: RunnerAtte
     policyVersion: job.policyVersion,
     authorizationEpoch: job.authorizationEpoch,
     capabilityGrantId: job.capabilityGrantId,
+    networkEnforcement: job.networkEnforcement,
+    networkBoundaryReceipt: job.networkBoundaryReceipt,
   };
 }
 
@@ -476,6 +486,15 @@ export class ExternalRunnerCoordinator {
     }
     const capabilities = unique(input.capabilities, "runner.capabilities");
     const networkDestinations = unique(input.networkDestinations, "runner.networkDestinations");
+    if (!input.networkBoundaryReceipt || !input.networkBoundaryReceipt.includes(`networkEnforcement=${input.networkEnforcement}`)) {
+      error({ code: "invalid-input", message: `Runner ${input.id} did not provide a receipt for its actual network boundary.`, affectedObject: input.id, recoveryAction: `enroll the Runner with a receipt naming networkEnforcement=${input.networkEnforcement}`, receipt: `runner=${input.id}; networkEnforcement=${input.networkEnforcement}; networkBoundaryReceipt=missing-or-mismatched` });
+    }
+    if (networkDestinations.length === 0 && input.networkEnforcement !== "deny-all") {
+      error({ code: "invalid-input", message: `Runner ${input.id} declares ${input.networkEnforcement} for an empty network policy.`, affectedObject: input.id, recoveryAction: "use networkEnforcement=deny-all for an empty allowlist", receipt: `runner=${input.id}; networkDestinations=empty; networkEnforcement=${input.networkEnforcement}; failClosed=true` });
+    }
+    if (networkDestinations.length > 0 && input.networkEnforcement === "deny-all") {
+      error({ code: "invalid-input", message: `Runner ${input.id} declares deny-all while advertising network destinations.`, affectedObject: input.id, recoveryAction: "attach a qualified Cloudflare Sandbox or customer egress proxy boundary for the declared destinations", receipt: `runner=${input.id}; networkDestinations=${networkDestinations.join(",")}; networkEnforcement=deny-all; failClosed=true` });
+    }
     const enrolledAt = this.now();
     const profileWithoutDigest: Omit<RunnerProfile, "protocol" | "profileDigest"> = {
       id: input.id,
@@ -485,6 +504,8 @@ export class ExternalRunnerCoordinator {
       platform: { ...input.platform },
       capabilities,
       networkDestinations,
+      networkEnforcement: input.networkEnforcement,
+      networkBoundaryReceipt: input.networkBoundaryReceipt,
       secretUse: input.secretUse,
       canUploadArtifacts: input.canUploadArtifacts,
       canUploadEvidence: input.canUploadEvidence,
@@ -724,6 +745,8 @@ export class ExternalRunnerCoordinator {
     attempt.receipt = `runnerAttempt=running; attempt=${attempt.id}; runner=${runner.id}; credential=${credential.id}; credentialStored=false`;
     stored.job.state = "running";
     stored.job.currentRunnerId = runner.id;
+    stored.job.networkEnforcement = runner.networkEnforcement;
+    stored.job.networkBoundaryReceipt = runner.networkBoundaryReceipt;
     stored.job.updatedAt = this.now();
     stored.job.receipt = `runnerJob=running; job=${stored.job.id}; attempt=${attempt.id}; runner=${runner.id}; canonicalWrite=false`;
     stored.run.runnerId = runner.id;
@@ -992,6 +1015,8 @@ export class ExternalRunnerCoordinator {
     if (runner.status !== "active") return false;
     if (!job.runnerRequirements.every((required) => runner.capabilities.includes(required))) return false;
     if (!job.networkDestinations.every((destination) => runner.networkDestinations.includes(destination))) return false;
+    if (job.networkDestinations.length === 0 && runner.networkEnforcement !== "deny-all") return false;
+    if (job.networkDestinations.length > 0 && runner.networkEnforcement === "deny-all") return false;
     if (job.secretUseAliases.length > 0 && runner.secretUse !== "brokered") return false;
     if (job.outputPaths.length > 0 && !runner.canUploadArtifacts) return false;
     if (job.verifierId && !runner.canUploadEvidence) return false;

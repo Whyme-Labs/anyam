@@ -339,6 +339,9 @@ export type Run = {
 
 export type RunnerStatus = "enrolled" | "active" | "unavailable" | "disabled" | "quarantined";
 
+/** The boundary that actually enforced a Runner's outbound policy. */
+export type RunnerNetworkEnforcement = "deny-all" | "cloudflare-sandbox" | "customer-egress-proxy";
+
 export type RunnerProfile = {
   protocol: typeof CONTRACT_VERSIONS.runner;
   id: string;
@@ -352,6 +355,8 @@ export type RunnerProfile = {
   };
   capabilities: readonly string[];
   networkDestinations: readonly string[];
+  networkEnforcement: RunnerNetworkEnforcement;
+  networkBoundaryReceipt: string;
   secretUse: "brokered" | "none" | "unverified";
   canUploadArtifacts: boolean;
   canUploadEvidence: boolean;
@@ -399,6 +404,9 @@ export type RunnerJob = {
   disclosure: DisclosurePolicyRef;
   runnerRequirements: readonly string[];
   networkDestinations: readonly string[];
+  /** Filled by the authoritative Runner claim before a Result can be signed. */
+  networkEnforcement?: RunnerNetworkEnforcement;
+  networkBoundaryReceipt?: string;
   secretUseAliases: readonly string[];
   outputLocations: RunnerOutputLocations;
   state: RunnerJobState;

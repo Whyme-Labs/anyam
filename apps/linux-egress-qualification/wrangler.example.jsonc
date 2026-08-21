@@ -1,0 +1,31 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-linux-egress-qualification",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-21",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "ANYAM_EGRESS_PROTOCOL": "anyam.workspace-egress/v1"
+  },
+  "containers": [
+    {
+      "class_name": "AnyamEgressSandbox",
+      "image": "./Dockerfile",
+      "instance_type": "lite"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SANDBOX",
+        "class_name": "AnyamEgressSandbox"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "egress-v1",
+      "new_sqlite_classes": ["AnyamEgressSandbox"]
+    }
+  ]
+}

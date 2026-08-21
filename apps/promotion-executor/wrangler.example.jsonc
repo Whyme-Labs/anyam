@@ -13,6 +13,7 @@
     "ANYAM_PROMOTION_EXECUTOR_PREVIEW_SUBDOMAIN": "replace-with-customer-workers-dev-subdomain",
     "ANYAM_PROMOTION_CREDENTIAL_SCOPES": "workers:read,workers:write",
     "ANYAM_PROMOTION_CREDENTIAL_SOURCE_ID": "customer-secret-binding-v1",
+    "ANYAM_PROMOTION_HEALTH_RECEIPT": "replace-with-credential-free-installation-probe-receipt",
     "ANYAM_PROMOTION_HANDOFF_KEY_ID": "replace-with-customer-promotion-handoff-key-id",
     "ANYAM_PROMOTION_HANDOFF_PREVIOUS_KEY_ID": "replace-with-previous-promotion-handoff-key-id-or-omit"
   },

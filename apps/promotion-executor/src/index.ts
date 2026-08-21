@@ -4,11 +4,12 @@ import { DurableObject } from "cloudflare:workers";
 
 import {
   createPromotionExecutorHandler,
-  probePromotionExecutorProviderAuthorization,
   type PromotionExecutorArtifactStore,
   type PromotionExecutorConfig,
 } from "../../../src/cloudflare/promotion-executor.ts";
 import { createCloudflareApiTokenCredentialBroker } from "../../../src/cloudflare/promotion-credential-broker.ts";
+import { promotionExecutorHealth } from "./health.ts";
+import { claimPromotionNonce } from "../../../src/cloudflare/promotion-executor-nonce.ts";
 
 export interface Env {
   ANYAM_PROMOTION_EXECUTOR_ACCOUNT_ID?: string;
@@ -26,6 +27,8 @@ export interface Env {
   ANYAM_PROMOTION_HANDOFF_PREVIOUS_SECRET?: string;
   /** Secret used only by an internal service binding/operator probe. */
   ANYAM_PROMOTION_HEALTH_TOKEN?: string;
+  /** Credential-free receipt produced by the bounded installation/qualification probe. */
+  ANYAM_PROMOTION_HEALTH_RECEIPT?: string;
   ANYAM_PROMOTION_NONCE_STORE?: DurableObjectNamespace;
   ANYAM_PROMOTION_ARTIFACTS: R2Bucket;
 }
@@ -108,20 +111,19 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
-      if (!healthAuthorized(request, env)) return json({ protocol: "anyam.promotion-executor-health/v1", status: "blocked", code: "health_internal_only", recoveryAction: "invoke health through the bound operator/service path with the configured health credential", receipt: "executor=health; authorization=not-observed; providerProbe=not-performed; credentialMaterialStored=false" }, 404);
+      if (!healthAuthorized(request, env)) {
+        const decision = promotionExecutorHealth({ authorized: false, configuration: "ready" });
+        return json(decision.body, decision.httpStatus);
+      }
       let config: PromotionExecutorConfig;
       try {
         config = configFromEnv(env);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return json({ protocol: "anyam.promotion-executor-health/v1", status: "blocked", code: "executor_configuration_invalid", message, recoveryAction: "configure the customer-owned executor bindings and secrets before binding the Realm service", receipt: `executor=config-invalid; providerAuthorization=not-probed; providerInvocation=false; credentialMaterialStored=false` }, 503);
+        const decision = promotionExecutorHealth({ authorized: true, configuration: "invalid" });
+        return json({ ...decision.body, message: error instanceof Error ? error.message : String(error) }, decision.httpStatus);
       }
-      try {
-        const observation = await probePromotionExecutorProviderAuthorization(config);
-        return json({ protocol: "anyam.promotion-executor-health/v1", status: "healthy", handoff: "signed-and-replay-protected", providerCredentials: "brokered-only", providerAuthorization: "observed", receipt: "executor=provider-probe; providerAuthorization=observed; providerOperation=observed; credentialMaterialStored=false; metadata=redacted", canonicalWrite: false, credentialMaterialStored: false });
-      } catch (error) {
-        return json({ protocol: "anyam.promotion-executor-health/v1", status: "blocked", code: "provider_authorization_unobserved", recoveryAction: "repair or rotate the customer-owned provider credential, then rerun the provider authorization probe before accepting this executor as healthy", receipt: "executor=provider-probe; providerAuthorization=unobserved; providerInvocation=false; credentialMaterialStored=false; metadata=redacted" }, 503);
-      }
+      const decision = promotionExecutorHealth({ authorized: true, configuration: "ready", ...(env.ANYAM_PROMOTION_HEALTH_RECEIPT === undefined ? {} : { qualificationReceipt: env.ANYAM_PROMOTION_HEALTH_RECEIPT }) });
+      return json(decision.body, decision.httpStatus);
     }
     try {
       const handler = createPromotionExecutorHandler(configFromEnv(env));
@@ -137,15 +139,12 @@ export class PromotionExecutorNonceStore extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     if (request.method !== "POST" || new URL(request.url).pathname !== "/claim") return new Response(null, { status: 404 });
     const body = await request.json() as { nonce?: unknown; expiresAt?: unknown };
-    if (typeof body.nonce !== "string" || body.nonce.trim().length === 0 || typeof body.expiresAt !== "string" || !Number.isFinite(Date.parse(body.expiresAt)) || Date.parse(body.expiresAt) <= Date.now()) return new Response(null, { status: 422 });
-    const expiredKeys: string[] = [];
-    for (const [key, value] of await this.ctx.storage.list<{ expiresAt?: string }>({ prefix: "nonce:" })) {
-      if (typeof value.expiresAt !== "string" || !Number.isFinite(Date.parse(value.expiresAt)) || Date.parse(value.expiresAt) <= Date.now()) expiredKeys.push(key);
+    if (typeof body.nonce !== "string" || typeof body.expiresAt !== "string") return new Response(null, { status: 422 });
+    try {
+      const result = await claimPromotionNonce({ nonce: body.nonce, expiresAt: body.expiresAt, storage: this.ctx.storage as unknown as import("../../../src/cloudflare/promotion-executor-nonce.ts").PromotionNonceStorage });
+      return new Response(null, { status: result === "claimed" ? 201 : 409 });
+    } catch {
+      return new Response(null, { status: 422 });
     }
-    for (const key of expiredKeys) await this.ctx.storage.delete(key);
-    const key = `nonce:${body.nonce}`;
-    if (await this.ctx.storage.get(key)) return new Response(null, { status: 409 });
-    await this.ctx.storage.put(key, { expiresAt: body.expiresAt, claimedAt: new Date().toISOString() });
-    return new Response(null, { status: 201 });
   }
 }

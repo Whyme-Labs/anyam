@@ -25,7 +25,7 @@ async function fileBytes(directory: string): Promise<number> {
 
 async function measureHealthyRuntime(): Promise<{ vmsBytes: number; rssBytes: number; openFiles: number; processCount: number; elapsedMs: number; workspaceBytes: number }> {
   const startedAt = Date.now();
-  const runtime = await execFile(process.execPath, ["-e", "const fs=require('node:fs');const status=fs.readFileSync('/proc/self/status','utf8');const value=(name)=>Number((status.match(new RegExp('^'+name+'\\\\s+(\\\\d+) kB','m'))||[])[1]||0)*1024;console.log(JSON.stringify({vmsBytes:value('VmSize'),rssBytes:value('VmRSS'),openFiles:fs.readdirSync('/proc/self/fd').length}));"], { encoding: "utf8" });
+  const runtime = await execFile(process.execPath, ["-e", "const fs=require('node:fs');const status=fs.readFileSync('/proc/self/status','utf8');const value=(name)=>Number((status.match(new RegExp('^'+name+':\\\\s+(\\\\d+) kB','m'))||[])[1]||0)*1024;console.log(JSON.stringify({vmsBytes:value('VmSize'),rssBytes:value('VmRSS'),openFiles:fs.readdirSync('/proc/self/fd').length}));"], { encoding: "utf8" });
   const measured = JSON.parse(runtime.stdout.trim()) as { vmsBytes: number; rssBytes: number; openFiles: number };
   const processCount = (await readdir("/proc", { withFileTypes: true })).filter((entry) => entry.isDirectory() && /^\d+$/u.test(entry.name)).length;
   return { ...measured, processCount, elapsedMs: Math.max(1, Date.now() - startedAt), workspaceBytes: await fileBytes(sourceDirectory) };

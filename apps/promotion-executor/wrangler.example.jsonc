@@ -4,6 +4,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-27",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": false,
+  "preview_urls": false,
   "vars": {
     "ANYAM_PROMOTION_EXECUTOR_ACCOUNT_ID": "replace-with-customer-cloudflare-account-id",
     "ANYAM_PROMOTION_EXECUTOR_TARGET_ID": "replace-with-customer-target-id",

@@ -7,6 +7,7 @@ import {
   type CapabilityGrant,
   type ResourceRef,
 } from "../kernel/contracts.ts";
+import { base64Url } from "../kernel/encoding.ts";
 
 export type AuthenticationMethod = "passkey" | "oidc";
 export type AuthenticationStrength = "oidc" | "passkey";
@@ -544,7 +545,7 @@ function tokenDigest(token: string): string {
 }
 
 function randomToken(): string {
-  return randomBytes(32).toString("base64url");
+  return base64Url(randomBytes(32));
 }
 
 function resourceMatches(scope: ResourceRef, resource: ResourceRef): boolean {

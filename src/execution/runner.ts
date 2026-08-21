@@ -19,6 +19,7 @@ import {
   type RunnerProfile,
   type RunnerStatus,
 } from "../kernel/contracts.ts";
+import { base64Url } from "../kernel/encoding.ts";
 import type { NormalizedActionInput, NormalizedActionOutput } from "./local.ts";
 
 type JsonRecord = Record<string, unknown>;
@@ -695,7 +696,7 @@ export class ExternalRunnerCoordinator {
     if (!candidate) return undefined;
     const attempt = this.requireAttempt(candidate.job.currentAttemptId);
     if (attempt.state !== "queued") return undefined;
-    const challenge = randomBytes(24).toString("base64url");
+    const challenge = base64Url(randomBytes(24));
     this.offers.set(attempt.id, challenge);
     attempt.challengeDigest = digest(challenge);
     attempt.state = "offered";
@@ -726,7 +727,7 @@ export class ExternalRunnerCoordinator {
     if (!offeredChallenge || offeredChallenge !== input.challenge || attempt.challengeDigest !== digest(input.challenge) || !verifyProof(runner.publicKey, claimMessage(input.challenge), input.signature)) {
       error({ code: "runner-proof-invalid", message: `Runner ${runner.id} did not prove possession of its enrolled identity for Attempt ${attempt.id}.`, affectedObject: runner.id, recoveryAction: "sign the exact pull challenge with the enrolled private key and retry the claim", receipt: `runner=${runner.id}; attempt=${attempt.id}; proof=invalid` });
     }
-    const token = randomBytes(32).toString("base64url");
+    const token = base64Url(randomBytes(32));
     const credential: StoredCredential = {
       id: opaqueId("runner-job-credential"),
       digest: credentialDigest(token),

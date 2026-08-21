@@ -1,6 +1,7 @@
 import { proposedManifest, runLocalCheck, scaffoldProject, startChange, type ProjectTemplateKind } from "./scaffold.js";
 import { gitCredentialGet, LocalAgentManager, readGitCredentialContext, runMcpStdio, setupAgent } from "./agent.js";
 import { loginAnyam } from "./auth.js";
+import { connectGitHubActions } from "./github-actions-bridge.js";
 import type { WorkspaceBoundaryMode } from "./workspace-boundary.js";
 import type { Readable } from "node:stream";
 
@@ -24,7 +25,7 @@ function kindFrom(args: readonly string[]): ProjectTemplateKind {
 
 function positionalArgs(args: readonly string[], command: string): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode"]);
+  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule"]);
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -39,7 +40,7 @@ function positionalArgs(args: readonly string[], command: string): readonly stri
 
 function subcommandPositionals(args: readonly string[]): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode"]);
+  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule"]);
   for (let index = 2; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -53,6 +54,8 @@ function subcommandPositionals(args: readonly string[]): readonly string[] {
 }
 
 function printHelp(): void {
+  console.log("connect github --method actions  generate a reviewable GitHub Actions Bridge workflow");
+  console.log("Bridge options: --realm <url> --project <id> --connection <id> --action-ref <owner/repo@sha> [--workflow-path <path>] [--remote <name>] [--schedule <cron>]");
   console.log(`Anyam local CLI\n\nCommands:\n  init [directory]                 create a local TypeScript Project\n  doctor [directory]               inspect manifest and source metadata locally\n  check [directory]                compatibility alias for doctor\n  change start <title>             start a local Change\n  agent setup <agent>              configure the local MCP broker and instructions\n  agent start [agent]              start or resume a local agent session\n  agent exec <agent> -- <command>  launch an agent through the Workspace boundary\n  agent handoff <agent>            revoke the current session and start another\n  agent status                     inspect the current local session\n  agent revoke                     revoke the current local session\n  mcp serve --stdio                serve the semantic MCP tools over stdio\n  auth login --realm <url>         authenticate through OAuth PKCE and the OS keychain\n  auth revoke                      revoke the current local session\n  git-credential-anyam get         issue a context-bound memory-only Workspace Git credential\n\nOptions:\n  --type worker|library             choose the template (default: worker)\n  --name <name>                     choose the Project name\n  --agent codex|claude|cursor|cli   choose the local coding agent\n  --mode enforceable|supervised     choose the Workspace boundary mode\n  --directory <path>               choose a Project directory\n  --json                            print machine-readable output\n  --dry-run                         print the proposed manifest without writing\n\nThe local broker never stores bearer credentials, writes canonical Git refs, reads secret values, approves Changes, or promotes production.`);
 }
 
@@ -120,6 +123,29 @@ export async function main(args: readonly string[], cwd = process.cwd(), input: 
       console.log(result.status === "passed" ? "Project doctor passed." : "Project doctor blocked; fix the named receipt and rerun anyam doctor.");
     }
     return result.status === "passed" ? 0 : 1;
+  }
+
+  if (command === "connect" && subcommand === "github") {
+    const method = valueAfter(args, "--method");
+    if (method !== "actions") throw new Error(`connect github currently requires --method actions; asked=${method ?? "missing"}; no workflow was written.`);
+    const workflowPath = valueAfter(args, "--workflow-path");
+    const remoteName = valueAfter(args, "--remote");
+    const outboundSchedule = valueAfter(args, "--schedule");
+    const result = await connectGitHubActions({
+      directory: valueAfter(args, "--directory") ?? cwd,
+      realm: requiredValue(args, "--realm", "connect github"),
+      project: requiredValue(args, "--project", "connect github"),
+      connection: requiredValue(args, "--connection", "connect github"),
+      actionRef: requiredValue(args, "--action-ref", "connect github"),
+      ...(workflowPath ? { workflowPath } : {}),
+      ...(remoteName ? { remoteName } : {}),
+      ...(outboundSchedule ? { outboundSchedule } : {}),
+      ...(args.includes("--dry-run") ? { dryRun: true } : {}),
+    });
+    printResult(result, json, result.status === "blocked"
+      ? `BLOCKED ${result.code}: ${result.message}\nRecovery: ${result.recoveryAction}\n${result.receipt}`
+      : `${result.status === "created" ? "Created" : result.status === "planned" ? "Planned" : "Already present"} ${result.workflowPath} for ${result.repository.owner}/${result.repository.name}.\nNo GitHub credential, token, private key, or push was used.\nNext: review and commit the workflow through your normal GitHub process.\n${result.receipt}`);
+    return result.status === "blocked" ? 1 : 0;
   }
 
   if (command === "change" && subcommand === "start") {

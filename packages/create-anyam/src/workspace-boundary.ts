@@ -427,15 +427,16 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
   const shellCommand = input.shell === true;
   const invokedCommand = shellCommand ? (process.platform === "win32" ? "cmd.exe" : "/bin/sh") : input.boundary.enforcement === "none" ? input.command : input.boundary.executablePaths[0] ?? input.command;
   const invokedArgs = shellCommand ? (process.platform === "win32" ? ["/d", "/s", "/c", input.command] : ["-c", input.command]) : args;
-  const executable = input.boundary.enforcement === "macos-sandbox-exec" ? "sandbox-exec" : invokedCommand;
+  const executable = input.boundary.enforcement === "macos-sandbox-exec"
+    ? "sandbox-exec"
+    : input.boundary.enforcement === "linux-bwrap"
+      ? "bwrap"
+      : invokedCommand;
   const executableArgs = input.boundary.enforcement === "macos-sandbox-exec"
     ? ["-p", input.boundary.profile ?? "", invokedCommand, ...invokedArgs]
     : input.boundary.enforcement === "linux-bwrap"
       ? [...linuxBwrapRuntimeArgs({ boundary: input.boundary, invokedCommand }), "--bind", input.boundary.workspaceDirectory, input.boundary.workspaceDirectory, "--chdir", input.boundary.workspaceDirectory, invokedCommand, ...invokedArgs]
       : shellCommand ? invokedArgs : ["-c", `${input.command} ${args.map((arg) => JSON.stringify(arg)).join(" ")}`];
-  if (process.env.ANYAM_WORKSPACE_DEBUG === "1" && input.boundary.enforcement === "linux-bwrap") {
-    console.error(JSON.stringify({ protocol: "anyam.workspace-boundary-debug/v1", executable, executableArgs }));
-  }
   const detached = process.platform !== "win32" && input.boundary.enforcement !== "none";
   const child = spawn(executable, executableArgs, { cwd: input.boundary.workspaceDirectory, env: input.boundary.environment, stdio: ["inherit", "pipe", "pipe"], detached });
   input.onProcess?.(child);

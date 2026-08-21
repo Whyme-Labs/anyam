@@ -21,12 +21,15 @@ export interface Env {
   ANYAM_PROMOTION_CREDENTIAL_SCOPES?: string;
   ANYAM_PROMOTION_CREDENTIAL_SOURCE_ID?: string;
   ANYAM_PROMOTION_HANDOFF_SECRET?: string;
+  /** Secret used only by an internal service binding/operator probe. */
+  ANYAM_PROMOTION_HEALTH_TOKEN?: string;
   ANYAM_PROMOTION_NONCE_STORE?: DurableObjectNamespace;
   ANYAM_PROMOTION_ARTIFACTS: R2Bucket;
 }
 
-// Route contract: GET /health is an operator probe; POST /execute is the
-// internal anyam.promotion-execution/v1 service-binding handoff.
+// Route contract: GET /health is an authenticated operator/service probe;
+// POST /execute is the internal anyam.promotion-execution/v1 handoff.
+const HEALTH_TOKEN_HEADER = "x-anyam-promotion-health-token";
 
 function required(value: string | undefined, field: string): string {
   if (!value || value.trim().length === 0) throw new Error(`${field} is required`);
@@ -78,10 +81,26 @@ function json(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
 }
 
+function constantTimeEqual(left: string, right: string): boolean {
+  const leftBytes = new TextEncoder().encode(left);
+  const rightBytes = new TextEncoder().encode(right);
+  if (leftBytes.byteLength !== rightBytes.byteLength) return false;
+  let result = 0;
+  for (let index = 0; index < leftBytes.byteLength; index += 1) result |= (leftBytes[index] ?? 0) ^ (rightBytes[index] ?? 0);
+  return result === 0;
+}
+
+function healthAuthorized(request: Request, env: Env): boolean {
+  const configured = env.ANYAM_PROMOTION_HEALTH_TOKEN?.trim();
+  const presented = request.headers.get(HEALTH_TOKEN_HEADER)?.trim();
+  return Boolean(configured && presented && constantTimeEqual(configured, presented));
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
+      if (!healthAuthorized(request, env)) return json({ protocol: "anyam.promotion-executor-health/v1", status: "blocked", code: "health_internal_only", recoveryAction: "invoke health through the bound operator/service path with the configured health credential", receipt: "executor=health; authorization=not-observed; providerProbe=not-performed; credentialMaterialStored=false" }, 404);
       let config: PromotionExecutorConfig;
       try {
         config = configFromEnv(env);
@@ -91,10 +110,9 @@ export default {
       }
       try {
         const observation = await probePromotionExecutorProviderAuthorization(config);
-        return json({ protocol: "anyam.promotion-executor-health/v1", status: "healthy", handoff: "signed-and-replay-protected", providerCredentials: "brokered-only", providerAuthorization: "observed", credentialId: observation.credentialId, credentialScopes: observation.scopes, providerCredentialExpiresAt: observation.expiresAt, providerOperationId: observation.providerOperationId, receipt: observation.receipt, canonicalWrite: false, credentialMaterialStored: false });
+        return json({ protocol: "anyam.promotion-executor-health/v1", status: "healthy", handoff: "signed-and-replay-protected", providerCredentials: "brokered-only", providerAuthorization: "observed", receipt: "executor=provider-probe; providerAuthorization=observed; providerOperation=observed; credentialMaterialStored=false; metadata=redacted", canonicalWrite: false, credentialMaterialStored: false });
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return json({ protocol: "anyam.promotion-executor-health/v1", status: "blocked", code: "provider_authorization_unobserved", message, recoveryAction: "repair or rotate the customer-owned provider credential, then rerun the provider authorization probe before accepting this executor as healthy", receipt: `executor=provider-probe; providerAuthorization=unobserved; providerInvocation=false; credentialMaterialStored=false` }, 503);
+        return json({ protocol: "anyam.promotion-executor-health/v1", status: "blocked", code: "provider_authorization_unobserved", recoveryAction: "repair or rotate the customer-owned provider credential, then rerun the provider authorization probe before accepting this executor as healthy", receipt: "executor=provider-probe; providerAuthorization=unobserved; providerInvocation=false; credentialMaterialStored=false; metadata=redacted" }, 503);
       }
     }
     try {
@@ -111,7 +129,12 @@ export class PromotionExecutorNonceStore extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     if (request.method !== "POST" || new URL(request.url).pathname !== "/claim") return new Response(null, { status: 404 });
     const body = await request.json() as { nonce?: unknown; expiresAt?: unknown };
-    if (typeof body.nonce !== "string" || body.nonce.trim().length === 0 || typeof body.expiresAt !== "string" || !Number.isFinite(Date.parse(body.expiresAt))) return new Response(null, { status: 422 });
+    if (typeof body.nonce !== "string" || body.nonce.trim().length === 0 || typeof body.expiresAt !== "string" || !Number.isFinite(Date.parse(body.expiresAt)) || Date.parse(body.expiresAt) <= Date.now()) return new Response(null, { status: 422 });
+    const expiredKeys: string[] = [];
+    for (const [key, value] of await this.ctx.storage.list<{ expiresAt?: string }>({ prefix: "nonce:" })) {
+      if (typeof value.expiresAt !== "string" || !Number.isFinite(Date.parse(value.expiresAt)) || Date.parse(value.expiresAt) <= Date.now()) expiredKeys.push(key);
+    }
+    for (const key of expiredKeys) await this.ctx.storage.delete(key);
     const key = `nonce:${body.nonce}`;
     if (await this.ctx.storage.get(key)) return new Response(null, { status: 409 });
     await this.ctx.storage.put(key, { expiresAt: body.expiresAt, claimedAt: new Date().toISOString() });

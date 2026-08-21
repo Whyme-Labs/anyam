@@ -9,7 +9,7 @@ import { basename, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { gitCommitIdentity, gitProjectRevisionId, gitTreeIdentity, inspectGitSource, isGitAncestor, LocalGitSourceError, trackedGitPaths } from "./git-source.js";
 import { createWorkspaceBoundary, removeWorkspaceBoundary, runWorkspaceCommand, terminateWorkspaceProcess, WorkspaceBoundaryError, type WorkspaceBoundary, type WorkspaceBoundaryEnforcement, type WorkspaceBoundaryMode } from "./workspace-boundary.js";
-import { trustedGitArgs, trustedGitEnvironment } from "./trusted-git.js";
+import { createTrustedGitMetadata, trustedGitArgs, trustedGitEnvironment } from "./trusted-git.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -1652,20 +1652,36 @@ export class LocalAgentManager {
       if (!Array.isArray(args.declaredEffects) || args.declaredEffects.some((effect) => typeof effect !== "string")) throw new LocalAgentError({ code: "change.effects_invalid", message: "Change revision declaredEffects must be an array of strings; no revision was published.", recoveryAction: "declare the semantic effects of the proposed revision", receipt: "change.publish_revision input schema" });
       const declaredEffects = args.declaredEffects as string[];
       let source: Awaited<ReturnType<typeof inspectGitSource>>;
+      let trustedMetadata: Awaited<ReturnType<typeof createTrustedGitMetadata>> | undefined;
+      // Agent checkpoints retain a writable `.git` for normal Git UX. Before
+      // publication, freeze that metadata into a broker-owned copy and rebuild
+      // the index so host Git never reads mutable config, hooks, refs, or flags.
       try {
-        source = await inspectGitSource(executionDirectory);
-      } catch (error) {
-        if (error instanceof LocalGitSourceError) {
+        try {
+          trustedMetadata = await createTrustedGitMetadata(executionDirectory);
+        } catch (error) {
           throw new LocalAgentError({
-            code: error.code,
-            message: `${error.message} No revision was published.`,
+            code: "git.metadata_missing",
+            message: `Trusted Git metadata could not be isolated for ${executionDirectory}; no revision was published. ${error instanceof Error ? error.message : String(error)}`,
             affectedObject: change.id,
-            recoveryAction: error.recoveryAction,
-            receipt: `change=${change.id}; git-code=${error.code}; directory=${this.directory}`,
+            recoveryAction: "restore a regular committed .git directory in the Change Workspace, then retry publishing",
+            receipt: `change=${change.id}; trustedGitMetadata=not-created; directory=${executionDirectory}`,
           });
         }
-        throw error;
-      }
+        try {
+          source = await inspectGitSource(executionDirectory, { metadataDirectory: trustedMetadata.directory, indexFile: trustedMetadata.indexFile });
+        } catch (error) {
+          if (error instanceof LocalGitSourceError) {
+            throw new LocalAgentError({
+              code: error.code,
+              message: `${error.message} No revision was published.`,
+              affectedObject: change.id,
+              recoveryAction: error.recoveryAction,
+              receipt: `change=${change.id}; git-code=${error.code}; directory=${this.directory}`,
+            });
+          }
+          throw error;
+        }
       if (!source.clean) {
         throw new LocalAgentError({
           code: "change.source_dirty",
@@ -1695,7 +1711,7 @@ export class LocalAgentManager {
           receipt: `base-repository=${change.baseRepositoryId}; current-repository=${source.repositoryId}`,
         });
       }
-      if (!(await isGitAncestor(executionDirectory, baseCommit, source.commitId))) {
+      if (!(await isGitAncestor(executionDirectory, baseCommit, source.commitId, { metadataDirectory: trustedMetadata.directory, indexFile: trustedMetadata.indexFile }))) {
         throw new LocalAgentError({
           code: "change.base_stale",
           message: `Change ${change.id} is based on Git commit ${baseCommit}, which is not an ancestor of current commit ${source.commitId}; no revision was published.`,
@@ -1726,9 +1742,12 @@ export class LocalAgentManager {
       const changeFile = await readJson<Record<string, unknown>>(changePath);
       changeFile.latestRevisionId = revision.id;
       await writeAtomic(changePath, `${JSON.stringify(changeFile, null, 2)}\n`);
-      this.record(active.state, { operation: "change.revision_proposed", outcome: "observed", sessionId: active.session.id, grantId: active.grant.id, taskId: active.session.taskId, projectId: active.session.projectId, changeId: change.id, workspaceId: change.workspaceId, actorId: active.session.actorId, agent: active.session.agent, details: { revisionId: revision.id, declaredEffects, sourceRepositoryId: source.repositoryId, sourceRevision: revision.sourceRevision, baseProjectRevisionId: revision.baseProjectRevisionId, treeDigest: revision.treeDigest, gitRef: source.gitRef, gitObjectFormat: source.objectFormat, canonicalWrite: false } });
+      this.record(active.state, { operation: "change.revision_proposed", outcome: "observed", sessionId: active.session.id, grantId: active.grant.id, taskId: active.session.taskId, projectId: active.session.projectId, changeId: change.id, workspaceId: change.workspaceId, actorId: active.session.actorId, agent: active.session.agent, details: { revisionId: revision.id, declaredEffects, sourceRepositoryId: source.repositoryId, sourceRevision: revision.sourceRevision, baseProjectRevisionId: revision.baseProjectRevisionId, treeDigest: revision.treeDigest, gitRef: source.gitRef, gitObjectFormat: source.objectFormat, trustedGitMetadata: trustedMetadata.receipt, canonicalWrite: false } });
       await this.appendToolAudit(active, name);
-      return { revision, canonicalWrite: false, next: "review or request protected landing through the project policy" };
+      return { revision, canonicalWrite: false, next: "review or request protected landing through the project policy", trustedGitMetadata: trustedMetadata.receipt };
+      } finally {
+        await trustedMetadata?.cleanup();
+      }
     }
     return this.denial(active, name);
   }

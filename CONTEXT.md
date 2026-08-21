@@ -160,6 +160,10 @@ _Avoid_: Public push, provider URL, edge quota ledger
 An external Git repository synchronized bidirectionally with one Anyam Source Space through an explicit ref mapping and Disclosure policy. Outbound state is a verified Project Revision projection; remote commits enter Anyam as proposed Changes with remote provenance; only Landing advances the canonical Project Revision, after which accepted refs may propagate outward. A Mirror never becomes a second canonical authority.
 _Avoid_: Second canonical repository, last-writer-wins synchronization
 
+Every Mirror records `canonicalAuthority=anyam`; provider branch protection is
+an optional provider receipt, not a prerequisite for private Projects. A
+provider-authoritative Mirror is not a supported fallback.
+
 **Mirror Operation**:
 An immutable, idempotent attempt to inspect, project, propose, reconcile, or recover a Repository Mirror. It records the expected remote generation, actual provider receipt, origin operation, inbound Change IDs, outcome, and policy-safe recovery action.
 _Avoid_: Provider webhook, hidden background retry

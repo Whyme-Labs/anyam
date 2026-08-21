@@ -61,6 +61,37 @@ function setup(): { coordinator: AuthorityPlaneCoordinator; projectRevisionId: s
   return { coordinator, projectRevisionId: "project-revision:initial", projectViewId, mirrorId: "mirror:github" };
 }
 
+test("a private provider mirror remains explicitly Anyam-canonical", () => {
+  const { coordinator } = setup();
+  const mirror = coordinator.snapshot().mirrors["mirror:github"];
+  assert.equal(mirror?.canonicalAuthority, "anyam");
+  assert.match(coordinator.snapshot().audit.at(-1)?.receipt ?? "", /canonicalAuthority=anyam; providerRole=projection/);
+});
+
+test("Authority rejects a provider-authoritative mirror request", () => {
+  const { coordinator } = setup();
+  assert.throws(
+    () => command(coordinator, "mirror.configure", "mirror:provider-authority", {
+      mirrorId: "mirror:provider-authority",
+      projectId: "project:video-player",
+      sourceSpaceId: "source:community",
+      provider: "github",
+      remoteRepository: "acme/video-player",
+      canonicalAuthority: "provider",
+      refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }],
+      disclosure: "public",
+      canonicalProjectRevisionId: "project-revision:initial",
+      canonicalRefs: [{ name: "refs/heads/main", oid: "commit:initial" }],
+      remoteGeneration: "remote:g0",
+      remoteRefs: [{ name: "refs/heads/main", oid: "commit:initial" }],
+      receipt: "fixture=provider-authority; credentialFree=true",
+    }),
+    (error: unknown) => error instanceof AuthorityPlaneError
+      && error.code === "invalid_request"
+      && error.receipt.includes("canonicalAuthority=provider"),
+  );
+});
+
 function syncPayload(input: { projectViewId: string; head: string; deliveryId: string; remoteGeneration: string; operationId: string; checkpointId: string; expectedRemoteGeneration?: string; operationState?: string }) {
   return {
     mirrorId: "mirror:github",

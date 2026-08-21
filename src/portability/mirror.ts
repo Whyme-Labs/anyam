@@ -293,6 +293,15 @@ export class MirrorCoordinator {
     nonEmpty(input.mirror.projectId, "mirror.projectId");
     nonEmpty(input.mirror.sourceSpaceId, "mirror.sourceSpaceId");
     nonEmpty(input.mirror.remoteRepository, "mirror.remoteRepository");
+    if (input.mirror.canonicalAuthority !== "anyam") {
+      throw new MirrorError({
+        code: "mirror.canonical_authority_unsupported",
+        message: `Mirror ${input.mirror.id} cannot make the provider canonical.`,
+        affectedObject: input.mirror.id,
+        recoveryAction: "configure the external repository as an Anyam projection; provider branch protection is optional and never replaces Anyam Landing",
+        receipt: `mirror=${input.mirror.id}; canonicalAuthority=${String(input.mirror.canonicalAuthority)}; providerRole=projection; transition=not-applied`,
+      });
+    }
     if (input.mirror.direction !== "bidirectional") {
       throw new MirrorError({
         code: "mirror.direction_unsupported",

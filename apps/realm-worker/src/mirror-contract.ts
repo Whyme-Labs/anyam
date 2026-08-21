@@ -126,6 +126,7 @@ export function mirrorCommand(input: { operation: MirrorMutation; body: Record<s
   const body = input.body;
   const command: AuthorityCommandName = input.operation === "configure" ? MIRROR_CONFIGURE_COMMAND : input.operation === "sync" ? MIRROR_SYNC_COMMAND : MIRROR_RECONCILE_COMMAND;
   if (input.operation === "configure") {
+    if (body.canonicalAuthority !== undefined && body.canonicalAuthority !== "anyam") throw new MirrorInputError("Repository Mirrors must keep Anyam as the canonical authority.", "configure the external repository as an Anyam projection; provider-authoritative canonical refs are not supported", `canonicalAuthority=${typeof body.canonicalAuthority === "string" ? body.canonicalAuthority : "invalid"}; providerRole=projection; transition=not-applied`);
     return {
       protocol: AUTHORITY_COMMAND_PROTOCOL,
       command,
@@ -137,6 +138,7 @@ export function mirrorCommand(input: { operation: MirrorMutation; body: Record<s
         sourceSpaceId: required(body.sourceSpaceId, "sourceSpaceId"),
         provider: required(body.provider, "provider"),
         remoteRepository: required(body.remoteRepository, "remoteRepository"),
+        canonicalAuthority: "anyam",
         refMappings: (() => { if (!Array.isArray(body.refMappings) || body.refMappings.length === 0) throw new MirrorInputError("refMappings must contain at least one mapping.", "declare the exact local and remote refs this Mirror may project", "refMappings=non-empty-required; transition=not-applied"); return body.refMappings.map((entry, index) => { const mapping = object(entry, `refMappings[${index}]`); return { localRef: required(mapping.localRef, `refMappings[${index}].localRef`), remoteRef: required(mapping.remoteRef, `refMappings[${index}].remoteRef`) }; }); })(),
         disclosure: oneOf(body.disclosure, "disclosure", ["public", "project", "restricted"] as const),
         ...(optional(body.state) ? { state: oneOf(body.state, "state", ["healthy", "lagging", "divergent", "force-pushed", "blocked", "credential-failed", "disabled"] as const) } : {}),

@@ -914,6 +914,8 @@ export type RepositoryExport = {
 };
 
 export type MirrorDirection = "bidirectional";
+/** Repository Mirrors are external projections. Anyam remains canonical. */
+export type MirrorCanonicalAuthority = "anyam";
 export type MirrorState = "healthy" | "lagging" | "divergent" | "force-pushed" | "blocked" | "credential-failed" | "disabled";
 export type MirrorRefMapping = { localRef: string; remoteRef: string };
 
@@ -925,6 +927,8 @@ export type RepositoryMirror = {
   provider: string;
   remoteRepository: string;
   direction: MirrorDirection;
+  /** Provider branch protection is optional; the Mirror never becomes canonical. */
+  canonicalAuthority: MirrorCanonicalAuthority;
   refMappings: readonly MirrorRefMapping[];
   disclosure: DisclosureClassification;
   state: MirrorState;

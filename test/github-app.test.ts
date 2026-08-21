@@ -150,6 +150,7 @@ test("GitHub App adapter uses selected-installation credentials for Smart HTTP r
       provider: "github",
       remoteRepository: "acme/video-player",
       direction: "bidirectional",
+      canonicalAuthority: "anyam",
       refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }],
       disclosure: "public",
       state: "healthy",
@@ -182,7 +183,7 @@ test("GitHub App classifies a compare 404 after a rewrite as force-push", async 
   git.refs = { generation: "remote:rewritten", refs: refs([["refs/heads/main", "commit:rewritten"]]), receipt: "git-smart-http=rewritten; provider=github" };
   const { value } = adapter({ api, git });
   const result = await value.inspect({
-    mirror: { protocol: "anyam.mirror/v1", id: "mirror:github-rewrite", projectId: "project:video-player", sourceSpaceId: "source:community", provider: "github", remoteRepository: "acme/video-player", direction: "bidirectional", refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }], disclosure: "public", state: "healthy", canonicalProjectRevisionId: "project-revision:one", canonicalRefs: refs([["refs/heads/main", "commit:one"]]), remoteGeneration: "remote:old", remoteRefs: refs([["refs/heads/main", "commit:one"]]), pendingInboundChangeIds: [], createdAt: "2026-08-13T00:00:00.000Z", updatedAt: "2026-08-13T00:00:00.000Z", receipt: "fixture=mirror; credentialFree=true" },
+    mirror: { protocol: "anyam.mirror/v1", id: "mirror:github-rewrite", projectId: "project:video-player", sourceSpaceId: "source:community", provider: "github", remoteRepository: "acme/video-player", direction: "bidirectional", canonicalAuthority: "anyam", refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }], disclosure: "public", state: "healthy", canonicalProjectRevisionId: "project-revision:one", canonicalRefs: refs([["refs/heads/main", "commit:one"]]), remoteGeneration: "remote:old", remoteRefs: refs([["refs/heads/main", "commit:one"]]), pendingInboundChangeIds: [], createdAt: "2026-08-13T00:00:00.000Z", updatedAt: "2026-08-13T00:00:00.000Z", receipt: "fixture=mirror; credentialFree=true" },
     knownRefs: refs([["refs/heads/main", "commit:one"]]),
     knownGeneration: "remote:old",
   });
@@ -203,6 +204,7 @@ test("GitHub App adapter projects canonical refs through Smart HTTP CAS and reje
       provider: "github",
       remoteRepository: "acme/video-player",
       direction: "bidirectional",
+      canonicalAuthority: "anyam",
       refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }],
       disclosure: "public",
       state: "healthy",
@@ -229,7 +231,7 @@ test("GitHub App adapter projects canonical refs through Smart HTTP CAS and reje
   issuer.expiresAt = "2000-01-01T00:00:00.000Z";
   const expired = await value.inspect({
     mirror: {
-      protocol: "anyam.mirror/v1", id: "mirror:github", projectId: "project:video-player", sourceSpaceId: "source:community", provider: "github", remoteRepository: "acme/video-player", direction: "bidirectional", refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }], disclosure: "public", state: "healthy", canonicalProjectRevisionId: "project-revision:two", canonicalRefs: refs([["refs/heads/main", "commit:two"]]), remoteGeneration: "remote:g3", remoteRefs: refs([["refs/heads/main", "commit:two"]]), pendingInboundChangeIds: [], createdAt: "2026-08-13T00:00:00.000Z", updatedAt: "2026-08-13T00:00:00.000Z", receipt: "fixture=mirror; credentialFree=true",
+      protocol: "anyam.mirror/v1", id: "mirror:github", projectId: "project:video-player", sourceSpaceId: "source:community", provider: "github", remoteRepository: "acme/video-player", direction: "bidirectional", canonicalAuthority: "anyam", refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }], disclosure: "public", state: "healthy", canonicalProjectRevisionId: "project-revision:two", canonicalRefs: refs([["refs/heads/main", "commit:two"]]), remoteGeneration: "remote:g3", remoteRefs: refs([["refs/heads/main", "commit:two"]]), pendingInboundChangeIds: [], createdAt: "2026-08-13T00:00:00.000Z", updatedAt: "2026-08-13T00:00:00.000Z", receipt: "fixture=mirror; credentialFree=true",
     },
     knownRefs: refs([["refs/heads/main", "commit:two"]]),
     knownGeneration: "remote:g3",

@@ -123,6 +123,7 @@ function mirror(input: { repository: string; initialGeneration: string; initialO
     provider: "github",
     remoteRepository: input.repository,
     direction: "bidirectional",
+    canonicalAuthority: "anyam",
     refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }],
     disclosure: "public",
     state: "healthy",
@@ -133,7 +134,7 @@ function mirror(input: { repository: string; initialGeneration: string; initialO
     pendingInboundChangeIds: [],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    receipt: "qualification=github-app; sourceSpace=public; canonicalWrite=false",
+    receipt: "qualification=github-app; sourceSpace=public; canonicalAuthority=anyam; providerRole=projection; providerProtection=not-required; canonicalWrite=false",
   };
 }
 

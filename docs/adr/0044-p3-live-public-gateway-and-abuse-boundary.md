@@ -47,6 +47,15 @@ normal Change, Evidence, Landing, Release, and Target policy
   Repository Driver.
 - `git-receive-pack` is rejected. Anonymous public Git never receives
   canonical-write authority.
+- Public Git uses the same stream-bounded Smart HTTP transport as private Git.
+  Request and response byte budgets, full body-lifecycle deadlines, and
+  concurrency release are therefore one transport policy rather than a
+  weaker public-only proxy. The public worker requires measured values and a
+  receipt for every configured tripwire; missing configuration closes the
+  public Git route.
+- The current concurrency tracker is worker-isolate local. This is an explicit
+  provider/runtime residual, not a global quota claim; a durable coordinator
+  must be qualified before cross-isolate enforcement is asserted.
 - Upstream provider URLs, private Source Space IDs, private paths, and provider
   error details are not returned to the caller.
 - The Gateway is the stable client URL; a provider can be replaced behind it.

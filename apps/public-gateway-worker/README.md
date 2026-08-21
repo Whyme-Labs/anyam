@@ -16,6 +16,27 @@ contribution boundary. It is deliberately narrower than a complete Git forge:
   contribution gate; it never grants canonical write or private Source Space
   access and never places the provider secret in a response or ledger record.
 
+Public Git is routed through the shared `anyam.smart-http/v1` transport. The
+worker does not maintain a second provider `fetch` path: request and response
+bodies are counted as they stream, the duration deadline remains active until
+the response body closes, and the concurrency slot is released exactly once
+on close, cancellation, or error. Configure the four public-Git limits with a
+single workload measurement receipt:
+
+```text
+PUBLIC_GIT_REQUEST_BYTES_LIMIT
+PUBLIC_GIT_RESPONSE_BYTES_LIMIT
+PUBLIC_GIT_DURATION_MS_LIMIT
+PUBLIC_GIT_CONCURRENCY_LIMIT
+PUBLIC_GIT_BUDGET_RECEIPT
+```
+
+If any value or receipt is missing, public Git remains closed with a receipt
+that names the missing budget and ask. The concurrency tracker is an
+isolate-local tripwire; a durable cross-isolate coordinator is not claimed by
+this adapter and must be qualified separately before it is used as a global
+quota.
+
 The example config intentionally contains placeholders. Replace them with
 customer-owned values and a measured receipt before deploying. Do not add a
 provider token to the config or expose the upstream Git URL in responses.

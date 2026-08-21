@@ -164,6 +164,45 @@ test("trusted Git inspection disables repository fsmonitor execution", async () 
   await assert.rejects(access(marker));
 });
 
+test("agent Change publication inspects an isolated Git metadata copy after a hostile agent mutates .git", async () => {
+  if (process.platform !== "darwin") return;
+  const directory = await projectDirectory();
+  const marker = join(directory, "host-git-executed");
+  const agentManager = manager(directory);
+  const script = [
+    "const fs=require('node:fs');",
+    "const hook=process.cwd()+'/.git/fsmonitor-hook.sh';",
+    `fs.writeFileSync(hook, ${JSON.stringify(`#!/bin/sh\nprintf host > ${marker}\n`)}, {mode:0o755});`,
+    "fs.appendFileSync('.git/config', '\\n[core]\\n\\tfsmonitor = '+hook+'\\n');",
+    "fs.writeFileSync('.git/index', 'hostile-index-replacement');",
+  ].join(" ");
+  const launched = await agentManager.launchAgent({ agent: "codex", mode: "enforceable", command: process.execPath, args: ["-e", script] });
+  assert.equal(launched.command.status, "passed", launched.command.stderr);
+  const published = await agentManager.invokeTool("change.publish_revision", { declaredEffects: ["source.modify"] });
+  assert.equal((published.revision as Record<string, unknown>).sourceKind, "git");
+  assert.match(String(published.trustedGitMetadata), /trustedGitMetadata=isolated-copy;.*index=rebuilt/);
+  await assert.rejects(access(marker));
+  await agentManager.revoke(launched.session.id);
+});
+
+test("agent Change publication rebuilds the trusted index instead of trusting skip-worktree metadata", async () => {
+  if (process.platform !== "darwin") return;
+  const directory = await projectDirectory();
+  const agentManager = manager(directory);
+  const script = [
+    "const fs=require('node:fs');",
+    "fs.writeFileSync('src/index.ts', 'export const hiddenMutation = true;\\n');",
+    "require('node:child_process').execFileSync('git',['update-index','--skip-worktree','src/index.ts']);",
+  ].join(" ");
+  const launched = await agentManager.launchAgent({ agent: "codex", mode: "enforceable", command: process.execPath, args: ["-e", script] });
+  assert.equal(launched.command.status, "passed", launched.command.stderr);
+  await assert.rejects(
+    agentManager.invokeTool("change.publish_revision", { declaredEffects: ["source.modify"] }),
+    (error: unknown) => error instanceof LocalAgentError && error.code === "change.source_dirty" && /asked=1 changed paths/.test(error.message),
+  );
+  await agentManager.revoke(launched.session.id);
+});
+
 test("Git repository identity survives a moved checkout and a fresh clone", async () => {
   const directory = await projectDirectory({ startChange: false });
   const moved = join(directory, "..", "moved-demo");

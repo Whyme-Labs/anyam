@@ -24,6 +24,13 @@ export type LocalGitSourceState = {
   clean: boolean;
 };
 
+export type GitInspectionOptions = {
+  /** A frozen metadata copy used when the live Workspace is agent-controlled. */
+  metadataDirectory?: string;
+  /** A clean index rebuilt from the frozen HEAD tree. */
+  indexFile?: string;
+};
+
 export class LocalGitSourceError extends Error {
   readonly code: "git.metadata_missing" | "git.revision_missing" | "git.command_failed";
   readonly directory: string;
@@ -60,13 +67,23 @@ function oid(value: string, field: string, directory: string): string {
   return trimmed;
 }
 
-async function git(directory: string, args: readonly string[]): Promise<string> {
-  return (await gitRaw(directory, args)).trim();
+function inspectionEnvironment(directory: string, options?: GitInspectionOptions): NodeJS.ProcessEnv {
+  const environment = trustedGitEnvironment();
+  if (options?.metadataDirectory) {
+    environment.GIT_DIR = options.metadataDirectory;
+    environment.GIT_WORK_TREE = directory;
+  }
+  if (options?.indexFile) environment.GIT_INDEX_FILE = options.indexFile;
+  return environment;
 }
 
-async function gitRaw(directory: string, args: readonly string[]): Promise<string> {
+async function git(directory: string, args: readonly string[], options?: GitInspectionOptions): Promise<string> {
+  return (await gitRaw(directory, args, options)).trim();
+}
+
+async function gitRaw(directory: string, args: readonly string[], options?: GitInspectionOptions): Promise<string> {
   try {
-    const result = await execFile("git", trustedGitArgs(args), { cwd: directory, encoding: "utf8", env: trustedGitEnvironment() });
+    const result = await execFile("git", trustedGitArgs(args), { cwd: directory, encoding: "utf8", env: inspectionEnvironment(directory, options) });
     return result.stdout;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -84,9 +101,9 @@ export async function trackedGitPaths(directoryInput: string): Promise<readonly 
   return (await gitRaw(directory, ["ls-files", "-z"])).split("\0").filter(Boolean).map((path) => path.replaceAll("\\", "/"));
 }
 
-async function optionalGit(directory: string, args: readonly string[]): Promise<string | null> {
+async function optionalGit(directory: string, args: readonly string[], options?: GitInspectionOptions): Promise<string | null> {
   try {
-    return await git(directory, args);
+    return await git(directory, args, options);
   } catch {
     return null;
   }
@@ -102,8 +119,8 @@ async function manifestRepositoryId(repositoryRoot: string): Promise<string | un
   }
 }
 
-async function rootLineage(directory: string): Promise<readonly string[]> {
-  const roots = (await git(directory, ["rev-list", "--max-parents=0", "--all"]))
+async function rootLineage(directory: string, options?: GitInspectionOptions): Promise<readonly string[]> {
+  const roots = (await git(directory, ["rev-list", "--max-parents=0", "--all"], options))
     .split("\n")
     .map((value) => value.trim())
     .filter(Boolean)
@@ -128,11 +145,11 @@ function statusPaths(value: string): string[] {
   return paths;
 }
 
-export async function inspectGitSource(directoryInput: string): Promise<LocalGitSourceState> {
+export async function inspectGitSource(directoryInput: string, options?: GitInspectionOptions): Promise<LocalGitSourceState> {
   const directory = resolve(directoryInput);
   let repositoryRoot: string;
   try {
-    repositoryRoot = resolve(await git(directory, ["rev-parse", "--show-toplevel"]));
+    repositoryRoot = resolve(await git(directory, ["rev-parse", "--show-toplevel"], options));
   } catch (error) {
     if (error instanceof LocalGitSourceError) {
       throw new LocalGitSourceError({
@@ -147,7 +164,7 @@ export async function inspectGitSource(directoryInput: string): Promise<LocalGit
 
   let commitId: string;
   try {
-    commitId = oid(await git(directory, ["rev-parse", "--verify", "HEAD^{commit}"]), "commit id", directory);
+    commitId = oid(await git(directory, ["rev-parse", "--verify", "HEAD^{commit}"], options), "commit id", directory);
   } catch (error) {
     if (error instanceof LocalGitSourceError) {
       throw new LocalGitSourceError({
@@ -160,13 +177,13 @@ export async function inspectGitSource(directoryInput: string): Promise<LocalGit
     throw error;
   }
 
-  const treeId = oid(await git(directory, ["rev-parse", "--verify", "HEAD^{tree}"]), "tree id", directory);
-  const objectFormat = (await optionalGit(directory, ["rev-parse", "--show-object-format=storage"])) === "sha256" ? "sha256" : "sha1";
-  const gitRef = (await optionalGit(directory, ["symbolic-ref", "--quiet", "--short", "HEAD"])) || "HEAD";
-  const status = await gitRaw(directory, ["status", "--porcelain=v1", "--untracked-files=all", "-z", "--", ".", ...SOURCE_METADATA_EXCLUDES]);
+  const treeId = oid(await git(directory, ["rev-parse", "--verify", "HEAD^{tree}"], options), "tree id", directory);
+  const objectFormat = (await optionalGit(directory, ["rev-parse", "--show-object-format=storage"], options)) === "sha256" ? "sha256" : "sha1";
+  const gitRef = (await optionalGit(directory, ["symbolic-ref", "--quiet", "--short", "HEAD"], options)) || "HEAD";
+  const status = await gitRaw(directory, ["status", "--porcelain=v1", "--untracked-files=all", "-z", "--", ".", ...SOURCE_METADATA_EXCLUDES], options);
   const changedPaths = statusPaths(status);
   const manifestId = await manifestRepositoryId(repositoryRoot);
-  const roots = manifestId ? [] : await rootLineage(directory);
+  const roots = manifestId ? [] : await rootLineage(directory, options);
   const repositoryId = manifestId
     ? `git-repository:v2:${manifestId}`
     : `git-repository:v2:sha256:${digestIdentity(JSON.stringify({ objectFormat, roots }))}`;
@@ -188,11 +205,11 @@ export async function inspectGitSource(directoryInput: string): Promise<LocalGit
   };
 }
 
-export async function isGitAncestor(directoryInput: string, baseCommit: string, currentCommit: string): Promise<boolean> {
+export async function isGitAncestor(directoryInput: string, baseCommit: string, currentCommit: string, options?: GitInspectionOptions): Promise<boolean> {
   const directory = resolve(directoryInput);
   if (!GIT_OID.test(baseCommit) || !GIT_OID.test(currentCommit)) return false;
   try {
-    await execFile("git", trustedGitArgs(["merge-base", "--is-ancestor", baseCommit, currentCommit]), { cwd: directory, encoding: "utf8", env: trustedGitEnvironment() });
+    await execFile("git", trustedGitArgs(["merge-base", "--is-ancestor", baseCommit, currentCommit]), { cwd: directory, encoding: "utf8", env: inspectionEnvironment(directory, options) });
     return true;
   } catch {
     return false;

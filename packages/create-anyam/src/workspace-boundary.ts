@@ -161,7 +161,9 @@ function linuxBwrapRuntimeArgs(input: { boundary: WorkspaceBoundary; invokedComm
     executableRoots.add(root);
     executableRoots.add(dirname(root));
   }
-  for (const root of executableRoots) appendReadonlyBind(args, root);
+  for (const root of executableRoots) {
+    if (root !== "/") appendReadonlyBind(args, root);
+  }
   return args;
 }
 

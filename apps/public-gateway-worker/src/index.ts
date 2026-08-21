@@ -24,6 +24,8 @@ import {
   type PublicIntakeMeasuredLimit,
   type PublicIntakePolicy,
 } from "../../../src/index.ts";
+import { handlePublicGitRequest } from "../../../src/cloudflare/public-git-transport.ts";
+import { SmartHttpBudgetTracker, type SmartHttpBudgetPolicy } from "../../../src/portability/smart-http.ts";
 
 export interface Env {
   PUBLIC_GATEWAY_COORDINATOR: DurableObjectNamespace;
@@ -53,6 +55,11 @@ export interface Env {
   PUBLIC_TURNSTILE_VERIFY_TIMEOUT_MS?: string;
   PUBLIC_TURNSTILE_VERIFY_TIMEOUT_RECEIPT?: string;
   UPSTREAM_GIT_BASE: string;
+  PUBLIC_GIT_REQUEST_BYTES_LIMIT?: string;
+  PUBLIC_GIT_RESPONSE_BYTES_LIMIT?: string;
+  PUBLIC_GIT_DURATION_MS_LIMIT?: string;
+  PUBLIC_GIT_CONCURRENCY_LIMIT?: string;
+  PUBLIC_GIT_BUDGET_RECEIPT?: string;
   /** Bound Realm service that validates owner/moderator sessions. */
   PUBLIC_GATEWAY_REALM_AUTHORITY?: Fetcher;
   /** Service-binding secret; never grants moderation by itself. */
@@ -187,6 +194,20 @@ function optionalToken(body: JsonObject): string | undefined {
   return value;
 }
 
+const publicGitBudgetTracker = new SmartHttpBudgetTracker("provider=cloudflare-workers; transport=public-git; concurrencyScope=worker-isolate; globalCoordinator=not-qualified");
+
+function publicGitBudget(env: Env): SmartHttpBudgetPolicy {
+  const receipt = required(env.PUBLIC_GIT_BUDGET_RECEIPT, "PUBLIC_GIT_BUDGET_RECEIPT");
+  if (!/(?:receipt|measure|qualification)/iu.test(receipt)) throw new PublicGatewayConfigurationError(["PUBLIC_GIT_BUDGET_RECEIPT"]);
+  return {
+    maxRequestBytes: positiveInteger(env.PUBLIC_GIT_REQUEST_BYTES_LIMIT, "PUBLIC_GIT_REQUEST_BYTES_LIMIT"),
+    maxResponseBytes: positiveInteger(env.PUBLIC_GIT_RESPONSE_BYTES_LIMIT, "PUBLIC_GIT_RESPONSE_BYTES_LIMIT"),
+    maxDurationMs: positiveInteger(env.PUBLIC_GIT_DURATION_MS_LIMIT, "PUBLIC_GIT_DURATION_MS_LIMIT"),
+    maxConcurrentRequests: positiveInteger(env.PUBLIC_GIT_CONCURRENCY_LIMIT, "PUBLIC_GIT_CONCURRENCY_LIMIT"),
+    receipt: `${receipt}; concurrencyScope=worker-isolate; globalCoordinator=not-qualified`,
+  };
+}
+
 
 function envelope(body: JsonObject): JsonObject {
   const value = body.envelope;
@@ -227,43 +248,28 @@ async function coordinatorRequest(env: Env, path: string, init?: RequestInit): P
 }
 
 async function publicGit(request: Request, env: Env): Promise<Response> {
-  const prefix = "/projects/public/source.git/";
-  const url = new URL(request.url);
-  const suffix = url.pathname.slice(prefix.length);
-  if (suffix.length === 0 || suffix.includes("..") || suffix.includes("\\") || suffix.includes("\0")) return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "not_found", recoveryAction: "use the configured public Source Space Git URL", receipt: "publicGitPath=invalid; privateMetadata=not-disclosed" }, 404);
-  if (suffix.endsWith("git-receive-pack")) return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "canonical_write_denied", recoveryAction: "create a public Change contribution envelope; anonymous Git receive-pack is never enabled", receipt: "publicGitOperation=receive-pack; canonicalWrite=false; materialized=false" }, 403);
-  if (request.method !== "GET" && !(request.method === "POST" && suffix.endsWith("git-upload-pack"))) return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "method_not_allowed", recoveryAction: "use public Git upload-pack reads or the contribution envelope endpoint", receipt: `publicGitOperation=${request.method}; canonicalWrite=false` }, 405);
-
-  let upstream: URL;
+  let upstreamBase: string;
+  let publicSourceSpaceId: string;
   try {
-    const upstreamBase = new URL(required(env.UPSTREAM_GIT_BASE, "UPSTREAM_GIT_BASE"));
-    if (upstreamBase.protocol !== "https:" && upstreamBase.protocol !== "http:") throw new Error("unsupported provider protocol");
-    if (upstreamBase.username || upstreamBase.password || upstreamBase.hash) throw new Error("provider URL must not contain credentials or a fragment");
-    upstream = new URL(suffix + url.search, upstreamBase.toString().endsWith("/") ? upstreamBase : `${upstreamBase}/`);
-  } catch {
-    return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "public_driver_unavailable", recoveryAction: "configure a valid customer-owned public Repository Driver URL and retry the provider-backed read", receipt: "providerUrl=not-disclosed; providerConfiguration=invalid; privateMetadata=not-disclosed" }, 503);
+    upstreamBase = required(env.UPSTREAM_GIT_BASE, "UPSTREAM_GIT_BASE");
+    publicSourceSpaceId = required(env.PUBLIC_SOURCE_SPACE_ID, "PUBLIC_SOURCE_SPACE_ID");
+  } catch (error) {
+    const missing = error instanceof PublicGatewayConfigurationError ? error.missing.join(",") : "unknown";
+    return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "public_git_configuration_invalid", recoveryAction: "configure a valid customer-owned HTTPS Repository Driver URL and public Source Space before enabling public reads", receipt: `publicGit=closed; config=${missing}; limit=configuration; asked=missing; providerUrl=not-disclosed; credentialMaterialStored=false` }, 503);
   }
-  const headers = new Headers();
-  for (const name of ["accept", "content-type", "content-encoding", "git-protocol"]) {
-    const value = request.headers.get(name);
-    if (value) headers.set(name, value);
-  }
-  let response: Response;
+  let budget: SmartHttpBudgetPolicy;
   try {
-    const upstreamInit: RequestInit = { method: request.method, headers };
-    if (request.method !== "GET") upstreamInit.body = request.body;
-    response = await fetch(upstream, upstreamInit);
+    budget = publicGitBudget(env);
+  } catch (error) {
+    const missing = error instanceof PublicGatewayConfigurationError ? error.missing.join(",") : "unknown";
+    return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "public_git_budget_unavailable", recoveryAction: "measure the public Git workload, configure every named limit and receipt, then retry the same read", receipt: `publicGit=closed; budget=configuration; limit=${missing}; asked=missing; providerUrl=not-disclosed; credentialMaterialStored=false` }, 503);
+  }
+  try {
+    const response = await handlePublicGitRequest(request, { upstreamBase, publicSourceSpaceId, budget, budgetTracker: publicGitBudgetTracker });
+    return response ?? json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "not_found", recoveryAction: "use the configured public Source Space Git URL", receipt: "publicGitRoute=not-found; privateMetadata=not-disclosed" }, 404);
   } catch {
     return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "public_driver_unavailable", recoveryAction: "retain the public projection and retry the provider-backed read after the driver recovers", receipt: "providerUrl=not-disclosed; publicGitRead=unavailable; privateMetadata=not-disclosed" }, 503);
   }
-  if (!response.ok) return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "public_driver_unavailable", recoveryAction: "inspect the provider adapter and retry the same public read", receipt: `providerStatus=${response.status}; providerUrl=not-disclosed; privateMetadata=not-disclosed` }, 503);
-  const responseHeaders = new Headers();
-  for (const name of ["content-type", "content-encoding", "etag", "last-modified", "cache-control", "vary"]) {
-    const value = response.headers.get(name);
-    if (value) responseHeaders.set(name, value);
-  }
-  responseHeaders.set("x-anyam-public-projection", "true");
-  return new Response(response.body, { status: response.status, headers: responseHeaders });
 }
 
 async function handleAdmin(request: Request, env: Env, action: "state" | "open" | "suspend" | "reopen" | "cleanup" | "ledger-export" | "ledger-compact" | "replay-archive-delete"): Promise<Response> {

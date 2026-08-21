@@ -26,7 +26,12 @@
     "PUBLIC_TURNSTILE_EXPECTED_HOSTNAME": "replace-with-customer-hostname",
     "PUBLIC_TURNSTILE_VERIFY_TIMEOUT_MS": "replace-with-measured-provider-timeout",
     "PUBLIC_TURNSTILE_VERIFY_TIMEOUT_RECEIPT": "receipt:replace-with-turnstile-timeout-measurement",
-    "UPSTREAM_GIT_BASE": "https://github.com/replace-with-public-driver/repository.git"
+    "UPSTREAM_GIT_BASE": "https://github.com/replace-with-public-driver/repository.git",
+    "PUBLIC_GIT_REQUEST_BYTES_LIMIT": "replace-with-measured-public-git-request-limit",
+    "PUBLIC_GIT_RESPONSE_BYTES_LIMIT": "replace-with-measured-public-git-response-limit",
+    "PUBLIC_GIT_DURATION_MS_LIMIT": "replace-with-measured-public-git-duration-limit",
+    "PUBLIC_GIT_CONCURRENCY_LIMIT": "replace-with-measured-public-git-concurrency-limit",
+    "PUBLIC_GIT_BUDGET_RECEIPT": "receipt:replace-with-public-git-stream-measurement"
   },
   "durable_objects": {
     "bindings": [

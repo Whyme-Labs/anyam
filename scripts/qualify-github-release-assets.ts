@@ -274,14 +274,18 @@ function readOwnerSessionFile(path: string): string {
 
 type CleanupReceipt = { status: "succeeded" | "blocked" | "not-run"; receipt: string; recoveryAction?: string };
 
-async function restoreAuthoritySnapshot(client: RealmAuthorityHttpClient, snapshot: JsonObject): Promise<CleanupReceipt> {
+async function restoreAuthorityRecovery(client: RealmAuthorityHttpClient, bundle: JsonObject): Promise<CleanupReceipt> {
   try {
-    const restored = await client.restoreAuthoritySnapshot(snapshot);
-    if (restored.status !== "recovery-restored") return { status: "blocked", receipt: "cleanup=authority-recovery-blocked; unexpected-status; credentialMaterialStored=false", recoveryAction: "authenticate the Realm owner again, inspect the recovery receipt, and restore the exact exported snapshot" };
-    const readBack = await client.exportAuthoritySnapshot();
-    const readBackSnapshot = authorityObject(readBack.snapshot, "restored Authority snapshot");
-    if (readBack.credentialFree !== true || Object.prototype.hasOwnProperty.call(readBackSnapshot, "credentials") || jsonDigest(readBackSnapshot) !== jsonDigest(snapshot)) return { status: "blocked", receipt: "cleanup=authority-recovery-blocked; snapshot-read-back-mismatch; credentialMaterialStored=false", recoveryAction: "retain the disposable Authority boundary and retry the exact snapshot restore after inspecting its receipt" };
-    return { status: "succeeded", receipt: "cleanup=authority-recovery-restored; snapshot-read-back-verified; identity-sessions-untouched; credentialMaterialStored=false" };
+    const restored = await client.restoreAuthorityRecovery(bundle);
+    if (restored.status !== "recovery-quarantined") return { status: "blocked", receipt: "cleanup=authority-recovery-blocked; unexpected-status; credentialMaterialStored=false", recoveryAction: "authenticate the Realm owner again, inspect the recovery receipt, and restore the exact signed bundle" };
+    const readBack = await client.exportAuthorityRecovery();
+    const readBackBundle = authorityObject(readBack.bundle, "restored Authority recovery bundle");
+    const readBackSnapshot = authorityObject(readBackBundle.snapshot, "restored Authority snapshot");
+    const originalSnapshot = authorityObject(bundle.snapshot, "original Authority snapshot");
+    if (readBack.credentialFree !== true || Object.prototype.hasOwnProperty.call(readBackSnapshot, "credentials") || jsonDigest(readBackSnapshot) !== jsonDigest(originalSnapshot)) return { status: "blocked", receipt: "cleanup=authority-recovery-blocked; snapshot-read-back-mismatch; credentialMaterialStored=false", recoveryAction: "retain the disposable Authority boundary and retry the exact signed bundle restore after inspecting its receipt" };
+    const activated = await client.activateAuthorityRecovery(authorityField(restored.bundleId, "bundleId"), authorityField(restored.bundleDigest, "bundleDigest"));
+    if (activated.status !== "recovery-activated" && activated.status !== "already-active") return { status: "blocked", receipt: "cleanup=authority-activation-blocked; unexpected-status; credentialMaterialStored=false", recoveryAction: "complete the passkey-authenticated Authority recovery activation ceremony with the exact quarantined bundle" };
+    return { status: "succeeded", receipt: "cleanup=authority-recovery-restored; snapshot-read-back-verified; passkey-activation-verified; identity-sessions-untouched; credentialMaterialStored=false" };
   } catch (error) {
     return { status: "blocked", receipt: `cleanup=authority-recovery-blocked; errorClass=${error instanceof Error ? error.name : "unknown"}; credentialMaterialStored=false`, recoveryAction: "authenticate the Realm owner again and restore the exact credential-free Authority snapshot" };
   }
@@ -293,9 +297,10 @@ async function qualifyCustomerRealmAuthority(input: {
   verified: ImmutableRelease;
   target: ReleaseAssetTarget;
 }): Promise<{ receipt: string; cleanupSnapshot: JsonObject; projectId: string; releaseId: string; targetId: string; promotionStatus: string }> {
-  const recovery = await input.client.exportAuthoritySnapshot();
-  const snapshot = authorityObject(recovery.snapshot, "Authority recovery snapshot");
-  if (recovery.credentialFree !== true || Object.prototype.hasOwnProperty.call(snapshot, "credentials")) throw new Error("customer Realm Authority recovery snapshot was not credential-free; no Authority mutation was attempted");
+  const recovery = await input.client.exportAuthorityRecovery();
+  const bundle = authorityObject(recovery.bundle, "Authority recovery bundle");
+  const snapshot = authorityObject(bundle.snapshot, "Authority recovery snapshot");
+  if (recovery.credentialFree !== true || Object.prototype.hasOwnProperty.call(snapshot, "credentials")) throw new Error("customer Realm Authority recovery bundle was not credential-free; no Authority mutation was attempted");
   const state = await input.client.inspectState();
   const authority = authorityObject(state.authority, "Authority state");
   const counts = authorityObject(authority.counts, "Authority state counts");
@@ -359,7 +364,7 @@ async function qualifyCustomerRealmAuthority(input: {
   const promotionStatus = authorityField(promotion.status, "promotion.status");
   if (promotionStatus !== "blocked") throw new Error(`customer Realm Authority Promotion unexpectedly returned ${promotionStatus}; provider execution must remain a separate handoff`);
   const finalState = await input.client.inspectState();
-  return { cleanupSnapshot: snapshot, projectId, releaseId, targetId, promotionStatus, receipt: `authority=customer-realm; project=${projectId}; artifact=${artifactId}; evidence=${evidenceId}; release=${releaseId}; target=${targetId}; promotion=${promotionStatus}; canonicalWrite=false; credentialMaterialStored=false; stateReadBack=${jsonDigest(finalState)}` };
+  return { cleanupSnapshot: bundle, projectId, releaseId, targetId, promotionStatus, receipt: `authority=customer-realm; project=${projectId}; artifact=${artifactId}; evidence=${evidenceId}; release=${releaseId}; target=${targetId}; promotion=${promotionStatus}; canonicalWrite=false; credentialMaterialStored=false; stateReadBack=${jsonDigest(finalState)}` };
 }
 
 async function qualifyLive(): Promise<Record<string, unknown>> {
@@ -393,15 +398,16 @@ async function qualifyLive(): Promise<Record<string, unknown>> {
   let cleanup: Record<string, unknown> = { status: "not-run", receipt: "cleanup=not-run" };
   let authorityCleanup: CleanupReceipt | undefined;
   try {
-    const authorityExport = await authorityClient.exportAuthoritySnapshot();
-    authoritySnapshot = authorityObject(authorityExport.snapshot, "Authority recovery snapshot");
-    if (authorityExport.credentialFree !== true || Object.prototype.hasOwnProperty.call(authoritySnapshot, "credentials")) throw new Error("customer Realm Authority recovery snapshot was not credential-free; no Authority mutation was attempted");
+    const authorityExport = await authorityClient.exportAuthorityRecovery();
+    authoritySnapshot = authorityObject(authorityExport.bundle, "Authority recovery bundle");
+    const recoverySnapshot = authorityObject(authoritySnapshot.snapshot, "Authority recovery snapshot");
+    if (authorityExport.credentialFree !== true || Object.prototype.hasOwnProperty.call(recoverySnapshot, "credentials")) throw new Error("customer Realm Authority recovery bundle was not credential-free; no Authority mutation was attempted");
     authorityQualification = await qualifyCustomerRealmAuthority({ client: authorityClient, selected, verified, target: targetValue });
     const capabilityReceipt = `provider=github; repository=${repository}; scopeReceipt=${scopeReceipt}; ${authorityQualification.receipt}; credentialMaterialStored=false`;
     const broker: GitHubReleaseAssetsCredentialBroker = { async issue() { return { token, credentialId: "credential:env:github-release-assets", expiresAt, audience: GITHUB_RELEASE_ASSETS_AUDIENCE, scopes, receipt: `${scopeReceipt}; selectedRepository=true; authority=customer-realm; credentialMaterialStored=false` }; } };
     const adapter = new GitHubReleaseAssetsAdapter({ owner, repository: name, disclosure: "public", credentialBroker: broker, client, artifactReader: { read: async () => bytes }, capabilityReceipt, requireImmutableRelease: true });
     result = await adapter.publish({ publicationId: "publication:live", attempt: 0, release: verified, artifact: selected, target: targetValue });
-    if (authorityQualification) authorityCleanup = await restoreAuthoritySnapshot(authorityClient, authorityQualification.cleanupSnapshot);
+    if (authorityQualification) authorityCleanup = await restoreAuthorityRecovery(authorityClient, authorityQualification.cleanupSnapshot);
   } finally {
     try {
       const created = await client.findReleaseByTag({ owner, repository: name, tagName, token });
@@ -413,7 +419,7 @@ async function qualifyLive(): Promise<Record<string, unknown>> {
     } catch (error) {
       cleanup = { status: "blocked", receipt: `cleanup=blocked; errorClass=${error instanceof Error ? error.name : "unknown"}; credentialMaterialStored=false`, recoveryAction: "retain the disposable repository, inspect the deterministic Release, and retry cleanup with the owner-controlled credential" };
     }
-    if (!authorityCleanup && authoritySnapshot) authorityCleanup = await restoreAuthoritySnapshot(authorityClient, authoritySnapshot);
+    if (!authorityCleanup && authoritySnapshot) authorityCleanup = await restoreAuthorityRecovery(authorityClient, authoritySnapshot);
   }
   if (!result || result.status !== "succeeded") {
     const error = result && result.status === "failed" ? `${result.errorCode}; ${result.recoveryAction}; ${result.receipt}` : "live release publication did not return a result";

@@ -237,14 +237,18 @@ function authorityProposalChangeId(value: JsonObject): string | undefined {
   return typeof record.changeId === "string" ? record.changeId : undefined;
 }
 
-async function restoreAuthoritySnapshot(client: RealmAuthorityHttpClient, snapshot: JsonObject): Promise<CleanupReceipt> {
+async function restoreAuthorityRecovery(client: RealmAuthorityHttpClient, bundle: JsonObject): Promise<CleanupReceipt> {
   try {
-    const restored = await client.restoreAuthoritySnapshot(snapshot);
-    if (restored.status !== "recovery-restored") return { status: "blocked", receipt: "cleanup=authority-restore-blocked; unexpected-recovery-status; credentialMaterialStored=false", recoveryAction: "authenticate the Realm owner again, inspect the Authority recovery receipt, and restore the exact exported snapshot" };
-    const readBack = await client.exportAuthoritySnapshot();
-    const readBackSnapshot = authorityObject(readBack.snapshot, "restored Authority recovery snapshot");
-    if (readBack.credentialFree !== true || digest(readBackSnapshot) !== digest(snapshot)) return { status: "blocked", receipt: "cleanup=authority-restore-blocked; snapshot-read-back-mismatch; credentialMaterialStored=false", recoveryAction: "retain the exact disposable Authority Realm, inspect the restore and export receipts, and retry restoration without changing the snapshot" };
-    return { status: "succeeded", receipt: "cleanup=authority-recovery-restored; authority-state-replaced; snapshot-read-back-verified; identity-sessions-untouched; credentialMaterialStored=false" };
+    const restored = await client.restoreAuthorityRecovery(bundle);
+    if (restored.status !== "recovery-quarantined") return { status: "blocked", receipt: "cleanup=authority-restore-blocked; unexpected-recovery-status; credentialMaterialStored=false", recoveryAction: "authenticate the Realm owner again, inspect the Authority recovery receipt, and restore the exact signed bundle" };
+    const readBack = await client.exportAuthorityRecovery();
+    const readBackBundle = authorityObject(readBack.bundle, "restored Authority recovery bundle");
+    const readBackSnapshot = authorityObject(readBackBundle.snapshot, "restored Authority recovery snapshot");
+    const originalSnapshot = authorityObject(bundle.snapshot, "original Authority recovery snapshot");
+    if (readBack.credentialFree !== true || digest(readBackSnapshot) !== digest(originalSnapshot)) return { status: "blocked", receipt: "cleanup=authority-restore-blocked; snapshot-read-back-mismatch; credentialMaterialStored=false", recoveryAction: "retain the exact disposable Authority Realm, inspect the signed restore and export receipts, and retry without changing the bundle" };
+    const activated = await client.activateAuthorityRecovery(authorityField(restored.bundleId, "bundleId"), authorityField(restored.bundleDigest, "bundleDigest"));
+    if (activated.status !== "recovery-activated" && activated.status !== "already-active") return { status: "blocked", receipt: "cleanup=authority-activation-blocked; unexpected-status; credentialMaterialStored=false", recoveryAction: "complete the passkey-authenticated Authority recovery activation ceremony with the exact quarantined bundle" };
+    return { status: "succeeded", receipt: "cleanup=authority-recovery-restored; authority-state-replaced; quarantine-read-back-verified; passkey-activation-verified; identity-sessions-untouched; credentialMaterialStored=false" };
   } catch (error) {
     return { status: "blocked", receipt: `cleanup=authority-restore-blocked; errorClass=${error instanceof Error ? error.name : "unknown"}; credentialMaterialStored=false`, recoveryAction: "authenticate the Realm owner again, inspect the Authority recovery receipt, and restore the exact exported snapshot" };
   }
@@ -612,9 +616,10 @@ async function main(): Promise<void> {
 
     if (authorityInputs) {
       authorityClient = new RealmAuthorityHttpClient({ baseUrl: authorityInputs.baseUrl, ownerSession: authorityInputs.ownerSession });
-      const recovery = await authorityClient.exportAuthoritySnapshot();
-      authorityRecoverySnapshot = authorityObject(recovery.snapshot, "authority recovery snapshot");
-      if (recovery.credentialFree !== true || Object.prototype.hasOwnProperty.call(authorityRecoverySnapshot, "credentials")) throw new Error("customer Realm Authority snapshot was not credential-free; no Authority mutation was attempted");
+      const recovery = await authorityClient.exportAuthorityRecovery();
+      authorityRecoverySnapshot = authorityObject(recovery.bundle, "authority recovery bundle");
+      const recoverySnapshot = authorityObject(authorityRecoverySnapshot.snapshot, "authority recovery snapshot");
+      if (recovery.credentialFree !== true || Object.prototype.hasOwnProperty.call(recoverySnapshot, "credentials")) throw new Error("customer Realm Authority recovery bundle was not credential-free; no Authority mutation was attempted");
       const initialAuthorityState = await authorityClient.inspectState();
       const initialAuthority = authorityObject(initialAuthorityState.authority, "authority state");
       const initialCounts = authorityObject(initialAuthority.counts, "authority state counts");
@@ -628,7 +633,7 @@ async function main(): Promise<void> {
     cleanup = await cleanupGitHubAppDisposable({ installation, issuer, api, repositoryPrefix: repository, qualificationId, disposableRepository });
     if (cleanup.status !== "succeeded") throw new Error(`provider cleanup failed: ${cleanup.recoveryAction ?? cleanup.receipt}`);
     if (authorityClient && authorityRecoverySnapshot) {
-      authorityCleanup = await restoreAuthoritySnapshot(authorityClient, authorityRecoverySnapshot);
+      authorityCleanup = await restoreAuthorityRecovery(authorityClient, authorityRecoverySnapshot);
       if (authorityCleanup.status !== "succeeded") throw new Error(`customer Realm Authority cleanup failed: ${authorityCleanup.recoveryAction ?? authorityCleanup.receipt}`);
     }
     const authorityRun = authority ?? { status: "not-run", receipt: "authority=not-run; inputs=not-configured; credentialValues=not-printed; canonicalWrite=false" };
@@ -645,7 +650,7 @@ async function main(): Promise<void> {
         cleanup = { status: "blocked", receipt: `cleanup=blocked; repository=${repository}; exception=${cleanupError instanceof Error ? cleanupError.name : "unknown"}; credentialMaterialStored=false`, recoveryAction: "restore the GitHub App credential authority, then retry exact disposable-repository cleanup" };
       }
     }
-    if (!authorityCleanup && authorityMutated && authorityClient && authorityRecoverySnapshot) authorityCleanup = await restoreAuthoritySnapshot(authorityClient, authorityRecoverySnapshot);
+    if (!authorityCleanup && authorityMutated && authorityClient && authorityRecoverySnapshot) authorityCleanup = await restoreAuthorityRecovery(authorityClient, authorityRecoverySnapshot);
     const cleanupReceipt = [cleanup?.receipt, authorityCleanup?.receipt].filter((receipt): receipt is string => receipt !== undefined).join("; ") || "cleanup=not-run; adapter-not-qualified";
     throw new Error(`${error instanceof Error ? error.message : "GitHub App qualification failed"}; cleanup=${cleanupReceipt}`);
   } finally {

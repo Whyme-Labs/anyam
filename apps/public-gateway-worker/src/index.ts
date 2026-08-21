@@ -26,9 +26,11 @@ import {
 } from "../../../src/index.ts";
 import { handlePublicGitRequest } from "../../../src/cloudflare/public-git-transport.ts";
 import { SmartHttpBudgetTracker, type SmartHttpBudgetPolicy } from "../../../src/portability/smart-http.ts";
+import { DurableSmartHttpBudgetCoordinator, emptySmartHttpBudgetCoordinatorState, handleSmartHttpBudgetCoordinatorRequest } from "../../../src/cloudflare/smart-http-budget-coordinator.ts";
 
 export interface Env {
   PUBLIC_GATEWAY_COORDINATOR: DurableObjectNamespace;
+  PUBLIC_GIT_BUDGET_COORDINATOR?: DurableObjectNamespace;
   PUBLIC_GATEWAY_REPLAY_ARCHIVE?: R2Bucket;
   PUBLIC_EDGE_RATE_LIMITER?: RateLimit;
   PUBLIC_PROJECT_ID: string;
@@ -264,11 +266,27 @@ async function publicGit(request: Request, env: Env): Promise<Response> {
     const missing = error instanceof PublicGatewayConfigurationError ? error.missing.join(",") : "unknown";
     return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "public_git_budget_unavailable", recoveryAction: "measure the public Git workload, configure every named limit and receipt, then retry the same read", receipt: `publicGit=closed; budget=configuration; limit=${missing}; asked=missing; providerUrl=not-disclosed; credentialMaterialStored=false` }, 503);
   }
+  if (!env.PUBLIC_GIT_BUDGET_COORDINATOR) return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "public_git_coordinator_unavailable", recoveryAction: "bind the customer-owned Durable Object Smart HTTP budget coordinator before enabling public Git", receipt: "publicGit=closed; coordinator=durable-binding-missing; globalConcurrency=not-enforced; canonicalWrite=false" }, 503);
   try {
-    const response = await handlePublicGitRequest(request, { upstreamBase, publicSourceSpaceId, budget, budgetTracker: publicGitBudgetTracker });
+    const coordinatorId = env.PUBLIC_GIT_BUDGET_COORDINATOR.idFromName(`public-git:${env.PUBLIC_PROJECT_ID}`);
+    const coordinator = new DurableSmartHttpBudgetCoordinator(env.PUBLIC_GIT_BUDGET_COORDINATOR.get(coordinatorId));
+    const response = await handlePublicGitRequest(request, { upstreamBase, publicSourceSpaceId, budget, budgetTracker: publicGitBudgetTracker, budgetCoordinator: coordinator });
     return response ?? json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "not_found", recoveryAction: "use the configured public Source Space Git URL", receipt: "publicGitRoute=not-found; privateMetadata=not-disclosed" }, 404);
   } catch {
     return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "public_driver_unavailable", recoveryAction: "retain the public projection and retry the provider-backed read after the driver recovers", receipt: "providerUrl=not-disclosed; publicGitRead=unavailable; privateMetadata=not-disclosed" }, 503);
+  }
+}
+
+export class PublicGitBudgetCoordinatorDO extends DurableObject<Env> {
+  override async fetch(request: Request): Promise<Response> {
+    let response: Response | undefined;
+    await this.ctx.blockConcurrencyWhile(async () => {
+      const state = await this.ctx.storage.get<ReturnType<typeof emptySmartHttpBudgetCoordinatorState>>("state") ?? emptySmartHttpBudgetCoordinatorState();
+      const result = await handleSmartHttpBudgetCoordinatorRequest({ request, state });
+      await this.ctx.storage.put("state", result.state);
+      response = result.response;
+    });
+    return response ?? json({ protocol: "anyam.smart-http-budget-coordinator/v1", status: "blocked", code: "coordinator_failed", receipt: "coordinator=response-missing; lease=not-applied" }, 503);
   }
 }
 

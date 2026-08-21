@@ -2,6 +2,7 @@ import { PUBLIC_GATEWAY_PROTOCOL } from "./public-gateway.ts";
 import {
   handleSmartHttpRequest,
   type SmartHttpBudgetPolicy,
+  type SmartHttpBudgetCoordinator,
   type SmartHttpBudgetTracker,
   type SmartHttpCredentialValidation,
   type SmartHttpGatewayConfig,
@@ -12,6 +13,7 @@ export type PublicGitTransportConfig = {
   publicSourceSpaceId: string;
   budget: SmartHttpBudgetPolicy;
   budgetTracker?: SmartHttpBudgetTracker;
+  budgetCoordinator?: SmartHttpBudgetCoordinator;
 };
 
 const anonymousReadOnlyCredentials = {
@@ -82,6 +84,7 @@ export async function handlePublicGitRequest(request: Request, config: PublicGit
     anonymousReadForRepository: ({ repositoryId, sourceSpaceId }) => repositoryId === "public" && sourceSpaceId === config.publicSourceSpaceId,
     budgets: { read: config.budget },
     ...(config.budgetTracker ? { budgetTracker: config.budgetTracker } : {}),
+    ...(config.budgetCoordinator ? { budgetCoordinator: config.budgetCoordinator } : {}),
   };
   const response = await handleSmartHttpRequest(boundedRequest, transportConfig);
   if (!response) return blocked("not_found", "use the configured public Source Space Git URL", "publicGitRoute=not-found; privateMetadata=not-disclosed", 404);

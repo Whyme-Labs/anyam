@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { handlePublicGitRequest } from "../src/cloudflare/public-git-transport.ts";
 import { SmartHttpBudgetTracker } from "../src/portability/smart-http.ts";
+import { DurableSmartHttpBudgetCoordinator, emptySmartHttpBudgetCoordinatorState, handleSmartHttpBudgetCoordinatorRequest } from "../src/cloudflare/smart-http-budget-coordinator.ts";
 
 function budget(overrides: Partial<Parameters<typeof handlePublicGitRequest>[1]["budget"]> = {}): Parameters<typeof handlePublicGitRequest>[1]["budget"] {
   return {
@@ -90,6 +91,40 @@ test("public Git enforces the shared response stream budget on chunked upstream 
     assert.equal(response.status, 200);
     await assert.rejects(() => response.arrayBuffer(), /budget=responseBytes; limit=4; asked=6/);
     assert.equal(tracker.current(), 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("public Git releases its durable concurrency lease only after the response stream closes", async () => {
+  const originalFetch = globalThis.fetch;
+  let coordinatorState = emptySmartHttpBudgetCoordinatorState();
+  const coordinator = new DurableSmartHttpBudgetCoordinator({
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const result = await handleSmartHttpBudgetCoordinatorRequest({ request, state: coordinatorState, now: () => 1_000 });
+      coordinatorState = result.state;
+      return result.response;
+    },
+  });
+  try {
+    globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(2));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "application/octet-stream" } })) as typeof fetch;
+    const response = await handlePublicGitRequest(new Request("https://public.invalid/projects/public/source.git/info/refs?service=git-upload-pack"), {
+      upstreamBase: "https://provider.invalid/public-driver.git",
+      publicSourceSpaceId: "source:public",
+      budget: budget({ maxConcurrentRequests: 1 }),
+      budgetCoordinator: coordinator,
+    });
+    assert.ok(response);
+    assert.equal(Object.keys(coordinatorState.leases).length, 1);
+    await response.arrayBuffer();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.equal(Object.keys(coordinatorState.leases).length, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }

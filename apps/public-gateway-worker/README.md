@@ -37,6 +37,12 @@ isolate-local tripwire; a durable cross-isolate coordinator is not claimed by
 this adapter and must be qualified separately before it is used as a global
 quota.
 
+For a deployed public gateway, bind `PUBLIC_GIT_BUDGET_COORDINATOR` to the
+customer-owned `PublicGitBudgetCoordinatorDO`. Public Git fails closed when
+that binding is absent. The Durable Object leases one operation per stream,
+expires abandoned leases using the measured duration budget, and releases the
+lease when the shared transport observes close, cancellation, or error.
+
 The example config intentionally contains placeholders. Replace them with
 customer-owned values and a measured receipt before deploying. Do not add a
 provider token to the config or expose the upstream Git URL in responses.

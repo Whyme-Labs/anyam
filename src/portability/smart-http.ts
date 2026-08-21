@@ -94,6 +94,8 @@ export type SmartHttpGatewayConfig = {
   allowInsecureUpstream?: boolean;
   budgets?: Partial<Record<SmartHttpOperation, SmartHttpBudgetPolicy>>;
   budgetTracker?: SmartHttpBudgetTracker;
+  /** Optional durable cross-isolate concurrency authority. */
+  budgetCoordinator?: SmartHttpBudgetCoordinator;
 };
 
 export type SmartHttpBudgetPolicy = {
@@ -128,6 +130,15 @@ export class SmartHttpBudgetTracker {
     return this.receipt;
   }
 }
+
+export type SmartHttpBudgetLease = {
+  id: string;
+  release(): void;
+};
+
+export type SmartHttpBudgetCoordinator = {
+  acquire(input: { operation: SmartHttpOperation; limit: number; leaseTtlMs: number; receipt: string }): Promise<SmartHttpBudgetLease | undefined>;
+};
 
 export type SmartHttpGatewayReceipt = {
   protocol: typeof SMART_HTTP_PROTOCOL;
@@ -478,14 +489,25 @@ export async function handleSmartHttpRequest(request: Request, config: SmartHttp
     budgetValue(budget.maxConcurrentRequests, "maxConcurrentRequests");
   }
   const budgetTracker = config.budgetTracker;
-  const acquired = budgetTracker?.acquire(budget?.maxConcurrentRequests) ?? true;
-  if (!acquired) return blockedReceipt(429, "git_budget_exceeded", "retry after an active Smart HTTP operation completes; the named concurrency budget is a tripwire", `repository=${route.repositoryId}; operation=${operation}; ${budgetFailureReceipt({ operation, policy: budget!, budget: "concurrentRequests", limit: budget!.maxConcurrentRequests!, asked: budgetTracker?.current() ?? "unknown" })}`);
+  let budgetLease: SmartHttpBudgetLease | undefined;
+  let acquired = true;
+  if (budget?.maxConcurrentRequests !== undefined) {
+    if (config.budgetCoordinator) {
+      if (budget.maxDurationMs === undefined) throw new SmartHttpCredentialError("durable concurrency coordination requires maxDurationMs so an abandoned lease can expire");
+      budgetLease = await config.budgetCoordinator.acquire({ operation, limit: budget.maxConcurrentRequests, leaseTtlMs: budget.maxDurationMs, receipt: budget.receipt });
+      acquired = budgetLease !== undefined;
+    } else {
+      acquired = budgetTracker?.acquire(budget.maxConcurrentRequests) ?? true;
+    }
+  }
+  if (!acquired) return blockedReceipt(429, "git_budget_exceeded", "retry after an active Smart HTTP operation completes; the named concurrency budget is a tripwire", `repository=${route.repositoryId}; operation=${operation}; coordinator=${config.budgetCoordinator ? "durable" : "isolate-local"}; ${budgetFailureReceipt({ operation, policy: budget!, budget: "concurrentRequests", limit: budget!.maxConcurrentRequests!, asked: config.budgetCoordinator ? "lease-unavailable" : budgetTracker?.current() ?? "unknown" })}`);
   let budgetReleased = false;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const releaseBudget = (): void => {
     if (!budgetReleased) {
       budgetReleased = true;
       budgetTracker?.release();
+      budgetLease?.release();
     }
   };
   const finishLifecycle = (): void => {

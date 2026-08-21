@@ -433,6 +433,9 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
     : input.boundary.enforcement === "linux-bwrap"
       ? [...linuxBwrapRuntimeArgs({ boundary: input.boundary, invokedCommand }), "--bind", input.boundary.workspaceDirectory, input.boundary.workspaceDirectory, "--chdir", input.boundary.workspaceDirectory, invokedCommand, ...invokedArgs]
       : shellCommand ? invokedArgs : ["-c", `${input.command} ${args.map((arg) => JSON.stringify(arg)).join(" ")}`];
+  if (process.env.ANYAM_WORKSPACE_DEBUG === "1" && input.boundary.enforcement === "linux-bwrap") {
+    console.error(JSON.stringify({ protocol: "anyam.workspace-boundary-debug/v1", executable, executableArgs }));
+  }
   const detached = process.platform !== "win32" && input.boundary.enforcement !== "none";
   const child = spawn(executable, executableArgs, { cwd: input.boundary.workspaceDirectory, env: input.boundary.environment, stdio: ["inherit", "pipe", "pipe"], detached });
   input.onProcess?.(child);

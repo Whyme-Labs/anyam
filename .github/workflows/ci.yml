@@ -78,7 +78,7 @@ jobs:
 
       - name: Qualify Anyam's Linux Workspace boundary
         if: runner.os == 'Linux'
-        run: npm run qualification:linux-workspace
+        run: ANYAM_WORKSPACE_DEBUG=1 npm run qualification:linux-workspace
 
       - name: Record runner receipt
         run: |

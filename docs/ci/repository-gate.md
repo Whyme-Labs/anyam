@@ -36,6 +36,10 @@ The workflow then uses `ubuntu-latest`. A manual `workflow_dispatch` run can
 select `github-hosted` without changing repository state. No Blacksmith
 credential is stored in the repository.
 
+Before installing dependencies, the gate qualifies the Linux `bubblewrap`
+host boundary and runs a deny-all probe. This keeps the enforceable Workspace
+tests fail-closed without weakening them for a CI provider image.
+
 Blacksmith requires an organization integration; it is not available for
 personal repositories. If the integration is absent, a Blacksmith run is a
 provider setup failure, not evidence that the Anyam gate is broken.

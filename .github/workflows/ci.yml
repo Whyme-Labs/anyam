@@ -51,6 +51,18 @@ jobs:
         with:
           bun-version: "1.3.14"
 
+      - name: Qualify the Linux host sandbox
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v bwrap >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends bubblewrap
+          fi
+          bwrap --version
+          probe="$(mktemp -d)"
+          trap 'rm -rf "$probe"' EXIT
+          bwrap --die-with-parent --unshare-net --ro-bind /usr /usr --ro-bind /bin /bin --bind "$probe" "$probe" --chdir "$probe" /usr/bin/true
+
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
 

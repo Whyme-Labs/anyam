@@ -76,6 +76,10 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
 
+      - name: Qualify Anyam's Linux Workspace boundary
+        if: runner.os == 'Linux'
+        run: npm run qualification:linux-workspace
+
       - name: Record runner receipt
         run: |
           node --input-type=module <<'NODE'

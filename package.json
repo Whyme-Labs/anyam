@@ -12,6 +12,7 @@
     "qualification:provider-feed": "tsx scripts/qualify-provider-feed.ts",
     "qualification:worker-target": "tsx scripts/qualify-worker-target.ts",
     "qualification:linux-egress": "tsx scripts/qualify-linux-egress.ts",
+    "qualification:linux-workspace": "tsx scripts/qualify-linux-workspace.ts",
     "qualification:promotion-executor": "tsx scripts/qualify-promotion-executor.ts",
     "qualification:promotion-reconciliation": "tsx scripts/qualify-promotion-reconciliation.ts",
     "realm:installation-manifest": "tsx scripts/realm-installation-manifest.ts",

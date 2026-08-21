@@ -38,6 +38,10 @@
       {
         "name": "PUBLIC_GATEWAY_COORDINATOR",
         "class_name": "PublicGatewayCoordinatorDO"
+      },
+      {
+        "name": "PUBLIC_GIT_BUDGET_COORDINATOR",
+        "class_name": "PublicGitBudgetCoordinatorDO"
       }
     ]
   },
@@ -49,8 +53,8 @@
   ],
   "migrations": [
     {
-      "tag": "v1",
-      "new_sqlite_classes": ["PublicGatewayCoordinatorDO"]
+      "tag": "v2",
+      "new_sqlite_classes": ["PublicGatewayCoordinatorDO", "PublicGitBudgetCoordinatorDO"]
     }
   ],
   "services": [

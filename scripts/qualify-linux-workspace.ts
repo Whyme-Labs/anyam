@@ -28,7 +28,8 @@ try {
   const result = await runWorkspaceCommand({
     boundary,
     shell: true,
-    command: "node -e \"require('node:fs').mkdirSync('dist',{recursive:true});require('node:fs').writeFileSync('dist/worker.bundle','private-alpha')\"",
+    protectGitMetadata: true,
+    command: "node -e \"const fs=require('node:fs');let blocked=false;try{fs.appendFileSync('.git/config','\\n# hostile-action\\n')}catch{blocked=true}fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/worker.bundle','private-alpha');if(!blocked)process.exit(17)\"",
   });
   receipt = {
     protocol,

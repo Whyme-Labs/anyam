@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { access, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { execFile as execFileCallback, type ChildProcess } from "node:child_process";
@@ -7,8 +7,9 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { basename, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import { gitCommitIdentity, gitProjectRevisionId, gitTreeIdentity, inspectGitSource, isGitAncestor, LocalGitSourceError } from "./git-source.js";
+import { gitCommitIdentity, gitProjectRevisionId, gitTreeIdentity, inspectGitSource, isGitAncestor, LocalGitSourceError, trackedGitPaths } from "./git-source.js";
 import { createWorkspaceBoundary, removeWorkspaceBoundary, runWorkspaceCommand, terminateWorkspaceProcess, WorkspaceBoundaryError, type WorkspaceBoundary, type WorkspaceBoundaryEnforcement, type WorkspaceBoundaryMode } from "./workspace-boundary.js";
+import { trustedGitArgs, trustedGitEnvironment } from "./trusted-git.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -534,6 +535,11 @@ function declaredWorkspacePathArray(value: unknown, field: string): readonly str
   });
 }
 
+function protectedOutputPaths(paths: readonly string[], trackedPaths: readonly string[]): readonly string[] {
+  const tracked = new Set(trackedPaths);
+  return paths.filter((path) => path === ".git" || path.startsWith(".git/") || path === ".anyam" || path.startsWith(".anyam/") || tracked.has(path));
+}
+
 function declaredResources(value: unknown, field: string): Readonly<Record<string, string | number | boolean>> {
   if (!isRecord(value) || Object.values(value).some((item) => !["string", "number", "boolean"].includes(typeof item))) {
     throw new LocalAgentError({ code: "run.manifest_invalid", message: `Declared Action field ${field} must contain only scalar resources; no run was started.`, affectedObject: field, recoveryAction: "repair anyam.json and rerun anyam check", receipt: `field=${field}; expected=scalar-record` });
@@ -601,14 +607,36 @@ async function localInputDigests(root: string, patterns: readonly string[]): Pro
   return { digests, missing };
 }
 
-async function localOutputDigests(root: string, paths: readonly string[]): Promise<{ digests: readonly string[]; missing: readonly string[] }> {
+async function localOutputDigests(root: string, paths: readonly string[]): Promise<{ digests: readonly string[]; missing: readonly string[]; error?: string }> {
   const digests: string[] = [];
   const missing: string[] = [];
+  let totalBytes = 0;
   for (const path of paths) {
     try {
-      const value = await readFile(join(root, path));
-      await stat(join(root, path));
-      digests.push(`${path}=${byteDigest(value)}`);
+      const outputPath = join(root, path);
+      const before = await lstat(outputPath);
+      if (!before.isFile()) return { digests: [], missing: [], error: `output=${path}; regular-file=false; recovery=replace symlinks, FIFOs, devices, and directories with regular files` };
+      const hash = createHash("sha256");
+      let fileBytes = 0;
+      const handle = await open(outputPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const stream = handle.createReadStream();
+        for await (const chunk of stream) {
+          const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          fileBytes += value.byteLength;
+          totalBytes += value.byteLength;
+          if (fileBytes > LOCAL_ACTION_POLICY.maxOutputBytes || totalBytes > LOCAL_ACTION_POLICY.maxOutputBytes) {
+            stream.destroy();
+            return { digests: [], missing: [], error: `budget=action.artifact-output; limit=${LOCAL_ACTION_POLICY.maxOutputBytes}bytes; asked=${path}; receipt=${LOCAL_ACTION_POLICY.receipt}` };
+          }
+          hash.update(value);
+        }
+      } finally {
+        await handle.close();
+      }
+      const after = await lstat(outputPath);
+      if (!after.isFile() || after.dev !== before.dev || after.ino !== before.ino) return { digests: [], missing: [], error: `output=${path}; file-changed-during-ingestion=true; recovery=produce a stable regular file before retrying` };
+      digests.push(`${path}=sha256:${hash.digest("hex")}`);
     } catch (error) {
       if (isNotFound(error)) missing.push(path);
       else throw error;
@@ -631,6 +659,7 @@ async function executeDeclaredAction(boundary: WorkspaceBoundary, command: strin
       boundary,
       command,
       shell: true,
+      protectGitMetadata: true,
       timeoutMs: LOCAL_ACTION_POLICY.timeoutMs,
       ...(onProcess ? { onProcess } : {}),
     });
@@ -1340,6 +1369,8 @@ export class LocalAgentManager {
         throw error;
       }
       if (!source.clean) throw new LocalAgentError({ code: "run.source_dirty", message: `Action ${action.id} requires a clean committed source revision; no run was started. budget=git.worktree; limit=clean source tree; asked=${source.changedPaths.length} changed paths.`, affectedObject: source.repositoryId, recoveryAction: "commit or discard changes before starting the Action", receipt: `git-status=dirty; changed-paths=${source.changedPaths.length}` });
+      const protectedPaths = protectedOutputPaths(action.outputPaths, await trackedGitPaths(boundary.workspaceDirectory));
+      if (protectedPaths.length > 0) throw new LocalAgentError({ code: "run.output_source_overlap", message: `Action ${action.id} declares protected output paths ${protectedPaths.join(", ")} that overlap tracked source or trusted metadata; no run was started.`, affectedObject: protectedPaths.join(","), recoveryAction: "write outputs beneath a dedicated untracked artifact directory", receipt: `output-source-overlap=${protectedPaths.join(",")}; canonicalWrite=false` });
       return {
         session: clone(active.session),
         grant: clone(active.grant),
@@ -1405,6 +1436,8 @@ export class LocalAgentManager {
           ? `budget=action.timeout; limit=${LOCAL_ACTION_POLICY.timeoutMs}ms; asked=command exceeded the execution boundary`
           : commandResult.outputLimitExceeded
             ? `budget=action.output; limit=${LOCAL_ACTION_POLICY.maxOutputBytes}bytes; asked=stdout or stderr exceeded the execution boundary`
+            : outputs.error
+              ? outputs.error
             : commandResult.exitCode !== 0
               ? `exit-code=${commandResult.exitCode ?? "unknown"}`
               : outputs.missing.length > 0
@@ -1543,6 +1576,8 @@ export class LocalAgentManager {
           ? `budget=action.timeout; limit=${LOCAL_ACTION_POLICY.timeoutMs}ms; asked=command exceeded the execution boundary`
           : commandResult.outputLimitExceeded
             ? `budget=action.output; limit=${LOCAL_ACTION_POLICY.maxOutputBytes}bytes; asked=stdout or stderr exceeded the execution boundary`
+            : outputs.error
+              ? outputs.error
             : commandResult.exitCode !== 0
               ? `exit-code=${commandResult.exitCode ?? "unknown"}`
               : outputs.missing.length > 0
@@ -1819,7 +1854,7 @@ export async function readGitCredentialContext(input: Readable): Promise<GitCred
 async function remoteOrigin(directory: string): Promise<{ protocol: string; host: string; path: string }> {
   let stdout: string;
   try {
-    ({ stdout } = await execFile("git", ["config", "--get", "remote.origin.url"], { cwd: directory, encoding: "utf8" }));
+    ({ stdout } = await execFile("git", trustedGitArgs(["config", "--get", "remote.origin.url"]), { cwd: directory, encoding: "utf8", env: trustedGitEnvironment() }));
   } catch {
     throw new LocalAgentError({ code: "git.credential.remote_missing", message: `No remote.origin.url is configured for ${directory}; no Workspace credential was issued.`, affectedObject: directory, recoveryAction: "configure the Anyam HTTPS Workspace remote before invoking Git", receipt: "git config --get remote.origin.url" });
   }

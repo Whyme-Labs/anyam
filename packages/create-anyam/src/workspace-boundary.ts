@@ -6,6 +6,8 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
+import { trustedGitArgs, trustedGitEnvironment } from "./trusted-git.js";
+
 const execFile = promisify(execFileCallback);
 
 export type WorkspaceBoundaryMode = "enforceable" | "supervised";
@@ -169,7 +171,7 @@ function linuxBwrapRuntimeArgs(input: { boundary: WorkspaceBoundary; invokedComm
 
 async function gitOutput(directory: string, args: readonly string[]): Promise<string> {
   try {
-    const result = await execFile("git", [...args], { cwd: directory, encoding: "utf8" });
+    const result = await execFile("git", trustedGitArgs(args), { cwd: directory, encoding: "utf8", env: trustedGitEnvironment() });
     return result.stdout.trim();
   } catch (error) {
     throw new WorkspaceBoundaryError({ code: "workspace.git_unavailable", message: `Git could not prepare the isolated Workspace; no agent process was started.`, affectedObject: directory, recoveryAction: "verify Git is installed and the source Workspace is a clean committed repository", receipt: `git=${args.join(" ")}; error=${error instanceof Error ? error.message.slice(0, 160) : String(error)}` });
@@ -274,7 +276,7 @@ function backendForHost(mode: WorkspaceBoundaryMode): WorkspaceBoundaryEnforceme
   throw new WorkspaceBoundaryError({ code: "workspace.enforcement_unavailable", message: `No qualified host sandbox is available for enforceable agent execution on ${process.platform}/${process.arch}; the agent was not started.`, recoveryAction: "install the qualified host sandbox or explicitly choose --mode supervised for developer-owned local work", receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; host=${process.platform}/${process.arch}; backend=none` });
 }
 
-function sandboxProfile(input: { workspaceDirectory: string; stateDirectory: string; sourceDirectory: string; network: readonly string[]; excludedPaths: readonly string[]; executableRoots: readonly string[] }): string {
+function sandboxProfile(input: { workspaceDirectory: string; stateDirectory: string; sourceDirectory: string; network: readonly string[]; excludedPaths: readonly string[]; executableRoots: readonly string[]; protectGitMetadata: boolean }): string {
   const runtimeRoots = new Set<string>([
     "/System",
     "/Library",
@@ -306,6 +308,7 @@ function sandboxProfile(input: { workspaceDirectory: string; stateDirectory: str
   for (const root of runtimeRoots) lines.push(`(allow file-read* (subpath ${quoteProfile(root)}))`);
   lines.push(`(allow file-read* (subpath ${quoteProfile(input.workspaceDirectory)}))`);
   lines.push(`(allow file-write* (subpath ${quoteProfile(input.workspaceDirectory)}))`);
+  if (input.protectGitMetadata) lines.push(`(deny file-write* (subpath ${quoteProfile(join(input.workspaceDirectory, ".git"))}))`);
   for (const host of input.network) lines.push(`(allow network-outbound (remote-name ${quoteProfile(host)}))`);
   return lines.join(" ");
 }
@@ -396,7 +399,7 @@ export async function createWorkspaceBoundary(input: WorkspaceBoundaryInput): Pr
   const environment = sanitizedEnvironment({ workspaceDirectory, boundaryId: id, mode: input.mode, executableRoots });
   const excludedPaths = [...(input.excludedPaths ?? [])].map((path) => resolve(path));
   const profile = process.platform === "darwin"
-    ? sandboxProfile({ workspaceDirectory, stateDirectory, sourceDirectory, network, excludedPaths, executableRoots })
+    ? sandboxProfile({ workspaceDirectory, stateDirectory, sourceDirectory, network, excludedPaths, executableRoots, protectGitMetadata: false })
     : undefined;
   const mounts: WorkspaceMount[] = [{ sourcePath: sourceDirectory, mountPath: "/workspace/source", mode: "read-only" }, { sourcePath: workspaceDirectory, mountPath: "/workspace", mode: "read-write" }];
   return {
@@ -417,7 +420,7 @@ export async function createWorkspaceBoundary(input: WorkspaceBoundaryInput): Pr
   };
 }
 
-export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; command: string; args?: readonly string[]; shell?: boolean; timeoutMs?: number; onProcess?: (process: ChildProcess) => void }): Promise<WorkspaceBoundaryCommandResult> {
+export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; command: string; args?: readonly string[]; shell?: boolean; timeoutMs?: number; protectGitMetadata?: boolean; onProcess?: (process: ChildProcess) => void }): Promise<WorkspaceBoundaryCommandResult> {
   const args = [...(input.args ?? [])];
   const timeoutMs = input.timeoutMs ?? WORKSPACE_BOUNDARY_POLICY.commandTimeoutMs;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new WorkspaceBoundaryError({ code: "workspace.command_timeout_invalid", message: `Workspace command timeout must be positive; asked=${timeoutMs}.`, recoveryAction: "provide a positive timeout or use the provisional boundary tripwire", receipt: WORKSPACE_BOUNDARY_POLICY.receipt });
@@ -425,6 +428,7 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
     throw new WorkspaceBoundaryError({ code: "workspace.network_allowlist_unsupported", message: "Linux enforceable Workspaces refuse host-allowlist execution without an attached egress proxy.", affectedObject: input.boundary.id, recoveryAction: "use deny-all networking or a qualified runner with an explicit egress proxy", receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=linux-bwrap; networkEnforcement=unsupported; process-start=false` });
   }
   const shellCommand = input.shell === true;
+  const protectGitMetadata = input.protectGitMetadata === true;
   const invokedCommand = shellCommand ? (process.platform === "win32" ? "cmd.exe" : "/bin/sh") : input.boundary.enforcement === "none" ? input.command : input.boundary.executablePaths[0] ?? input.command;
   const invokedArgs = shellCommand ? (process.platform === "win32" ? ["/d", "/s", "/c", input.command] : ["-c", input.command]) : args;
   const executable = input.boundary.enforcement === "macos-sandbox-exec"
@@ -432,10 +436,13 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
     : input.boundary.enforcement === "linux-bwrap"
       ? "bwrap"
       : invokedCommand;
+  const linuxArgs = input.boundary.enforcement === "linux-bwrap"
+    ? [...linuxBwrapRuntimeArgs({ boundary: input.boundary, invokedCommand }), "--bind", input.boundary.workspaceDirectory, input.boundary.workspaceDirectory, ...(protectGitMetadata && existsSync(join(input.boundary.workspaceDirectory, ".git")) ? ["--ro-bind", join(input.boundary.workspaceDirectory, ".git"), join(input.boundary.workspaceDirectory, ".git")] : []), "--chdir", input.boundary.workspaceDirectory, invokedCommand, ...invokedArgs]
+    : undefined;
   const executableArgs = input.boundary.enforcement === "macos-sandbox-exec"
-    ? ["-p", input.boundary.profile ?? "", invokedCommand, ...invokedArgs]
+    ? ["-p", protectGitMetadata ? `${input.boundary.profile ?? ""} (deny file-write* (subpath ${quoteProfile(join(input.boundary.workspaceDirectory, ".git"))}))` : input.boundary.profile ?? "", invokedCommand, ...invokedArgs]
     : input.boundary.enforcement === "linux-bwrap"
-      ? [...linuxBwrapRuntimeArgs({ boundary: input.boundary, invokedCommand }), "--bind", input.boundary.workspaceDirectory, input.boundary.workspaceDirectory, "--chdir", input.boundary.workspaceDirectory, invokedCommand, ...invokedArgs]
+      ? linuxArgs ?? []
       : shellCommand ? invokedArgs : ["-c", `${input.command} ${args.map((arg) => JSON.stringify(arg)).join(" ")}`];
   const detached = process.platform !== "win32" && input.boundary.enforcement !== "none";
   const child = spawn(executable, executableArgs, { cwd: input.boundary.workspaceDirectory, env: input.boundary.environment, stdio: ["inherit", "pipe", "pipe"], detached });
@@ -497,7 +504,7 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
     stderrDigest: digest(stderr),
     ...(result.timedOut ? { timedOut: true } : {}),
     ...(child.pid ? { processId: child.pid, ...(detached ? { processGroupId: child.pid } : {}) } : {}),
-    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=${input.boundary.enforcement}; networkEnforcement=${input.boundary.networkEnforcement}; status=${status};${result.timedOut ? ` budget=workspace.command; limit=${timeoutMs}ms; asked=timeout;` : ""}${outputLimitExceeded ? ` budget=workspace.output; limit=${WORKSPACE_BOUNDARY_POLICY.maxOutputBytes}bytes; asked=output-exceeded;` : ""}`,
+    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=${input.boundary.enforcement}; networkEnforcement=${input.boundary.networkEnforcement}; gitMetadata=${protectGitMetadata ? "read-only" : "workspace-writable"}; status=${status};${result.timedOut ? ` budget=workspace.command; limit=${timeoutMs}ms; asked=timeout;` : ""}${outputLimitExceeded ? ` budget=workspace.output; limit=${WORKSPACE_BOUNDARY_POLICY.maxOutputBytes}bytes; asked=output-exceeded;` : ""}`,
   };
 }
 

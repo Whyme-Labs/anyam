@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { join, resolve } from "node:path";
 
+import { trustedGitArgs, trustedGitEnvironment } from "./trusted-git.js";
+
 const execFile = promisify(execFileCallback);
 
 const GIT_OID = /^[0-9a-f]{40,64}$/;
@@ -64,7 +66,7 @@ async function git(directory: string, args: readonly string[]): Promise<string> 
 
 async function gitRaw(directory: string, args: readonly string[]): Promise<string> {
   try {
-    const result = await execFile("git", [...args], { cwd: directory, encoding: "utf8" });
+    const result = await execFile("git", trustedGitArgs(args), { cwd: directory, encoding: "utf8", env: trustedGitEnvironment() });
     return result.stdout;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -75,6 +77,11 @@ async function gitRaw(directory: string, args: readonly string[]): Promise<strin
       recoveryAction: "verify Git is installed, the workspace exists, and its metadata is readable",
     });
   }
+}
+
+export async function trackedGitPaths(directoryInput: string): Promise<readonly string[]> {
+  const directory = resolve(directoryInput);
+  return (await gitRaw(directory, ["ls-files", "-z"])).split("\0").filter(Boolean).map((path) => path.replaceAll("\\", "/"));
 }
 
 async function optionalGit(directory: string, args: readonly string[]): Promise<string | null> {
@@ -185,7 +192,7 @@ export async function isGitAncestor(directoryInput: string, baseCommit: string, 
   const directory = resolve(directoryInput);
   if (!GIT_OID.test(baseCommit) || !GIT_OID.test(currentCommit)) return false;
   try {
-    await execFile("git", ["merge-base", "--is-ancestor", baseCommit, currentCommit], { cwd: directory, encoding: "utf8" });
+    await execFile("git", trustedGitArgs(["merge-base", "--is-ancestor", baseCommit, currentCommit]), { cwd: directory, encoding: "utf8", env: trustedGitEnvironment() });
     return true;
   } catch {
     return false;

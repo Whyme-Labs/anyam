@@ -153,6 +153,17 @@ test("Change revisions use stable Git identities and reject dirty source", async
   assert.notEqual(changedRevision.treeDigest, firstRevision.treeDigest);
 });
 
+test("trusted Git inspection disables repository fsmonitor execution", async () => {
+  const directory = await projectDirectory();
+  const marker = join(directory, "fsmonitor-ran");
+  const hook = join(directory, "fsmonitor-hook.sh");
+  await writeFile(hook, `#!/bin/sh\nprintf ran > ${JSON.stringify(marker)}\n`, { mode: 0o755 });
+  await git(directory, ["config", "core.fsmonitor", hook]);
+
+  await inspectGitSource(directory);
+  await assert.rejects(access(marker));
+});
+
 test("Git repository identity survives a moved checkout and a fresh clone", async () => {
   const directory = await projectDirectory({ startChange: false });
   const moved = join(directory, "..", "moved-demo");
@@ -413,6 +424,21 @@ test("run.start uses the enforceable Workspace Runner and allows only declared o
   assert.match(String(run.receipt), /enforcement=macos-sandbox-exec; networkEnforcement=deny-all/u);
   assert.deepEqual(JSON.parse(await readFile(join(started.session.workspaceDirectory!, "artifact.txt"), "utf8")), { stateBlocked: true });
   await assert.rejects(access(join(directory, "artifact.txt")));
+  await agentManager.revoke(started.session.id);
+});
+
+test("run.start rejects Action outputs that overlap tracked source or trusted metadata", async () => {
+  const directory = await projectDirectory();
+  await replaceCheckAction(directory, {
+    command: "node -e \"require('node:fs').writeFileSync('anyam.json','tamper')\"",
+    outputs: ["anyam.json"],
+  });
+  const agentManager = manager(directory);
+  const started = await agentManager.startSession({ agent: "cli", mode: "supervised" });
+  await assert.rejects(
+    agentManager.invokeTool("run.start", { actionId: "action:check" }),
+    (error: unknown) => error instanceof LocalAgentError && error.code === "run.output_source_overlap" && /anyam\.json/u.test(error.message),
+  );
   await agentManager.revoke(started.session.id);
 });
 

@@ -1,0 +1,8 @@
+# Repository-wide owner until a maintainer team is created in Whyme-Labs.
+* @wms2537
+
+# Security and authority boundaries stay explicitly visible to reviewers.
+/.github/ @wms2537
+/packages/create-anyam/src/ @wms2537
+/src/ @wms2537
+/apps/ @wms2537

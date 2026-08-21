@@ -251,6 +251,30 @@ function linuxPrlimitArgs(limits: WorkspaceResourceLimits): string[] {
   ];
 }
 
+/**
+ * Measure the current Linux host/runtime before deriving disposable tripwires.
+ * This is a qualification helper, not a universal product default.
+ */
+export async function measureLinuxWorkspaceResourceLimits(sourceDirectory: string): Promise<WorkspaceResourceLimits> {
+  if (process.platform !== "linux") throw new WorkspaceBoundaryError({ code: "workspace.resource_measurement_unsupported", message: `Linux resource measurement is unavailable on ${process.platform}.`, recoveryAction: "run the measurement on the Linux runner that will execute the Workspace", receipt: `measurement=unsupported; host=${process.platform}; resourceLimits=not-created` });
+  const startedAt = Date.now();
+  const runtime = await execFile(process.execPath, ["-e", "const fs=require('node:fs');const status=fs.readFileSync('/proc/self/status','utf8');const value=(name)=>Number((status.match(new RegExp('^'+name+':\\s+(\\d+) kB','m'))||[])[1]||0)*1024;console.log(JSON.stringify({vmsBytes:value('VmSize'),rssBytes:value('VmRSS'),openFiles:fs.readdirSync('/proc/self/fd').length}));"], { encoding: "utf8" });
+  const measured = JSON.parse(runtime.stdout.trim()) as { vmsBytes: number; rssBytes: number; openFiles: number };
+  const processCount = (await readdir("/proc", { withFileTypes: true })).filter((entry) => entry.isDirectory() && /^\d+$/u.test(entry.name)).length;
+  const workspaceBytes = await regularFileBytes(sourceDirectory);
+  const elapsedMs = Math.max(1, Date.now() - startedAt);
+  return {
+    maxProcesses: Math.max(processCount * 4, processCount + 128),
+    maxAddressSpaceBytes: Math.max(measured.vmsBytes * 2, measured.rssBytes * 8),
+    maxCpuSeconds: Math.max(5, Math.ceil(elapsedMs / 1000) * 8),
+    maxOpenFiles: measured.openFiles + 256,
+    maxFileBytes: Math.max(workspaceBytes * 2, measured.rssBytes),
+    maxWorkspaceBytes: Math.max(workspaceBytes * 4, workspaceBytes + 1_048_576),
+    monitorIntervalMs: 250,
+    receipt: `measurement=linux-healthy-runtime; baselineProcesses=${processCount}; baselineVmsBytes=${measured.vmsBytes}; baselineRssBytes=${measured.rssBytes}; baselineOpenFiles=${measured.openFiles}; baselineWorkspaceBytes=${workspaceBytes}; baselineElapsedMs=${elapsedMs}; tripwireFormula=processes=max(baseline*4,baseline+128);addressSpace=max(vms*2,rss*8);cpuSeconds=max(5,elapsedSeconds*8);openFiles=baseline+256;fileBytes=max(workspace*2,rss);workspaceBytes=max(workspace*4,workspace+1048576);monitorIntervalMs=250`,
+  };
+}
+
 function appendReadonlyBind(args: string[], path: string): void {
   if (existsSync(path)) args.push("--ro-bind", path, path);
 }
@@ -448,14 +472,6 @@ export async function createWorkspaceBoundary(input: WorkspaceBoundaryInput): Pr
   const stateDirectory = await realPathOrResolve(input.stateDirectory);
   const network = [...new Set((input.network ?? []).map(normalizedHost))];
   const enforcement = backendForHost(input.mode);
-  const resourceLimits = input.mode === "enforceable" && process.platform === "linux"
-    ? (() => {
-      if (!input.resourceLimits) throw new WorkspaceBoundaryError({ code: "workspace.resource_limits_required", message: "Linux enforceable Workspace execution requires an explicit measured resource policy; namespace isolation alone is not accepted.", affectedObject: input.workspaceId, recoveryAction: "measure the healthy workload and provide resourceLimits with a receipt before starting the Linux Workspace", receipt: "resourceLimits=required; enforcement=linux-bwrap; process-start=false" });
-      if (!linuxPrlimitPath()) throw new WorkspaceBoundaryError({ code: "workspace.resource_prlimit_unavailable", message: "Linux enforceable Workspace execution requires prlimit for process and resource tripwires, but no qualified prlimit binary is available.", affectedObject: input.workspaceId, recoveryAction: "install util-linux prlimit or choose a qualified container runner; the agent was not started", receipt: "resourceLimits=unavailable; primitive=prlimit; enforcement=linux-bwrap; process-start=false" });
-      return validateResourceLimits(input.resourceLimits);
-    })()
-    : input.resourceLimits ? validateResourceLimits(input.resourceLimits) : undefined;
-  const resourceBoundaryReceipt = resourceLimits ? `resourceLimits=measured; ${resourceLimits.receipt};` : "resourceLimits=not-configured;";
   if (input.mode === "enforceable" && process.platform === "linux" && network.length > 0) {
     throw new WorkspaceBoundaryError({
       code: "workspace.network_allowlist_unsupported",
@@ -465,6 +481,14 @@ export async function createWorkspaceBoundary(input: WorkspaceBoundaryInput): Pr
       receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=linux-bwrap; networkEnforcement=unsupported; providerInvocation=false`,
     });
   }
+  const resourceLimits = input.mode === "enforceable" && process.platform === "linux"
+    ? (() => {
+      if (!input.resourceLimits) throw new WorkspaceBoundaryError({ code: "workspace.resource_limits_required", message: "Linux enforceable Workspace execution requires an explicit measured resource policy; namespace isolation alone is not accepted.", affectedObject: input.workspaceId, recoveryAction: "measure the healthy workload and provide resourceLimits with a receipt before starting the Linux Workspace", receipt: "resourceLimits=required; enforcement=linux-bwrap; process-start=false" });
+      if (!linuxPrlimitPath()) throw new WorkspaceBoundaryError({ code: "workspace.resource_prlimit_unavailable", message: "Linux enforceable Workspace execution requires prlimit for process and resource tripwires, but no qualified prlimit binary is available.", affectedObject: input.workspaceId, recoveryAction: "install util-linux prlimit or choose a qualified container runner; the agent was not started", receipt: "resourceLimits=unavailable; primitive=prlimit; enforcement=linux-bwrap; process-start=false" });
+      return validateResourceLimits(input.resourceLimits);
+    })()
+    : input.resourceLimits ? validateResourceLimits(input.resourceLimits) : undefined;
+  const resourceBoundaryReceipt = resourceLimits ? `resourceLimits=measured; ${resourceLimits.receipt};` : "resourceLimits=not-configured;";
   const executablePaths = input.mode === "enforceable" ? [...new Set(await Promise.all((input.executablePaths ?? []).map(resolveExecutablePath)))] : [];
   const executableRoots = executablePaths.map((path) => dirname(path));
   if (input.mode === "supervised") {

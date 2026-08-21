@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createWorkspaceBoundary, removeWorkspaceBoundary, runWorkspaceCommand } from "../packages/create-anyam/src/workspace-boundary.ts";
+import { createWorkspaceBoundary, LINUX_BWRAP_CONTAINMENT_RECEIPT, removeWorkspaceBoundary, runWorkspaceCommand } from "../packages/create-anyam/src/workspace-boundary.ts";
 
 const protocol = "anyam.linux-workspace-qualification/v1" as const;
 const root = await mkdtemp(join(tmpdir(), "anyam-linux-workspace-qualification-"));
@@ -29,12 +29,13 @@ try {
     boundary,
     shell: true,
     protectGitMetadata: true,
-    command: "node -e \"const fs=require('node:fs');let blocked=false;try{fs.appendFileSync('.git/config','\\n# hostile-action\\n')}catch{blocked=true}fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/worker.bundle','private-alpha');if(!blocked)process.exit(17)\"",
+    command: "node -e \"const fs=require('node:fs');let blocked=false;try{fs.appendFileSync('.git/config','\\n# hostile-action\\n')}catch{blocked=true}const pidIsolated=process.ppid===1;fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/worker.bundle',JSON.stringify({pidIsolated,proc1:fs.readFileSync('/proc/1/comm','utf8').trim()}));if(!blocked||!pidIsolated)process.exit(17)\"",
   });
   receipt = {
     protocol,
     status: result.status === "passed" ? "succeeded" : "blocked",
     enforcement: boundary.enforcement,
+    containment: LINUX_BWRAP_CONTAINMENT_RECEIPT,
     networkEnforcement: boundary.networkEnforcement,
     exitCode: result.exitCode,
     stdoutDigest: result.stdoutDigest,

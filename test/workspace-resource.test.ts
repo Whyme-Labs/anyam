@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createWorkspaceBoundary, WorkspaceBoundaryError } from "../packages/create-anyam/src/workspace-boundary.ts";
+import { createWorkspaceBoundary, LINUX_BWRAP_CONTAINMENT_RECEIPT, WorkspaceBoundaryError } from "../packages/create-anyam/src/workspace-boundary.ts";
 
 const validLimits = {
   maxProcesses: 256,
@@ -26,4 +26,13 @@ test("Workspace resource policies reject non-positive tripwires with an actionab
     () => createWorkspaceBoundary({ sourceDirectory: process.cwd(), stateDirectory: process.cwd(), projectId: "project:test", changeId: "change:test", workspaceId: "workspace:test", mode: "supervised", resourceLimits: { ...validLimits, maxOpenFiles: 0 } }),
     (error: unknown) => error instanceof WorkspaceBoundaryError && error.code === "workspace.resource_limits_invalid" && /maxOpenFiles/u.test(error.receipt ?? ""),
   );
+});
+
+test("Linux containment receipt names the namespace and capability primitives", () => {
+  assert.match(LINUX_BWRAP_CONTAINMENT_RECEIPT, /user=try/);
+  assert.match(LINUX_BWRAP_CONTAINMENT_RECEIPT, /pid=unshared/);
+  assert.match(LINUX_BWRAP_CONTAINMENT_RECEIPT, /ipc=unshared/);
+  assert.match(LINUX_BWRAP_CONTAINMENT_RECEIPT, /uts=unshared/);
+  assert.match(LINUX_BWRAP_CONTAINMENT_RECEIPT, /cgroup=try/);
+  assert.match(LINUX_BWRAP_CONTAINMENT_RECEIPT, /capabilities=drop-all/);
 });

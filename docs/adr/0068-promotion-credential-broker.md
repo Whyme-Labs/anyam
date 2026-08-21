@@ -51,6 +51,11 @@ and audit objects remain credential-free.
 
 - Secret rotation is observed on the next issue/probe without a hard-coded
   local expiry value.
+- Promotion handoff key rotation is separate from provider credential
+  rotation: the executor accepts only the configured active key ID and, during
+  a bounded overlap, one explicitly configured previous key ID. The key ID is
+  bound into the signed message and unknown IDs are rejected before provider
+  invocation.
 - A revoked or expired provider token fails before a Worker version upload or
   deployment request and includes an actionable receipt.
 - A provider 401/403 after a successful probe remains distinguishable as

@@ -60,6 +60,16 @@ export type PromotionHandoffNonceStore = {
   claim(input: { nonce: string; expiresAt: string }): Promise<boolean>;
 };
 
+export type PromotionHandoffKey = {
+  id: string;
+  secret: string;
+};
+
+export type PromotionHandoffKeyring = {
+  active: PromotionHandoffKey;
+  previous?: PromotionHandoffKey;
+};
+
 export type PromotionExecutionResult = {
   protocol: typeof PROMOTION_EXECUTION_PROTOCOL;
   status: PromotionExecutionStatus;
@@ -142,8 +152,8 @@ function stableJson(value: unknown): string {
   return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
 }
 
-export function promotionHandoffMessage(context: Readonly<PromotionExecutionContext>, nonce: string, expiresAt: string): string {
-  return stableJson({ protocol: PROMOTION_EXECUTION_PROTOCOL, nonce, expiresAt, context });
+export function promotionHandoffMessage(context: Readonly<PromotionExecutionContext>, nonce: string, expiresAt: string, keyId?: string): string {
+  return stableJson({ protocol: PROMOTION_EXECUTION_PROTOCOL, nonce, expiresAt, ...(keyId ? { keyId } : {}), context });
 }
 
 function base64Url(bytes: Uint8Array): string {
@@ -161,18 +171,20 @@ async function handoffKey(secret: string, usage: KeyUsage[]): Promise<CryptoKey>
   return crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, usage);
 }
 
-export async function signPromotionHandoff(input: { context: Readonly<PromotionExecutionContext>; nonce: string; expiresAt: string; secret: string }): Promise<string> {
+export async function signPromotionHandoff(input: { context: Readonly<PromotionExecutionContext>; nonce: string; expiresAt: string; secret: string; keyId?: string }): Promise<string> {
   const key = await handoffKey(input.secret, ["sign"]);
-  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(promotionHandoffMessage(input.context, input.nonce, input.expiresAt)));
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(promotionHandoffMessage(input.context, input.nonce, input.expiresAt, input.keyId)));
   return base64Url(new Uint8Array(signature));
 }
 
-export async function verifyPromotionHandoff(input: { context: Readonly<PromotionExecutionContext>; nonce: string; expiresAt: string; signature: string; secret: string }): Promise<boolean> {
+export async function verifyPromotionHandoff(input: { context: Readonly<PromotionExecutionContext>; nonce: string; expiresAt: string; signature: string; secret: string; keyId?: string }): Promise<boolean> {
   if (!Number.isFinite(Date.parse(input.expiresAt)) || Date.parse(input.expiresAt) <= Date.now()) return false;
   try {
     const key = await handoffKey(input.secret, ["verify"]);
     const signature = decodeBase64Url(input.signature);
-    return await crypto.subtle.verify("HMAC", key, signature.buffer as ArrayBuffer, new TextEncoder().encode(promotionHandoffMessage(input.context, input.nonce, input.expiresAt)));
+    const signatureBytes = new Uint8Array(signature.byteLength);
+    signatureBytes.set(signature);
+    return await crypto.subtle.verify("HMAC", key, signatureBytes.buffer, new TextEncoder().encode(promotionHandoffMessage(input.context, input.nonce, input.expiresAt, input.keyId)));
   } catch {
     return false;
   }

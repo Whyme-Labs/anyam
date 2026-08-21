@@ -1040,14 +1040,15 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       const coordinator = new AuthorityPlaneCoordinator(current);
       const executor = {
         execute: async (context: Readonly<import("../../../src/cloudflare/promotion-execution.ts").PromotionExecutionContext>): Promise<PromotionExecutionResult> => {
+          const handoffKeyId = this.env.ANYAM_PROMOTION_HANDOFF_KEY_ID?.trim();
           const handoffSecret = this.env.ANYAM_PROMOTION_HANDOFF_SECRET?.trim();
-          if (!handoffSecret) throw new Error("promotion-handoff-secret-missing");
+          if (!handoffKeyId || !handoffSecret) throw new Error("promotion-handoff-key-missing");
           const nonce = crypto.randomUUID();
           const expiresAt = new Date(Date.now() + PROMOTION_HANDOFF_TTL_MS).toISOString();
-          const handoff = await signPromotionHandoff({ context, nonce, expiresAt, secret: handoffSecret });
+          const handoff = await signPromotionHandoff({ context, nonce, expiresAt, secret: handoffSecret, keyId: handoffKeyId });
           const response = await executorBinding.fetch(new Request("https://anyam-promotion-executor/execute", {
             method: "POST",
-            headers: { "content-type": "application/json", "x-anyam-promotion-protocol": PROMOTION_EXECUTION_PROTOCOL, "x-anyam-promotion-handoff": handoff, "x-anyam-promotion-nonce": nonce, "x-anyam-promotion-expires-at": expiresAt },
+            headers: { "content-type": "application/json", "x-anyam-promotion-protocol": PROMOTION_EXECUTION_PROTOCOL, "x-anyam-promotion-handoff": handoff, "x-anyam-promotion-key-id": handoffKeyId, "x-anyam-promotion-nonce": nonce, "x-anyam-promotion-expires-at": expiresAt },
             body: JSON.stringify(context),
           }));
           if (!response.ok) throw new Error(`promotion-executor-http-${response.status}`);
@@ -1077,14 +1078,15 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       const coordinator = new AuthorityPlaneCoordinator(current);
       const executor = {
         execute: async (context: Readonly<import("../../../src/cloudflare/promotion-execution.ts").PromotionExecutionContext>): Promise<PromotionExecutionResult> => {
+          const handoffKeyId = this.env.ANYAM_PROMOTION_HANDOFF_KEY_ID?.trim();
           const handoffSecret = this.env.ANYAM_PROMOTION_HANDOFF_SECRET?.trim();
-          if (!handoffSecret) throw new Error("promotion-handoff-secret-missing");
+          if (!handoffKeyId || !handoffSecret) throw new Error("promotion-handoff-key-missing");
           const nonce = crypto.randomUUID();
           const expiresAt = new Date(Date.now() + PROMOTION_HANDOFF_TTL_MS).toISOString();
-          const handoff = await signPromotionHandoff({ context, nonce, expiresAt, secret: handoffSecret });
+          const handoff = await signPromotionHandoff({ context, nonce, expiresAt, secret: handoffSecret, keyId: handoffKeyId });
           const response = await executorBinding.fetch(new Request("https://anyam-promotion-executor/execute", {
             method: "POST",
-            headers: { "content-type": "application/json", "x-anyam-promotion-protocol": PROMOTION_EXECUTION_PROTOCOL, "x-anyam-promotion-handoff": handoff, "x-anyam-promotion-nonce": nonce, "x-anyam-promotion-expires-at": expiresAt },
+            headers: { "content-type": "application/json", "x-anyam-promotion-protocol": PROMOTION_EXECUTION_PROTOCOL, "x-anyam-promotion-handoff": handoff, "x-anyam-promotion-key-id": handoffKeyId, "x-anyam-promotion-nonce": nonce, "x-anyam-promotion-expires-at": expiresAt },
             body: JSON.stringify(context),
           }));
           if (!response.ok) throw new Error(`promotion-executor-http-${response.status}`);

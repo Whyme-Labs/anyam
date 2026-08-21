@@ -23,6 +23,28 @@ function blocked(code: string, recoveryAction: string, receipt: string, status =
   return json({ protocol: BRIDGE_PROTOCOL, status: "blocked", code, recoveryAction, receipt: `${receipt}; credentialMaterialStored=false; canonicalWrite=false` }, status);
 }
 
+function rejectCredentialFields(value: Record<string, unknown>): void {
+  const find = (candidate: unknown, path: string): string | undefined => {
+    if (Array.isArray(candidate)) {
+      for (const [index, item] of candidate.entries()) {
+        const found = find(item, `${path}[${index}]`);
+        if (found) return found;
+      }
+      return undefined;
+    }
+    if (candidate === null || typeof candidate !== "object") return undefined;
+    for (const [key, item] of Object.entries(candidate)) {
+      const current = `${path}.${key}`;
+      if (/^(?:token|accessToken|refreshToken|secret|password|privateKey|apiKey)$/iu.test(key)) return current;
+      const found = find(item, current);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  const field = find(value, "body");
+  if (field) throw new Error(`credentialField=${field}; credentialMaterial=not-accepted`);
+}
+
 async function exchange(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
   if (request.method !== "POST") return blocked("method_not_allowed", "use POST with one connectionId, operation, and GitHub OIDC assertion", "bridge=exchange; method=post-required", 405);
   let value: Record<string, unknown>;
@@ -53,6 +75,28 @@ async function exchange(request: Request, env: AnyamRealmOAuthEnv): Promise<Resp
     return json(await requestAnyamRealmCoordinator(env, "/github-actions-bridge/exchange/internal", { connectionId, operation, verification }));
   } catch {
     return blocked("bridge_exchange_rejected", "inspect the credential-free Realm receipt and retry only the same immutable workflow operation", `connection=${connectionId}; exchange=rejected`, 409);
+  }
+}
+
+async function outboundBundle(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
+  if (request.method !== "POST") return blocked("method_not_allowed", "use POST with the outbound capability ID and run observation", "bridge=outbound-bundle; method=post-required", 405);
+  try {
+    const value = await body(request);
+    rejectCredentialFields(value);
+    return json(await requestAnyamRealmCoordinator(env, "/github-actions-bridge/outbound/bundle/internal", value));
+  } catch (error) {
+    return blocked("outbound_bundle_rejected", "request a fresh outbound OIDC capability and inspect the exact Mirror checkpoint", `bridge=outbound-bundle; error=${error instanceof Error ? error.message : "invalid"}`, 409);
+  }
+}
+
+async function outboundComplete(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
+  if (request.method !== "POST") return blocked("method_not_allowed", "use POST with the exact plan, signed bundle, run observation, and provider read-back", "bridge=outbound-complete; method=post-required", 405);
+  try {
+    const value = await body(request);
+    rejectCredentialFields(value);
+    return json(await requestAnyamRealmCoordinator(env, "/github-actions-bridge/outbound/complete/internal", value));
+  } catch (error) {
+    return blocked("outbound_completion_rejected", "inspect the exact outbound Mirror checkpoint and provider read-back; no canonical state changed", `bridge=outbound-complete; error=${error instanceof Error ? error.message : "invalid"}`, 409);
   }
 }
 
@@ -146,6 +190,8 @@ export async function handleGitHubActionsBridgeRequest(request: Request, env: An
   if (pathname === "/api/owner/integrations/github-actions/bridge/connections") return createConnection(request, env);
   if (pathname === "/api/owner/integrations/github-actions/bridge/connections/revoke") return revokeConnection(request, env);
   if (pathname === "/api/integrations/github-actions/bridge/exchange") return exchange(request, env);
+  if (pathname === "/api/integrations/github-actions/bridge/outbound/bundle") return outboundBundle(request, env);
+  if (pathname === "/api/integrations/github-actions/bridge/outbound/complete") return outboundComplete(request, env);
   if (pathname === "/api/integrations/github-actions/bridge/prepare") return prepare(request, env);
   if (pathname === "/api/integrations/github-actions/bridge/proposal") return proposal(request, env);
   if (pathname === "/api/owner/integrations/github-actions/bridge/activate") return activate(request, env);

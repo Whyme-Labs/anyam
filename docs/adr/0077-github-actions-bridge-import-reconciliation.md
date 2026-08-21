@@ -26,6 +26,8 @@ POST /api/integrations/github-actions/bridge/exchange
 POST /api/integrations/github-actions/bridge/prepare
 POST /api/integrations/github-actions/bridge/proposal
 POST /api/owner/integrations/github-actions/bridge/activate
+POST /api/integrations/github-actions/bridge/outbound/bundle
+POST /api/integrations/github-actions/bridge/outbound/complete
 ```
 
 The owner creates a pending connection bound to the exact Realm, Project,

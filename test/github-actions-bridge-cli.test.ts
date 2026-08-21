@@ -45,6 +45,10 @@ test("GitHub Actions workflow generation is deterministic, pinned, and credentia
   assert.match(workflow, /id-token: write/u);
   assert.match(workflow, /contents: read/u);
   assert.match(workflow, /contents: write/u);
+  assert.match(workflow, /outbound\/bundle/u);
+  assert.match(workflow, /outbound\/complete/u);
+  assert.match(workflow, /protected-branch-policy: refuse-and-report/u);
+  assert.match(workflow, /Anyam CI remains authoritative/u);
   assert.match(workflow, new RegExp(actionRef.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
   assert.doesNotMatch(workflow, /private.?key|webhook.?secret|password|bearer/iu);
   assert.equal(workflow, generateGitHubActionsBridgeWorkflow({

@@ -82,6 +82,7 @@ export const CONTRACT_VERSIONS = {
   publicGatewayReplayArchive: "anyam.public-gateway-replay-archive/v1",
   githubActionsBridge: "anyam.github-actions-bridge/v1",
   githubActionsBridgeSource: "anyam.github-actions-bridge-source/v1",
+  githubActionsBridgeOutbound: "anyam.github-actions-bridge-outbound/v1",
 } as const;
 
 export type SourceSpaceClassification = "public" | "internal" | "restricted" | "result-only";

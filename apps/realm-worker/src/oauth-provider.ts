@@ -83,6 +83,8 @@ export type AnyamRealmOAuthEnv = CustomerRealmWorkerEnv & {
   ANYAM_GITHUB_BRIDGE_CUTOVER?: Fetcher;
   /** Customer-owned Change proposal boundary for GitHub-ahead history. */
   ANYAM_GITHUB_BRIDGE_PROPOSAL?: Fetcher;
+  /** Customer-owned signed outbound bundle/read-back Mirror boundary. */
+  ANYAM_GITHUB_BRIDGE_OUTBOUND?: Fetcher;
   ANYAM_OWNER_BOOTSTRAP_TOKEN?: string;
   ANYAM_REALM_RP_ID?: string;
   OAUTH_PROVIDER?: OAuthHelpers;

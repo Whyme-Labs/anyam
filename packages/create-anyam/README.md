@@ -91,9 +91,12 @@ anyam connect github ... --schedule "<customer-approved-cron>"
 ```
 
 The workflow uses job-scoped GitHub permissions and a customer-owned Realm
-connection. Anyam remains canonical; GitHub is a mirror and contribution
-surface. Live GitHub OIDC/JWKS verification and bundle import are separate
-provider qualification and Realm integration stages.
+connection. For outbound projection it retrieves a signed exact bundle, pushes
+with `GITHUB_TOKEN`, and reports mapped-ref read-back to the Realm. Protected
+branch refusal becomes a visible mirror-branch/Pull Request recovery rather
+than false success. Anyam remains canonical; GitHub is a mirror and
+contribution surface. Live GitHub OIDC/JWKS, protected-branch, and outbound
+provider qualification remain separate receipts.
 
 ## Connect a local coding agent
 

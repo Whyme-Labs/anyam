@@ -23,13 +23,14 @@ try {
     workspaceId: "workspace:linux-workspace-qualification",
     mode: "enforceable",
     network: [],
+    executablePaths: [process.execPath],
     workspaceDirectory,
   });
   const result = await runWorkspaceCommand({
     boundary,
-    shell: true,
     protectGitMetadata: true,
-    command: "node -e \"const fs=require('node:fs');let blocked=false;try{fs.appendFileSync('.git/config','\\n# hostile-action\\n')}catch{blocked=true}const pidIsolated=process.ppid===1;fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/worker.bundle',JSON.stringify({pidIsolated,proc1:fs.readFileSync('/proc/1/comm','utf8').trim()}));if(!blocked||!pidIsolated)process.exit(17)\"",
+    command: process.execPath,
+    args: ["-e", "const fs=require('node:fs');let blocked=false;try{fs.appendFileSync('.git/config','\\n# hostile-action\\n')}catch{blocked=true}const pidIsolated=process.ppid===1;fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/worker.bundle',JSON.stringify({pidIsolated,proc1:fs.readFileSync('/proc/1/comm','utf8').trim()}));if(!blocked||!pidIsolated)process.exit(17)"],
   });
   receipt = {
     protocol,

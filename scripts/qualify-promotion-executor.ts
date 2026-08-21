@@ -69,17 +69,18 @@ function containsCredentialMaterial(value: unknown): boolean {
 async function remoteQualification(): Promise<Record<string, unknown> | undefined> {
   const url = process.env.ANYAM_PROMOTION_EXECUTOR_URL?.trim();
   const contextPath = process.env.ANYAM_PROMOTION_EXECUTOR_CONTEXT_FILE?.trim();
+  const handoffKeyId = process.env.ANYAM_PROMOTION_EXECUTOR_HANDOFF_KEY_ID?.trim();
   const handoffSecret = process.env.ANYAM_PROMOTION_EXECUTOR_HANDOFF_SECRET?.trim();
   if (!url && !contextPath) return undefined;
   if (!url || !contextPath) throw new Error("ANYAM_PROMOTION_EXECUTOR_URL and ANYAM_PROMOTION_EXECUTOR_CONTEXT_FILE must be set together for remote qualification");
-  if (!handoffSecret) throw new Error("ANYAM_PROMOTION_EXECUTOR_HANDOFF_SECRET is required for remote qualification");
+  if (!handoffKeyId || !handoffSecret) throw new Error("ANYAM_PROMOTION_EXECUTOR_HANDOFF_KEY_ID and ANYAM_PROMOTION_EXECUTOR_HANDOFF_SECRET are required for remote qualification");
   const context = JSON.parse(await readFile(contextPath, "utf8")) as unknown;
   if (containsCredentialMaterial(context)) throw new Error("remote qualification context contains credential-shaped material; refusing to send it");
   const typedContext = context as ReturnType<typeof createPromotionExecutionContext>;
   const nonce = `nonce:${crypto.randomUUID()}`;
   const expiresAt = new Date(Date.now() + PROMOTION_HANDOFF_TTL_MS).toISOString();
-  const signature = await signPromotionHandoff({ context: typedContext, nonce, expiresAt, secret: handoffSecret });
-  const response = await fetch(url, { method: "POST", headers: { "content-type": "application/json", "x-anyam-promotion-protocol": "anyam.promotion-execution/v1", "x-anyam-promotion-handoff": signature, "x-anyam-promotion-nonce": nonce, "x-anyam-promotion-expires-at": expiresAt }, body: JSON.stringify(context) });
+  const signature = await signPromotionHandoff({ context: typedContext, nonce, expiresAt, secret: handoffSecret, keyId: handoffKeyId });
+  const response = await fetch(url, { method: "POST", headers: { "content-type": "application/json", "x-anyam-promotion-protocol": "anyam.promotion-execution/v1", "x-anyam-promotion-handoff": signature, "x-anyam-promotion-key-id": handoffKeyId, "x-anyam-promotion-nonce": nonce, "x-anyam-promotion-expires-at": expiresAt }, body: JSON.stringify(context) });
   const body = await response.json().catch(() => ({})) as Record<string, unknown>;
   return { mode: "remote", httpStatus: response.status, status: body.status ?? "unknown", receipt: body.receipt ?? "not-provided", credentialValues: "not-printed", contextFile: contextPath, providerDeployment: "customer-operated" };
 }
@@ -87,6 +88,7 @@ async function remoteQualification(): Promise<Record<string, unknown> | undefine
 async function localQualification(): Promise<Record<string, unknown>> {
   const { context, bytes } = fixture();
   const handoffSecret = "promotion-executor-qualification-handoff";
+  const handoffKeyId = "promotion-executor-qualification-key-v1";
   const claimed = new Set<string>();
   const handler = createPromotionExecutorHandler({
     accountId: "account:promotion-executor-qualification",
@@ -101,15 +103,15 @@ async function localQualification(): Promise<Record<string, unknown>> {
         return { token: "qualification-token-kept-inside-broker", credentialId: `credential:qualification:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: `credentialBroker=qualification-fixture; operation=${input.operation}; providerAuthorization=observed; credentialMaterialStored=false` };
       },
     },
-    handoffSecret,
+    handoffKeys: { active: { id: handoffKeyId, secret: handoffSecret } },
     handoffNonceStore: { async claim(input) { if (claimed.has(input.nonce)) return false; claimed.add(input.nonce); return true; } },
     fetch: fakeFetch(context.release.id),
     artifactStore: { async get(key) { return key === `artifacts/${context.artifacts[0]?.digest}` ? { arrayBuffer: async () => new Uint8Array(bytes).buffer as ArrayBuffer } : null; } },
   });
   const nonce = `nonce:${crypto.randomUUID()}`;
   const expiresAt = new Date(Date.now() + PROMOTION_HANDOFF_TTL_MS).toISOString();
-  const signature = await signPromotionHandoff({ context, nonce, expiresAt, secret: handoffSecret });
-  const response = await handler(new Request("https://promotion-executor.example/execute", { method: "POST", headers: { "content-type": "application/json", "x-anyam-promotion-protocol": "anyam.promotion-execution/v1", "x-anyam-promotion-handoff": signature, "x-anyam-promotion-nonce": nonce, "x-anyam-promotion-expires-at": expiresAt }, body: JSON.stringify(context) }));
+  const signature = await signPromotionHandoff({ context, nonce, expiresAt, secret: handoffSecret, keyId: handoffKeyId });
+  const response = await handler(new Request("https://promotion-executor.example/execute", { method: "POST", headers: { "content-type": "application/json", "x-anyam-promotion-protocol": "anyam.promotion-execution/v1", "x-anyam-promotion-handoff": signature, "x-anyam-promotion-key-id": handoffKeyId, "x-anyam-promotion-nonce": nonce, "x-anyam-promotion-expires-at": expiresAt }, body: JSON.stringify(context) }));
   const result = await response.json() as Record<string, unknown>;
   if (!response.ok || result.status !== "succeeded") throw new Error(`local executor qualification failed: HTTP ${response.status}; status=${String(result.status)}; receipt=${String(result.receipt)}`);
   return { mode: "local-boundary", status: "succeeded", resultStatus: result.status, targetCurrentReleaseId: (result.target as Record<string, unknown>)?.currentReleaseId, credentialValues: "not-printed", providerDeployment: "fixture-only", receipt: "executor=customer-operated-boundary; adapter=cloudflare.worker; artifactStore=digest-addressed; credentials=brokered-only; canonicalWrite=false; liveProvider=not-performed" };

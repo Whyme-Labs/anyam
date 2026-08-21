@@ -80,7 +80,7 @@ function handlerFor(context: ReturnType<typeof createPromotionExecutionContext>,
         return { token: "provider-token-kept-in-executor", credentialId: `credential:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: `credentialBroker=fixture; operation=${input.operation}; providerAuthorization=observed; credentialMaterialStored=false` };
       },
     },
-    handoffSecret: "promotion-executor-test-handoff-secret",
+    handoffKeys: { active: { id: "handoff-key-v1", secret: "promotion-executor-test-handoff-secret" }, previous: { id: "handoff-key-v0", secret: "promotion-executor-test-previous-secret" } },
     handoffNonceStore: { async claim(input) { if (claimed.has(input.nonce)) return false; claimed.add(input.nonce); return true; } },
     fetch: fakeFetch(context.release.id),
     artifactStore: {
@@ -94,8 +94,16 @@ function handlerFor(context: ReturnType<typeof createPromotionExecutionContext>,
 async function signedRequest(context: ReturnType<typeof createPromotionExecutionContext>, body: unknown = context): Promise<Request> {
   const nonce = `nonce:${crypto.randomUUID()}`;
   const expiresAt = new Date(Date.now() + PROMOTION_HANDOFF_TTL_MS).toISOString();
-  const signature = await signPromotionHandoff({ context, nonce, expiresAt, secret: "promotion-executor-test-handoff-secret" });
-  return new Request("https://executor.example/execute", { method: "POST", headers: { "content-type": "application/json", "x-anyam-promotion-protocol": "anyam.promotion-execution/v1", "x-anyam-promotion-handoff": signature, "x-anyam-promotion-nonce": nonce, "x-anyam-promotion-expires-at": expiresAt }, body: JSON.stringify(body) });
+  const keyId = "handoff-key-v1";
+  const signature = await signPromotionHandoff({ context, nonce, expiresAt, secret: "promotion-executor-test-handoff-secret", keyId });
+  return new Request("https://executor.example/execute", { method: "POST", headers: { "content-type": "application/json", "x-anyam-promotion-protocol": "anyam.promotion-execution/v1", "x-anyam-promotion-handoff": signature, "x-anyam-promotion-key-id": keyId, "x-anyam-promotion-nonce": nonce, "x-anyam-promotion-expires-at": expiresAt }, body: JSON.stringify(body) });
+}
+
+async function signedRequestWithKey(context: ReturnType<typeof createPromotionExecutionContext>, keyId: string, secret: string): Promise<Request> {
+  const nonce = `nonce:${crypto.randomUUID()}`;
+  const expiresAt = new Date(Date.now() + PROMOTION_HANDOFF_TTL_MS).toISOString();
+  const signature = await signPromotionHandoff({ context, nonce, expiresAt, secret, keyId });
+  return new Request("https://executor.example/execute", { method: "POST", headers: { "content-type": "application/json", "x-anyam-promotion-protocol": "anyam.promotion-execution/v1", "x-anyam-promotion-handoff": signature, "x-anyam-promotion-key-id": keyId, "x-anyam-promotion-nonce": nonce, "x-anyam-promotion-expires-at": expiresAt }, body: JSON.stringify(context) });
 }
 
 test("customer-operated executor runs the qualified Worker Target and returns a credential-free result", async () => {
@@ -146,4 +154,15 @@ test("customer-operated executor rejects missing, altered, and replayed handoffs
   const signed = await signedRequest(context);
   const alteredResponse = await handler(new Request(signed.url, { method: "POST", headers: signed.headers, body: JSON.stringify({ ...context, executionDigest: `sha256:${"0".repeat(64)}` }) }));
   assert.equal(alteredResponse.status, 401);
+});
+
+test("customer-operated executor accepts the previous handoff key only during rotation overlap", async () => {
+  const { context, artifactBytes } = fixture();
+  const handler = handlerFor(context, artifactBytes);
+  const previous = await signedRequestWithKey(context, "handoff-key-v0", "promotion-executor-test-previous-secret");
+  assert.equal((await handler(previous)).status, 200);
+  const active = await signedRequestWithKey(context, "handoff-key-v1", "promotion-executor-test-handoff-secret");
+  assert.equal((await handler(active)).status, 200);
+  const unknown = await signedRequestWithKey(context, "handoff-key-vx", "promotion-executor-test-handoff-secret");
+  assert.equal((await handler(unknown)).status, 401);
 });

@@ -19,7 +19,7 @@ Bind `ANYAM_PROMOTION_EXECUTOR` to a customer-operated Promotion executor
 Worker. The Realm sends only `anyam.promotion-execution/v1` context over the
 internal service binding. The executor:
 
-1. accepts only the exact protocol and typed context;
+1. accepts only the exact protocol, active/overlap handoff key ID, and typed context;
 2. rejects caller-supplied credential-shaped fields, unknown adapter IDs,
    mismatched Target IDs, unsupported Artifact types, and incomplete rollback
    lineage before provider invocation;
@@ -60,6 +60,10 @@ be qualified against the same `/execute` route by setting
   observed by the broker on every issue/probe. The executor never accepts a
   caller-supplied expiry timestamp and does not claim a universal provider
   lifetime.
+- Handoff authentication uses an explicit active key ID and may retain one
+  previous key during rotation overlap. Unknown key IDs fail before nonce
+  claim or provider invocation; rotation state is configuration, not Authority
+  data.
 - Durable reconciliation, late-callback rejection, and operator status are
   defined in ADR 0056 / #179. This boundary returns safe checkpoints but does
   not pretend to own provider mechanics or credential material.

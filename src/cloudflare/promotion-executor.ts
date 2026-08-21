@@ -27,6 +27,7 @@ import {
   type PromotionExecutionContext,
   type PromotionExecutionReleaseBundle,
   type PromotionExecutionResult,
+  type PromotionHandoffKeyring,
 } from "./promotion-execution.ts";
 import { verifyPromotionHandoff, type PromotionHandoffNonceStore } from "./promotion-execution.ts";
 
@@ -62,7 +63,7 @@ export type PromotionExecutorConfig = {
   routeReadinessRetry?: CloudflareWorkerRouteReadinessRetry;
   rollbackRouteReadinessRetry?: CloudflareWorkerRouteReadinessRetry;
   healthHeaders?: Readonly<Record<string, string>>;
-  handoffSecret: string;
+  handoffKeys: PromotionHandoffKeyring;
   handoffNonceStore: PromotionHandoffNonceStore;
 };
 
@@ -424,12 +425,15 @@ function mapPromotionResult(context: PromotionExecutionContext, local: Promotion
 }
 
 export function createPromotionExecutor(config: PromotionExecutorConfig): { execute(context: Readonly<PromotionExecutionContext>): Promise<PromotionExecutionResult> } {
-  if (!config.accountId || !config.scriptName || !config.targetId || !config.previewSubdomain || !config.credentialBroker || !config.handoffSecret || !config.handoffNonceStore) {
+  if (!config.accountId || !config.scriptName || !config.targetId || !config.previewSubdomain || !config.credentialBroker || !config.handoffKeys?.active?.id || !config.handoffKeys.active.secret || !config.handoffNonceStore) {
     throw new PromotionExecutorConfigurationError(
       "Customer-operated Promotion executor configuration is incomplete.",
-      "configure account ID, Worker script, Target ID, preview subdomain, customer-owned credential broker, handoff secret, and nonce store before binding the service",
-      `executor=config-incomplete; handoff=${config.handoffSecret ? "present" : "missing"}; nonceStore=${config.handoffNonceStore ? "present" : "missing"}; providerInvocation=false; credentialMaterialStored=false`,
+      "configure account ID, Worker script, Target ID, preview subdomain, customer-owned credential broker, active handoff key, and nonce store before binding the service",
+      `executor=config-incomplete; handoffKey=${config.handoffKeys?.active?.id ? "present" : "missing"}; nonceStore=${config.handoffNonceStore ? "present" : "missing"}; providerInvocation=false; credentialMaterialStored=false`,
     );
+  }
+  if (config.handoffKeys.previous && (!config.handoffKeys.previous.id || !config.handoffKeys.previous.secret || config.handoffKeys.previous.id === config.handoffKeys.active.id)) {
+    throw new PromotionExecutorConfigurationError("Customer-operated Promotion executor handoff key rotation configuration is invalid.", "configure a distinct previous handoff key ID and secret, or omit the previous key pair", "executor=handoff-key-rotation-invalid; providerInvocation=false; credentialMaterialStored=false");
   }
   const adapterId = config.adapterId ?? CLOUDFLARE_WORKER_TARGET_ADAPTER_ID;
   if (adapterId !== CLOUDFLARE_WORKER_TARGET_ADAPTER_ID) {
@@ -523,8 +527,10 @@ export function createPromotionExecutorHandler(config: PromotionExecutorConfig):
       const nonce = request.headers.get("x-anyam-promotion-nonce")?.trim() ?? "";
       const expiresAt = request.headers.get("x-anyam-promotion-expires-at")?.trim() ?? "";
       const signature = request.headers.get("x-anyam-promotion-handoff")?.trim() ?? "";
-      if (!nonce || !expiresAt || !signature || !(await verifyPromotionHandoff({ context, nonce, expiresAt, signature, secret: config.handoffSecret }))) {
-        return jsonResponse({ protocol: PROMOTION_EXECUTOR_PROTOCOL, status: "blocked", code: "handoff_invalid", message: "The Authority Promotion handoff is missing, expired, or invalid.", recoveryAction: "request a fresh signed one-time Authority handoff; provider invocation was not attempted", receipt: "executor=handoff-invalid; providerInvocation=false; credentialMaterialStored=false" }, 401);
+      const keyId = request.headers.get("x-anyam-promotion-key-id")?.trim() ?? "";
+      const handoffKey = keyId === config.handoffKeys.active.id ? config.handoffKeys.active : keyId === config.handoffKeys.previous?.id ? config.handoffKeys.previous : undefined;
+      if (!nonce || !expiresAt || !signature || !handoffKey || !(await verifyPromotionHandoff({ context, nonce, expiresAt, signature, secret: handoffKey.secret, keyId }))) {
+        return jsonResponse({ protocol: PROMOTION_EXECUTOR_PROTOCOL, status: "blocked", code: "handoff_invalid", message: "The Authority Promotion handoff is missing, expired, unknown-keyed, or invalid.", recoveryAction: "request a fresh signed one-time Authority handoff using the active handoff key ID; provider invocation was not attempted", receipt: `executor=handoff-invalid; keyId=${keyId || "missing"}; providerInvocation=false; credentialMaterialStored=false` }, 401);
       }
       if (!(await config.handoffNonceStore.claim({ nonce, expiresAt }))) {
         return jsonResponse({ protocol: PROMOTION_EXECUTOR_PROTOCOL, status: "blocked", code: "handoff_replayed", message: "The Authority Promotion handoff nonce has already been consumed.", recoveryAction: "request a fresh signed handoff for explicit reconciliation", receipt: "executor=handoff-replay; providerInvocation=false; credentialMaterialStored=false" }, 409);

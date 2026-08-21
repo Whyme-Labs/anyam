@@ -20,7 +20,10 @@ export interface Env {
   ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN?: string;
   ANYAM_PROMOTION_CREDENTIAL_SCOPES?: string;
   ANYAM_PROMOTION_CREDENTIAL_SOURCE_ID?: string;
+  ANYAM_PROMOTION_HANDOFF_KEY_ID?: string;
   ANYAM_PROMOTION_HANDOFF_SECRET?: string;
+  ANYAM_PROMOTION_HANDOFF_PREVIOUS_KEY_ID?: string;
+  ANYAM_PROMOTION_HANDOFF_PREVIOUS_SECRET?: string;
   /** Secret used only by an internal service binding/operator probe. */
   ANYAM_PROMOTION_HEALTH_TOKEN?: string;
   ANYAM_PROMOTION_NONCE_STORE?: DurableObjectNamespace;
@@ -51,6 +54,11 @@ function configFromEnv(env: Env): PromotionExecutorConfig {
   const credentialToken = required(env.ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN, "ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN");
   const credentialScopes = scopes(env.ANYAM_PROMOTION_CREDENTIAL_SCOPES);
   const credentialSourceId = env.ANYAM_PROMOTION_CREDENTIAL_SOURCE_ID?.trim() || "customer-secret-binding";
+  const handoffKeyId = required(env.ANYAM_PROMOTION_HANDOFF_KEY_ID, "ANYAM_PROMOTION_HANDOFF_KEY_ID");
+  const handoffSecret = required(env.ANYAM_PROMOTION_HANDOFF_SECRET, "ANYAM_PROMOTION_HANDOFF_SECRET");
+  const previousKeyId = env.ANYAM_PROMOTION_HANDOFF_PREVIOUS_KEY_ID?.trim();
+  const previousSecret = env.ANYAM_PROMOTION_HANDOFF_PREVIOUS_SECRET?.trim();
+  if ((previousKeyId && !previousSecret) || (!previousKeyId && previousSecret)) throw new Error("ANYAM_PROMOTION_HANDOFF_PREVIOUS_KEY_ID and ANYAM_PROMOTION_HANDOFF_PREVIOUS_SECRET must be configured together");
   return {
     accountId,
     targetId,
@@ -62,7 +70,7 @@ function configFromEnv(env: Env): PromotionExecutorConfig {
       targetId,
       tokenSource: async () => ({ token: credentialToken, sourceId: credentialSourceId, scopes: credentialScopes }),
     }),
-    handoffSecret: required(env.ANYAM_PROMOTION_HANDOFF_SECRET, "ANYAM_PROMOTION_HANDOFF_SECRET"),
+    handoffKeys: { active: { id: handoffKeyId, secret: handoffSecret }, ...(previousKeyId && previousSecret ? { previous: { id: previousKeyId, secret: previousSecret } } : {}) },
     handoffNonceStore: {
       async claim(input) {
         if (!env.ANYAM_PROMOTION_NONCE_STORE) throw new Error("ANYAM_PROMOTION_NONCE_STORE binding is required");

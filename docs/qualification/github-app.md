@@ -81,15 +81,16 @@ session value with no cookie header or other credentials.
 
 Use exactly one of `ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION` or
 `ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION_FILE`. The Realm must be an empty,
-disposable Authority boundary: the qualification exports its credential-free
-Authority Plane snapshot, creates one Project, public Source Space, public
-Project View, and empty mapped Mirror from the actual seeded Git OID, then
-restores that Authority snapshot after provider cleanup, then exports it again
-and compares the snapshot digest. The Authority recovery endpoint replaces only
-the Authority Plane state; it does not revoke or restore
-identity, passkeys, owner sessions, or OAuth grants. This removes a hidden
-pre-seeding dependency and makes the cleanup boundary explicit. A non-empty
-Authority Realm is rejected before mutation.
+disposable Authority boundary: the qualification exports its signed,
+credential-free `anyam.authority-recovery/v1` bundle, creates one Project,
+public Source Space, public Project View, and empty mapped Mirror from the
+actual seeded Git OID, then restores that bundle after provider cleanup and
+compares the snapshot digest. Restore is stale/replay checked and enters an
+explicit quarantine; normal Authority mutation remains blocked until the
+owner completes the separate passkey-authenticated
+`/api/authority/recovery/activate` ceremony. This recovery boundary does not
+revoke or restore identity, passkeys, owner sessions, or OAuth grants. A
+non-empty Authority Realm is rejected before mutation.
 
 The qualification records outbound projection, inbound ref proposal, explicit
 force-push failure, canonical-wins reconciliation, one stable pull-request

@@ -528,6 +528,16 @@ The Worker exposes a customer-owned WebAuthn adapter boundary:
 | `GET /owner/login` | Serves the browser authentication ceremony (use `?format=json` for the machine contract) |
 | `GET /owner/qualification` | Same-origin owner-session qualification controls; credential values are redacted and recovery state remains in page memory |
 
+The production Authority recovery surface is separate from the disposable
+identity qualification controls. Configure the non-secret
+`ANYAM_AUTHORITY_RECOVERY_KEY_ID` and customer secret
+`ANYAM_AUTHORITY_RECOVERY_SECRET`. `POST /api/authority/recovery/export`
+returns a signed `anyam.authority-recovery/v1` bundle; restore accepts only
+that bundle, checks its expected Authority version and audit-chain digest, and
+enters quarantine. `POST /api/authority/recovery/activate` requires a fresh
+passkey-authenticated owner session plus the exact quarantined bundle ID and
+digest. Normal Authority mutations fail closed while quarantined.
+
 The qualification surface now includes a minimal browser ceremony and retains
 the JSON contract for automation. The server-side verifier uses
 `@simplewebauthn/server`, stores only public credential material and the

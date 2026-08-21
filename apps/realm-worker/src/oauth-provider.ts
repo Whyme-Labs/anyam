@@ -67,6 +67,10 @@ export type AnyamRealmOAuthEnv = CustomerRealmWorkerEnv & {
   ANYAM_PROMOTION_EXECUTOR?: Fetcher;
   /** Shared secret used only to sign Authority-to-executor handoffs. */
   ANYAM_PROMOTION_HANDOFF_SECRET?: string;
+  /** Customer-owned independent Authority recovery signing key material. */
+  ANYAM_AUTHORITY_RECOVERY_SECRET?: string;
+  /** Non-secret key identifier used to select the active recovery key. */
+  ANYAM_AUTHORITY_RECOVERY_KEY_ID?: string;
   /** Shared only with the bound Public Gateway service; never a user credential. */
   ANYAM_PUBLIC_GATEWAY_SERVICE_SECRET?: string;
   ANYAM_OWNER_BOOTSTRAP_TOKEN?: string;

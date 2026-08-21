@@ -130,12 +130,16 @@ export class RealmAuthorityHttpClient {
     return this.request(`/api/mirrors/${encodeURIComponent(mirrorId)}/reconcile`, { method: "POST", body, idempotencyKey, allowStatuses: [409], allowBlocked: true });
   }
 
-  exportAuthoritySnapshot(): Promise<JsonObject> {
+  exportAuthorityRecovery(): Promise<JsonObject> {
     return this.request("/api/authority/recovery/export", { method: "POST", body: {}, idempotencyKey: "qualification:authority-recovery-export" });
   }
 
-  restoreAuthoritySnapshot(snapshot: JsonObject): Promise<JsonObject> {
-    return this.request("/api/authority/recovery/restore", { method: "POST", body: { snapshot }, idempotencyKey: "qualification:authority-recovery-restore" });
+  restoreAuthorityRecovery(bundle: JsonObject): Promise<JsonObject> {
+    return this.request("/api/authority/recovery/restore", { method: "POST", body: { bundle }, idempotencyKey: "qualification:authority-recovery-restore" });
+  }
+
+  activateAuthorityRecovery(bundleId: string, bundleDigest: string): Promise<JsonObject> {
+    return this.request("/api/authority/recovery/activate", { method: "POST", body: { bundleId, bundleDigest }, idempotencyKey: `qualification:authority-recovery-activate:${bundleId}` });
   }
 
   /**

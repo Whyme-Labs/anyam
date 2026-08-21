@@ -23,8 +23,9 @@ test("Realm Authority client sends the owner session as a host cookie and preser
   await client.reconcileMirror("mirror:qualification", { reconciliation: "canonical-wins" }, "qualification:reconcile");
   await client.inspectState();
   await client.inspectMirror("mirror:qualification");
-  await client.exportAuthoritySnapshot();
-  await client.restoreAuthoritySnapshot({ credentialFree: true });
+  await client.exportAuthorityRecovery();
+  await client.restoreAuthorityRecovery({ protocol: "anyam.authority-recovery/v1", bundleId: "bundle:qualification", bundleDigest: "sha256:bundle" });
+  await client.activateAuthorityRecovery("bundle:qualification", "sha256:bundle");
   await client.command({ command: "release.create", payload: { projectId: "project:qualification" }, idempotencyKey: "qualification:release" });
 
   assert.deepEqual(calls.map((call) => [call.method, new URL(call.url).pathname]), [
@@ -38,6 +39,7 @@ test("Realm Authority client sends the owner session as a host cookie and preser
     ["GET", "/api/mirrors/mirror%3Aqualification"],
     ["POST", "/api/authority/recovery/export"],
     ["POST", "/api/authority/recovery/restore"],
+    ["POST", "/api/authority/recovery/activate"],
     ["POST", "/api/authority/command"],
   ]);
   assert.equal(calls[0]?.cookie, "anyam_owner_session=session%3Aowner-qualification");
@@ -46,9 +48,10 @@ test("Realm Authority client sends the owner session as a host cookie and preser
   assert.equal(calls[3]?.body?.mirrorId, "mirror:qualification");
   assert.equal(calls[4]?.body?.operationId, "operation:one");
   assert.equal(calls[5]?.body?.reconciliation, "canonical-wins");
-  assert.equal(calls[9]?.body?.snapshot && (calls[9]?.body?.snapshot as Record<string, unknown>).credentialFree, true);
-  assert.equal(calls[10]?.body?.command, "release.create");
-  assert.equal(calls[10]?.body?.idempotencyKey, "qualification:release");
+  assert.equal((calls[9]?.body?.bundle as Record<string, unknown> | undefined)?.bundleId, "bundle:qualification");
+  assert.equal(calls[10]?.body?.bundleId, "bundle:qualification");
+  assert.equal(calls[11]?.body?.command, "release.create");
+  assert.equal(calls[11]?.body?.idempotencyKey, "qualification:release");
 });
 
 test("Realm Authority client redacts provider response bodies from typed request errors", async () => {

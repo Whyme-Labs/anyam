@@ -55,5 +55,11 @@
       "tag": "p3-26-initial",
       "new_sqlite_classes": ["PublicGatewayCoordinatorDO"]
     }
+  ],
+  "services": [
+    {
+      "binding": "PUBLIC_GATEWAY_REALM_AUTHORITY",
+      "service": "anyam-realm"
+    }
   ]
 }

@@ -1172,6 +1172,20 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     };
   }
 
+  private async publicGatewayAuthorize(body: CoordinatorRequestBody): Promise<Response> {
+    const sessionId = coordinatorString(body, "sessionId");
+    const projectId = coordinatorString(body, "projectId");
+    const operation = coordinatorString(body, "operation");
+    const allowedOperations = ["state", "open", "suspend", "reopen", "cleanup", "ledger-export", "ledger-compact", "replay-archive-delete"] as const;
+    if (!allowedOperations.includes(operation as typeof allowedOperations[number])) throw new RealmIdentityError({ code: "public_gateway.operation_denied", message: "The requested Public Gateway operation is not in the Realm moderation boundary.", recoveryAction: "request one of the documented Public Gateway moderation operations", receipt: `operation=${operation}; publicGateway=not-authorized` });
+    const identity = this.requireIdentity();
+    const session = identity.validateSession(sessionId);
+    const identitySnapshot = identity.getRecoverySnapshot();
+    const relationship = Object.values(identitySnapshot.relationships).find((candidate) => candidate.status === "active" && candidate.principalId === session.principalId && candidate.resource.realmId === identitySnapshot.realm.id && (candidate.resource.projectId === undefined || candidate.resource.projectId === projectId) && (candidate.role === "owner" || candidate.role === "moderator"));
+    if (!relationship) throw new RealmIdentityError({ code: "public_gateway.moderation_denied", message: "The authenticated Realm session has no active owner or moderator relationship for this Public Gateway Project.", recoveryAction: "authenticate a Realm owner or grant the Principal the moderator relationship for this Project", receipt: `project=${projectId}; session=${session.id}; role=owner-or-moderator-required; publicGateway=not-authorized` });
+    return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "authorized", projectId, operation, actor: { id: session.actorId, role: relationship.role }, realmId: identitySnapshot.realm.id, authorizationEpoch: identitySnapshot.realm.authorizationEpoch, receipt: `publicGateway=moderation-authorized; project=${projectId}; operation=${operation}; actor=${session.actorId}; role=${relationship.role}; authorizationEpoch=${identitySnapshot.realm.authorizationEpoch}; credentialMaterialStored=false` });
+  }
+
   override async fetch(request: Request): Promise<Response> {
     await this.initialized;
     const url = new URL(request.url);
@@ -1203,6 +1217,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/promotion/reconcile/internal") return await this.authorityPromotionReconcile(body);
       if (url.pathname === "/authority/promotion/status/internal") return await this.authorityPromotionStatus(body);
       if (url.pathname === "/authority/mcp-command/internal") return await this.authorityMcpCommand(body);
+      if (url.pathname === "/public-gateway/authorize") return await this.publicGatewayAuthorize(body);
       if (url.pathname === "/authority/command/internal") return await this.authorityCommand(body);
 
       if (url.pathname === "/identity/passkey-challenge/issue") {
@@ -1964,8 +1979,35 @@ async function reconcileCustomerProviderQueue(batch: MessageBatch<Record<string,
   }
 }
 
+function constantTimeEqual(left: string, right: string): boolean {
+  const leftBytes = new TextEncoder().encode(left);
+  const rightBytes = new TextEncoder().encode(right);
+  if (leftBytes.byteLength !== rightBytes.byteLength) return false;
+  let result = 0;
+  for (let index = 0; index < leftBytes.byteLength; index += 1) result |= (leftBytes[index] ?? 0) ^ (rightBytes[index] ?? 0);
+  return result === 0;
+}
+
+async function publicGatewayAuthorization(request: Request, env: Env): Promise<Response | undefined> {
+  if (new URL(request.url).pathname !== "/internal/public-gateway/authorize") return undefined;
+  const configured = env.ANYAM_PUBLIC_GATEWAY_SERVICE_SECRET?.trim();
+  const presented = request.headers.get("x-anyam-public-gateway-service-secret")?.trim();
+  if (!configured || !presented || !constantTimeEqual(configured, presented)) return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "blocked", code: "public_gateway_internal_unauthorized", recoveryAction: "invoke this route only through the bound Public Gateway service with the customer-owned service secret", receipt: "publicGateway=internal-auth-failed; authorization=not-issued; credentialMaterialStored=false" }, 403);
+  try {
+    const body = await request.json();
+    if (body === null || typeof body !== "object" || Array.isArray(body)) throw new Error("request body must be a JSON object");
+    const result = await requestAnyamRealmCoordinator(env, "/public-gateway/authorize", body as Record<string, unknown>);
+    return coordinatorJson(result, result.status === "authorized" ? 200 : 403);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "blocked", code: "public_gateway_authorization_failed", message, recoveryAction: "authenticate an owner or moderator Realm session and retry the same Public Gateway operation", receipt: "publicGateway=authorization-failed; credentialMaterialStored=false" }, 403);
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const publicGatewayResponse = await publicGatewayAuthorization(request, env);
+    if (publicGatewayResponse) return publicGatewayResponse;
     // Owner ceremony routes do not need the OAuth provider to be constructed.
     // This keeps local HTTP development useful while the provider correctly
     // enforces HTTPS issuer metadata for MCP/OAuth requests.

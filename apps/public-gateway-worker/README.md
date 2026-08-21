@@ -24,10 +24,17 @@ The public gateway is closed until an owner uses the authenticated admin route
 to open it. A missing measured logical limit fails closed; `approval-only` mode
 is available when no honest quota exists yet.
 
-The example `ADMIN_TOKEN` is an owner-only qualification secret. The Worker
-does not trust caller-provided actor or role fields. A production Realm should
-replace this adapter boundary with the Realm's authenticated capability check
-before delegating moderator roles or broader administration.
+Moderation is authorized by the bound Realm service, not by a static
+administrator token. Admin requests carry a short-lived Realm session handle
+in `x-anyam-realm-session`; the gateway asks the Realm to validate the owner or
+moderator relationship for the exact Project and operation, then forwards only
+the Realm-authorized Actor and role to the Durable Object. The service-binding
+secret authenticates the Worker-to-Worker call but never grants moderation by
+itself. Caller-provided actor or role fields are ignored.
+
+Configure `PUBLIC_GATEWAY_REALM_AUTHORITY` as a service binding to the
+customer-owned Realm Worker and set `PUBLIC_GATEWAY_REALM_SERVICE_SECRET` with
+`wrangler secret put`. Without both bindings, moderation remains blocked.
 
 Set `PUBLIC_ABUSE_MODE=turnstile-required` only after measuring a provider
 timeout tripwire and storing the Turnstile secret as a customer-owned secret

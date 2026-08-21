@@ -53,7 +53,10 @@ export interface Env {
   PUBLIC_TURNSTILE_VERIFY_TIMEOUT_MS?: string;
   PUBLIC_TURNSTILE_VERIFY_TIMEOUT_RECEIPT?: string;
   UPSTREAM_GIT_BASE: string;
-  ADMIN_TOKEN: string;
+  /** Bound Realm service that validates owner/moderator sessions. */
+  PUBLIC_GATEWAY_REALM_AUTHORITY?: Fetcher;
+  /** Service-binding secret; never grants moderation by itself. */
+  PUBLIC_GATEWAY_REALM_SERVICE_SECRET?: string;
 }
 
 type JsonObject = Record<string, unknown>;
@@ -214,12 +217,6 @@ async function bodyObject(request: Request): Promise<JsonObject> {
   return value as JsonObject;
 }
 
-function adminAuthorized(request: Request, env: Env): boolean {
-  const expected = env.ADMIN_TOKEN;
-  if (!expected || expected.includes("replace-with")) return false;
-  return request.headers.get("authorization") === `Bearer ${expected}`;
-}
-
 function gatewayStub(env: Env): DurableObjectStub {
   const id = env.PUBLIC_GATEWAY_COORDINATOR.idFromName(env.PUBLIC_PROJECT_ID);
   return env.PUBLIC_GATEWAY_COORDINATOR.get(id);
@@ -270,18 +267,37 @@ async function publicGit(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleAdmin(request: Request, env: Env, action: "state" | "open" | "suspend" | "reopen" | "cleanup" | "ledger-export" | "ledger-compact" | "replay-archive-delete"): Promise<Response> {
-  if (!adminAuthorized(request, env)) return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate the customer Realm owner or moderator; no public gateway mutation was performed", receipt: "adminAuthorization=missing-or-invalid; mutation=false" }, 401);
+  const authority = env.PUBLIC_GATEWAY_REALM_AUTHORITY;
+  const serviceSecret = env.PUBLIC_GATEWAY_REALM_SERVICE_SECRET?.trim();
+  const realmSession = request.headers.get("x-anyam-realm-session")?.trim();
+  if (!authority || typeof authority.fetch !== "function" || !serviceSecret) return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "moderation_authority_unavailable", recoveryAction: "bind the customer Realm authority and its service secret before enabling Public Gateway moderation", receipt: "moderationAuthority=not-bound; mutation=false" }, 503);
+  if (!realmSession) return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "unauthorized", recoveryAction: "authenticate a Realm owner or moderator and send the short-lived Realm session handle", receipt: "moderationAuthorization=realm-session-missing; mutation=false" }, 401);
   const body = request.method === "POST" ? await bodyObject(request) : {};
+  let authorization: JsonObject;
+  try {
+    const response = await authority.fetch(new Request("https://anyam-realm/internal/public-gateway/authorize", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-anyam-public-gateway-service-secret": serviceSecret },
+      body: JSON.stringify({ sessionId: realmSession, projectId: env.PUBLIC_PROJECT_ID, operation: action }),
+    }));
+    const value: unknown = await response.json().catch(() => ({}));
+    authorization = value !== null && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : {};
+    if (!response.ok || authorization.status !== "authorized") return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "moderation_unauthorized", recoveryAction: "authenticate an active Realm owner or moderator for this Project and retry", receipt: `moderationAuthority=status-${response.status}; mutation=false; privateMetadata=not-disclosed` }, response.status === 503 ? 503 : 403);
+  } catch {
+    return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "moderation_authority_unavailable", recoveryAction: "restore the customer Realm service binding and retry the same moderation operation", receipt: "moderationAuthority=unavailable; mutation=false" }, 503);
+  }
+  const actor = authorization.actor;
+  if (actor === null || typeof actor !== "object" || Array.isArray(actor) || typeof (actor as JsonObject).id !== "string" || ((actor as JsonObject).role !== "owner" && (actor as JsonObject).role !== "moderator")) return json({ protocol: PUBLIC_GATEWAY_PROTOCOL, code: "moderation_authorization_malformed", recoveryAction: "repair the Realm moderation authorization response before retrying", receipt: "moderationAuthority=malformed; mutation=false" }, 503);
   const path = action === "state" ? "/state" : action === "ledger-export" ? "/ledger/export" : action === "ledger-compact" ? "/ledger/compact" : action === "replay-archive-delete" ? "/ledger/replay-archive/delete-expired" : `/admin/${action}`;
   const coordinatorInit: RequestInit = { method: action === "state" ? "GET" : "POST", headers: { "content-type": "application/json" } };
   if (action !== "state") {
-    // The qualification adapter has one owner-scoped secret. Do not let a
-    // caller-controlled JSON field impersonate a moderator or another actor;
-    // a future Realm auth adapter must supply richer role/capability claims.
+    // The Realm service is the source of actor and role authority. Caller JSON
+    // cannot impersonate a moderator or override the authorized Project.
     coordinatorInit.body = JSON.stringify({
       ...body,
-      actorId: `realm-owner:${env.PUBLIC_PROJECT_ID}`,
-      role: "owner",
+      actorId: (actor as JsonObject).id,
+      role: (actor as JsonObject).role,
+      authorizationReceipt: typeof authorization.receipt === "string" ? authorization.receipt : "realm-moderation-authorized",
     });
   }
   const response = await coordinatorRequest(env, path, coordinatorInit);

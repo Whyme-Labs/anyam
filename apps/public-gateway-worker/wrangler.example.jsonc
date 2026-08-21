@@ -48,6 +48,12 @@
       "new_sqlite_classes": ["PublicGatewayCoordinatorDO"]
     }
   ],
+  "services": [
+    {
+      "binding": "PUBLIC_GATEWAY_REALM_AUTHORITY",
+      "service": "anyam-realm"
+    }
+  ],
   "ratelimits": [
     {
       "name": "PUBLIC_EDGE_RATE_LIMITER",

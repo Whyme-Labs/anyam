@@ -163,6 +163,15 @@ test("intersects role, Source Space policy, task grant, client/session state, an
   assert.ok(denied.explanation.factors.some((factor) => factor.name === "source-space-policy" && factor.status === "denied"));
 });
 
+test("moderator relationships authorize only the Public Gateway moderation capability", () => {
+  const { realm, principal, passkeySession } = createRealm();
+  const relationship = realm.addRelationship({ principalId: principal.id, kind: "organization-member", subjectId: principal.id, role: "moderator", resource: { realmId: realm.realm.id, projectId: "project:video-player" } });
+  const stored = realm.getRecoverySnapshot().relationships[relationship.id];
+  assert.equal(stored?.role, "moderator");
+  assert.equal(stored?.resource.projectId, "project:video-player");
+  assert.equal(passkeySession.principalId, principal.id);
+});
+
 test("returns a disclosure-safe not_found explanation for hidden Source Spaces", () => {
   const { realm, principal, passkeySession } = createRealm();
   const { task, grant } = taskAndGrant(realm, passkeySession, { sourceSpaceIds: ["private-codec"] });

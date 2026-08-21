@@ -49,6 +49,7 @@ export type Capability =
   | "governance.profile.manage"
   | "governance.profile.evaluate"
   | "agent.delegate"
+  | "public.moderate"
   | "policy.manage"
   | "identity.manage";
 
@@ -194,7 +195,7 @@ export type Relationship = {
   status: "active" | "revoked";
 };
 
-export type RealmRole = "viewer" | "contributor" | "reviewer" | "maintainer" | "release-manager" | "security-reviewer" | "owner";
+export type RealmRole = "viewer" | "contributor" | "reviewer" | "maintainer" | "release-manager" | "security-reviewer" | "moderator" | "owner";
 
 export type SourceSpacePolicy = {
   protocol: typeof CONTRACT_VERSIONS.policy;
@@ -518,6 +519,7 @@ const ROLE_CAPABILITIES: Readonly<Record<RealmRole, readonly Capability[]>> = {
   maintainer: ["project.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "landing.request", "target.read", "extension.install", "extension.manage", "extension.invoke", "governance.profile.evaluate", "agent.delegate"],
   "release-manager": ["project.inspect", "source.read", "change.inspect", "review.submit_finding", "change.approve", "evidence.read", "target.read", "target.promote", "landing.request", "extension.invoke"],
   "security-reviewer": ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "target.read", "governance.profile.evaluate"],
+  moderator: ["project.inspect", "change.inspect", "evidence.read", "public.moderate"],
   owner: ["project.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "secret.use", "landing.request", "release.create", "target.configure", "promotion.request", "target.read", "target.promote", "extension.install", "extension.manage", "extension.invoke", "governance.profile.manage", "governance.profile.evaluate", "agent.delegate", "policy.manage", "identity.manage"],
 };
 

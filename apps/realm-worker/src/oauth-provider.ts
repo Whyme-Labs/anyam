@@ -67,6 +67,8 @@ export type AnyamRealmOAuthEnv = CustomerRealmWorkerEnv & {
   ANYAM_PROMOTION_EXECUTOR?: Fetcher;
   /** Shared secret used only to sign Authority-to-executor handoffs. */
   ANYAM_PROMOTION_HANDOFF_SECRET?: string;
+  /** Shared only with the bound Public Gateway service; never a user credential. */
+  ANYAM_PUBLIC_GATEWAY_SERVICE_SECRET?: string;
   ANYAM_OWNER_BOOTSTRAP_TOKEN?: string;
   ANYAM_REALM_RP_ID?: string;
   OAUTH_PROVIDER?: OAuthHelpers;

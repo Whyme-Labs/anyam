@@ -95,6 +95,9 @@ export const WORKSPACE_BOUNDARY_POLICY = {
   receipt: "policy=workspace-boundary/v1; sizing=provisional-tripwire; remeasure-before-production",
 } as const;
 
+/** Namespace/capability controls qualified by the Linux repository gate. */
+export const LINUX_BWRAP_CONTAINMENT_RECEIPT = "pid=unshared; ipc=unshared; uts=unshared; cgroup=try; session=new; capabilities=drop-all; sizing=qualification-tripwire; remeasure-before-production";
+
 const SAFE_ENVIRONMENT_KEYS = new Set([
   "CI",
   "FORCE_COLOR",
@@ -153,7 +156,7 @@ function appendReadonlyBind(args: string[], path: string): void {
 }
 
 function linuxBwrapRuntimeArgs(input: { boundary: WorkspaceBoundary; invokedCommand: string }): string[] {
-  const args = ["--die-with-parent", "--unshare-net"];
+  const args = ["--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try", "--unshare-net", "--cap-drop", "ALL"];
   for (const path of ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"]) appendReadonlyBind(args, path);
   args.push("--proc", "/proc", "--dev", "/dev");
 
@@ -416,7 +419,7 @@ export async function createWorkspaceBoundary(input: WorkspaceBoundaryInput): Pr
     executablePaths,
     ...(profile ? { profile } : {}),
     temporary,
-    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; mode=${input.mode}; enforcement=${enforcement}; mounts=${mounts.length}; network-hosts=${network.length}; networkEnforcement=${network.length === 0 ? "deny-all" : "host-allowlist"}; canonicalWrite=false; ambientCredentials=blocked`,
+    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; mode=${input.mode}; enforcement=${enforcement};${enforcement === "linux-bwrap" ? ` containment=${LINUX_BWRAP_CONTAINMENT_RECEIPT};` : ""} mounts=${mounts.length}; network-hosts=${network.length}; networkEnforcement=${network.length === 0 ? "deny-all" : "host-allowlist"}; canonicalWrite=false; ambientCredentials=blocked`,
   };
 }
 
@@ -504,7 +507,7 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
     stderrDigest: digest(stderr),
     ...(result.timedOut ? { timedOut: true } : {}),
     ...(child.pid ? { processId: child.pid, ...(detached ? { processGroupId: child.pid } : {}) } : {}),
-    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=${input.boundary.enforcement}; networkEnforcement=${input.boundary.networkEnforcement}; gitMetadata=${protectGitMetadata ? "read-only" : "workspace-writable"}; status=${status};${result.timedOut ? ` budget=workspace.command; limit=${timeoutMs}ms; asked=timeout;` : ""}${outputLimitExceeded ? ` budget=workspace.output; limit=${WORKSPACE_BOUNDARY_POLICY.maxOutputBytes}bytes; asked=output-exceeded;` : ""}`,
+    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=${input.boundary.enforcement};${input.boundary.enforcement === "linux-bwrap" ? ` containment=${LINUX_BWRAP_CONTAINMENT_RECEIPT};` : ""} networkEnforcement=${input.boundary.networkEnforcement}; gitMetadata=${protectGitMetadata ? "read-only" : "workspace-writable"}; status=${status};${result.timedOut ? ` budget=workspace.command; limit=${timeoutMs}ms; asked=timeout;` : ""}${outputLimitExceeded ? ` budget=workspace.output; limit=${WORKSPACE_BOUNDARY_POLICY.maxOutputBytes}bytes; asked=output-exceeded;` : ""}`,
   };
 }
 

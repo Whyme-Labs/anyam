@@ -80,6 +80,7 @@ export const CONTRACT_VERSIONS = {
   publicGatewayAbuse: "anyam.public-gateway-abuse/v1",
   publicGatewayLedger: "anyam.public-gateway-ledger/v1",
   publicGatewayReplayArchive: "anyam.public-gateway-replay-archive/v1",
+  githubActionsBridge: "anyam.github-actions-bridge/v1",
 } as const;
 
 export type SourceSpaceClassification = "public" | "internal" | "restricted" | "result-only";

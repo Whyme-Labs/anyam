@@ -164,6 +164,10 @@ Every Mirror records `canonicalAuthority=anyam`; provider branch protection is
 an optional provider receipt, not a prerequisite for private Projects. A
 provider-authoritative Mirror is not a supported fallback.
 
+**GitHub Actions Bridge**:
+A customer-owned GitHub workflow that presents a verified GitHub OIDC workload identity to the customer-owned Realm, receives a short-lived operation-specific Capability, and transfers a bounded Git projection without a standing GitHub credential. The Bridge is a provider adapter and never receives canonical Landing authority.
+_Avoid_: Full GitHub sync, GitHub App requirement
+
 **Mirror Operation**:
 An immutable, idempotent attempt to inspect, project, propose, reconcile, or recover a Repository Mirror. It records the expected remote generation, actual provider receipt, origin operation, inbound Change IDs, outcome, and policy-safe recovery action.
 _Avoid_: Provider webhook, hidden background retry

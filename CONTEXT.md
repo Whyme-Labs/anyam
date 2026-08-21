@@ -168,6 +168,16 @@ provider-authoritative Mirror is not a supported fallback.
 A customer-owned GitHub workflow that presents a verified GitHub OIDC workload identity to the customer-owned Realm, receives a short-lived operation-specific Capability, and transfers a bounded Git projection without a standing GitHub credential. The Bridge is a provider adapter and never receives canonical Landing authority.
 _Avoid_: Full GitHub sync, GitHub App requirement
 
+The Bridge source transfer is a complete Git bundle/ref/object-format/LFS
+package. The RepositoryDriver, not the workflow, supplies the history relation
+(`empty`, `same`, `github-ahead`, `canonical-ahead`, or `diverged`). An empty
+Project requires explicit owner confirmation before the quarantined package can
+be initialized; GitHub-ahead state may create only a quarantined Change
+proposal; same-history is no-transfer; canonical-ahead and diverged state are
+blocked reconciliation checkpoints. Bridge capabilities are operation
+specific (`inbound`, `proposal`, or `outbound`), persisted by the Realm
+coordinator, and always `canonicalWrite=false`.
+
 **Mirror Operation**:
 An immutable, idempotent attempt to inspect, project, propose, reconcile, or recover a Repository Mirror. It records the expected remote generation, actual provider receipt, origin operation, inbound Change IDs, outcome, and policy-safe recovery action.
 _Avoid_: Provider webhook, hidden background retry

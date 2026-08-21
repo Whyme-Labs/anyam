@@ -2,7 +2,7 @@ import { CONTRACT_VERSIONS, opaqueId } from "../kernel/contracts.ts";
 
 export const GITHUB_ACTIONS_OIDC_ISSUER = "https://token.actions.githubusercontent.com" as const;
 
-export type GitHubActionsBridgeOperation = "inbound" | "outbound";
+export type GitHubActionsBridgeOperation = "inbound" | "outbound" | "proposal";
 export type GitHubActionsEventName = "push" | "pull_request" | "workflow_dispatch";
 
 export type GitHubActionsBridgeConnectionInput = {
@@ -97,6 +97,13 @@ export type GitHubActionsBridgeCapability = {
   receipt: string;
 };
 
+export type GitHubActionsBridgeSnapshot = {
+  connections: Readonly<Record<string, GitHubActionsBridgeConnection>>;
+  capabilities: Readonly<Record<string, GitHubActionsBridgeCapability>>;
+  replayJtiDigests: readonly { connectionId: string; jtiDigest: string; expiresAt: string }[];
+  credentialMaterialStored: false;
+};
+
 export type GitHubActionsBridgeFailure = {
   status: "failed";
   code: string;
@@ -175,6 +182,12 @@ function nonEmpty(value: unknown, field: string): string {
   return value.trim();
 }
 
+function credentialFreeReceipt(value: unknown, field: string): string {
+  const receipt = nonEmpty(value, field);
+  if (/(?:Bearer\s+\S+|(?:token|secret|password|api[_-]?key|private[_-]?key)\s*[=:]\s*\S+)/iu.test(receipt) || /-----BEGIN [^-]+ PRIVATE KEY-----/iu.test(receipt)) throw new GitHubActionsBridgeInputError({ code: "receipt_credential_material", message: `${field} contains credential-shaped material.`, recoveryAction: "return a digest-only credential-free verifier receipt and retry; no capability was issued", receipt: `${field}=credential-shaped; capability=not-issued; credentialMaterialStored=false` });
+  return receipt;
+}
+
 function timestamp(value: unknown, field: string, now: number, relation: "future" | "past-or-present"): string {
   const text = nonEmpty(value, field);
   const parsed = Date.parse(text);
@@ -240,7 +253,7 @@ function connectionFields(input: GitHubActionsBridgeConnectionInput, now: number
   const ref = nonEmpty(input.ref, "ref");
   const audience = nonEmpty(input.audience, "audience");
   const allowedEvents = list(input.allowedEvents, "allowedEvents", ["push", "pull_request", "workflow_dispatch"] as const);
-  const allowedOperations = list(input.allowedOperations, "allowedOperations", ["inbound", "outbound"] as const);
+  const allowedOperations = list(input.allowedOperations, "allowedOperations", ["inbound", "outbound", "proposal"] as const);
   const expiresAt = timestamp(input.expiresAt, "expiresAt", now, "future");
   return { protocol: CONTRACT_VERSIONS.githubActionsBridge, realmId, projectId, sourceSpaceId, repositoryOwner, repositoryOwnerId, repository, repositoryId, workflowRef, expectedJobWorkflowRef, ref, audience, allowedEvents, allowedOperations, expiresAt };
 }
@@ -258,12 +271,18 @@ function stateFailure(connection: GitHubActionsBridgeConnection): GitHubActionsB
 export class GitHubActionsBridgeAuthority {
   private readonly connections = new Map<string, GitHubActionsBridgeConnection>();
   private readonly capabilities = new Map<string, GitHubActionsBridgeCapability>();
+  private readonly replayJtiDigests = new Map<string, string>();
   private readonly replayLedger: GitHubActionsBridgeReplayLedger;
   private readonly now: () => string;
 
-  constructor(input: { now?: () => string; replayLedger?: GitHubActionsBridgeReplayLedger } = {}) {
+  constructor(input: { now?: () => string; replayLedger?: GitHubActionsBridgeReplayLedger; snapshot?: GitHubActionsBridgeSnapshot } = {}) {
     this.now = input.now ?? (() => new Date().toISOString());
     this.replayLedger = input.replayLedger ?? new MemoryGitHubActionsBridgeReplayLedger(this.now);
+    if (input.snapshot) {
+      for (const [id, connection] of Object.entries(input.snapshot.connections)) this.connections.set(id, clone(connection));
+      for (const [id, capability] of Object.entries(input.snapshot.capabilities)) this.capabilities.set(id, clone(capability));
+      for (const entry of input.snapshot.replayJtiDigests) this.replayJtiDigests.set(JSON.stringify([entry.connectionId, entry.jtiDigest]), entry.expiresAt);
+    }
   }
 
   createPendingConnection(input: GitHubActionsBridgeConnectionInput): GitHubActionsBridgeResult<GitHubActionsBridgeConnection> {
@@ -300,10 +319,37 @@ export class GitHubActionsBridgeAuthority {
     } catch {
       return failure({ code: "oidc_verification_failed", message: "The GitHub OIDC verifier failed before returning a result.", recoveryAction: "inspect the customer-owned OIDC verifier and retry the same Bridge connection", receipt: `connection=${connection.id}; verifier=exception; capability=not-issued; credentialMaterialStored=false` });
     }
-    if (verification.status !== "verified") return failure({ code: verification.code, message: "The GitHub OIDC assertion was not verified.", recoveryAction: verification.recoveryAction, receipt: `${verification.receipt}; connection=${connection.id}; capability=not-issued; credentialMaterialStored=false` });
+    return this.exchangeVerified({ connectionId, operation: input.operation, verification });
+  }
+
+  /**
+   * Complete an exchange after a customer-owned verifier has checked the
+   * bearer assertion. This is the Durable Object seam: the outer Worker may
+   * call a bound OIDC verifier without moving the token into Realm storage.
+   */
+  async exchangeVerified(input: { connectionId: string; operation: GitHubActionsBridgeOperation; verification: GitHubActionsOidcVerification }): Promise<GitHubActionsBridgeResult<{ connection: GitHubActionsBridgeConnection; capability: GitHubActionsBridgeCapability }>> {
+    const connectionId = typeof input.connectionId === "string" ? input.connectionId.trim() : "";
+    const connection = this.connections.get(connectionId);
+    if (!connection) return failure({ code: "connection_not_found", message: `GitHub Actions Bridge connection ${connectionId || "missing"} is not available.`, recoveryAction: "start a new Anyam GitHub connection and use its generated workflow identifier", receipt: `connection=${connectionId || "missing"}; capability=not-issued; discoverable=false` });
+    const nowText = this.now();
+    const now = Date.parse(nowText);
+    if (connection.status === "pending" && Date.parse(connection.expiresAt) <= now) {
+      const expired: GitHubActionsBridgeConnection = { ...connection, status: "expired", closedAt: nowText, reason: "pending connection expired", expiresAt: connection.expiresAt };
+      this.connections.set(connection.id, expired);
+      return stateFailure(expired);
+    }
+    if (connection.status !== "pending" && connection.status !== "active") return stateFailure(connection);
+    if (!connection.allowedOperations.includes(input.operation)) return failure({ code: "operation_denied", message: `Bridge connection ${connection.id} does not allow ${input.operation}.`, recoveryAction: "create a connection whose declared operation set includes this exact direction", receipt: `connection=${connection.id}; operation=${input.operation}; allowed=${connection.allowedOperations.join(",")}; capability=not-issued` });
+    let verificationReceipt: string;
+    try {
+      verificationReceipt = credentialFreeReceipt(input.verification.receipt, "verification.receipt");
+    } catch (error) {
+      return error instanceof GitHubActionsBridgeInputError ? failure(error) : failure({ code: "receipt_credential_material", message: "The verifier receipt was not credential-free.", recoveryAction: "return a digest-only verifier receipt and retry; no capability was issued", receipt: `connection=${connection.id}; capability=not-issued; credentialMaterialStored=false` });
+    }
+    if (input.verification.status !== "verified") return failure({ code: input.verification.code, message: "The GitHub OIDC assertion was not verified.", recoveryAction: input.verification.recoveryAction, receipt: `${verificationReceipt}; connection=${connection.id}; capability=not-issued; credentialMaterialStored=false` });
     let claims: GitHubActionsOidcClaims;
     try {
-      claims = parseClaims(verification.claims, now);
+      claims = parseClaims(input.verification.claims, now);
     } catch (error) {
       return error instanceof GitHubActionsBridgeInputError ? failure(error) : failure({ code: "claims_malformed", message: "The verified GitHub OIDC claims were malformed.", recoveryAction: "return the standard GitHub Actions claims and retry; no capability was issued", receipt: `connection=${connection.id}; claims=malformed; capability=not-issued` });
     }
@@ -313,7 +359,13 @@ export class GitHubActionsBridgeAuthority {
     let replay: "claimed" | "duplicate";
     try {
       jtiDigest = await digest(claims.jti);
-      replay = await this.replayLedger.claim({ connectionId: connection.id, jtiDigest, expiresAt: claims.expiresAt });
+      const replayKey = JSON.stringify([connection.id, jtiDigest]);
+      const recordedExpiry = this.replayJtiDigests.get(replayKey);
+      if (recordedExpiry !== undefined && Date.parse(recordedExpiry) > now) replay = "duplicate";
+      else {
+        replay = await this.replayLedger.claim({ connectionId: connection.id, jtiDigest, expiresAt: claims.expiresAt });
+        if (replay === "claimed") this.replayJtiDigests.set(replayKey, claims.expiresAt);
+      }
     } catch {
       return failure({ code: "replay_ledger_unavailable", message: "The Bridge replay ledger was unavailable; no capability was issued.", recoveryAction: "restore the durable replay ledger and retry the same workflow run only after checking whether its jti was accepted", receipt: `connection=${connection.id}; replayLedger=unavailable; capability=not-issued; credentialMaterialStored=false` });
     }
@@ -353,8 +405,21 @@ export class GitHubActionsBridgeAuthority {
     return success(clone(closed), `connection=${connection.id}; status=revoked; activeCapabilities=denied-at-check; credentialMaterialStored=false`);
   }
 
-  snapshot(): { connections: Readonly<Record<string, GitHubActionsBridgeConnection>>; capabilities: Readonly<Record<string, GitHubActionsBridgeCapability>>; credentialMaterialStored: false; receipt: string } {
-    return { connections: Object.fromEntries([...this.connections].map(([id, value]) => [id, clone(value)])), capabilities: Object.fromEntries([...this.capabilities].map(([id, value]) => [id, clone(value)])), credentialMaterialStored: false, receipt: `provider=github-actions-oidc; connections=${this.connections.size}; capabilities=${this.capabilities.size}; storage=memory-qualification; tokenMaterial=not-stored; liveProviderQualification=not-claimed` };
+  snapshot(): GitHubActionsBridgeSnapshot & { receipt: string } {
+    const now = Date.parse(this.now());
+    const replayJtiDigests = [...this.replayJtiDigests.entries()]
+      .filter(([, expiresAt]) => Date.parse(expiresAt) > now)
+      .map(([key, expiresAt]) => {
+        try {
+          const decoded: unknown = JSON.parse(key);
+          if (Array.isArray(decoded) && decoded.length === 2 && typeof decoded[0] === "string" && typeof decoded[1] === "string") return { connectionId: decoded[0], jtiDigest: decoded[1], expiresAt };
+        } catch {
+          // A malformed local replay entry is omitted from the credential-free snapshot.
+        }
+        return undefined;
+      })
+      .filter((entry): entry is { connectionId: string; jtiDigest: string; expiresAt: string } => entry !== undefined);
+    return { connections: Object.fromEntries([...this.connections].map(([id, value]) => [id, clone(value)])), capabilities: Object.fromEntries([...this.capabilities].map(([id, value]) => [id, clone(value)])), replayJtiDigests, credentialMaterialStored: false, receipt: `provider=github-actions-oidc; connections=${this.connections.size}; capabilities=${this.capabilities.size}; replayJtiDigests=${replayJtiDigests.length}; storage=realm-boundary; tokenMaterial=not-stored; liveProviderQualification=not-claimed` };
   }
 
   private validateClaims(connection: GitHubActionsBridgeConnection, claims: GitHubActionsOidcClaims): GitHubActionsBridgeFailure | undefined {

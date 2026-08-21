@@ -74,6 +74,15 @@ export type AnyamRealmOAuthEnv = CustomerRealmWorkerEnv & {
   ANYAM_AUTHORITY_RECOVERY_KEY_ID?: string;
   /** Shared only with the bound Public Gateway service; never a user credential. */
   ANYAM_PUBLIC_GATEWAY_SERVICE_SECRET?: string;
+  /** Customer-owned verifier for GitHub Actions OIDC assertions. The token is
+   * forwarded only to this binding and never stored in Realm state. */
+  ANYAM_GITHUB_OIDC_VERIFIER?: Fetcher;
+  /** Customer-owned RepositoryDriver/import boundary for Bridge bundles. */
+  ANYAM_GITHUB_BRIDGE_IMPORTER?: Fetcher;
+  /** Customer-owned Authority cutover boundary for an owner-confirmed empty Project. */
+  ANYAM_GITHUB_BRIDGE_CUTOVER?: Fetcher;
+  /** Customer-owned Change proposal boundary for GitHub-ahead history. */
+  ANYAM_GITHUB_BRIDGE_PROPOSAL?: Fetcher;
   ANYAM_OWNER_BOOTSTRAP_TOKEN?: string;
   ANYAM_REALM_RP_ID?: string;
   OAUTH_PROVIDER?: OAuthHelpers;

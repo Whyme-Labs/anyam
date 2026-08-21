@@ -31,12 +31,16 @@ import { CREDENTIAL_AUDIENCES, RealmIdentityError, RealmIdentityPolicy, type Cap
 import type { ResourceRef } from "../../../src/kernel/contracts.ts";
 import { oauthConsentBindingMatches } from "../../../src/identity/oauth-consent.ts";
 import { createAnyamRealmOAuthProvider, type AnyamRealmOAuthEnv } from "./oauth-provider.ts";
-import { handleAnyamRealmOwnerRequest } from "./passkey-owner.ts";
+import { handleAnyamRealmOwnerRequest, requestAnyamRealmCoordinator } from "./passkey-owner.ts";
 import { createCloudflareCustomerProviderAdapters } from "./customer-provider-adapters.ts";
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "./coordinator-protocol.ts";
 import { handleAuthorityRequest } from "./authority-edge.ts";
 import { isMcpDeliveryOperation, mcpDeliveryScope, parseMcpDeliveryBinding, MCP_DELIVERY_OPERATIONS, type McpDeliveryOperation } from "./mcp-delivery-grant.ts";
 import { AUTHORITY_RECOVERY_PROTOCOL, createAuthorityRecoveryBundle, verifyAuthorityRecoveryBundle, type AuthorityRecoveryBundle } from "../../../src/cloudflare/authority-recovery.ts";
+import { GitHubActionsBridgeAuthority, type GitHubActionsBridgeConnectionInput, type GitHubActionsBridgeOperation, type GitHubActionsBridgeSnapshot, type GitHubActionsOidcVerification } from "../../../src/portability/github-actions-bridge.ts";
+import { GitHubActionsBridgeImportCoordinator, MemoryGitHubActionsBridgeImportLedger, type GitHubActionsBridgeImportSnapshot, type GitHubActionsBridgeOwnerConfirmation, type GitHubActionsBridgeRepositoryImportReceipt } from "../../../src/portability/github-actions-bridge-import.ts";
+import { encodeGitHubActionsBridgeSourcePackage, parseGitHubActionsBridgeHistory, parseGitHubActionsBridgeMode, parseGitHubActionsBridgePlan, parseGitHubActionsBridgeSourcePackage } from "./github-actions-bridge-contract.ts";
+import { handleGitHubActionsBridgeRequest } from "./github-actions-bridge-route.ts";
 
 export type Env = AnyamRealmOAuthEnv;
 
@@ -48,6 +52,8 @@ const REALM_OAUTH_GRANT_PREFIX = "anyam/realm-oauth-grant/v1:";
 const REALM_AUTHORITY_SNAPSHOT_KEY = "anyam/realm-authority/snapshot/v1";
 const REALM_AUTHORITY_RECOVERY_STATUS_KEY = "anyam/realm-authority/recovery-status/v1";
 const REALM_AUTHORITY_RECOVERY_RESTORE_PREFIX = "anyam/realm-authority/recovery-restore/v1:";
+const REALM_GITHUB_ACTIONS_BRIDGE_SNAPSHOT_KEY = "anyam/github-actions-bridge/snapshot/v1";
+const REALM_GITHUB_ACTIONS_BRIDGE_IMPORT_SNAPSHOT_KEY = "anyam/github-actions-bridge/import-snapshot/v1";
 const REALM_COORDINATOR_PROTOCOL = "anyam.realm-coordinator/v1" as const;
 const REALM_QUALIFICATION_PROJECT_ID = "project:realm-qualification";
 const REALM_QUALIFICATION_SOURCE_SPACE_ID = "source:realm-qualification";
@@ -172,6 +178,90 @@ function coordinatorString(body: CoordinatorRequestBody, key: string): string {
   const value = body[key];
   if (typeof value !== "string" || value.trim().length === 0) throw new Error(`${key} is required`);
   return value.trim();
+}
+
+function bridgeOperation(body: CoordinatorRequestBody): GitHubActionsBridgeOperation {
+  const operation = coordinatorString(body, "operation");
+  if (operation !== "inbound" && operation !== "outbound" && operation !== "proposal") throw new RealmIdentityError({ code: "github_bridge.operation_invalid", message: `GitHub Actions Bridge operation ${operation} is unsupported.`, recoveryAction: "request inbound, proposal, or outbound for the exact owner-approved connection", receipt: `operation=${operation}; capability=not-issued; credentialMaterialStored=false` });
+  return operation;
+}
+
+function bridgeConnectionInput(value: unknown): GitHubActionsBridgeConnectionInput {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new RealmIdentityError({ code: "github_bridge.connection_invalid", message: "The Bridge connection request must be an object.", recoveryAction: "send the owner-approved repository, workflow, ref, audience, operation, and expiry fields", receipt: "connection=object-required; transition=not-applied; credentialMaterialStored=false" });
+  const input = value as Record<string, unknown>;
+  const required = (key: string): string => coordinatorString(input, key);
+  const array = (key: string): string[] => coordinatorStringArray(input, key);
+  const allowedEvents: GitHubActionsBridgeConnectionInput["allowedEvents"] = [];
+  for (const event of array("allowedEvents")) {
+    if (event !== "push" && event !== "pull_request" && event !== "workflow_dispatch") throw new RealmIdentityError({ code: "github_bridge.event_invalid", message: `Bridge event ${event} is unsupported.`, recoveryAction: "choose push, pull_request, or workflow_dispatch for the owner-approved connection", receipt: `event=${event}; transition=not-applied; credentialMaterialStored=false` });
+    allowedEvents.push(event);
+  }
+  const allowedOperations: GitHubActionsBridgeConnectionInput["allowedOperations"] = [];
+  for (const operation of array("allowedOperations")) {
+    if (operation !== "inbound" && operation !== "outbound" && operation !== "proposal") throw new RealmIdentityError({ code: "github_bridge.operation_invalid", message: `Bridge operation ${operation} is unsupported.`, recoveryAction: "choose inbound, proposal, or outbound for the owner-approved connection", receipt: `operation=${operation}; transition=not-applied; credentialMaterialStored=false` });
+    allowedOperations.push(operation);
+  }
+  const expectedJobWorkflowRef = input.expectedJobWorkflowRef === null || input.expectedJobWorkflowRef === undefined ? null : required("expectedJobWorkflowRef");
+  return {
+    ...(input.id === undefined ? {} : { id: required("id") }),
+    realmId: required("realmId"),
+    projectId: required("projectId"),
+    sourceSpaceId: required("sourceSpaceId"),
+    repositoryOwner: required("repositoryOwner"),
+    repositoryOwnerId: required("repositoryOwnerId"),
+    repository: required("repository"),
+    repositoryId: required("repositoryId"),
+    workflowRef: required("workflowRef"),
+    expectedJobWorkflowRef,
+    ref: required("ref"),
+    audience: required("audience"),
+    allowedEvents,
+    allowedOperations,
+    expiresAt: required("expiresAt"),
+  };
+}
+
+function bridgeVerification(value: unknown): GitHubActionsOidcVerification {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new RealmIdentityError({ code: "github_bridge.verification_invalid", message: "The customer-owned OIDC verifier did not return a verification object.", recoveryAction: "repair the bound OIDC verifier response and retry; no Bridge state changed", receipt: "verification=object-required; capability=not-issued; credentialMaterialStored=false" });
+  const record = value as Record<string, unknown>;
+  if (record.status === "verified") {
+    if (typeof record.receipt !== "string" || record.receipt.trim().length === 0 || !("claims" in record)) throw new RealmIdentityError({ code: "github_bridge.verification_invalid", message: "The verified OIDC response is missing claims or a receipt.", recoveryAction: "return verified claims and a credential-free receipt from the bound OIDC verifier", receipt: "verification=verified-shape-invalid; capability=not-issued; credentialMaterialStored=false" });
+    return { status: "verified", claims: record.claims, receipt: record.receipt };
+  }
+  if (record.status === "failed" && typeof record.code === "string" && typeof record.recoveryAction === "string" && typeof record.receipt === "string") return { status: "failed", code: record.code, recoveryAction: record.recoveryAction, receipt: record.receipt };
+  throw new RealmIdentityError({ code: "github_bridge.verification_invalid", message: "The customer-owned OIDC verifier returned an unsupported result.", recoveryAction: "return status=verified with claims or status=failed with code, recoveryAction, and receipt", receipt: "verification=unsupported; capability=not-issued; credentialMaterialStored=false" });
+}
+
+function bridgeObject(value: unknown, field: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new RealmIdentityError({ code: "github_bridge.service_response_invalid", message: `${field} must be an object.`, recoveryAction: "repair the customer-owned Bridge service response and retry the named checkpoint", receipt: `${field}=object-required; credentialMaterialStored=false` });
+  return value as Record<string, unknown>;
+}
+
+function bridgeServiceText(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) throw new RealmIdentityError({ code: "github_bridge.service_response_invalid", message: `${field} must be a non-empty string.`, recoveryAction: "return a complete credential-free Bridge service receipt and retry the named checkpoint", receipt: `${field}=string-required; credentialMaterialStored=false` });
+  return value.trim();
+}
+
+function bridgeServiceObjectFormat(value: unknown): "sha1" | "sha256" {
+  const format = bridgeServiceText(value, "objectFormat");
+  if (format !== "sha1" && format !== "sha256") throw new RealmIdentityError({ code: "github_bridge.service_response_invalid", message: "Bridge service object format is unsupported.", recoveryAction: "return sha1 or sha256 in the credential-free RepositoryDriver receipt", receipt: `objectFormat=${format}; credentialMaterialStored=false` });
+  return format;
+}
+
+function bridgeServiceRefs(value: unknown): { name: string; oid: string }[] {
+  if (!Array.isArray(value)) throw new RealmIdentityError({ code: "github_bridge.service_response_invalid", message: "Bridge service refs must be an array.", recoveryAction: "return the complete verified Git ref list and retry the named checkpoint", receipt: "refs=array-required; credentialMaterialStored=false" });
+  return value.map((entry, index) => {
+    const ref = bridgeObject(entry, `refs[${index}]`);
+    return { name: bridgeServiceText(ref.name, `refs[${index}].name`), oid: bridgeServiceText(ref.oid, `refs[${index}].oid`) };
+  });
+}
+
+function bridgeImportReceipt(value: unknown): GitHubActionsBridgeRepositoryImportReceipt {
+  const result = bridgeObject(value, "repositoryImport");
+  if (result.status !== "succeeded") throw new RealmIdentityError({ code: "github_bridge.service_response_invalid", message: "The RepositoryDriver service did not return a succeeded import receipt.", recoveryAction: "repair the customer-owned RepositoryDriver/import boundary and resume the named checkpoint", receipt: "repositoryImport=status-invalid; credentialMaterialStored=false" });
+  const lfsState = bridgeServiceText(result.lfsState, "lfsState");
+  if (lfsState !== "empty" && lfsState !== "complete") throw new RealmIdentityError({ code: "github_bridge.service_response_invalid", message: "The RepositoryDriver service returned an incomplete LFS state.", recoveryAction: "complete the declared LFS object set before activation", receipt: `lfsState=${lfsState}; credentialMaterialStored=false` });
+  return { status: "succeeded", repositoryId: bridgeServiceText(result.repositoryId, "repositoryId"), sourceSnapshotId: bridgeServiceText(result.sourceSnapshotId, "sourceSnapshotId"), objectFormat: bridgeServiceObjectFormat(result.objectFormat), refs: bridgeServiceRefs(result.refs), bundleDigest: bridgeServiceText(result.bundleDigest, "bundleDigest"), lfsState, checkpointId: bridgeServiceText(result.checkpointId, "checkpointId"), receipt: bridgeServiceText(result.receipt, "receipt") };
 }
 
 function coordinatorOptionalString(body: CoordinatorRequestBody, key: string, fallback: string): string {
@@ -584,6 +674,8 @@ function coordinatorError(error: unknown): Response {
 export class AnyamRealmCoordinator extends DurableObject<Env> {
   private readonly initialized: Promise<void>;
   private identity: RealmIdentityPolicy | undefined;
+  private githubActionsBridge!: GitHubActionsBridgeAuthority;
+  private githubActionsBridgeImports!: GitHubActionsBridgeImportCoordinator;
   private recoveryStatus: RealmRecoveryStatus = "active";
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -598,12 +690,34 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         relyingPartyId: snapshot?.realm.relyingPartyId ?? env.ANYAM_REALM_RP_ID ?? "anyam.local",
       });
       if (snapshot) this.identity.restoreOperationalSnapshot(snapshot);
+      const bridgeSnapshot = await ctx.storage.get<GitHubActionsBridgeSnapshot>(REALM_GITHUB_ACTIONS_BRIDGE_SNAPSHOT_KEY);
+      this.githubActionsBridge = new GitHubActionsBridgeAuthority(bridgeSnapshot ? { snapshot: bridgeSnapshot } : {});
+      const importSnapshot = await ctx.storage.get<GitHubActionsBridgeImportSnapshot>(REALM_GITHUB_ACTIONS_BRIDGE_IMPORT_SNAPSHOT_KEY);
+      this.githubActionsBridgeImports = new GitHubActionsBridgeImportCoordinator({ ledger: new MemoryGitHubActionsBridgeImportLedger(importSnapshot?.completedOperationIds ?? []) });
     });
   }
 
   private requireIdentity(): RealmIdentityPolicy {
     if (!this.identity) throw new Error("realm identity is not hydrated");
     return this.identity;
+  }
+
+  private requireGitHubActionsBridge(): GitHubActionsBridgeAuthority {
+    if (!this.githubActionsBridge) throw new Error("github_actions_bridge_not_hydrated");
+    return this.githubActionsBridge;
+  }
+
+  private requireGitHubActionsBridgeImports(): GitHubActionsBridgeImportCoordinator {
+    if (!this.githubActionsBridgeImports) throw new Error("github_actions_bridge_import_not_hydrated");
+    return this.githubActionsBridgeImports;
+  }
+
+  private async persistGitHubActionsBridge(): Promise<void> {
+    await this.ctx.storage.put(REALM_GITHUB_ACTIONS_BRIDGE_SNAPSHOT_KEY, this.requireGitHubActionsBridge().snapshot());
+  }
+
+  private async persistGitHubActionsBridgeImports(): Promise<void> {
+    await this.ctx.storage.put(REALM_GITHUB_ACTIONS_BRIDGE_IMPORT_SNAPSHOT_KEY, this.requireGitHubActionsBridgeImports().snapshot());
   }
 
   private async persistIdentity(): Promise<void> {
@@ -1303,6 +1417,104 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "authorized", projectId, operation, actor: { id: session.actorId, role: relationship.role }, realmId: identitySnapshot.realm.id, authorizationEpoch: identitySnapshot.realm.authorizationEpoch, receipt: `publicGateway=moderation-authorized; project=${projectId}; operation=${operation}; actor=${session.actorId}; role=${relationship.role}; authorizationEpoch=${identitySnapshot.realm.authorizationEpoch}; credentialMaterialStored=false` });
   }
 
+  private async githubActionsBridgeAudience(body: CoordinatorRequestBody): Promise<Response> {
+    const connectionId = coordinatorString(body, "connectionId");
+    const connection = this.requireGitHubActionsBridge().snapshot().connections[connectionId];
+    if (!connection) return coordinatorJson({ protocol: "anyam.github-actions-bridge/v1", status: "blocked", code: "connection_not_found", recoveryAction: "start a fresh owner-approved GitHub Actions Bridge connection", receipt: `connection=${connectionId}; audience=not-returned; credentialMaterialStored=false` }, 404);
+    if (connection.status !== "pending" && connection.status !== "active") return coordinatorJson({ protocol: "anyam.github-actions-bridge/v1", status: "blocked", code: `connection_${connection.status}`, recoveryAction: "create a fresh Bridge connection after inspecting the owner-visible checkpoint", receipt: `connection=${connectionId}; status=${connection.status}; audience=not-returned; credentialMaterialStored=false` }, 409);
+    return coordinatorJson({ protocol: "anyam.github-actions-bridge/v1", status: "succeeded", connectionId, audience: connection.audience, receipt: `connection=${connectionId}; audience=owner-configured; credentialMaterialStored=false` });
+  }
+
+  private async githubActionsBridgeCreateConnection(body: CoordinatorRequestBody): Promise<Response> {
+    this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const input = bridgeConnectionInput(body.connection);
+    if (input.realmId !== this.requireIdentity().getRecoverySnapshot().realm.id) throw new RealmIdentityError({ code: "github_bridge.realm_mismatch", message: "The Bridge connection Realm does not match this customer Realm.", recoveryAction: "create the connection through the customer Realm that owns the Project and Source Space", receipt: `connectionRealm=${input.realmId}; currentRealm=${this.requireIdentity().getRecoverySnapshot().realm.id}; transition=not-applied; credentialMaterialStored=false` });
+    const authority = await this.authoritySnapshot();
+    const project = authority.projects[input.projectId];
+    if (!project || !project.sourceSpaceIds.includes(input.sourceSpaceId) || !authority.sourceSpaces[input.sourceSpaceId]) throw new RealmIdentityError({ code: "github_bridge.project_source_space_not_found", message: "The Bridge connection Project or Source Space is not available in this Realm.", recoveryAction: "create the Project and Source Space through the customer Authority before connecting GitHub Actions", receipt: `project=${input.projectId}; sourceSpace=${input.sourceSpaceId}; connection=not-created; discoverable=false; credentialMaterialStored=false` });
+    const result = this.requireGitHubActionsBridge().createPendingConnection(input);
+    await this.persistGitHubActionsBridge();
+    return coordinatorJson(result, result.status === "succeeded" ? 200 : 422);
+  }
+
+  private async githubActionsBridgeRevokeConnection(body: CoordinatorRequestBody): Promise<Response> {
+    this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const result = this.requireGitHubActionsBridge().revokeConnection(coordinatorString(body, "connectionId"), coordinatorString(body, "reason"));
+    await this.persistGitHubActionsBridge();
+    return coordinatorJson(result, result.status === "succeeded" ? 200 : 404);
+  }
+
+  private async githubActionsBridgeExchange(body: CoordinatorRequestBody): Promise<Response> {
+    const result = await this.requireGitHubActionsBridge().exchangeVerified({ connectionId: coordinatorString(body, "connectionId"), operation: bridgeOperation(body), verification: bridgeVerification(body.verification) });
+    await this.persistGitHubActionsBridge();
+    return coordinatorJson(result, result.status === "succeeded" ? 200 : result.code === "connection_not_found" ? 404 : result.code === "operation_denied" ? 403 : 409);
+  }
+
+  private async githubActionsBridgePrepare(body: CoordinatorRequestBody): Promise<Response> {
+    const sourcePackage = parseGitHubActionsBridgeSourcePackage(body.sourcePackage);
+    const history = parseGitHubActionsBridgeHistory(body.history);
+    const mode = parseGitHubActionsBridgeMode(body.mode);
+    const operation: GitHubActionsBridgeOperation = mode === "proposal" ? "proposal" : "inbound";
+    const authorized = this.requireGitHubActionsBridge().authorize(sourcePackage.capabilityId, operation);
+    if (authorized.status === "failed") return coordinatorJson(authorized, 403);
+    const prepared = await this.requireGitHubActionsBridgeImports().prepare({ capability: authorized.value, sourcePackage, history, mode });
+    await this.persistGitHubActionsBridgeImports();
+    return coordinatorJson(prepared, prepared.status === "succeeded" ? 200 : 422);
+  }
+
+  private async bridgeService(binding: Fetcher | undefined, path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (!binding) throw new RealmIdentityError({ code: "github_bridge.service_unconfigured", message: `Customer-owned GitHub Actions Bridge service ${path} is not configured.`, recoveryAction: "bind the qualified customer-owned Bridge service before accepting this operation", receipt: `service=${path}; configured=false; credentialMaterialStored=false` });
+    const response = await binding.fetch(`https://anyam-github-actions-bridge${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const value = await response.json().catch(() => ({}));
+    if (!response.ok) throw new RealmIdentityError({ code: "github_bridge.service_rejected", message: `Customer-owned GitHub Actions Bridge service ${path} rejected the checkpoint.`, recoveryAction: "inspect the customer-owned service receipt and resume the same immutable checkpoint only when safe", receipt: `service=${path}; httpStatus=${response.status}; credentialMaterialStored=false` });
+    return bridgeObject(value, `service.${path}`);
+  }
+
+  private async githubActionsBridgeActivate(body: CoordinatorRequestBody): Promise<Response> {
+    const ownerSessionId = coordinatorString(body, "sessionId");
+    const owner = this.authorityOwnerSession(ownerSessionId);
+    const sourcePackage = parseGitHubActionsBridgeSourcePackage(body.sourcePackage);
+    const history = parseGitHubActionsBridgeHistory(body.history);
+    const plan = parseGitHubActionsBridgePlan(body.plan);
+    const authorized = this.requireGitHubActionsBridge().authorize(sourcePackage.capabilityId, "inbound");
+    if (authorized.status === "failed") return coordinatorJson(authorized, 403);
+    const confirmation: GitHubActionsBridgeOwnerConfirmation = { status: "confirmed", principalId: owner.principalId, sessionId: owner.sessionId, receipt: `owner=verified; principal=${owner.principalId}; package=owner-confirmed; credentialMaterialStored=false` };
+    const result = await this.requireGitHubActionsBridgeImports().activateInitialImport({
+      plan,
+      capability: authorized.value,
+      sourcePackage,
+      history,
+      ownerConfirmation: confirmation,
+      importer: { importQuarantined: async ({ sourcePackage: packageValue, checkpointId }) => bridgeImportReceipt(await this.bridgeService(this.env.ANYAM_GITHUB_BRIDGE_IMPORTER, "/import", { protocol: "anyam.github-actions-bridge-service/v1", operation: "quarantine", sourcePackage: encodeGitHubActionsBridgeSourcePackage(packageValue), checkpointId })) },
+      cutover: { activateImportedRepository: async ({ sourcePackage: packageValue, imported, ownerConfirmation: ownerValue, checkpointId }) => {
+        const value = await this.bridgeService(this.env.ANYAM_GITHUB_BRIDGE_CUTOVER, "/cutover", { protocol: "anyam.github-actions-bridge-service/v1", operation: "initialization-cutover", sourcePackage: encodeGitHubActionsBridgeSourcePackage(packageValue), imported, owner: { principalId: ownerValue.principalId, receipt: ownerValue.receipt }, checkpointId });
+        return { status: "succeeded", projectRevisionId: bridgeServiceText(value.projectRevisionId, "projectRevisionId"), receipt: bridgeServiceText(value.receipt, "receipt") };
+      } },
+    });
+    await this.persistGitHubActionsBridgeImports();
+    return coordinatorJson(result, result.status === "succeeded" ? 200 : result.code === "owner_confirmation_required" ? 403 : 409);
+  }
+
+  private async githubActionsBridgeProposal(body: CoordinatorRequestBody): Promise<Response> {
+    const sourcePackage = parseGitHubActionsBridgeSourcePackage(body.sourcePackage);
+    const history = parseGitHubActionsBridgeHistory(body.history);
+    const plan = parseGitHubActionsBridgePlan(body.plan);
+    const authorized = this.requireGitHubActionsBridge().authorize(sourcePackage.capabilityId, "proposal");
+    if (authorized.status === "failed") return coordinatorJson(authorized, 403);
+    const result = await this.requireGitHubActionsBridgeImports().createProposal({
+      plan,
+      capability: authorized.value,
+      sourcePackage,
+      history,
+      creator: { createProposal: async ({ sourcePackage: packageValue, history: historyValue, capability: capabilityValue, checkpointId }) => {
+        const value = await this.bridgeService(this.env.ANYAM_GITHUB_BRIDGE_PROPOSAL, "/proposal", { protocol: "anyam.github-actions-bridge-service/v1", operation: "create-proposal", sourcePackage: encodeGitHubActionsBridgeSourcePackage(packageValue), history: historyValue, capability: capabilityValue, checkpointId });
+        return { status: "succeeded", changeId: bridgeServiceText(value.changeId, "changeId"), checkpointId: bridgeServiceText(value.checkpointId, "checkpointId"), receipt: bridgeServiceText(value.receipt, "receipt") };
+      } },
+    });
+    await this.persistGitHubActionsBridgeImports();
+    return coordinatorJson(result, result.status === "succeeded" ? 200 : 409);
+  }
+
   override async fetch(request: Request): Promise<Response> {
     await this.initialized;
     const url = new URL(request.url);
@@ -1333,6 +1545,13 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/mirrors/internal") return await this.authorityMirrors(body);
       if (url.pathname === "/authority/promotion/execute/internal") return await this.authorityPromotionExecute(body);
       if (url.pathname === "/authority/promotion/reconcile/internal") return await this.authorityPromotionReconcile(body);
+      if (url.pathname === "/github-actions-bridge/audience/internal") return await this.githubActionsBridgeAudience(body);
+      if (url.pathname === "/github-actions-bridge/connection/create/internal") return await this.githubActionsBridgeCreateConnection(body);
+      if (url.pathname === "/github-actions-bridge/connection/revoke/internal") return await this.githubActionsBridgeRevokeConnection(body);
+      if (url.pathname === "/github-actions-bridge/exchange/internal") return await this.githubActionsBridgeExchange(body);
+      if (url.pathname === "/github-actions-bridge/prepare/internal") return await this.githubActionsBridgePrepare(body);
+      if (url.pathname === "/github-actions-bridge/activate/internal") return await this.githubActionsBridgeActivate(body);
+      if (url.pathname === "/github-actions-bridge/proposal/internal") return await this.githubActionsBridgeProposal(body);
       if (url.pathname === "/authority/promotion/status/internal") return await this.authorityPromotionStatus(body);
       if (url.pathname === "/authority/mcp-command/internal") return await this.authorityMcpCommand(body);
       if (url.pathname === "/authority/runner-profile/internal") return await this.authorityRunnerProfile(body);
@@ -1474,7 +1693,8 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
           if (agentMutationRequested && binding) {
             const actor = identity.getRecoverySnapshot().actors[session.actorId];
             if (!actor || actor.kind !== "agent" || actor.agentId !== binding.agentId || session.id !== binding.agentSessionId) throw new RealmIdentityError({ code: "oauth.grant_agent_session_invalid", message: "The OAuth grant session is not the delegated Agent Session named by the resource.", recoveryAction: "reuse the exact delegated Agent Session and restart authorization", receipt: "oauthGrant=agent-session-mismatch; taskGrant=not-created" });
-            const capability = deliveryOperations[0] ? mcpDeliveryScope(deliveryOperations[0]) : scopes.includes("workspace.write") ? "workspace.write" : scopes.includes("change.write") ? "change.publish_revision" : "run.invoke";
+            if (!binding.taskId || !binding.capabilityGrantId) throw new RealmIdentityError({ code: "oauth.grant_agent_binding_incomplete", message: "The OAuth Agent delivery binding is missing its Task or Capability Grant.", recoveryAction: "restart delegation and authorize the exact Task/Grant resource", receipt: "oauthGrant=agent-binding-incomplete; taskGrant=not-created" });
+            const capability: Capability = deliveryOperations[0] ? mcpDeliveryScope(deliveryOperations[0]) : scopes.includes("workspace.write") ? "workspace.write" : scopes.includes("change.write") ? "change.publish_revision" : "run.invoke";
             const validation = identity.validateTaskGrant({ principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, taskId: binding.taskId, grantId: binding.capabilityGrantId, resource: binding.resourceRef, sourceSpaceIds, action: capability });
             if (!validation.valid) throw new RealmIdentityError({ code: validation.code, message: "The delegated Agent Task/Grant is not live for this OAuth resource.", recoveryAction: validation.recoveryAction, receipt: validation.receipt });
           }
@@ -2135,6 +2355,8 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const publicGatewayResponse = await publicGatewayAuthorization(request, env);
     if (publicGatewayResponse) return publicGatewayResponse;
+    const githubActionsBridgeResponse = await handleGitHubActionsBridgeRequest(request, env);
+    if (githubActionsBridgeResponse) return githubActionsBridgeResponse;
     // Owner ceremony routes do not need the OAuth provider to be constructed.
     // This keeps local HTTP development useful while the provider correctly
     // enforces HTTPS issuer metadata for MCP/OAuth requests.

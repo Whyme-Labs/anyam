@@ -2,19 +2,19 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createWorkspaceBoundary, LINUX_BWRAP_CONTAINMENT_RECEIPT, removeWorkspaceBoundary, runWorkspaceCommand } from "../packages/create-anyam/src/workspace-boundary.ts";
+import { createWorkspaceBoundary, LINUX_BWRAP_CONTAINMENT_RECEIPT, measureLinuxWorkspaceResourceLimits, removeWorkspaceBoundary, runWorkspaceCommand } from "../packages/create-anyam/src/workspace-boundary.ts";
 
 const protocol = "anyam.linux-workspace-qualification/v1" as const;
 const root = await mkdtemp(join(tmpdir(), "anyam-linux-workspace-qualification-"));
 const sourceDirectory = process.env.GITHUB_WORKSPACE ?? process.cwd();
 const stateDirectory = join(root, "state");
 const workspaceDirectory = join(root, "workspace");
-
 let boundary: Awaited<ReturnType<typeof createWorkspaceBoundary>> | undefined;
 let receipt: Record<string, unknown> | undefined;
 let failure: unknown;
 try {
   await mkdir(stateDirectory, { recursive: true });
+  const resourceLimits = await measureLinuxWorkspaceResourceLimits(sourceDirectory);
   boundary = await createWorkspaceBoundary({
     sourceDirectory,
     stateDirectory,
@@ -24,6 +24,7 @@ try {
     mode: "enforceable",
     network: [],
     executablePaths: [process.execPath],
+    resourceLimits,
     workspaceDirectory,
   });
   const result = await runWorkspaceCommand({
@@ -37,6 +38,7 @@ try {
     status: result.status === "passed" ? "succeeded" : "blocked",
     enforcement: boundary.enforcement,
     containment: LINUX_BWRAP_CONTAINMENT_RECEIPT,
+    resourceLimits,
     networkEnforcement: boundary.networkEnforcement,
     exitCode: result.exitCode,
     stdoutDigest: result.stdoutDigest,

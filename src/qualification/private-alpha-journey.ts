@@ -49,6 +49,7 @@ import { SmartHttpRepositoryDriver } from "../portability/smart-http-driver.ts";
 import { projectExportDigest } from "../portability/project-export.ts";
 import { gitCommitIdentity, gitProjectRevisionId, gitTreeIdentity, inspectGitSource } from "../../packages/create-anyam/src/git-source.ts";
 import { LocalAgentManager } from "../../packages/create-anyam/src/agent.ts";
+import { measureLinuxWorkspaceResourceLimits } from "../../packages/create-anyam/src/workspace-boundary.ts";
 import { scaffoldProject, startChange } from "../../packages/create-anyam/src/scaffold.ts";
 
 const execFile = promisify(execFileCallback);
@@ -349,7 +350,8 @@ export async function runPrivateAlphaJourneyQualification(): Promise<PrivateAlph
     const view = workspaceValue.view as { id: string };
     authorityExecute(authority, ownerAuthority, "change.create", "private-alpha:authority:change", { projectId: project.id, changeId: changeMetadata.id, intentId: changeMetadata.intentId, baseProjectRevisionId: baseProjectRevision.id, workspaceId: changeMetadata.local.workspaceId });
 
-    agentManager = new LocalAgentManager({ directory: workingDirectory, stateDirectory: join(root, "agent-state"), principalId: ownerSession.principalId, clientId: "client:anyam-local-broker" });
+    const resourceLimits = process.platform === "linux" ? await measureLinuxWorkspaceResourceLimits(workingDirectory) : undefined;
+    agentManager = new LocalAgentManager({ directory: workingDirectory, stateDirectory: join(root, "agent-state"), principalId: ownerSession.principalId, clientId: "client:anyam-local-broker", ...(resourceLimits ? { resourceLimits } : {}) });
     const started = await agentManager.startSession({ agent: "cli", changeId: changeMetadata.id, mode: "enforceable" });
     const runResult = await agentManager.invokeTool("run.start", { actionId: "action:check" });
     const localRun = runResult.run as { id: string; status: string; actionId: string; evidenceId: string; sourceRevision: string; sourceSnapshot: string; actionContractDigest: string; verifierId: string; inputDigests: readonly string[]; outputDigests: readonly string[]; outputDigest: string; toolchainDigest: string; environmentDigest: string; actorId: string; grantId: string; taskId: string; receipt: string };

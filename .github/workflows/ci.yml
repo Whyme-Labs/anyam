@@ -61,7 +61,7 @@ jobs:
           bwrap --version
           probe="$(mktemp -d)"
           trap 'rm -rf "$probe"' EXIT
-          bwrap --die-with-parent --unshare-net --ro-bind /usr /usr --ro-bind /bin /bin --bind "$probe" "$probe" --chdir "$probe" /usr/bin/true
+          bwrap --die-with-parent --unshare-net --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /sbin /sbin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --ro-bind /etc /etc --proc /proc --dev /dev --bind "$probe" "$probe" --chdir "$probe" /usr/bin/true
 
       - name: Install locked dependencies
         run: npm ci --ignore-scripts

@@ -146,6 +146,25 @@ function commandExists(command: string): boolean {
   return ["/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin"].some((root) => existsSync(join(root, command)));
 }
 
+function appendReadonlyBind(args: string[], path: string): void {
+  if (existsSync(path)) args.push("--ro-bind", path, path);
+}
+
+function linuxBwrapRuntimeArgs(input: { boundary: WorkspaceBoundary; invokedCommand: string }): string[] {
+  const args = ["--die-with-parent", "--unshare-net"];
+  for (const path of ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"]) appendReadonlyBind(args, path);
+  args.push("--proc", "/proc", "--dev", "/dev");
+
+  const executableRoots = new Set<string>();
+  for (const executablePath of [input.invokedCommand, ...input.boundary.executablePaths]) {
+    const root = dirname(executablePath);
+    executableRoots.add(root);
+    executableRoots.add(dirname(root));
+  }
+  for (const root of executableRoots) appendReadonlyBind(args, root);
+  return args;
+}
+
 async function gitOutput(directory: string, args: readonly string[]): Promise<string> {
   try {
     const result = await execFile("git", [...args], { cwd: directory, encoding: "utf8" });
@@ -410,7 +429,7 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
   const executableArgs = input.boundary.enforcement === "macos-sandbox-exec"
     ? ["-p", input.boundary.profile ?? "", invokedCommand, ...invokedArgs]
     : input.boundary.enforcement === "linux-bwrap"
-      ? ["--die-with-parent", ...(input.boundary.networkEnforcement === "deny-all" ? ["--unshare-net"] : []), "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin", "--bind", input.boundary.workspaceDirectory, input.boundary.workspaceDirectory, "--chdir", input.boundary.workspaceDirectory, invokedCommand, ...invokedArgs]
+      ? [...linuxBwrapRuntimeArgs({ boundary: input.boundary, invokedCommand }), "--bind", input.boundary.workspaceDirectory, input.boundary.workspaceDirectory, "--chdir", input.boundary.workspaceDirectory, invokedCommand, ...invokedArgs]
       : shellCommand ? invokedArgs : ["-c", `${input.command} ${args.map((arg) => JSON.stringify(arg)).join(" ")}`];
   const detached = process.platform !== "win32" && input.boundary.enforcement !== "none";
   const child = spawn(executable, executableArgs, { cwd: input.boundary.workspaceDirectory, env: input.boundary.environment, stdio: ["inherit", "pipe", "pipe"], detached });

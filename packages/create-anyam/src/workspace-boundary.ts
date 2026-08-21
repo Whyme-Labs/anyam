@@ -156,7 +156,7 @@ function linuxBwrapRuntimeArgs(input: { boundary: WorkspaceBoundary; invokedComm
   args.push("--proc", "/proc", "--dev", "/dev");
 
   const executableRoots = new Set<string>();
-  for (const executablePath of [input.invokedCommand, ...input.boundary.executablePaths]) {
+  for (const executablePath of [process.execPath, input.invokedCommand, ...input.boundary.executablePaths]) {
     const root = dirname(executablePath);
     executableRoots.add(root);
     executableRoots.add(dirname(root));

@@ -24,6 +24,7 @@ import {
   type StageGateDecision,
 } from "../kernel/evidence.ts";
 import { targetDeploymentProfile } from "../delivery/target-deployment.ts";
+import { createReleaseInputSet } from "../delivery/release-input.ts";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -1372,6 +1373,13 @@ export async function runLocalRelease(input: {
     kind: "indeterminate" as const,
     message,
   }))];
+  const inputSet = createReleaseInputSet({
+    buildDefinitionDigest: manifest.digest,
+    dependencyDigest: input.context.dependencyDigest,
+    toolchainDigest: input.context.toolchainDigest,
+    environmentDigest: input.context.environmentDigest,
+    artifactDigests: artifacts.map((artifact) => artifact.digest),
+  });
   const release: Release = {
     protocol: CONTRACT_VERSIONS.release,
     id: opaqueId("release"),
@@ -1386,6 +1394,7 @@ export async function runLocalRelease(input: {
     ...(input.context.changeRevisionId ? { changeRevisionId: input.context.changeRevisionId } : {}),
     provenanceDigest: digest({
       manifest: manifest.digest,
+      inputClosure: inputSet.inputClosureDigest,
       releasePlan: plan.receipt,
       projectRevisionId: input.context.projectRevisionId,
       projectViewId: input.context.projectViewId,
@@ -1394,7 +1403,8 @@ export async function runLocalRelease(input: {
       evidence: results.map((result) => result.evidence.validityKey),
       policyVersion: input.context.policyVersion,
     }),
-    receipt: `release=${input.releaseName}; artifacts=${artifacts.length}; evidence=${results.length}; status=${allBlockers.length === 0 ? "ready" : "blocked"}; ${plan.receipt}`,
+    inputSet,
+    receipt: `release=${input.releaseName}; artifacts=${artifacts.length}; evidence=${results.length}; status=${allBlockers.length === 0 ? "ready" : "blocked"}; inputClosure=${inputSet.inputClosureDigest}; ${plan.receipt}`,
   };
   return {
     manifest,

@@ -10,6 +10,7 @@ import {
   type Target,
 } from "../kernel/contracts.ts";
 import { targetDeploymentContractDigest, targetDeploymentProfile } from "./target-deployment.ts";
+import { assertReleaseInputSetMatches, deriveReleaseInputSet } from "./release-input.ts";
 
 /**
  * A Target adapter is deliberately smaller than the Promotion authority. It
@@ -476,6 +477,10 @@ export function sealVerifiedRelease(input: {
       receipt: `declaredEvidence=${release.evidenceIds.length}; providedEvidence=${evidenceById.size}`,
     });
   }
+
+  const inputSet = release.inputSet ?? deriveReleaseInputSet({ configurationDigests: release.configurationDigests, artifacts, evidence });
+  if (release.inputSet) assertReleaseInputSetMatches({ inputSet: release.inputSet, configurationDigests: release.configurationDigests, artifacts, evidence });
+  release.inputSet = inputSet;
 
   const targetContractDigest = "contractDigest" in input.target && typeof input.target.contractDigest === "string"
     ? input.target.contractDigest

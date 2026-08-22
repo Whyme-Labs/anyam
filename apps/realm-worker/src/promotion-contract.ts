@@ -130,6 +130,19 @@ function safeDeploymentProfile(value: unknown): Record<string, unknown> {
   };
 }
 
+function safeInputSet(value: unknown): Record<string, unknown> {
+  const inputSet = record(value, "inputSet");
+  return {
+    protocol: valueString(inputSet.protocol, "inputSet.protocol"),
+    buildDefinitionDigest: valueString(inputSet.buildDefinitionDigest, "inputSet.buildDefinitionDigest"),
+    dependencyDigest: valueString(inputSet.dependencyDigest, "inputSet.dependencyDigest"),
+    toolchainDigest: valueString(inputSet.toolchainDigest, "inputSet.toolchainDigest"),
+    environmentDigest: valueString(inputSet.environmentDigest, "inputSet.environmentDigest"),
+    artifactDigests: valueStringList(inputSet.artifactDigests, "inputSet.artifactDigests"),
+    inputClosureDigest: valueString(inputSet.inputClosureDigest, "inputSet.inputClosureDigest"),
+  };
+}
+
 function safePromotion(value: unknown): Record<string, unknown> {
   const promotion = record(value, "promotion");
   const previousReleaseId = promotion.previousReleaseId === null ? null : valueString(promotion.previousReleaseId, "promotion.previousReleaseId");
@@ -171,6 +184,7 @@ function safeRelease(value: unknown): Record<string, unknown> {
     id: valueString(release.id, "release.id"),
     projectRevisionId: valueString(release.projectRevisionId, "release.projectRevisionId"),
     status: valueString(release.status, "release.status"),
+    ...(release.inputSet === undefined ? {} : { inputSet: safeInputSet(release.inputSet) }),
   };
 }
 

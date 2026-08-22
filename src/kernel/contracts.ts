@@ -37,6 +37,7 @@ export const CONTRACT_VERSIONS = {
   evidence: "anyam.evidence/v1",
   artifact: "anyam.artifact/v1",
   release: "anyam.release/v1",
+  releaseInput: "anyam.release-input/v1",
   target: "anyam.target/v1",
   targetDeployment: "anyam.target-deployment/v1",
   verifiedRelease: "anyam.verified-release/v1",
@@ -540,6 +541,16 @@ export type Artifact = {
 
 export type ReleaseStatus = "draft" | "ready" | "promoted" | "recalled";
 
+export type ReleaseInputSet = {
+  protocol: typeof CONTRACT_VERSIONS.releaseInput;
+  buildDefinitionDigest: string;
+  dependencyDigest: string;
+  toolchainDigest: string;
+  environmentDigest: string;
+  artifactDigests: readonly string[];
+  inputClosureDigest: string;
+};
+
 export type Release = {
   protocol: typeof CONTRACT_VERSIONS.release;
   id: string;
@@ -553,6 +564,7 @@ export type Release = {
   name?: string;
   changeRevisionId?: string;
   provenanceDigest?: string;
+  inputSet?: ReleaseInputSet;
   receipt?: string;
 };
 

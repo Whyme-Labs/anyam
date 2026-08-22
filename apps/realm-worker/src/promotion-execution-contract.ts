@@ -122,6 +122,19 @@ function safeDeploymentProfile(value: unknown): Record<string, unknown> {
   };
 }
 
+function safeInputSet(value: unknown): Record<string, unknown> {
+  const inputSet = object(value, "inputSet");
+  return {
+    protocol: string(inputSet.protocol, "inputSet.protocol"),
+    buildDefinitionDigest: string(inputSet.buildDefinitionDigest, "inputSet.buildDefinitionDigest"),
+    dependencyDigest: string(inputSet.dependencyDigest, "inputSet.dependencyDigest"),
+    toolchainDigest: string(inputSet.toolchainDigest, "inputSet.toolchainDigest"),
+    environmentDigest: string(inputSet.environmentDigest, "inputSet.environmentDigest"),
+    artifactDigests: stringList(inputSet.artifactDigests, "inputSet.artifactDigests"),
+    inputClosureDigest: string(inputSet.inputClosureDigest, "inputSet.inputClosureDigest"),
+  };
+}
+
 function safePromotion(value: unknown): Record<string, unknown> {
   const promotion = object(value, "promotion");
   const previousReleaseId = promotion.previousReleaseId === null ? null : string(promotion.previousReleaseId, "promotion.previousReleaseId");
@@ -189,7 +202,7 @@ function safeTarget(value: unknown): Record<string, unknown> {
 
 function safeRelease(value: unknown): Record<string, unknown> {
   const release = object(value, "release");
-  return { protocol: string(release.protocol, "release.protocol"), id: string(release.id, "release.id"), projectRevisionId: string(release.projectRevisionId, "release.projectRevisionId"), status: string(release.status, "release.status") };
+  return { protocol: string(release.protocol, "release.protocol"), id: string(release.id, "release.id"), projectRevisionId: string(release.projectRevisionId, "release.projectRevisionId"), status: string(release.status, "release.status"), ...(release.inputSet === undefined ? {} : { inputSet: safeInputSet(release.inputSet) }) };
 }
 
 function safeCheckpoint(value: unknown): Record<string, unknown> | undefined {

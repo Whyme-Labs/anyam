@@ -59,8 +59,41 @@ function stringList(value: unknown, field: string, allowEmpty: boolean): string[
   return [...new Set((value as string[]).map((entry) => entry.trim()))];
 }
 
+function profileObject(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("deploymentProfile must be an object.", "send a typed credential-free deploymentProfile; no transition was accepted", `operation=${TARGET_CONFIGURE_COMMAND}; field=deploymentProfile; object-required; transition=not-applied`);
+  return value as Record<string, unknown>;
+}
+
+function optionalString(value: unknown, field: string): string | undefined {
+  return value === undefined ? undefined : requiredString(value, field);
+}
+
+function deploymentProfile(value: unknown): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  const profile = profileObject(value);
+  const environment = requiredString(profile.environment, "deploymentProfile.environment");
+  const channel = profile.channel === undefined ? "stable" : requiredString(profile.channel, "deploymentProfile.channel");
+  const dataClass = profile.dataClass === undefined ? "custom" : requiredString(profile.dataClass, "deploymentProfile.dataClass");
+  const resourceSharing = profile.resourceSharing === undefined ? "isolated" : requiredString(profile.resourceSharing, "deploymentProfile.resourceSharing");
+  return {
+    environment,
+    channel,
+    audience: requiredString(profile.audience, "deploymentProfile.audience"),
+    runtimeIdentity: requiredString(profile.runtimeIdentity, "deploymentProfile.runtimeIdentity"),
+    routeIdentities: stringList(profile.routeIdentities ?? [], "deploymentProfile.routeIdentities", true),
+    bindingIdentities: stringList(profile.bindingIdentities ?? [], "deploymentProfile.bindingIdentities", true),
+    dataResourceIdentities: stringList(profile.dataResourceIdentities ?? [], "deploymentProfile.dataResourceIdentities", true),
+    configurationDigests: stringList(profile.configurationDigests ?? [], "deploymentProfile.configurationDigests", true),
+    secretUseAliases: stringList(profile.secretUseAliases ?? [], "deploymentProfile.secretUseAliases", true),
+    dataClass,
+    resourceSharing,
+    ...(optionalString(profile.sharingPolicyDigest, "deploymentProfile.sharingPolicyDigest") ? { sharingPolicyDigest: optionalString(profile.sharingPolicyDigest, "deploymentProfile.sharingPolicyDigest") } : {}),
+    ...(optionalString(profile.profileDigest, "deploymentProfile.profileDigest") ? { profileDigest: optionalString(profile.profileDigest, "deploymentProfile.profileDigest") } : {}),
+  };
+}
+
 function assertAllowed(body: Record<string, unknown>): void {
-  const allowed = ["idempotencyKey", "expectedVersion", "projectId", "targetId", "name", "adapterId", "acceptedArtifactTypes", "requiredEvidenceKeys"];
+  const allowed = ["idempotencyKey", "expectedVersion", "projectId", "targetId", "name", "adapterId", "acceptedArtifactTypes", "requiredEvidenceKeys", "deploymentProfile"];
   const unknown = Object.keys(body).find((key) => !allowed.includes(key));
   if (unknown) return invalid(`Field ${unknown} is not accepted by this typed route.`, `remove ${unknown} and send only the documented ${TARGET_CONFIGURE_COMMAND} fields; no transition was accepted`, `operation=${TARGET_CONFIGURE_COMMAND}; field=${unknown}; transition=not-applied`);
 }
@@ -83,6 +116,7 @@ export function targetConfigureCommand(value: unknown): TargetConfigureMutation 
   const adapterId = safeIdentifier(body.adapterId, "adapterId");
   const acceptedArtifactTypes = stringList(body.acceptedArtifactTypes, "acceptedArtifactTypes", false);
   const requiredEvidenceKeys = stringList(body.requiredEvidenceKeys ?? [], "requiredEvidenceKeys", true);
+  const profile = deploymentProfile(body.deploymentProfile);
   return {
     command: TARGET_CONFIGURE_COMMAND,
     idempotencyKey,
@@ -94,6 +128,7 @@ export function targetConfigureCommand(value: unknown): TargetConfigureMutation 
       adapterId,
       acceptedArtifactTypes,
       requiredEvidenceKeys,
+      ...(profile ? { deploymentProfile: profile } : {}),
     },
   };
 }
@@ -113,6 +148,26 @@ function valueStringList(value: unknown, field: string): string[] {
   return [...(value as string[])];
 }
 
+function safeDeploymentProfile(value: unknown): Record<string, unknown> {
+  const profile = record(value, "deploymentProfile");
+  return {
+    protocol: valueString(profile.protocol, "deploymentProfile.protocol"),
+    environment: valueString(profile.environment, "deploymentProfile.environment"),
+    channel: valueString(profile.channel, "deploymentProfile.channel"),
+    audience: valueString(profile.audience, "deploymentProfile.audience"),
+    runtimeIdentity: valueString(profile.runtimeIdentity, "deploymentProfile.runtimeIdentity"),
+    routeIdentities: valueStringList(profile.routeIdentities, "deploymentProfile.routeIdentities"),
+    bindingIdentities: valueStringList(profile.bindingIdentities, "deploymentProfile.bindingIdentities"),
+    dataResourceIdentities: valueStringList(profile.dataResourceIdentities, "deploymentProfile.dataResourceIdentities"),
+    configurationDigests: valueStringList(profile.configurationDigests, "deploymentProfile.configurationDigests"),
+    secretUseAliases: valueStringList(profile.secretUseAliases, "deploymentProfile.secretUseAliases"),
+    dataClass: valueString(profile.dataClass, "deploymentProfile.dataClass"),
+    resourceSharing: valueString(profile.resourceSharing, "deploymentProfile.resourceSharing"),
+    ...(profile.sharingPolicyDigest === undefined ? {} : { sharingPolicyDigest: valueString(profile.sharingPolicyDigest, "deploymentProfile.sharingPolicyDigest") }),
+    profileDigest: valueString(profile.profileDigest, "deploymentProfile.profileDigest"),
+  };
+}
+
 function safeTarget(value: unknown): Record<string, unknown> {
   const target = record(value, "target");
   return {
@@ -124,6 +179,7 @@ function safeTarget(value: unknown): Record<string, unknown> {
     acceptedArtifactTypes: valueStringList(target.acceptedArtifactTypes, "target.acceptedArtifactTypes"),
     requiredEvidenceKeys: valueStringList(target.requiredEvidenceKeys, "target.requiredEvidenceKeys"),
     state: valueString(target.state, "target.state"),
+    ...(target.deploymentProfile === undefined ? {} : { deploymentProfile: safeDeploymentProfile(target.deploymentProfile) }),
   };
 }
 

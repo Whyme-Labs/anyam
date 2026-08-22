@@ -519,7 +519,7 @@ function credentialField(value: unknown): string | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   for (const [key, nested] of Object.entries(value)) {
     const lower = key.toLowerCase();
-    if (lower !== "credentialfree" && /token|password|secret|credential/.test(lower)) return key;
+    if (lower !== "credentialfree" && lower !== "secretusealiases" && /token|password|secret|credential/.test(lower)) return key;
     const found = credentialField(nested);
     if (found) return found;
   }

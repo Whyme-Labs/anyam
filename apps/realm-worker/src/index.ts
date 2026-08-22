@@ -1270,7 +1270,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       status: "ready",
       version: snapshot.version,
       promotion: safePromotion,
-      target: { protocol: target.protocol, id: target.id, projectId: target.projectId, name: target.name, adapterId: target.adapterId, state: target.state, currentReleaseId: target.currentReleaseId ?? null, releaseHistory: [...(target.releaseHistory ?? [])], ...(target.lastPromotionId ? { lastPromotionId: target.lastPromotionId } : {}) },
+      target: { protocol: target.protocol, id: target.id, projectId: target.projectId, name: target.name, adapterId: target.adapterId, state: target.state, currentReleaseId: target.currentReleaseId ?? null, releaseHistory: [...(target.releaseHistory ?? [])], ...(target.lastPromotionId ? { lastPromotionId: target.lastPromotionId } : {}), ...(target.deploymentProfile ? { deploymentProfile: target.deploymentProfile } : {}) },
       release: { protocol: release.protocol, id: release.id, projectRevisionId: release.projectRevisionId, status: release.status },
       ...(promotion.reconciliationCheckpoint ? { checkpoint: promotion.reconciliationCheckpoint } : {}),
       session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch },

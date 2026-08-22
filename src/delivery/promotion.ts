@@ -9,6 +9,7 @@ import {
   type Release,
   type Target,
 } from "../kernel/contracts.ts";
+import { targetDeploymentContractDigest, targetDeploymentProfile } from "./target-deployment.ts";
 
 /**
  * A Target adapter is deliberately smaller than the Promotion authority. It
@@ -322,15 +323,17 @@ export function createWorkerTarget(input: {
       receipt: `target=${input.target.id}; currentRelease=${input.currentReleaseId}; history=${releaseHistory.join(",")}`,
     });
   }
+  const deploymentProfile = targetDeploymentProfile(input.target);
   return {
     ...clone(input.target),
     acceptedArtifactTypes: [...input.target.acceptedArtifactTypes],
     requiredEvidenceKeys: [...input.target.requiredEvidenceKeys],
+    deploymentProfile,
     currentReleaseId: input.currentReleaseId ?? null,
     releaseHistory,
     capabilities: { ...input.capabilities },
     contractDigest: input.contractDigest ?? digest({
-      target: input.target,
+      targetContractDigest: targetDeploymentContractDigest(input.target),
       capabilities: input.capabilities,
     }),
   };
@@ -474,7 +477,9 @@ export function sealVerifiedRelease(input: {
     });
   }
 
-  const targetContractDigest = "contractDigest" in input.target ? input.target.contractDigest : undefined;
+  const targetContractDigest = "contractDigest" in input.target && typeof input.target.contractDigest === "string"
+    ? input.target.contractDigest
+    : targetDeploymentContractDigest(input.target);
   const releaseDigest = digest({
     projectId: input.projectId,
     targetId: input.target.id,

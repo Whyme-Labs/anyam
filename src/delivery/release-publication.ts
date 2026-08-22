@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import {
   CONTRACT_VERSIONS,
   opaqueId,
@@ -13,6 +11,7 @@ import {
   type DeliveryAdapterResult,
   type ImmutableRelease,
 } from "./promotion.ts";
+import { targetDeploymentContractDigest, targetDeploymentProfile } from "./target-deployment.ts";
 
 /**
  * A package registry, downloadable release channel, or generic artifact
@@ -192,13 +191,7 @@ function nonEmpty(value: string, field: string, affectedObject: string): void {
 }
 
 function defaultContractDigest(target: Target): string {
-  return `sha256:${createHash("sha256").update(JSON.stringify({
-    id: target.id,
-    projectId: target.projectId,
-    adapterId: target.adapterId,
-    acceptedArtifactTypes: target.acceptedArtifactTypes,
-    requiredEvidenceKeys: target.requiredEvidenceKeys,
-  })).digest("hex")}`;
+  return targetDeploymentContractDigest({ ...target, deploymentProfile: targetDeploymentProfile(target) });
 }
 
 export function createReleaseAssetTarget(input: ReleaseAssetTargetInput): ReleaseAssetTarget {
@@ -237,6 +230,7 @@ export function createReleaseAssetTarget(input: ReleaseAssetTargetInput): Releas
     ...clone(input.target),
     acceptedArtifactTypes: [...input.target.acceptedArtifactTypes],
     requiredEvidenceKeys: [...input.target.requiredEvidenceKeys],
+    deploymentProfile: targetDeploymentProfile(input.target),
     currentReleaseId: input.currentReleaseId ?? null,
     currentArtifactId: input.currentArtifactId ?? null,
     releaseHistory,

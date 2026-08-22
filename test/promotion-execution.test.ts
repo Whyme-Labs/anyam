@@ -80,7 +80,11 @@ test("trusted Promotion handoff invokes the injected executor once and persists 
   assert.equal((first.value.target as { currentReleaseId: string }).currentReleaseId, "release:execution");
   assert.deepEqual((first.value.target as { releaseHistory: string[] }).releaseHistory, ["release:execution"]);
   assert.equal((first.value.promotion as { executionIdempotencyKey: string }).executionIdempotencyKey, "execute:execution:1");
-  assert.equal(JSON.stringify(first).includes("secret"), false);
+  const serialized = JSON.stringify(first);
+  assert.equal(serialized.includes("secret="), false);
+  assert.equal(serialized.includes("token="), false);
+  assert.equal(serialized.includes("password="), false);
+  assert.equal(serialized.includes("Bearer "), false);
   const replay = await coordinator.executePromotion({ promotionId: "promotion:execution", executionIdempotencyKey: "execute:execution:1", executor: { execute: async () => { throw new Error("must-not-run"); } }, session });
   assert.deepEqual(replay, first);
   assert.equal(calls.count, 1);

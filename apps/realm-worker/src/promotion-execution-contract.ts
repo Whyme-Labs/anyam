@@ -97,6 +97,31 @@ function optionalString(value: unknown, field: string): string | undefined {
   return value === undefined ? undefined : string(value, field);
 }
 
+function stringList(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || entry.length === 0)) throw new Error(`coordinator_${field}_malformed`);
+  return [...(value as string[])];
+}
+
+function safeDeploymentProfile(value: unknown): Record<string, unknown> {
+  const profile = object(value, "deploymentProfile");
+  return {
+    protocol: string(profile.protocol, "deploymentProfile.protocol"),
+    environment: string(profile.environment, "deploymentProfile.environment"),
+    channel: string(profile.channel, "deploymentProfile.channel"),
+    audience: string(profile.audience, "deploymentProfile.audience"),
+    runtimeIdentity: string(profile.runtimeIdentity, "deploymentProfile.runtimeIdentity"),
+    routeIdentities: stringList(profile.routeIdentities, "deploymentProfile.routeIdentities"),
+    bindingIdentities: stringList(profile.bindingIdentities, "deploymentProfile.bindingIdentities"),
+    dataResourceIdentities: stringList(profile.dataResourceIdentities, "deploymentProfile.dataResourceIdentities"),
+    configurationDigests: stringList(profile.configurationDigests, "deploymentProfile.configurationDigests"),
+    secretUseAliases: stringList(profile.secretUseAliases, "deploymentProfile.secretUseAliases"),
+    dataClass: string(profile.dataClass, "deploymentProfile.dataClass"),
+    resourceSharing: string(profile.resourceSharing, "deploymentProfile.resourceSharing"),
+    ...(profile.sharingPolicyDigest === undefined ? {} : { sharingPolicyDigest: string(profile.sharingPolicyDigest, "deploymentProfile.sharingPolicyDigest") }),
+    profileDigest: string(profile.profileDigest, "deploymentProfile.profileDigest"),
+  };
+}
+
 function safePromotion(value: unknown): Record<string, unknown> {
   const promotion = object(value, "promotion");
   const previousReleaseId = promotion.previousReleaseId === null ? null : string(promotion.previousReleaseId, "promotion.previousReleaseId");
@@ -158,6 +183,7 @@ function safeTarget(value: unknown): Record<string, unknown> {
     currentReleaseId: target.currentReleaseId === null ? null : string(target.currentReleaseId, "target.currentReleaseId"),
     releaseHistory: [...history],
     ...(optionalString(target.lastPromotionId, "target.lastPromotionId") ? { lastPromotionId: optionalString(target.lastPromotionId, "target.lastPromotionId") } : {}),
+    ...(target.deploymentProfile === undefined ? {} : { deploymentProfile: safeDeploymentProfile(target.deploymentProfile) }),
   };
 }
 

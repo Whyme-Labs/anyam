@@ -32,6 +32,13 @@ import {
 } from "../kernel/contracts.ts";
 import type { PromotionReconciliationCheckpoint, PromotionRecord } from "../delivery/promotion.ts";
 import {
+  assertTargetResourceIsolation,
+  createTargetDeploymentProfile,
+  defaultTargetDeploymentProfile,
+  targetDeploymentProfile,
+  TargetDeploymentProfileError,
+} from "../delivery/target-deployment.ts";
+import {
   PROMOTION_EXECUTION_PROTOCOL,
   createPromotionExecutionContext,
   normalizePromotionExecutionResult,
@@ -472,6 +479,7 @@ export function normalizeAuthorityPlaneSnapshot(snapshot: AuthorityPlaneSnapshot
     if (!existing) mirrorDeliveryEntries.push([deliveryKey, normalized]);
   }
   const mirrorDeliveries = Object.fromEntries(mirrorDeliveryEntries);
+  const targets = Object.fromEntries(Object.entries(snapshot.targets ?? {}).map(([id, target]) => [id, { ...target, deploymentProfile: targetDeploymentProfile(target) }]));
   return {
     ...snapshot,
     runnerProfiles: snapshot.runnerProfiles ?? {},
@@ -479,6 +487,7 @@ export function normalizeAuthorityPlaneSnapshot(snapshot: AuthorityPlaneSnapshot
     mirrors: snapshot.mirrors ?? {},
     mirrorOperations: snapshot.mirrorOperations ?? {},
     mirrorCheckpoints: snapshot.mirrorCheckpoints ?? {},
+    targets,
     externalProposals,
     mirrorDeliveries,
   };
@@ -1624,11 +1633,42 @@ export class AuthorityPlaneCoordinator {
         return success({ release: { ...release, projectId: releaseProjectId } }, `release=${release.id}; project=${releaseProjectId}; status=ready; providerPromotion=not-performed; canonicalWrite=false`);
       }
       case "target.configure": {
-        const target: Target = { protocol: CONTRACT_VERSIONS.target, id: optionalString(payload.targetId) ?? opaqueId("target"), projectId: requiredString(payload.projectId, "projectId"), name: requiredString(payload.name, "name"), adapterId: requiredString(payload.adapterId, "adapterId"), acceptedArtifactTypes: stringArray(payload.acceptedArtifactTypes, "acceptedArtifactTypes"), requiredEvidenceKeys: stringArray(payload.requiredEvidenceKeys ?? [], "requiredEvidenceKeys", true), state: "configured" };
+        const targetWithoutProfile: Target = { protocol: CONTRACT_VERSIONS.target, id: optionalString(payload.targetId) ?? opaqueId("target"), projectId: requiredString(payload.projectId, "projectId"), name: requiredString(payload.name, "name"), adapterId: requiredString(payload.adapterId, "adapterId"), acceptedArtifactTypes: stringArray(payload.acceptedArtifactTypes, "acceptedArtifactTypes"), requiredEvidenceKeys: stringArray(payload.requiredEvidenceKeys ?? [], "requiredEvidenceKeys", true), state: "configured" };
+        const profileValue = payload.deploymentProfile === undefined ? undefined : record<unknown>(payload.deploymentProfile, "deploymentProfile");
+        let deploymentProfile;
+        try {
+          const sharingPolicyDigest = profileValue === undefined ? undefined : optionalString(profileValue.sharingPolicyDigest);
+          deploymentProfile = profileValue === undefined
+            ? defaultTargetDeploymentProfile(targetWithoutProfile)
+            : createTargetDeploymentProfile({
+              environment: enumString(profileValue.environment, "deploymentProfile.environment", ["preview", "development", "staging", "production", "custom"] as const),
+              channel: enumString(profileValue.channel, "deploymentProfile.channel", ["alpha", "beta", "stable", "custom"] as const, "stable"),
+              audience: requiredString(profileValue.audience, "deploymentProfile.audience"),
+              runtimeIdentity: requiredString(profileValue.runtimeIdentity, "deploymentProfile.runtimeIdentity"),
+              routeIdentities: stringArray(profileValue.routeIdentities ?? [], "deploymentProfile.routeIdentities", true),
+              bindingIdentities: stringArray(profileValue.bindingIdentities ?? [], "deploymentProfile.bindingIdentities", true),
+              dataResourceIdentities: stringArray(profileValue.dataResourceIdentities ?? [], "deploymentProfile.dataResourceIdentities", true),
+              configurationDigests: stringArray(profileValue.configurationDigests ?? [], "deploymentProfile.configurationDigests", true),
+              secretUseAliases: stringArray(profileValue.secretUseAliases ?? [], "deploymentProfile.secretUseAliases", true),
+              dataClass: enumString(profileValue.dataClass, "deploymentProfile.dataClass", ["synthetic", "isolated", "production-shaped", "production", "custom"] as const, "custom"),
+              resourceSharing: enumString(profileValue.resourceSharing, "deploymentProfile.resourceSharing", ["isolated", "owner-approved"] as const, "isolated"),
+              ...(sharingPolicyDigest ? { sharingPolicyDigest } : {}),
+            });
+        } catch (error) {
+          if (error instanceof TargetDeploymentProfileError) throw new AuthorityPlaneError({ code: error.code === "resource-conflict" ? "conflict" : "invalid_request", message: error.message, recoveryAction: error.recoveryAction, receipt: error.receipt });
+          throw error;
+        }
+        const target: Target = { ...targetWithoutProfile, deploymentProfile };
         if (!next.projects[target.projectId]) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${target.projectId} does not exist.`, recoveryAction: "create the Project before configuring its Target", receipt: `target=${target.id}; project=${target.projectId}; target=not-configured` });
         if (next.targets[target.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Target ${target.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Target identity", receipt: `target=${target.id}; exists=true; transition=not-applied` });
+        try {
+          assertTargetResourceIsolation({ existing: Object.values(next.targets), candidate: target });
+        } catch (error) {
+          if (error instanceof TargetDeploymentProfileError) throw new AuthorityPlaneError({ code: "conflict", message: error.message, recoveryAction: error.recoveryAction, receipt: error.receipt });
+          throw error;
+        }
         next.targets[target.id] = target;
-        return success({ target }, `target=${target.id}; state=configured; providerAdapter=${target.adapterId}; qualification=not-performed; canonicalWrite=false`);
+        return success({ target }, `target=${target.id}; state=configured; providerAdapter=${target.adapterId}; environment=${deploymentProfile.environment}; channel=${deploymentProfile.channel}; profileDigest=${deploymentProfile.profileDigest}; qualification=not-performed; canonicalWrite=false`);
       }
       case "promotion.request": {
         const promotionProjectId = requiredString(payload.projectId, "projectId");

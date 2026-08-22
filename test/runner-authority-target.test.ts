@@ -414,9 +414,24 @@ test("external Runner completion composes through Authority into a non-web Targe
     adapterId: "generic.release-assets",
     acceptedArtifactTypes: ["cli.archive"],
     requiredEvidenceKeys: [],
+    deploymentProfile: {
+      environment: "production",
+      channel: "stable",
+      audience: "download-users",
+      runtimeIdentity: "release-assets:production",
+      routeIdentities: [],
+      bindingIdentities: [],
+      dataResourceIdentities: [],
+      configurationDigests: ["sha256:downloads-config"],
+      secretUseAliases: [],
+      dataClass: "production",
+      resourceSharing: "isolated",
+    },
   });
   assert.equal(targetResult.status, "succeeded");
   const target = targetResult.value.target as Target;
+  assert.equal(target.deploymentProfile?.environment, "production");
+  assert.equal(target.deploymentProfile?.profileDigest.startsWith("sha256:"), true);
   const promotionRequest = command(authority, "promotion.request", "authority:promotion", {
     projectId,
     promotionId: "promotion:cli-archive",

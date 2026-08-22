@@ -10,6 +10,7 @@ import {
   type Target,
   type TargetState,
 } from "../kernel/contracts.ts";
+import { targetDeploymentProfile } from "../delivery/target-deployment.ts";
 import type {
   AuthorityPlaneSnapshot,
   AuthoritySession,
@@ -82,6 +83,7 @@ export type PromotionExecutionResult = {
     state: TargetState;
     currentReleaseId: string | null;
     releaseHistory: readonly string[];
+    deploymentProfile?: Target["deploymentProfile"];
   };
   checkpoint?: PromotionReconciliationCheckpoint;
   receipt: string;
@@ -306,6 +308,7 @@ function contextDigest(input: {
       adapterId: input.target.adapterId,
       acceptedArtifactTypes: input.target.acceptedArtifactTypes,
       requiredEvidenceKeys: input.target.requiredEvidenceKeys,
+      deploymentProfile: targetDeploymentProfile(input.target),
     },
     expectedCurrentReleaseId: input.expectedCurrentReleaseId,
     executionIdempotencyKey: input.executionIdempotencyKey,
@@ -529,6 +532,14 @@ export function validatePromotionExecutionResult(input: PromotionExecutionContex
       message: "Provider Target result is not bound to the requested Project and Target.",
       recoveryAction: "return the Target identity from the trusted executor context",
       receipt: `target=${input.target.id}; resultTarget=${resultTarget.id}; targetMutation=false`,
+    });
+  }
+  if (resultTarget.deploymentProfile !== undefined && resultTarget.deploymentProfile.profileDigest !== targetDeploymentProfile(input.target).profileDigest) {
+    resultError({
+      code: "lineage-mismatch",
+      message: "Provider Promotion result returned a different Target Deployment Profile.",
+      recoveryAction: "return the exact Authority-bound Target profile or reconcile the provider operation before retrying",
+      receipt: `target=${input.target.id}; expectedProfile=${targetDeploymentProfile(input.target).profileDigest}; receivedProfile=${resultTarget.deploymentProfile.profileDigest}; targetMutation=false`,
     });
   }
   const forbidden = forbiddenCredentialMaterial(result);

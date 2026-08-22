@@ -23,6 +23,7 @@ import {
   type EvidenceRequirement,
   type StageGateDecision,
 } from "../kernel/evidence.ts";
+import { targetDeploymentProfile } from "../delivery/target-deployment.ts";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -81,6 +82,7 @@ export type LocalExecutionContext = {
   changeRevisionId?: string;
   workspaceId?: string;
   targetId?: string;
+  targetDeploymentProfileDigest?: string;
   declaredEffects?: readonly string[];
 };
 
@@ -104,6 +106,7 @@ export type NormalizedActionInput = {
   policyVersion: string;
   authorizationEpoch: string;
   targetId?: string;
+  targetDeploymentProfileDigest?: string;
   disclosure: DisclosurePolicyRef;
   actor: ActorRef;
   capabilityGrantId: string;
@@ -1063,7 +1066,8 @@ export class LocalExecutionEngine {
       ? { projectionId: this.context.disclosure.projectionId, classification: "restricted" }
       : { ...this.context.disclosure };
     const moduleArtifactTypes = this.manifest.artifactTypesByModule[action.moduleId] ?? [];
-    const targetContractDigest = this.manifest.targets.find((target) => target.id === this.context.targetId)?.contractDigest;
+    const targetContractDigest = this.context.targetDeploymentProfileDigest
+      ?? this.manifest.targets.find((target) => target.id === this.context.targetId)?.contractDigest;
     const validityKey = digest({
       projectRevisionId: this.context.projectRevisionId,
       projectViewId: this.context.projectViewId,
@@ -1124,6 +1128,7 @@ export class LocalExecutionEngine {
       policyVersion: this.context.policyVersion,
       authorizationEpoch: this.context.authorizationEpoch,
       ...(this.context.targetId ? { targetId: this.context.targetId } : {}),
+      ...(this.context.targetDeploymentProfileDigest ? { targetDeploymentProfileDigest: this.context.targetDeploymentProfileDigest } : {}),
       disclosure: { ...effectiveDisclosure },
       actor: { ...this.context.actor },
       capabilityGrantId: this.context.capabilityGrantId,
@@ -1405,7 +1410,7 @@ export async function runLocalRelease(input: {
 }
 
 export function targetFromManifest(target: NormalizedTarget, projectId: string): Target {
-  return {
+  const targetValue: Target = {
     protocol: CONTRACT_VERSIONS.target,
     id: target.id,
     projectId,
@@ -1415,4 +1420,5 @@ export function targetFromManifest(target: NormalizedTarget, projectId: string):
     requiredEvidenceKeys: [],
     state: "configured",
   };
+  return { ...targetValue, deploymentProfile: targetDeploymentProfile(targetValue) };
 }

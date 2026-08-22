@@ -38,6 +38,7 @@ export const CONTRACT_VERSIONS = {
   artifact: "anyam.artifact/v1",
   release: "anyam.release/v1",
   target: "anyam.target/v1",
+  targetDeployment: "anyam.target-deployment/v1",
   verifiedRelease: "anyam.verified-release/v1",
   promotion: "anyam.promotion/v1",
   releasePublication: "anyam.release-publication/v1",
@@ -557,6 +558,28 @@ export type Release = {
 
 export type TargetState = "configured" | "healthy" | "degraded" | "unknown";
 
+export type TargetEnvironment = "preview" | "development" | "staging" | "production" | "custom";
+export type TargetChannel = "alpha" | "beta" | "stable" | "custom";
+export type TargetDataClass = "synthetic" | "isolated" | "production-shaped" | "production" | "custom";
+export type TargetResourceSharing = "isolated" | "owner-approved";
+
+export type TargetDeploymentProfile = {
+  protocol: typeof CONTRACT_VERSIONS.targetDeployment;
+  environment: TargetEnvironment;
+  channel: TargetChannel;
+  audience: string;
+  runtimeIdentity: string;
+  routeIdentities: readonly string[];
+  bindingIdentities: readonly string[];
+  dataResourceIdentities: readonly string[];
+  configurationDigests: readonly string[];
+  secretUseAliases: readonly string[];
+  dataClass: TargetDataClass;
+  resourceSharing: TargetResourceSharing;
+  sharingPolicyDigest?: string;
+  profileDigest: string;
+};
+
 export type Target = {
   protocol: typeof CONTRACT_VERSIONS.target;
   id: string;
@@ -576,6 +599,8 @@ export type Target = {
   releaseHistory?: readonly string[];
   /** Last authoritative Promotion that changed or reconciled this Target. */
   lastPromotionId?: string;
+  /** Credential-free environment, channel, and resource identity boundary. */
+  deploymentProfile?: TargetDeploymentProfile;
 };
 
 export type CapabilityGrantStatus = "active" | "revoked" | "expired";

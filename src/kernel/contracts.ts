@@ -38,6 +38,7 @@ export const CONTRACT_VERSIONS = {
   artifact: "anyam.artifact/v1",
   release: "anyam.release/v1",
   releaseInput: "anyam.release-input/v1",
+  migration: "anyam.migration/v1",
   target: "anyam.target/v1",
   targetDeployment: "anyam.target-deployment/v1",
   verifiedRelease: "anyam.verified-release/v1",
@@ -551,6 +552,22 @@ export type ReleaseInputSet = {
   inputClosureDigest: string;
 };
 
+export type MigrationStrategy = "none" | "expand-contract" | "manual" | "custom";
+export type MigrationCompatibility = "backward-compatible" | "bidirectional" | "forward-only" | "incompatible" | "unknown";
+export type MigrationRollback = "safe" | "application-only" | "manual-data-action" | "blocked";
+
+export type MigrationPlan = {
+  protocol: typeof CONTRACT_VERSIONS.migration;
+  strategy: MigrationStrategy;
+  beforeSchemaDigest?: string;
+  afterSchemaDigest?: string;
+  compatibility: MigrationCompatibility;
+  rollback: MigrationRollback;
+  migrationArtifactIds: readonly string[];
+  requiredEvidenceKeys: readonly string[];
+  planDigest: string;
+};
+
 export type Release = {
   protocol: typeof CONTRACT_VERSIONS.release;
   id: string;
@@ -565,6 +582,7 @@ export type Release = {
   changeRevisionId?: string;
   provenanceDigest?: string;
   inputSet?: ReleaseInputSet;
+  migrationPlan?: MigrationPlan;
   receipt?: string;
 };
 

@@ -45,6 +45,7 @@ import {
   deriveReleaseInputSet,
   ReleaseInputError,
 } from "../delivery/release-input.ts";
+import { createMigrationPlan, defaultMigrationPlan, MigrationPlanError } from "../delivery/migration-plan.ts";
 import {
   PROMOTION_EXECUTION_PROTOCOL,
   createPromotionExecutionContext,
@@ -1654,12 +1655,31 @@ export class AuthorityPlaneCoordinator {
           if (error instanceof ReleaseInputError) throw new AuthorityPlaneError({ code: error.code === "missing" ? "invalid_request" : "conflict", message: error.message, recoveryAction: error.recoveryAction, receipt: error.receipt });
           throw error;
         }
+        const migrationValue = payload.migrationPlan === undefined ? undefined : record<unknown>(payload.migrationPlan, "migrationPlan");
+        let migrationPlan;
+        try {
+          migrationPlan = migrationValue === undefined
+            ? defaultMigrationPlan()
+            : createMigrationPlan({
+              ...(migrationValue.strategy === undefined ? {} : { strategy: enumString(migrationValue.strategy, "migrationPlan.strategy", ["none", "expand-contract", "manual", "custom"] as const) }),
+              ...(migrationValue.beforeSchemaDigest === undefined ? {} : { beforeSchemaDigest: requiredString(migrationValue.beforeSchemaDigest, "migrationPlan.beforeSchemaDigest") }),
+              ...(migrationValue.afterSchemaDigest === undefined ? {} : { afterSchemaDigest: requiredString(migrationValue.afterSchemaDigest, "migrationPlan.afterSchemaDigest") }),
+              ...(migrationValue.compatibility === undefined ? {} : { compatibility: enumString(migrationValue.compatibility, "migrationPlan.compatibility", ["backward-compatible", "bidirectional", "forward-only", "incompatible", "unknown"] as const) }),
+              ...(migrationValue.rollback === undefined ? {} : { rollback: enumString(migrationValue.rollback, "migrationPlan.rollback", ["safe", "application-only", "manual-data-action", "blocked"] as const) }),
+              migrationArtifactIds: stringArray(migrationValue.migrationArtifactIds ?? [], "migrationPlan.migrationArtifactIds", true),
+              requiredEvidenceKeys: stringArray(migrationValue.requiredEvidenceKeys ?? [], "migrationPlan.requiredEvidenceKeys", true),
+              ...(migrationValue.planDigest === undefined ? {} : { planDigest: requiredString(migrationValue.planDigest, "migrationPlan.planDigest") }),
+            });
+        } catch (error) {
+          if (error instanceof MigrationPlanError) throw new AuthorityPlaneError({ code: error.code === "invalid" ? "invalid_request" : "conflict", message: error.message, recoveryAction: error.recoveryAction, receipt: error.receipt });
+          throw error;
+        }
         const releaseName = optionalString(payload.name);
         const releaseChangeRevisionId = optionalString(payload.changeRevisionId);
         const releaseChangeRevision = releaseChangeRevisionId ? next.changeRevisions[releaseChangeRevisionId] : undefined;
         if (releaseChangeRevisionId && (!releaseChangeRevision || next.changes[releaseChangeRevision.changeId]?.projectId !== releaseProjectId || releaseChangeRevision.projectRevisionId !== projectRevisionId)) throw new AuthorityPlaneError({ code: "conflict", message: "Release Change Revision must belong to the exact Project and canonical Project Revision.", recoveryAction: "create the Release from the Change Revision that produced this canonical Project Revision", receipt: `project=${releaseProjectId}; projectRevision=${projectRevisionId}; changeRevision=${releaseChangeRevisionId}; release=not-created` });
         const releaseProvenanceDigest = optionalString(payload.provenanceDigest);
-        const release: Release = { protocol: CONTRACT_VERSIONS.release, id: optionalString(payload.releaseId) ?? opaqueId("release"), projectRevisionId, artifactIds, evidenceIds, configurationDigests, stateAssumptions: stringArray(payload.stateAssumptions ?? [], "stateAssumptions", true), policyVersion: requiredString(payload.policyVersion, "policyVersion"), status: "ready", ...(releaseName ? { name: releaseName } : {}), ...(releaseChangeRevisionId ? { changeRevisionId: releaseChangeRevisionId } : {}), ...(releaseProvenanceDigest ? { provenanceDigest: releaseProvenanceDigest } : {}), inputSet, receipt: `release=ready; project=${releaseProjectId}; projectRevision=${projectRevisionId}; artifacts=${artifactIds.length}; evidence=${evidenceIds.length}; inputClosure=${inputSet.inputClosureDigest}` };
+        const release: Release = { protocol: CONTRACT_VERSIONS.release, id: optionalString(payload.releaseId) ?? opaqueId("release"), projectRevisionId, artifactIds, evidenceIds, configurationDigests, stateAssumptions: stringArray(payload.stateAssumptions ?? [], "stateAssumptions", true), policyVersion: requiredString(payload.policyVersion, "policyVersion"), status: "ready", ...(releaseName ? { name: releaseName } : {}), ...(releaseChangeRevisionId ? { changeRevisionId: releaseChangeRevisionId } : {}), ...(releaseProvenanceDigest ? { provenanceDigest: releaseProvenanceDigest } : {}), inputSet, migrationPlan, receipt: `release=ready; project=${releaseProjectId}; projectRevision=${projectRevisionId}; artifacts=${artifactIds.length}; evidence=${evidenceIds.length}; inputClosure=${inputSet.inputClosureDigest}; migrationPlan=${migrationPlan.planDigest}` };
         if (next.releases[release.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Release ${release.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Release identity", receipt: `release=${release.id}; exists=true; transition=not-applied` });
         next.releases[release.id] = release;
         return success({ release: { ...release, projectId: releaseProjectId } }, `release=${release.id}; project=${releaseProjectId}; status=ready; providerPromotion=not-performed; canonicalWrite=false`);

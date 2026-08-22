@@ -39,6 +39,14 @@ export type NormalizedProjectSource = {
   provenance: string;
 };
 
+export type NormalizedModule = {
+  id: string;
+  root: string;
+  dependencyIds: readonly string[];
+  artifactTypes: readonly string[];
+  actionIds: readonly string[];
+};
+
 export type NormalizedProjectManifest = {
   schema: "anyam.project/v1";
   projectId: string;
@@ -46,6 +54,7 @@ export type NormalizedProjectManifest = {
   referenceType: string;
   sourceSpaceIds: readonly string[];
   source: NormalizedProjectSource;
+  modules: readonly NormalizedModule[];
   actions: readonly Action[];
   verifiers: readonly Verifier[];
   targets: readonly NormalizedTarget[];
@@ -122,6 +131,19 @@ export type LocalActionResult = {
   stdout: string;
   stderr: string;
   validityKey: string;
+  /** A source-revision-independent key for safe cache reuse. */
+  reuseKey: string;
+};
+
+export type LocalReleasePlan = {
+  changedPaths: readonly string[] | undefined;
+  directModuleIds: readonly string[];
+  affectedModuleIds: readonly string[];
+  selectedActionIds: readonly string[];
+  skippedActionIds: readonly string[];
+  reusedActionIds: readonly string[];
+  fallbackActionIds: readonly string[];
+  receipt: string;
 };
 
 export type LocalReleaseResult = {
@@ -131,6 +153,7 @@ export type LocalReleaseResult = {
   artifacts: readonly Artifact[];
   release: Release;
   gate: StageGateDecision;
+  plan: LocalReleasePlan;
   cacheHits: number;
   warnings: readonly string[];
 };
@@ -334,6 +357,7 @@ export function normalizeProjectManifest(value: unknown): NormalizedProjectManif
   }
 
   const actions: Action[] = [];
+  const modules: NormalizedModule[] = [];
   const artifactTypesByModule: Record<string, readonly string[]> = {};
   const actionIds = new Set<string>();
   const moduleIds = new Set<string>();
@@ -414,7 +438,52 @@ export function normalizeProjectManifest(value: unknown): NormalizedProjectManif
         contractDigest: actionContractDigest(actionWithoutDigest),
       });
     }
+    modules.push({
+      id: moduleId,
+      root: moduleRoot,
+      dependencyIds: [...dependencyIds],
+      artifactTypes: [...artifactTypes],
+      actionIds: actions
+        .filter((action) => action.moduleId === moduleId)
+        .map((action) => action.id),
+    });
   }
+
+  const moduleIdsById = new Set(modules.map((module) => module.id));
+  for (const module of modules) {
+    const unknownDependency = module.dependencyIds.find((dependencyId) => !moduleIdsById.has(dependencyId));
+    if (unknownDependency) {
+      fail({
+        code: "manifest-reference-invalid",
+        message: `Module ${module.id} depends on unknown Module ${unknownDependency}.`,
+        affectedObject: module.id,
+        recoveryAction: "declare the dependency Module or remove the stale dependency before running Actions",
+        receipt: `module=${module.id}; dependency=${unknownDependency}; dependency-reference=missing`,
+      });
+    }
+  }
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (module: NormalizedModule): void => {
+    if (visited.has(module.id)) return;
+    if (visiting.has(module.id)) {
+      fail({
+        code: "manifest-reference-invalid",
+        message: `Module dependency graph contains a cycle at ${module.id}.`,
+        affectedObject: module.id,
+        recoveryAction: "remove the dependency cycle so the Release plan has a deterministic order",
+        receipt: `module=${module.id}; dependency-graph=cycle; visiting=${[...visiting].join(",")}`,
+      });
+    }
+    visiting.add(module.id);
+    for (const dependencyId of module.dependencyIds) {
+      const dependency = modules.find((candidate) => candidate.id === dependencyId);
+      if (dependency) visit(dependency);
+    }
+    visiting.delete(module.id);
+    visited.add(module.id);
+  };
+  for (const module of modules) visit(module);
 
   const verifierValues = value.verifiers;
   if (!Array.isArray(verifierValues)) {
@@ -535,6 +604,7 @@ export function normalizeProjectManifest(value: unknown): NormalizedProjectManif
     referenceType,
     sourceSpaceIds,
     source,
+    modules,
     actions,
     verifiers,
     targets,
@@ -561,6 +631,110 @@ function globRegExp(pattern: string): RegExp {
     }
   }
   return new RegExp(`${expression}$`);
+}
+
+function normalizeChangedPath(value: string, index: number): string {
+  const normalized = value.replaceAll("\\", "/").replace(/^\.\//, "");
+  if (normalized.length === 0 || normalized.startsWith("/") || normalized === ".." || normalized.startsWith("../") || normalized.includes("/../")) {
+    fail({
+      code: "manifest-invalid",
+      message: `Changed path ${index} must be relative and must not traverse outside the Project Workspace.`,
+      affectedObject: `changedPaths[${index}]`,
+      recoveryAction: "provide normalized tracked paths relative to the Project Workspace",
+      receipt: `field=changedPaths[${index}]; path=${JSON.stringify(value)}; relative-no-traversal=false`,
+    });
+  }
+  return normalized;
+}
+
+function pathUnderModuleRoot(path: string, root: string): boolean {
+  return root === "." || path === root || path.startsWith(`${root}/`);
+}
+
+function moduleDirectlyAffected(module: NormalizedModule, actions: readonly Action[], changedPaths: readonly string[]): boolean {
+  if (changedPaths.some((path) => pathUnderModuleRoot(path, module.root))) return true;
+  return actions
+    .filter((action) => action.moduleId === module.id)
+    .some((action) => changedPaths.some((path) => action.inputGlobs.some((pattern) => globRegExp(pattern).test(path))));
+}
+
+function releasePlanReceipt(input: {
+  changedPaths: readonly string[] | undefined;
+  directModuleIds: readonly string[];
+  affectedModuleIds: readonly string[];
+  selectedActionIds: readonly string[];
+  skippedActionIds: readonly string[];
+  reusedActionIds: readonly string[];
+  fallbackActionIds: readonly string[];
+}): string {
+  return [
+    "release-plan=v1",
+    `changedPaths=${input.changedPaths === undefined ? "not-provided" : input.changedPaths.length === 0 ? "empty" : input.changedPaths.join(",")}`,
+    `directModules=${input.directModuleIds.join(",") || "none"}`,
+    `affectedModules=${input.affectedModuleIds.join(",") || "none"}`,
+    `selectedActions=${input.selectedActionIds.join(",") || "none"}`,
+    `skippedActions=${input.skippedActionIds.join(",") || "none"}`,
+    `reusedActions=${input.reusedActionIds.join(",") || "none"}`,
+    `fallbackActions=${input.fallbackActionIds.join(",") || "none"}`,
+  ].join("; ");
+}
+
+export function createLocalReleasePlan(input: {
+  manifest: NormalizedProjectManifest;
+  changedPaths?: readonly string[];
+}): LocalReleasePlan {
+  const changedPaths = input.changedPaths?.map(normalizeChangedPath);
+  const allActionIds = input.manifest.actions.map((action) => action.id);
+  if (changedPaths === undefined) {
+    return {
+      changedPaths,
+      directModuleIds: input.manifest.modules.map((module) => module.id),
+      affectedModuleIds: input.manifest.modules.map((module) => module.id),
+      selectedActionIds: allActionIds,
+      skippedActionIds: [],
+      reusedActionIds: [],
+      fallbackActionIds: [],
+      receipt: releasePlanReceipt({ changedPaths, directModuleIds: input.manifest.modules.map((module) => module.id), affectedModuleIds: input.manifest.modules.map((module) => module.id), selectedActionIds: allActionIds, skippedActionIds: [], reusedActionIds: [], fallbackActionIds: [] }),
+    };
+  }
+
+  const directModuleIds = input.manifest.modules
+    .filter((module) => moduleDirectlyAffected(module, input.manifest.actions, changedPaths))
+    .map((module) => module.id);
+  const affectedModuleIds = new Set(directModuleIds);
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const module of input.manifest.modules) {
+      if (affectedModuleIds.has(module.id)) continue;
+      if (module.dependencyIds.some((dependencyId) => affectedModuleIds.has(dependencyId))) {
+        affectedModuleIds.add(module.id);
+        expanded = true;
+      }
+    }
+  }
+  const affected = input.manifest.modules.filter((module) => affectedModuleIds.has(module.id)).map((module) => module.id);
+  const selectedActionIds = input.manifest.actions.filter((action) => affectedModuleIds.has(action.moduleId)).map((action) => action.id);
+  const skippedActionIds = input.manifest.actions.filter((action) => !affectedModuleIds.has(action.moduleId)).map((action) => action.id);
+  return {
+    changedPaths,
+    directModuleIds,
+    affectedModuleIds: affected,
+    selectedActionIds,
+    skippedActionIds,
+    reusedActionIds: [],
+    fallbackActionIds: [],
+    receipt: releasePlanReceipt({ changedPaths, directModuleIds, affectedModuleIds: affected, selectedActionIds, skippedActionIds, reusedActionIds: [], fallbackActionIds: [] }),
+  };
+}
+
+function updateLocalReleasePlan(input: LocalReleasePlan, updates: { reusedActionIds: readonly string[]; fallbackActionIds: readonly string[] }): LocalReleasePlan {
+  return {
+    ...input,
+    reusedActionIds: [...updates.reusedActionIds],
+    fallbackActionIds: [...updates.fallbackActionIds],
+    receipt: releasePlanReceipt({ ...input, reusedActionIds: updates.reusedActionIds, fallbackActionIds: updates.fallbackActionIds }),
+  };
 }
 
 async function walkFiles(root: string, current = root): Promise<string[]> {
@@ -680,6 +854,7 @@ function cloneActionResult(result: LocalActionResult): LocalActionResult {
       inputDigests: [...result.runnerOutput.inputDigests],
       outputDigests: [...result.runnerOutput.outputDigests],
     },
+    reuseKey: result.reuseKey,
   };
 }
 
@@ -695,14 +870,23 @@ function appendCachedEvidence(ledger: EvidenceLedger, evidence: Evidence): void 
  */
 export class LocalExecutionCache {
   private readonly records = new Map<string, LocalActionResult>();
+  private readonly reusableRecords = new Map<string, LocalActionResult>();
 
   get(validityKey: string): LocalActionResult | undefined {
     const record = this.records.get(validityKey);
     return record ? cloneActionResult(record) : undefined;
   }
 
+  getReusable(reuseKey: string): LocalActionResult | undefined {
+    const record = this.reusableRecords.get(reuseKey);
+    return record ? cloneActionResult(record) : undefined;
+  }
+
   set(result: LocalActionResult): void {
-    if (result.evidence.outcome === "passed") this.records.set(result.validityKey, cloneActionResult(result));
+    if (result.evidence.outcome !== "passed") return;
+    const cloned = cloneActionResult(result);
+    this.records.set(result.validityKey, cloned);
+    this.reusableRecords.set(result.reuseKey, cloned);
   }
 }
 
@@ -724,7 +908,122 @@ export class LocalExecutionEngine {
     this.cache = input.cache ?? new LocalExecutionCache();
   }
 
-  async runAction(input: { actionId: string; verifierId?: string }): Promise<LocalActionResult> {
+  private reuseActionResult(input: {
+    reusable: LocalActionResult;
+    action: Action;
+    verifier: Verifier | undefined;
+    runnerInput: NormalizedActionInput;
+    runnerOutput: NormalizedActionOutput;
+    inputDigests: readonly string[];
+    effectDigests: readonly string[];
+    effectiveDisclosure: DisclosurePolicyRef;
+    validityKey: string;
+    reuseKey: string;
+  }): LocalActionResult {
+    const runId = opaqueId("run");
+    const run: Run = {
+      ...cloneRun(input.reusable.run),
+      id: runId,
+      projectRevisionId: this.context.projectRevisionId,
+      projectViewId: this.context.projectViewId,
+      runnerId: "runner:local-cache",
+      status: "succeeded",
+      outputDigest: input.runnerOutput.outputDigest,
+      ...(this.context.changeRevisionId ? { changeRevisionId: this.context.changeRevisionId } : {}),
+      ...(this.context.workspaceId ? { workspaceId: this.context.workspaceId } : {}),
+      inputDigests: [...input.inputDigests],
+      outputDigests: [...input.runnerOutput.outputDigests],
+      effectDigests: [...input.effectDigests],
+      dependencyDigest: this.context.dependencyDigest,
+      toolchainDigest: this.context.toolchainDigest,
+      environmentDigest: this.context.environmentDigest,
+      policyVersion: this.context.policyVersion,
+      ...(this.context.targetId ? { targetId: this.context.targetId } : {}),
+      actor: { ...this.context.actor },
+      capabilityGrantId: this.context.capabilityGrantId,
+      exitCode: 0,
+      stdoutDigest: input.runnerOutput.stdoutDigest,
+      stderrDigest: input.runnerOutput.stderrDigest,
+    };
+    const evidence = this.ledger.append({
+      key: `action:${input.action.id}:verifier:${input.verifier?.id ?? "missing"}`,
+      criterion: `Action ${input.action.id} reused a passed cache result under its exact input closure.`,
+      outcome: "passed",
+      validityKey: input.validityKey,
+      actionId: input.action.id,
+      verifierId: input.verifier?.id ?? "verifier:missing",
+      toolchainDigest: this.context.toolchainDigest,
+      dependencyDigest: this.context.dependencyDigest,
+      environmentDigest: this.context.environmentDigest,
+      inputDigests: [...input.inputDigests],
+      effectDigests: [...input.effectDigests],
+      outputDigest: input.runnerOutput.outputDigest,
+      producer: { kind: "attestation", id: input.reusable.evidence.id, version: "local-cache/v1" },
+      projectRevisionId: this.context.projectRevisionId,
+      projectViewId: this.context.projectViewId,
+      ...(this.context.changeRevisionId ? { changeRevisionId: this.context.changeRevisionId } : {}),
+      runId,
+      actor: { ...this.context.actor },
+      runnerId: "runner:local-cache",
+      policyVersion: this.context.policyVersion,
+      authorizationEpoch: this.context.authorizationEpoch,
+      capabilityGrantId: this.context.capabilityGrantId,
+      disclosure: { ...input.effectiveDisclosure },
+      receipt: `action=${input.action.id}; verifier=${input.verifier?.id ?? "missing"}; reuse=verified-cache; priorEvidence=${input.reusable.evidence.id}; reuseKey=${input.reuseKey}; inputs=${input.inputDigests.length}; outputs=${input.runnerOutput.outputDigests.length}`,
+      invalidators: [
+        "project-view",
+        "action-contract",
+        "verifier-contract",
+        "dependency",
+        "toolchain",
+        "environment",
+        "policy",
+        "authorization-epoch",
+        "target",
+        "disclosure",
+        "input-closure",
+      ],
+      owner: this.context.owner,
+      sourceSpaceSnapshots: { ...this.context.sourceSpaceSnapshots },
+      actionContractDigest: input.action.contractDigest,
+      ...(input.verifier ? { verifierContractDigest: input.verifier.contractDigest } : {}),
+      ...(this.context.targetId ? { targetId: this.context.targetId } : {}),
+      ...(this.context.workspaceId ? { workspaceId: this.context.workspaceId } : {}),
+    });
+    const artifacts = input.reusable.artifacts.map((artifact) => ({
+      ...cloneArtifact(artifact),
+      id: opaqueId("artifact"),
+      projectRevisionId: this.context.projectRevisionId,
+      ...(this.context.changeRevisionId ? { changeRevisionId: this.context.changeRevisionId } : {}),
+      runId,
+      provenanceDigest: digest({ reuseKey: input.reuseKey, priorArtifactId: artifact.id, digest: artifact.digest }),
+    }));
+    const result: LocalActionResult = {
+      ...cloneActionResult(input.reusable),
+      run,
+      evidence,
+      artifacts,
+      runnerInput: {
+        ...input.runnerInput,
+        inputDigests: [...input.inputDigests],
+        effectDigests: [...input.effectDigests],
+      },
+      runnerOutput: {
+        ...input.runnerOutput,
+        inputDigests: [...input.inputDigests],
+        outputDigests: [...input.runnerOutput.outputDigests],
+      },
+      cacheHit: true,
+      stdout: "",
+      stderr: "",
+      validityKey: input.validityKey,
+      reuseKey: input.reuseKey,
+    };
+    this.cache.set(result);
+    return result;
+  }
+
+  async runAction(input: { actionId: string; verifierId?: string; cachePolicy?: "exact" | "reusable" | "none" }): Promise<LocalActionResult> {
     const action = this.manifest.actions.find((candidate) => candidate.id === input.actionId);
     if (!action) {
       fail({
@@ -763,6 +1062,8 @@ export class LocalExecutionEngine {
     const effectiveDisclosure: DisclosurePolicyRef = verifier?.disclosure === "result-only"
       ? { projectionId: this.context.disclosure.projectionId, classification: "restricted" }
       : { ...this.context.disclosure };
+    const moduleArtifactTypes = this.manifest.artifactTypesByModule[action.moduleId] ?? [];
+    const targetContractDigest = this.manifest.targets.find((target) => target.id === this.context.targetId)?.contractDigest;
     const validityKey = digest({
       projectRevisionId: this.context.projectRevisionId,
       projectViewId: this.context.projectViewId,
@@ -779,6 +1080,24 @@ export class LocalExecutionEngine {
       targetId: this.context.targetId,
       disclosure: this.context.disclosure,
       effectiveDisclosure,
+      moduleArtifactTypes,
+      targetContractDigest,
+      inputDigests,
+      effectDigests,
+    });
+    const reuseKey = digest({
+      actionContractDigest: action.contractDigest,
+      verifierContractDigest: verifier?.contractDigest,
+      dependencyDigest: this.context.dependencyDigest,
+      toolchainDigest: this.context.toolchainDigest,
+      environmentDigest: this.context.environmentDigest,
+      policyVersion: this.context.policyVersion,
+      authorizationEpoch: this.context.authorizationEpoch,
+      targetId: this.context.targetId,
+      disclosure: this.context.disclosure,
+      effectiveDisclosure,
+      moduleArtifactTypes,
+      targetContractDigest,
       inputDigests,
       effectDigests,
     });
@@ -810,10 +1129,15 @@ export class LocalExecutionEngine {
       capabilityGrantId: this.context.capabilityGrantId,
       runnerId: this.context.runnerId,
     };
-    const cached = this.cache.get(validityKey);
+    const cachePolicy = input.cachePolicy ?? "exact";
+    const cached = cachePolicy === "none" ? undefined : this.cache.get(validityKey);
     if (cached) {
       appendCachedEvidence(this.ledger, cached.evidence);
       return { ...cached, cacheHit: true };
+    }
+    if (cachePolicy === "reusable") {
+      const reusable = this.cache.getReusable(reuseKey);
+      if (reusable) return this.reuseActionResult({ reusable, action, verifier, runnerInput, runnerOutput: reusable.runnerOutput, inputDigests, effectDigests, effectiveDisclosure, validityKey, reuseKey });
     }
 
     const runId = opaqueId("run");
@@ -928,12 +1252,11 @@ export class LocalExecutionEngine {
       ...(this.context.targetId ? { targetId: this.context.targetId } : {}),
       ...(this.context.workspaceId ? { workspaceId: this.context.workspaceId } : {}),
     });
-    const artifactTypes = this.manifest.artifactTypesByModule[action.moduleId] ?? [];
     const artifacts: Artifact[] = outcome === "passed"
       ? outputs.files.map((file, index) => ({
         protocol: CONTRACT_VERSIONS.artifact,
         id: opaqueId("artifact"),
-        type: artifactTypes[index] ?? artifactTypes[0] ?? "generic.output",
+        type: moduleArtifactTypes[index] ?? moduleArtifactTypes[0] ?? "generic.output",
         digest: file.digest,
         projectRevisionId: this.context.projectRevisionId,
         ...(this.context.changeRevisionId ? { changeRevisionId: this.context.changeRevisionId } : {}),
@@ -954,6 +1277,7 @@ export class LocalExecutionEngine {
       stdout: commandResult.stdout,
       stderr: commandResult.stderr,
       validityKey,
+      reuseKey,
     };
     this.cache.set(result);
     return cloneActionResult(result);
@@ -966,23 +1290,37 @@ export async function runLocalRelease(input: {
   releaseName: string;
   ledger?: EvidenceLedger;
   cache?: LocalExecutionCache;
+  changedPaths?: readonly string[];
   stateAssumptions?: readonly string[];
 }): Promise<LocalReleaseResult> {
   const manifest = normalizeProjectManifest(input.manifest);
   const ledger = input.ledger ?? new EvidenceLedger();
   const cache = input.cache ?? new LocalExecutionCache();
   const engine = new LocalExecutionEngine({ manifest, context: input.context, ledger, cache });
+  const initialPlan = createLocalReleasePlan({ manifest, ...(input.changedPaths === undefined ? {} : { changedPaths: input.changedPaths }) });
   const results: LocalActionResult[] = [];
+  const reusedActionIds = new Set<string>();
+  const fallbackActionIds = new Set<string>();
   for (const action of manifest.actions) {
     const verifiers = manifest.verifiers.filter((verifier) => verifier.actionId === action.id);
+    const selected = initialPlan.selectedActionIds.includes(action.id);
+    const cachePolicy = selected ? "exact" : "reusable";
+    let actionReused = true;
     if (verifiers.length === 0) {
-      results.push(await engine.runAction({ actionId: action.id }));
-      continue;
+      const result = await engine.runAction({ actionId: action.id, cachePolicy });
+      results.push(result);
+      actionReused = actionReused && result.cacheHit;
+    } else {
+      for (const verifier of verifiers) {
+        const result = await engine.runAction({ actionId: action.id, verifierId: verifier.id, cachePolicy });
+        results.push(result);
+        actionReused = actionReused && result.cacheHit;
+      }
     }
-    for (const verifier of verifiers) {
-      results.push(await engine.runAction({ actionId: action.id, verifierId: verifier.id }));
-    }
+    if (actionReused) reusedActionIds.add(action.id);
+    if (!selected && !actionReused) fallbackActionIds.add(action.id);
   }
+  const plan = updateLocalReleasePlan(initialPlan, { reusedActionIds: [...reusedActionIds], fallbackActionIds: [...fallbackActionIds] });
 
   const requiredVerifiers = manifest.verifiers.filter((verifier) => verifier.requiredFor.includes("release"));
   const requiredEvidence: EvidenceRequirement[] = requiredVerifiers.map((verifier) => {
@@ -1043,6 +1381,7 @@ export async function runLocalRelease(input: {
     ...(input.context.changeRevisionId ? { changeRevisionId: input.context.changeRevisionId } : {}),
     provenanceDigest: digest({
       manifest: manifest.digest,
+      releasePlan: plan.receipt,
       projectRevisionId: input.context.projectRevisionId,
       projectViewId: input.context.projectViewId,
       changeRevisionId: input.context.changeRevisionId,
@@ -1050,7 +1389,7 @@ export async function runLocalRelease(input: {
       evidence: results.map((result) => result.evidence.validityKey),
       policyVersion: input.context.policyVersion,
     }),
-    receipt: `release=${input.releaseName}; artifacts=${artifacts.length}; evidence=${results.length}; status=${allBlockers.length === 0 ? "ready" : "blocked"}`,
+    receipt: `release=${input.releaseName}; artifacts=${artifacts.length}; evidence=${results.length}; status=${allBlockers.length === 0 ? "ready" : "blocked"}; ${plan.receipt}`,
   };
   return {
     manifest,
@@ -1060,7 +1399,8 @@ export async function runLocalRelease(input: {
     release,
     gate: { ...gate, blockers: allBlockers },
     cacheHits: results.filter((result) => result.cacheHit).length,
-    warnings: [...manifest.warnings, ...releaseBlockers],
+    warnings: [...manifest.warnings, ...releaseBlockers, plan.receipt],
+    plan,
   };
 }
 

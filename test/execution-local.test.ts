@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -9,6 +9,7 @@ import {
   LocalExecutionCache,
   LocalExecutionEngine,
   LocalExecutionError,
+  createLocalReleasePlan,
   normalizeProjectManifest,
   runLocalRelease,
   type LocalExecutionContext,
@@ -277,6 +278,137 @@ test("failed local Actions and stale or indeterminate Evidence block a Release g
     });
     assert.equal(gate.status, "blocked");
     assert.deepEqual(gate.blockers.map((blocker) => blocker.kind), ["stale", "indeterminate", "missing"]);
+  } finally {
+    await rm(copied.directory, { recursive: true, force: true });
+  }
+});
+
+function graphManifest(): Record<string, unknown> {
+  const action = (id: string, moduleId: string, input: string, output: string) => ({
+    id,
+    command: "node -e \"process.exit(0)\"",
+    inputs: [input],
+    outputs: output ? [output] : [],
+    network: [],
+    resources: {},
+    moduleId,
+  });
+  return {
+    schema: "anyam.project/v1",
+    id: "project:graph",
+    name: "Graph test",
+    referenceType: "typescript-library",
+    sourceSpaceIds: ["source:graph"],
+    source: { root: ".", provenance: "test" },
+    modules: [
+      { id: "module:core", root: "core", dependencies: [], actions: [action("action:core", "module:core", "core/src/**/*.ts", "dist/core.out")], artifactTypes: ["core.output"] },
+      { id: "module:app", root: "app", dependencies: ["module:core"], actions: [action("action:app", "module:app", "app/src/**/*.ts", "dist/app.out")], artifactTypes: ["app.output"] },
+      { id: "module:docs", root: "docs", dependencies: [], actions: [action("action:docs", "module:docs", "docs/**/*.md", "dist/docs.out")], artifactTypes: ["docs.output"] },
+    ],
+    verifiers: [],
+    targets: [{ id: "target:graph", adapter: "generic", accepts: ["core.output", "app.output", "docs.output"], requiredCapabilities: [] }],
+  };
+}
+
+test("normalizes and plans a dependency closure, rejecting unknown and cyclic modules", () => {
+  const manifest = normalizeProjectManifest(graphManifest());
+  const plan = createLocalReleasePlan({ manifest, changedPaths: ["core/src/index.ts"] });
+  assert.deepEqual(plan.directModuleIds, ["module:core"]);
+  assert.deepEqual(plan.affectedModuleIds, ["module:core", "module:app"]);
+  assert.deepEqual(plan.selectedActionIds, ["action:core", "action:app"]);
+  assert.deepEqual(plan.skippedActionIds, ["action:docs"]);
+  assert.match(plan.receipt, /affectedModules=module:core,module:app/);
+
+  assert.throws(
+    () => normalizeProjectManifest({ ...graphManifest(), modules: [{ ...(graphManifest().modules as readonly Record<string, unknown>[])[0], dependencies: ["module:missing"] }] }),
+    (error: unknown) => {
+      assert.ok(error instanceof LocalExecutionError);
+      assert.equal(error.code, "manifest-reference-invalid");
+      assert.match(error.receipt, /dependency-reference=missing/);
+      return true;
+    },
+  );
+
+  const cycle = graphManifest();
+  const cycleModules = cycle.modules as readonly Record<string, unknown>[];
+  cycle.modules = [
+    { ...cycleModules[0], dependencies: ["module:app"] },
+    cycleModules[1],
+    cycleModules[2],
+  ];
+  assert.throws(
+    () => normalizeProjectManifest(cycle),
+    (error: unknown) => {
+      assert.ok(error instanceof LocalExecutionError);
+      assert.equal(error.code, "manifest-reference-invalid");
+      assert.match(error.receipt, /dependency-graph=cycle/);
+      return true;
+    },
+  );
+});
+
+test("reuses unaffected Action results across Project Revisions only through an exact input closure", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "anyam-release-plan-"));
+  try {
+    await mkdir(join(directory, "core", "src"), { recursive: true });
+    await mkdir(join(directory, "app", "src"), { recursive: true });
+    await mkdir(join(directory, "docs"), { recursive: true });
+    await writeFile(join(directory, "core", "src", "index.ts"), "export const core = true;\n");
+    await writeFile(join(directory, "app", "src", "index.ts"), "export const app = true;\n");
+    await writeFile(join(directory, "docs", "README.md"), "initial\n");
+    const raw = graphManifest();
+    const modules = raw.modules as readonly Record<string, unknown>[];
+    raw.modules = modules.map((module) => ({
+      ...module,
+      actions: (module.actions as readonly Record<string, unknown>[]).map((action) => ({
+        ...action,
+        command: action.id === "action:core"
+          ? "node -e \"const fs=require('fs');fs.mkdirSync('dist',{recursive:true});fs.copyFileSync('core/src/index.ts','dist/core.out')\""
+          : action.id === "action:app"
+            ? "node -e \"const fs=require('fs');fs.mkdirSync('dist',{recursive:true});fs.copyFileSync('app/src/index.ts','dist/app.out')\""
+            : "node -e \"const fs=require('fs');fs.mkdirSync('dist',{recursive:true});fs.copyFileSync('docs/README.md','dist/docs.out')\"",
+      })),
+    }));
+    const manifest = normalizeProjectManifest(raw);
+    const cache = new LocalExecutionCache();
+    const first = await runLocalRelease({ manifest: raw, cache, releaseName: "graph-v1", context: { ...context(directory, "target:graph"), projectRevisionId: "project-revision:graph:v1" } });
+    assert.equal(first.release.status, "ready");
+
+    await writeFile(join(directory, "docs", "README.md"), "changed\n");
+    const second = await runLocalRelease({
+      manifest: raw,
+      cache,
+      changedPaths: ["docs/README.md"],
+      releaseName: "graph-v2",
+      context: { ...context(directory, "target:graph"), projectRevisionId: "project-revision:graph:v2" },
+    });
+    assert.equal(second.release.status, "ready");
+    assert.deepEqual(second.plan.affectedModuleIds, ["module:docs"]);
+    assert.deepEqual(second.plan.reusedActionIds, ["action:core", "action:app"]);
+    assert.deepEqual(second.plan.fallbackActionIds, []);
+    assert.equal(second.cacheHits, 2);
+    assert.equal(second.artifacts.find((artifact) => artifact.actionId === "action:core")?.projectRevisionId, "project-revision:graph:v2");
+    assert.equal(second.evidence.find((record) => record.actionId === "action:core")?.producer.kind, "attestation");
+    assert.match(second.release.receipt ?? "", /reusedActions=action:core,action:app/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("affected planning falls back to execution when no exact reusable result exists", async () => {
+  const copied = await copyFixture("worker");
+  try {
+    const result = await runLocalRelease({
+      manifest: copied.manifest,
+      changedPaths: [],
+      context: context(copied.directory, "target:worker"),
+      releaseName: "worker-fallback-plan",
+    });
+    assert.equal(result.release.status, "ready");
+    assert.deepEqual(result.plan.selectedActionIds, []);
+    assert.deepEqual(result.plan.fallbackActionIds, ["action:check", "action:build"]);
+    assert.deepEqual(result.plan.reusedActionIds, []);
+    assert.match(result.plan.receipt, /fallbackActions=action:check,action:build/);
   } finally {
     await rm(copied.directory, { recursive: true, force: true });
   }

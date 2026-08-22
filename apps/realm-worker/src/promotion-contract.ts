@@ -143,6 +143,21 @@ function safeInputSet(value: unknown): Record<string, unknown> {
   };
 }
 
+function safeMigrationPlan(value: unknown): Record<string, unknown> {
+  const plan = record(value, "migrationPlan");
+  return {
+    protocol: valueString(plan.protocol, "migrationPlan.protocol"),
+    strategy: valueString(plan.strategy, "migrationPlan.strategy"),
+    ...(plan.beforeSchemaDigest === undefined ? {} : { beforeSchemaDigest: valueString(plan.beforeSchemaDigest, "migrationPlan.beforeSchemaDigest") }),
+    ...(plan.afterSchemaDigest === undefined ? {} : { afterSchemaDigest: valueString(plan.afterSchemaDigest, "migrationPlan.afterSchemaDigest") }),
+    compatibility: valueString(plan.compatibility, "migrationPlan.compatibility"),
+    rollback: valueString(plan.rollback, "migrationPlan.rollback"),
+    migrationArtifactIds: valueStringList(plan.migrationArtifactIds, "migrationPlan.migrationArtifactIds"),
+    requiredEvidenceKeys: valueStringList(plan.requiredEvidenceKeys, "migrationPlan.requiredEvidenceKeys"),
+    planDigest: valueString(plan.planDigest, "migrationPlan.planDigest"),
+  };
+}
+
 function safePromotion(value: unknown): Record<string, unknown> {
   const promotion = record(value, "promotion");
   const previousReleaseId = promotion.previousReleaseId === null ? null : valueString(promotion.previousReleaseId, "promotion.previousReleaseId");
@@ -185,6 +200,7 @@ function safeRelease(value: unknown): Record<string, unknown> {
     projectRevisionId: valueString(release.projectRevisionId, "release.projectRevisionId"),
     status: valueString(release.status, "release.status"),
     ...(release.inputSet === undefined ? {} : { inputSet: safeInputSet(release.inputSet) }),
+    ...(release.migrationPlan === undefined ? {} : { migrationPlan: safeMigrationPlan(release.migrationPlan) }),
   };
 }
 

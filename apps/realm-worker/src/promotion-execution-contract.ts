@@ -135,6 +135,21 @@ function safeInputSet(value: unknown): Record<string, unknown> {
   };
 }
 
+function safeMigrationPlan(value: unknown): Record<string, unknown> {
+  const plan = object(value, "migrationPlan");
+  return {
+    protocol: string(plan.protocol, "migrationPlan.protocol"),
+    strategy: string(plan.strategy, "migrationPlan.strategy"),
+    ...(plan.beforeSchemaDigest === undefined ? {} : { beforeSchemaDigest: string(plan.beforeSchemaDigest, "migrationPlan.beforeSchemaDigest") }),
+    ...(plan.afterSchemaDigest === undefined ? {} : { afterSchemaDigest: string(plan.afterSchemaDigest, "migrationPlan.afterSchemaDigest") }),
+    compatibility: string(plan.compatibility, "migrationPlan.compatibility"),
+    rollback: string(plan.rollback, "migrationPlan.rollback"),
+    migrationArtifactIds: stringList(plan.migrationArtifactIds, "migrationPlan.migrationArtifactIds"),
+    requiredEvidenceKeys: stringList(plan.requiredEvidenceKeys, "migrationPlan.requiredEvidenceKeys"),
+    planDigest: string(plan.planDigest, "migrationPlan.planDigest"),
+  };
+}
+
 function safePromotion(value: unknown): Record<string, unknown> {
   const promotion = object(value, "promotion");
   const previousReleaseId = promotion.previousReleaseId === null ? null : string(promotion.previousReleaseId, "promotion.previousReleaseId");
@@ -202,7 +217,7 @@ function safeTarget(value: unknown): Record<string, unknown> {
 
 function safeRelease(value: unknown): Record<string, unknown> {
   const release = object(value, "release");
-  return { protocol: string(release.protocol, "release.protocol"), id: string(release.id, "release.id"), projectRevisionId: string(release.projectRevisionId, "release.projectRevisionId"), status: string(release.status, "release.status"), ...(release.inputSet === undefined ? {} : { inputSet: safeInputSet(release.inputSet) }) };
+  return { protocol: string(release.protocol, "release.protocol"), id: string(release.id, "release.id"), projectRevisionId: string(release.projectRevisionId, "release.projectRevisionId"), status: string(release.status, "release.status"), ...(release.inputSet === undefined ? {} : { inputSet: safeInputSet(release.inputSet) }), ...(release.migrationPlan === undefined ? {} : { migrationPlan: safeMigrationPlan(release.migrationPlan) }) };
 }
 
 function safeCheckpoint(value: unknown): Record<string, unknown> | undefined {

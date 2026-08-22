@@ -81,6 +81,22 @@ function inputSet(value: unknown): Record<string, unknown> | undefined {
   };
 }
 
+function migrationPlan(value: unknown): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("migrationPlan must be an object.", "send a typed credential-free Migration Plan; no transition was accepted", `operation=${RELEASE_CREATE_COMMAND}; field=migrationPlan; object-required; transition=not-applied`);
+  const plan = value as Record<string, unknown>;
+  return {
+    ...(plan.strategy === undefined ? {} : { strategy: requiredString(plan.strategy, "migrationPlan.strategy") }),
+    ...(plan.beforeSchemaDigest === undefined ? {} : { beforeSchemaDigest: requiredString(plan.beforeSchemaDigest, "migrationPlan.beforeSchemaDigest") }),
+    ...(plan.afterSchemaDigest === undefined ? {} : { afterSchemaDigest: requiredString(plan.afterSchemaDigest, "migrationPlan.afterSchemaDigest") }),
+    ...(plan.compatibility === undefined ? {} : { compatibility: requiredString(plan.compatibility, "migrationPlan.compatibility") }),
+    ...(plan.rollback === undefined ? {} : { rollback: requiredString(plan.rollback, "migrationPlan.rollback") }),
+    migrationArtifactIds: stringList(plan.migrationArtifactIds, "migrationPlan.migrationArtifactIds"),
+    requiredEvidenceKeys: stringList(plan.requiredEvidenceKeys, "migrationPlan.requiredEvidenceKeys"),
+    ...(plan.planDigest === undefined ? {} : { planDigest: requiredString(plan.planDigest, "migrationPlan.planDigest") }),
+  };
+}
+
 function assertAllowed(body: Record<string, unknown>): void {
   const allowed = [
     "idempotencyKey",
@@ -97,6 +113,7 @@ function assertAllowed(body: Record<string, unknown>): void {
     "changeRevisionId",
     "provenanceDigest",
     "inputSet",
+    "migrationPlan",
   ];
   const unknown = Object.keys(body).find((key) => !allowed.includes(key));
   if (unknown) return invalid(`Field ${unknown} is not accepted by this typed route.`, `remove ${unknown} and send only the documented ${RELEASE_CREATE_COMMAND} fields; no transition was accepted`, `operation=${RELEASE_CREATE_COMMAND}; field=${unknown}; transition=not-applied`);
@@ -126,6 +143,7 @@ export function releaseCreateCommand(value: unknown): ReleaseCreateMutation {
   const changeRevisionId = optionalSafeIdentifier(body.changeRevisionId, "changeRevisionId");
   const provenanceDigest = body.provenanceDigest === undefined ? undefined : requiredString(body.provenanceDigest, "provenanceDigest");
   const releaseInputSet = inputSet(body.inputSet);
+  const releaseMigrationPlan = migrationPlan(body.migrationPlan);
   return {
     command: RELEASE_CREATE_COMMAND,
     idempotencyKey,
@@ -143,6 +161,7 @@ export function releaseCreateCommand(value: unknown): ReleaseCreateMutation {
       ...(changeRevisionId ? { changeRevisionId } : {}),
       ...(provenanceDigest ? { provenanceDigest } : {}),
       ...(releaseInputSet ? { inputSet: releaseInputSet } : {}),
+      ...(releaseMigrationPlan ? { migrationPlan: releaseMigrationPlan } : {}),
     },
   };
 }
@@ -179,6 +198,21 @@ function safeInputSet(value: unknown): Record<string, unknown> {
   };
 }
 
+function safeMigrationPlan(value: unknown): Record<string, unknown> {
+  const plan = record(value, "migrationPlan");
+  return {
+    protocol: valueString(plan.protocol, "migrationPlan.protocol"),
+    strategy: valueString(plan.strategy, "migrationPlan.strategy"),
+    ...(plan.beforeSchemaDigest === undefined ? {} : { beforeSchemaDigest: valueString(plan.beforeSchemaDigest, "migrationPlan.beforeSchemaDigest") }),
+    ...(plan.afterSchemaDigest === undefined ? {} : { afterSchemaDigest: valueString(plan.afterSchemaDigest, "migrationPlan.afterSchemaDigest") }),
+    compatibility: valueString(plan.compatibility, "migrationPlan.compatibility"),
+    rollback: valueString(plan.rollback, "migrationPlan.rollback"),
+    migrationArtifactIds: valueStringList(plan.migrationArtifactIds, "migrationPlan.migrationArtifactIds"),
+    requiredEvidenceKeys: valueStringList(plan.requiredEvidenceKeys, "migrationPlan.requiredEvidenceKeys"),
+    planDigest: valueString(plan.planDigest, "migrationPlan.planDigest"),
+  };
+}
+
 function safeRelease(value: unknown): Record<string, unknown> {
   const release = record(value, "release");
   const projectId = valueString(release.projectId, "release.projectId");
@@ -196,6 +230,7 @@ function safeRelease(value: unknown): Record<string, unknown> {
     ...(name ? { name } : {}),
     ...(changeRevisionId ? { changeRevisionId } : {}),
     ...(release.inputSet === undefined ? {} : { inputSet: safeInputSet(release.inputSet) }),
+    ...(release.migrationPlan === undefined ? {} : { migrationPlan: safeMigrationPlan(release.migrationPlan) }),
   };
 }
 

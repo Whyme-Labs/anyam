@@ -11,6 +11,7 @@ import {
 } from "../kernel/contracts.ts";
 import { targetDeploymentContractDigest, targetDeploymentProfile } from "./target-deployment.ts";
 import { assertReleaseInputSetMatches, deriveReleaseInputSet } from "./release-input.ts";
+import { assertMigrationPlanSafeForTarget, createMigrationPlan, defaultMigrationPlan } from "./migration-plan.ts";
 
 /**
  * A Target adapter is deliberately smaller than the Promotion authority. It
@@ -481,6 +482,34 @@ export function sealVerifiedRelease(input: {
   const inputSet = release.inputSet ?? deriveReleaseInputSet({ configurationDigests: release.configurationDigests, artifacts, evidence });
   if (release.inputSet) assertReleaseInputSetMatches({ inputSet: release.inputSet, configurationDigests: release.configurationDigests, artifacts, evidence });
   release.inputSet = inputSet;
+  const migrationPlan = release.migrationPlan ?? defaultMigrationPlan();
+  const normalizedMigrationPlan = createMigrationPlan(migrationPlan);
+  for (const migrationArtifactId of normalizedMigrationPlan.migrationArtifactIds) {
+    const artifact = artifactById.get(migrationArtifactId);
+    if (!artifact || !release.artifactIds.includes(migrationArtifactId)) {
+      error({
+        code: "invalid-release",
+        message: `Migration Plan references Artifact ${migrationArtifactId}, but that Artifact is not part of Release ${release.id}.`,
+        affectedObject: release.id,
+        recoveryAction: "attach the exact migration Artifact to the Release before Promotion",
+        receipt: `release=${release.id}; migrationArtifact=${migrationArtifactId}; declared=${release.artifactIds.includes(migrationArtifactId)}; provided=${artifact ? "true" : "false"}`,
+      });
+    }
+  }
+  for (const requiredEvidenceKey of normalizedMigrationPlan.requiredEvidenceKeys) {
+    const record = evidence.find((candidate) => candidate.key === requiredEvidenceKey);
+    if (!record || !release.evidenceIds.includes(record.id) || record.outcome !== "passed" || record.projectRevisionId !== release.projectRevisionId || (record.targetId !== undefined && record.targetId !== input.target.id)) {
+      error({
+        code: "invalid-release",
+        message: `Migration Plan requires passed Evidence ${requiredEvidenceKey} for Target ${input.target.id}.`,
+        affectedObject: release.id,
+        recoveryAction: "produce the required migration Evidence for the exact Project Revision and Target before Promotion",
+        receipt: `release=${release.id}; migrationEvidence=${requiredEvidenceKey}; present=${record ? "true" : "false"}; declared=${record ? release.evidenceIds.includes(record.id) : "false"}; outcome=${record?.outcome ?? "missing"}`,
+      });
+    }
+  }
+  assertMigrationPlanSafeForTarget({ plan: normalizedMigrationPlan, environment: targetDeploymentProfile(input.target).environment });
+  release.migrationPlan = normalizedMigrationPlan;
 
   const targetContractDigest = "contractDigest" in input.target && typeof input.target.contractDigest === "string"
     ? input.target.contractDigest

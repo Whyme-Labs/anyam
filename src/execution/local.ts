@@ -25,6 +25,7 @@ import {
 } from "../kernel/evidence.ts";
 import { targetDeploymentProfile } from "../delivery/target-deployment.ts";
 import { createReleaseInputSet } from "../delivery/release-input.ts";
+import { defaultMigrationPlan } from "../delivery/migration-plan.ts";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -1404,6 +1405,7 @@ export async function runLocalRelease(input: {
       policyVersion: input.context.policyVersion,
     }),
     inputSet,
+    migrationPlan: defaultMigrationPlan(),
     receipt: `release=${input.releaseName}; artifacts=${artifacts.length}; evidence=${results.length}; status=${allBlockers.length === 0 ? "ready" : "blocked"}; inputClosure=${inputSet.inputClosureDigest}; ${plan.receipt}`,
   };
   return {

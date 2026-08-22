@@ -20,6 +20,7 @@ import {
   type ProjectRevision,
   type ProjectView,
   type Release,
+  type ReleaseInputSet,
   type Run,
   type RunnerAttempt,
   type RunnerProfile,
@@ -38,6 +39,12 @@ import {
   targetDeploymentProfile,
   TargetDeploymentProfileError,
 } from "../delivery/target-deployment.ts";
+import {
+  assertReleaseInputSetMatches,
+  createReleaseInputSet,
+  deriveReleaseInputSet,
+  ReleaseInputError,
+} from "../delivery/release-input.ts";
 import {
   PROMOTION_EXECUTION_PROTOCOL,
   createPromotionExecutionContext,
@@ -1622,12 +1629,37 @@ export class AuthorityPlaneCoordinator {
         if (artifacts.some((item) => !item) || evidence.some((item) => !item)) throw new AuthorityPlaneError({ code: "not_found", message: "Release references an Artifact or Evidence record that is not present.", recoveryAction: "restore the complete immutable lineage before creating the Release", receipt: `projectRevision=${projectRevisionId}; artifacts=${artifactIds.length}; evidence=${evidenceIds.length}; release=not-created` });
         if (artifacts.some((item) => item!.projectRevisionId !== projectRevisionId)) throw new AuthorityPlaneError({ code: "conflict", message: "Release Artifacts must be bound to the exact canonical Project Revision.", recoveryAction: "record or select Artifacts produced from the exact canonical Project Revision before creating the Release", receipt: `project=${releaseProjectId}; projectRevision=${projectRevisionId}; artifacts=exact-project-revision-required; release=not-created` });
         if (evidence.some((item) => item!.projectRevisionId !== projectRevisionId || item!.outcome !== "passed")) throw new AuthorityPlaneError({ code: "conflict", message: "Release Evidence must be passed and bound to the exact Project Revision.", recoveryAction: "rerun the verifier against the exact Project Revision and attach fresh passed Evidence", receipt: `projectRevision=${projectRevisionId}; evidence=exact-passed-required; release=not-created` });
+        const configurationDigests = stringArray(payload.configurationDigests ?? [], "configurationDigests", true);
+        const artifactRecords = artifacts.filter((item): item is Artifact => item !== undefined);
+        const evidenceRecords = evidence.filter((item): item is Evidence => item !== undefined);
+        const inputSetValue = payload.inputSet === undefined ? undefined : record<unknown>(payload.inputSet, "inputSet");
+        let inputSet: ReleaseInputSet;
+        try {
+          const derived = deriveReleaseInputSet({ configurationDigests, artifacts: artifactRecords, evidence: evidenceRecords });
+          if (inputSetValue === undefined) {
+            inputSet = derived;
+          } else {
+            const supplied = createReleaseInputSet({
+              buildDefinitionDigest: requiredString(inputSetValue.buildDefinitionDigest, "inputSet.buildDefinitionDigest"),
+              dependencyDigest: requiredString(inputSetValue.dependencyDigest, "inputSet.dependencyDigest"),
+              toolchainDigest: requiredString(inputSetValue.toolchainDigest, "inputSet.toolchainDigest"),
+              environmentDigest: requiredString(inputSetValue.environmentDigest, "inputSet.environmentDigest"),
+              artifactDigests: stringArray(inputSetValue.artifactDigests, "inputSet.artifactDigests", true),
+            });
+            if (requiredString(inputSetValue.inputClosureDigest, "inputSet.inputClosureDigest") !== supplied.inputClosureDigest) throw new ReleaseInputError({ code: "mismatch", message: "Release inputSet digest does not match its fields.", recoveryAction: "recompute inputSet.inputClosureDigest from the exact fields and retry", receipt: `inputClosure=declared-digest-mismatch; expected=${supplied.inputClosureDigest}` });
+            assertReleaseInputSetMatches({ inputSet: supplied, configurationDigests, artifacts: artifactRecords, evidence: evidenceRecords });
+            inputSet = supplied;
+          }
+        } catch (error) {
+          if (error instanceof ReleaseInputError) throw new AuthorityPlaneError({ code: error.code === "missing" ? "invalid_request" : "conflict", message: error.message, recoveryAction: error.recoveryAction, receipt: error.receipt });
+          throw error;
+        }
         const releaseName = optionalString(payload.name);
         const releaseChangeRevisionId = optionalString(payload.changeRevisionId);
         const releaseChangeRevision = releaseChangeRevisionId ? next.changeRevisions[releaseChangeRevisionId] : undefined;
         if (releaseChangeRevisionId && (!releaseChangeRevision || next.changes[releaseChangeRevision.changeId]?.projectId !== releaseProjectId || releaseChangeRevision.projectRevisionId !== projectRevisionId)) throw new AuthorityPlaneError({ code: "conflict", message: "Release Change Revision must belong to the exact Project and canonical Project Revision.", recoveryAction: "create the Release from the Change Revision that produced this canonical Project Revision", receipt: `project=${releaseProjectId}; projectRevision=${projectRevisionId}; changeRevision=${releaseChangeRevisionId}; release=not-created` });
         const releaseProvenanceDigest = optionalString(payload.provenanceDigest);
-        const release: Release = { protocol: CONTRACT_VERSIONS.release, id: optionalString(payload.releaseId) ?? opaqueId("release"), projectRevisionId, artifactIds, evidenceIds, configurationDigests: stringArray(payload.configurationDigests ?? [], "configurationDigests", true), stateAssumptions: stringArray(payload.stateAssumptions ?? [], "stateAssumptions", true), policyVersion: requiredString(payload.policyVersion, "policyVersion"), status: "ready", ...(releaseName ? { name: releaseName } : {}), ...(releaseChangeRevisionId ? { changeRevisionId: releaseChangeRevisionId } : {}), ...(releaseProvenanceDigest ? { provenanceDigest: releaseProvenanceDigest } : {}), receipt: `release=ready; project=${releaseProjectId}; projectRevision=${projectRevisionId}; artifacts=${artifactIds.length}; evidence=${evidenceIds.length}` };
+        const release: Release = { protocol: CONTRACT_VERSIONS.release, id: optionalString(payload.releaseId) ?? opaqueId("release"), projectRevisionId, artifactIds, evidenceIds, configurationDigests, stateAssumptions: stringArray(payload.stateAssumptions ?? [], "stateAssumptions", true), policyVersion: requiredString(payload.policyVersion, "policyVersion"), status: "ready", ...(releaseName ? { name: releaseName } : {}), ...(releaseChangeRevisionId ? { changeRevisionId: releaseChangeRevisionId } : {}), ...(releaseProvenanceDigest ? { provenanceDigest: releaseProvenanceDigest } : {}), inputSet, receipt: `release=ready; project=${releaseProjectId}; projectRevision=${projectRevisionId}; artifacts=${artifactIds.length}; evidence=${evidenceIds.length}; inputClosure=${inputSet.inputClosureDigest}` };
         if (next.releases[release.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Release ${release.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Release identity", receipt: `release=${release.id}; exists=true; transition=not-applied` });
         next.releases[release.id] = release;
         return success({ release: { ...release, projectId: releaseProjectId } }, `release=${release.id}; project=${releaseProjectId}; status=ready; providerPromotion=not-performed; canonicalWrite=false`);

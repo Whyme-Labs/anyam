@@ -407,6 +407,7 @@ test("external Runner completion composes through Authority into a non-web Targe
   });
   assert.equal(releaseResult.status, "succeeded");
   const release = releaseResult.value.release as Release;
+  assert.match(release.inputSet?.inputClosureDigest ?? "", /^sha256:/);
   const targetResult = command(authority, "target.configure", "authority:target", {
     projectId,
     targetId: "target:downloads",

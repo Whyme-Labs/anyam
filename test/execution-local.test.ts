@@ -139,6 +139,7 @@ for (const fixture of [
       assert.equal(result.artifacts[0]?.type, fixture.artifactType);
       assert.equal(result.release.artifactIds[0], result.artifacts[0]?.id);
       assert.equal(result.release.evidenceIds.length, result.evidence.length);
+      assert.match(result.release.inputSet?.inputClosureDigest ?? "", /^sha256:/);
       assert.equal(result.release.receipt?.includes("status=ready"), true);
       assert.equal(result.runs.length, 2);
       assert.equal(result.evidence.length, 2);

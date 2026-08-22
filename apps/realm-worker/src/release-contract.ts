@@ -67,6 +67,20 @@ function stringList(value: unknown, field: string): string[] {
   return [...new Set((value as string[]).map((entry) => entry.trim()))];
 }
 
+function inputSet(value: unknown): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("inputSet must be an object.", "send a typed credential-free Release input closure; no transition was accepted", `operation=${RELEASE_CREATE_COMMAND}; field=inputSet; object-required; transition=not-applied`);
+  const record = value as Record<string, unknown>;
+  return {
+    buildDefinitionDigest: requiredString(record.buildDefinitionDigest, "inputSet.buildDefinitionDigest"),
+    dependencyDigest: requiredString(record.dependencyDigest, "inputSet.dependencyDigest"),
+    toolchainDigest: requiredString(record.toolchainDigest, "inputSet.toolchainDigest"),
+    environmentDigest: requiredString(record.environmentDigest, "inputSet.environmentDigest"),
+    artifactDigests: stringList(record.artifactDigests, "inputSet.artifactDigests"),
+    inputClosureDigest: requiredString(record.inputClosureDigest, "inputSet.inputClosureDigest"),
+  };
+}
+
 function assertAllowed(body: Record<string, unknown>): void {
   const allowed = [
     "idempotencyKey",
@@ -82,6 +96,7 @@ function assertAllowed(body: Record<string, unknown>): void {
     "policyVersion",
     "changeRevisionId",
     "provenanceDigest",
+    "inputSet",
   ];
   const unknown = Object.keys(body).find((key) => !allowed.includes(key));
   if (unknown) return invalid(`Field ${unknown} is not accepted by this typed route.`, `remove ${unknown} and send only the documented ${RELEASE_CREATE_COMMAND} fields; no transition was accepted`, `operation=${RELEASE_CREATE_COMMAND}; field=${unknown}; transition=not-applied`);
@@ -110,6 +125,7 @@ export function releaseCreateCommand(value: unknown): ReleaseCreateMutation {
   const policyVersion = requiredString(body.policyVersion, "policyVersion");
   const changeRevisionId = optionalSafeIdentifier(body.changeRevisionId, "changeRevisionId");
   const provenanceDigest = body.provenanceDigest === undefined ? undefined : requiredString(body.provenanceDigest, "provenanceDigest");
+  const releaseInputSet = inputSet(body.inputSet);
   return {
     command: RELEASE_CREATE_COMMAND,
     idempotencyKey,
@@ -126,6 +142,7 @@ export function releaseCreateCommand(value: unknown): ReleaseCreateMutation {
       policyVersion,
       ...(changeRevisionId ? { changeRevisionId } : {}),
       ...(provenanceDigest ? { provenanceDigest } : {}),
+      ...(releaseInputSet ? { inputSet: releaseInputSet } : {}),
     },
   };
 }
@@ -149,6 +166,19 @@ function valueStringList(value: unknown, field: string): string[] {
   return [...(value as string[])];
 }
 
+function safeInputSet(value: unknown): Record<string, unknown> {
+  const inputSet = record(value, "inputSet");
+  return {
+    protocol: valueString(inputSet.protocol, "inputSet.protocol"),
+    buildDefinitionDigest: valueString(inputSet.buildDefinitionDigest, "inputSet.buildDefinitionDigest"),
+    dependencyDigest: valueString(inputSet.dependencyDigest, "inputSet.dependencyDigest"),
+    toolchainDigest: valueString(inputSet.toolchainDigest, "inputSet.toolchainDigest"),
+    environmentDigest: valueString(inputSet.environmentDigest, "inputSet.environmentDigest"),
+    artifactDigests: valueStringList(inputSet.artifactDigests, "inputSet.artifactDigests"),
+    inputClosureDigest: valueString(inputSet.inputClosureDigest, "inputSet.inputClosureDigest"),
+  };
+}
+
 function safeRelease(value: unknown): Record<string, unknown> {
   const release = record(value, "release");
   const projectId = valueString(release.projectId, "release.projectId");
@@ -165,6 +195,7 @@ function safeRelease(value: unknown): Record<string, unknown> {
     status: valueString(release.status, "release.status"),
     ...(name ? { name } : {}),
     ...(changeRevisionId ? { changeRevisionId } : {}),
+    ...(release.inputSet === undefined ? {} : { inputSet: safeInputSet(release.inputSet) }),
   };
 }
 

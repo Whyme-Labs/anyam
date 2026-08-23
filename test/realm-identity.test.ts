@@ -335,3 +335,16 @@ test("binds MCP delivery to a live human-owned Task and Grant", () => {
   assert.equal(revoked.valid, false);
   if (!revoked.valid) assert.equal(revoked.code, "mcp.delivery_task_grant_inactive");
 });
+
+test("effective human capabilities are resource-scoped and explicit denies win", () => {
+  const { realm, principal } = createRealm();
+  const resource = { realmId: realm.realm.id, projectId: "project:video-player" };
+  realm.addRelationship({ principalId: principal.id, kind: "team-member", subjectId: "team:video-player", role: "maintainer", resource });
+  const allowed = realm.activeCapabilitiesForPrincipal({ principalId: principal.id, resource });
+  assert.equal(allowed.includes("workspace.write"), true);
+  assert.equal(allowed.includes("landing.request"), true);
+  assert.equal(allowed.includes("promotion.request"), false);
+  realm.addRelationship({ principalId: principal.id, kind: "team-member", subjectId: "team:video-player-deny", role: "maintainer", resource, deniedCapabilities: ["landing.request"] });
+  const denied = realm.activeCapabilitiesForPrincipal({ principalId: principal.id, resource });
+  assert.equal(denied.includes("landing.request"), false);
+});

@@ -32,7 +32,7 @@ function kindFrom(args: readonly string[]): ProjectTemplateKind {
 
 function positionalArgs(args: readonly string[], command: string): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation"]);
+  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation"]);
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -47,7 +47,7 @@ function positionalArgs(args: readonly string[], command: string): readonly stri
 
 function subcommandPositionals(args: readonly string[]): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation"]);
+  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation"]);
   for (let index = 2; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -64,7 +64,8 @@ function printHelp(): void {
   console.log("connect github --method actions  generate a reviewable GitHub Actions Bridge workflow");
   console.log("Bridge options: --realm <url> --project <id> --connection <id> --action-ref <owner/repo@sha> [--workflow-path <path>] [--remote <name>] [--schedule <cron>]");
   console.log("realm plan|install|upgrade|doctor|export|restore|destroy  customer-operated lifecycle");
-  console.log(`Anyam local CLI\n\nCommands:\n  init [directory]                 create a local TypeScript Project\n  doctor [directory]               inspect manifest and source metadata locally\n  check [directory]                compatibility alias for doctor\n  change start <title>             start a local Change\n  agent setup <agent>              configure the local MCP broker and instructions\n  agent start [agent]              start or resume a local agent session\n  agent exec <agent> -- <command>  launch an agent through the Workspace boundary\n  agent handoff <agent>            revoke the current session and start another\n  agent status                     inspect the current local session\n  agent revoke                     revoke the current local session\n  mcp serve --stdio                serve the semantic MCP tools over stdio\n  auth login --realm <url>         authenticate through OAuth PKCE and the OS keychain\n  auth revoke                      revoke the current local session\n  git-credential-anyam get         issue a context-bound memory-only Workspace Git credential\n\nOptions:\n  --type worker|library             choose the template (default: worker)\n  --name <name>                     choose the Project name\n  --agent codex|claude|cursor|cli   choose the local coding agent\n  --mode enforceable|supervised     choose the Workspace boundary mode\n  --directory <path>               choose a Project directory\n  --json                            print machine-readable output\n  --dry-run                         print the proposed manifest without writing\n\nThe local broker never stores bearer credentials, writes canonical Git refs, reads secret values, approves Changes, or promotes production.`);
+  console.log("workspace start|list|inspect|exec  explicit concurrent local Workspace controls (use --session for selection)");
+  console.log(`Anyam local CLI\n\nCommands:\n  init [directory]                 create a local TypeScript Project\n  doctor [directory]               inspect manifest and source metadata locally\n  check [directory]                compatibility alias for doctor\n  change start <title>             start a local Change\n  workspace list                   list all active local Workspaces\n  workspace inspect --session <id> inspect one explicit Workspace session\n  workspace exec --session <id> -- <command>  run in one existing Workspace\n  agent setup <agent>              configure the local MCP broker and instructions\n  agent start [agent]              start or resume an agent session\n  agent exec <agent> -- <command>  launch an agent through the Workspace boundary\n  agent handoff <agent>            revoke one selected session and start another\n  agent status [--session <id>]    inspect one selected or current session\n  agent revoke [--session <id>]    revoke one selected session\n  mcp serve --stdio                serve the semantic MCP tools over stdio\n  auth login --realm <url>         authenticate through OAuth PKCE and the OS keychain\n  auth revoke                      revoke the current local session\n  git-credential-anyam get         issue a context-bound memory-only Workspace Git credential\n\nOptions:\n  --type worker|library             choose the template (default: worker)\n  --name <name>                     choose the Project name\n  --agent codex|claude|cursor|cli   choose the local coding agent\n  --mode enforceable|supervised     choose the Workspace boundary mode\n  --session <id>                    select one explicit local Workspace/session\n  --directory <path>               choose a Project directory\n  --json                            print machine-readable output\n  --dry-run                         print the proposed manifest without writing\n\nThe local broker never stores bearer credentials, writes canonical Git refs, reads secret values, approves Changes, or promotes production.`);
 }
 
 function agentValue(args: readonly string[], fallback?: string): string {
@@ -191,6 +192,41 @@ export async function main(args: readonly string[], cwd = process.cwd(), input: 
     return 0;
   }
 
+  if (command === "workspace" && subcommand === "list") {
+    const result = await new LocalAgentManager({ directory: agentDirectory(args, cwd) }).listSessions();
+    printResult(result, json, result.length === 0 ? "No active local Workspaces." : result.map((workspace) => `${workspace.session.id} · ${workspace.session.agent} · ${workspace.session.changeId} · ${workspace.session.workspaceId}`).join("\n"));
+    return 0;
+  }
+
+  if (command === "workspace" && subcommand === "start") {
+    const agent = agentValue(args, "cli");
+    const mode = valueAfter(args, "--mode") as WorkspaceBoundaryMode | undefined;
+    if (mode && mode !== "enforceable" && mode !== "supervised") throw new Error(`--mode must be enforceable or supervised; asked=${mode}.`);
+    const result = await new LocalAgentManager({ directory: agentDirectory(args, cwd) }).startSession({ agent, parallel: true, ...(mode ? { mode } : {}) });
+    printResult(result, json, `Workspace ${result.session.workspaceId} started for ${result.session.agent}.\nSession: ${result.session.id}\nChange: ${result.session.changeId}\nCanonical write: denied`);
+    return 0;
+  }
+
+  if (command === "workspace" && subcommand === "inspect") {
+    const sessionId = requiredValue(args, "--session", "workspace inspect");
+    const result = await new LocalAgentManager({ directory: agentDirectory(args, cwd) }).inspectSession(sessionId);
+    if (!result) throw new Error(`Workspace session ${sessionId} is not active; run anyam workspace list and select an active session.`);
+    printResult(result, json, `${result.session.id} · ${result.session.agent} · ${result.session.changeId} · ${result.session.workspaceId}\nCredentials: ${result.activeCredentialCount}`);
+    return 0;
+  }
+
+  if (command === "workspace" && subcommand === "exec") {
+    const sessionId = requiredValue(args, "--session", "workspace exec");
+    const separator = args.indexOf("--");
+    const executable = separator >= 0 ? args[separator + 1] : undefined;
+    if (!executable) throw new Error("workspace exec requires --session <id> -- <command> [args...]; no process was started.");
+    const mode = (valueAfter(args, "--mode") ?? "enforceable") as WorkspaceBoundaryMode;
+    if (mode !== "enforceable" && mode !== "supervised") throw new Error(`--mode must be enforceable or supervised; asked=${mode}.`);
+    const result = await new LocalAgentManager({ directory: valueAfter(args, "--directory") ?? cwd }).launchAgent({ sessionId, command: executable, args: args.slice(separator + 2), mode });
+    printResult(result, json, `Workspace process ${result.command.status} in ${result.boundary.mode} Workspace (${result.boundary.enforcement}).\nWorkspace: ${result.boundary.workspaceDirectory}\nReceipt: ${result.command.receipt}`);
+    return result.command.status === "passed" ? 0 : 1;
+  }
+
   if (command === "agent" && subcommand === "setup") {
     const agent = agentValue(args, "cli");
     const setupPositionals = subcommandPositionals(args);
@@ -226,13 +262,14 @@ export async function main(args: readonly string[], cwd = process.cwd(), input: 
   if (command === "agent" && subcommand === "handoff") {
     const agent = agentValue(args);
     if (!agent) throw new Error("agent handoff requires an agent; run anyam agent handoff <codex|claude|cursor|cli>.");
-    const result = await new LocalAgentManager({ directory: agentDirectory(args, cwd) }).handoff({ agent });
+    const sessionId = valueAfter(args, "--session");
+    const result = await new LocalAgentManager({ directory: agentDirectory(args, cwd) }).handoff({ agent, ...(sessionId ? { sessionId } : {}) });
     printResult(result, json, `Handoff complete. Previous session: ${result.previousSessionId ?? "none"}\nNew session: ${result.next.session.id} (${result.next.session.agent})\nPrior credentials are revoked.`);
     return 0;
   }
 
   if (command === "agent" && subcommand === "status") {
-    const result = await new LocalAgentManager({ directory: agentDirectory(args, cwd) }).status();
+    const result = await new LocalAgentManager({ directory: agentDirectory(args, cwd) }).status(valueAfter(args, "--session"));
     printResult(result, json, result.session ? `Active ${result.session.agent} session ${result.session.id}\nWorkspace: ${result.session.workspaceId}\nCredentials: ${result.activeCredentialCount}\nAudit events: ${result.auditCount}` : "No active local agent session.");
     return 0;
   }

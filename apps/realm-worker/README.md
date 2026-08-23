@@ -90,7 +90,8 @@ Realm and Project coordinators remain the source of authority above them.
 
 ## Authority Plane vertical slice
 
-After an owner completes the passkey login ceremony, the public edge exposes:
+After a Realm member completes the configured authentication ceremony, the
+public edge exposes policy-scoped Authority routes:
 
 | Route | Purpose |
 | --- | --- |
@@ -453,9 +454,10 @@ deduplicated by idempotency key, and appended to the audit ledger. Only
 adapter is separately qualified; it never changes the Target pointer or claims
 that deployment occurred.
 
-This is an owner-only vertical slice. General project membership, capability
-grants, Git Smart HTTP object transfer, and live provider Target adapters are
-subsequent boundaries. The binding-shaped Worker test exercises the complete
+The hosted command/read path now evaluates Realm relationships and semantic
+capabilities for human team sessions; identity/recovery administration remains
+owner-only. Git Smart HTTP object transfer and live provider Target adapters are
+separate boundaries. The binding-shaped Worker test exercises the complete
 Project-to-Promotion path; the Wrangler smoke receipt remains
 `wrangler=dry-run; deployment=not-performed` until a customer deployment is
 run and independently observed.

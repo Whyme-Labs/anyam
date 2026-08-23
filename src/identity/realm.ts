@@ -518,7 +518,7 @@ const ROLE_CAPABILITIES: Readonly<Record<RealmRole, readonly Capability[]>> = {
   contributor: ["project.inspect", "source.read", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "review.submit_finding", "run.invoke", "evidence.read", "target.read", "agent.delegate"],
   reviewer: ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "review.submit_finding", "change.approve", "evidence.read", "target.read"],
   maintainer: ["project.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "landing.request", "target.read", "extension.install", "extension.manage", "extension.invoke", "governance.profile.evaluate", "agent.delegate"],
-  "release-manager": ["project.inspect", "source.read", "change.inspect", "review.submit_finding", "change.approve", "evidence.read", "target.read", "target.promote", "landing.request", "extension.invoke"],
+  "release-manager": ["project.inspect", "source.read", "change.inspect", "review.submit_finding", "change.approve", "evidence.read", "target.read", "target.promote", "landing.request", "release.create", "promotion.request", "extension.invoke"],
   "security-reviewer": ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "target.read", "governance.profile.evaluate"],
   moderator: ["project.inspect", "change.inspect", "evidence.read", "public.moderate"],
   owner: ["project.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "secret.use", "landing.request", "release.create", "target.configure", "promotion.request", "target.read", "target.promote", "extension.install", "extension.manage", "extension.invoke", "governance.profile.manage", "governance.profile.evaluate", "agent.delegate", "policy.manage", "identity.manage"],
@@ -669,6 +669,24 @@ export class RealmIdentityPolicy {
 
   snapshot(): RealmState {
     return clone(this.state);
+  }
+
+  /**
+   * Returns the effective human capability set for one resource boundary.
+   * This is a policy observation for trusted adapters; it does not mint a
+   * Task, Grant, credential, or canonical write authority.
+   */
+  activeCapabilitiesForPrincipal(input: { principalId: string; resource: ResourceRef }): readonly Capability[] {
+    const principal = this.state.principals[input.principalId];
+    if (!principal || principal.realmId !== this.state.realm.id || principal.status !== "active") return [];
+    const allowed = new Set<Capability>();
+    const denied = new Set<Capability>();
+    for (const relationship of Object.values(this.state.relationships)) {
+      if (relationship.status !== "active" || relationship.realmId !== this.state.realm.id || relationship.principalId !== input.principalId || !resourceMatches(relationship.resource, input.resource)) continue;
+      for (const capability of ROLE_CAPABILITIES[relationship.role]) allowed.add(capability);
+      for (const capability of relationship.deniedCapabilities) denied.add(capability);
+    }
+    return [...allowed].filter((capability) => !denied.has(capability)).sort();
   }
 
   getRecoverySnapshot(): RealmRecoverySnapshot {

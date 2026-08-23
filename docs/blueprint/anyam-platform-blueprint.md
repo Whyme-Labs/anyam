@@ -520,14 +520,14 @@ anyam create|init|clone|connect|status|diff|commit|fetch|pull|push
 anyam project inspect|export|import
 anyam source-space list|view|publish
 anyam intent create|claim|release
-anyam workspace create|inspect|handoff|destroy
+anyam workspace start|list|inspect|exec|handoff|destroy
 anyam change create|status|publish|review|land|revert
 anyam check|run|evidence
 anyam preview open|logs
 anyam release create|inspect
 anyam target list|promote|rollback
 anyam mirror configure|sync|inspect
-anyam agent setup|start|revoke
+anyam agent setup|start|status|revoke
 anyam policy explain
 ```
 
@@ -762,14 +762,14 @@ implementation work package, not an unowned promise.
 | Changes, team review, Integration Cohorts, and Landing | [ADR 0005](../adr/0005-stable-changes-and-compare-and-swap-landing.md), [ADR 0035](../adr/0035-team-review-integration-cohorts-and-authority.md) |
 | Artifacts, Releases, Targets, Worker and non-web publication | [ADR 0006](../adr/0006-generalize-artifacts-releases-and-targets.md), [ADR 0033](../adr/0033-worker-release-promotion-and-rollback.md), [ADR 0034](../adr/0034-non-web-release-publication-and-portable-artifacts.md), [ADR 0080](../adr/0080-target-deployment-profiles.md), [ADR 0081](../adr/0081-release-input-closure.md), [ADR 0082](../adr/0082-migration-compatibility-and-data-rollback.md), [ADR 0083](../adr/0083-target-promotion-safety.md), [ADR 0084](../adr/0084-migration-aware-rollback.md), [ADR 0085](../adr/0085-cloudflare-operation-scopes.md), [ADR 0086](../adr/0086-filesystem-artifact-containment.md), [ADR 0087](../adr/0087-worker-release-manifest-readback.md), [ADR 0088](../adr/0088-authoritative-target-routing.md), [ADR 0089](../adr/0089-explicit-preview-strategies.md), [ADR 0090](../adr/0090-rollout-and-provider-identity-ledger.md), [ADR 0093](../adr/0093-explicit-target-risk-and-worker-materialization.md) |
 | Identity and capability policy | [ADR 0007](../adr/0007-realm-owned-authentication-and-delegation.md), [ADR 0008](../adr/0008-explainable-capability-policy.md), [ADR 0030](../adr/0030-realm-identity-and-capability-policy.md) |
-| CLI, Git, MCP, agents | [ADR 0009](../adr/0009-cli-git-mcp-agent-connection.md) |
+| CLI, Git, MCP, agents | [ADR 0009](../adr/0009-cli-git-mcp-agent-connection.md), [ADR 0095](../adr/0095-explicit-concurrent-local-workspaces.md) |
 | Manifests, Actions, Verifiers, Runners | [ADR 0011](../adr/0011-portable-project-manifest-contract.md), [ADR 0012](../adr/0012-cloudflare-default-and-portable-pull-runners.md) |
 | External Runner Attempts and generic non-web Target publication | [ADR 0037](../adr/0037-external-pull-runners-and-generic-target-qualification.md), [ADR 0034](../adr/0034-non-web-release-publication-and-portable-artifacts.md) |
 | Stage Gates, Qualification Evidence, operational receipts, recovery drills, and Residual Risk | [ADR 0038](../adr/0038-stage-gates-and-operational-receipts.md), [ADR 0020](../adr/0020-releasable-stages-and-entry-exit-gates.md), [ADR 0021](../adr/0021-evidence-backed-acceptance-and-validation.md), [ADR 0022](../adr/0022-reliability-operations-and-recovery-contract.md), [ADR 0023](../adr/0023-receipt-backed-costs-quotas-and-packaging.md) |
 | Evidence, threats, Cloudflare architecture | [ADR 0013](../adr/0013-evidence-validity-policy-and-provenance.md), [ADR 0014](../adr/0014-system-threat-model.md), [ADR 0015](../adr/0015-cloudflare-first-architecture-and-provider-boundaries.md) |
 | APIs, events, hosting, bootstrap | [ADR 0016](../adr/0016-normalized-service-data-api-and-event-contracts.md), [ADR 0018](../adr/0018-hosting-tenancy-and-ownership-modes.md), [ADR 0019](../adr/0019-bootstrap-onboarding-import-and-recovery.md), [ADR 0091](../adr/0091-customer-realm-cli-lifecycle.md), [ADR 0092](../adr/0092-production-operations-control-room.md) |
 | Stages, validation, operations, cost | [ADR 0020](../adr/0020-releasable-stages-and-entry-exit-gates.md), [ADR 0021](../adr/0021-evidence-backed-acceptance-and-validation.md), [ADR 0022](../adr/0022-reliability-operations-and-recovery-contract.md), [ADR 0023](../adr/0023-receipt-backed-costs-quotas-and-packaging.md) |
-| Governance, extensions, positioning, delivery | [ADR 0024](../adr/0024-open-governance-profiles-and-compliance-boundaries.md), [ADR 0025](../adr/0025-versioned-extension-contracts-and-trust.md), [ADR 0026](../adr/0026-positioning-documentation-and-adoption.md), [ADR 0027](../adr/0027-phased-delivery-program.md) |
+| Governance, extensions, positioning, delivery | [ADR 0024](../adr/0024-open-governance-profiles-and-compliance-boundaries.md), [ADR 0025](../adr/0025-versioned-extension-contracts-and-trust.md), [ADR 0026](../adr/0026-positioning-documentation-and-adoption.md), [ADR 0027](../adr/0027-phased-delivery-program.md), [ADR 0094](../adr/0094-hosted-team-authority-and-human-delivery-mcp.md) |
 
 ## No-fog audit
 

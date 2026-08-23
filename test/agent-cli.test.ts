@@ -98,6 +98,21 @@ test("local agent session is bound to one Change Workspace and revocation invali
   await assert.rejects(agentManager.invokeTool("repository.write"), (error: unknown) => error instanceof LocalAgentError && error.code === "agent.session.missing");
 });
 
+test("concurrent local Workspaces are explicit and revoking one leaves the other active", async () => {
+  const directory = await projectDirectory();
+  const agentManager = manager(directory, { sessionLifetimeMs: 60_000 });
+  const first = await agentManager.startSession({ agent: "codex" });
+  const second = await agentManager.startSession({ agent: "claude", parallel: true });
+  assert.notEqual(first.session.id, second.session.id);
+  const listed = await agentManager.listSessions();
+  assert.deepEqual(new Set(listed.map((item) => item.session.id)), new Set([first.session.id, second.session.id]));
+  assert.equal((await agentManager.status(first.session.id)).session?.id, first.session.id);
+  assert.equal((await agentManager.status(second.session.id)).session?.id, second.session.id);
+  assert.equal((await agentManager.revoke(first.session.id)).status, "revoked");
+  assert.equal((await agentManager.status(second.session.id)).session?.id, second.session.id);
+  assert.equal((await agentManager.status(first.session.id)).session, null);
+});
+
 test("MCP exposes semantic Change tools and keeps canonical writes outside the broker", async () => {
   const directory = await projectDirectory();
   const agentManager = manager(directory, { credentialLifetimeMs: 10_000, sessionLifetimeMs: 60_000 });

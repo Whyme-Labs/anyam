@@ -171,6 +171,14 @@ export function assertTargetCanPromote(target: Target): TargetDeploymentProfile 
       receipt: `target=${target.id}; deploymentProfile=${profile ? "incomplete" : "missing"}; configurationDigests=${profile?.configurationDigests.length ?? 0}; promotion=blocked`,
     });
   }
+  if (profile.environment === "custom" || profile.dataClass === "custom") {
+    fail({
+      code: "incomplete-profile",
+      message: `Target ${target.id} has an unknown deployment risk classification.`,
+      recoveryAction: "replace custom environment and data classifications with explicit preview, development, staging, or production values before requesting Promotion",
+      receipt: `target=${target.id}; environment=${profile.environment}; dataClass=${profile.dataClass}; risk=unknown; promotion=blocked`,
+    });
+  }
   return profile;
 }
 

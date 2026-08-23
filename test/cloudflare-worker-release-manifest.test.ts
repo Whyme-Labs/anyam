@@ -37,6 +37,12 @@ function release(): ImmutableRelease {
   return { protocol: CONTRACT_VERSIONS.verifiedRelease, id: "verified-release:manifest", projectId: "project:manifest", release: base, artifacts, evidence, releaseDigest: digest("release"), receipt: "fixture=manifest" };
 }
 
+function releaseWithStaticAsset(): ImmutableRelease {
+  const base = release();
+  const asset: Artifact = { protocol: CONTRACT_VERSIONS.artifact, id: "artifact:asset", type: "worker.asset", digest: digest("asset-bytes"), projectRevisionId: "project-revision:manifest", outputPath: "assets/index.html" };
+  return { ...base, artifacts: [...base.artifacts, asset], release: { ...base.release, artifactIds: [...base.release.artifactIds, asset.id] } };
+}
+
 test("Worker Release Manifest carries modules, assets, bindings, compatibility, migrations, and health identity", () => {
   const manifest = createCloudflareWorkerReleaseManifest({
     release: release(),
@@ -60,6 +66,19 @@ test("Worker Release Manifest carries modules, assets, bindings, compatibility, 
   assert.match(String((metadata.annotations as { "workers/message": string })["workers/message"]), new RegExp(`manifest=${manifest.digest}`));
 });
 
+test("Worker Release Manifest separates static asset Artifacts from executable modules", () => {
+  const manifest = createCloudflareWorkerReleaseManifest({
+    release: releaseWithStaticAsset(),
+    compatibilityDate: "2026-01-01",
+    staticAssetArtifactIds: ["artifact:asset"],
+    staticAssets: { manifestDigest: digest("assets-manifest"), namespaceDigest: digest("assets-namespace") },
+  });
+  assert.equal(manifest.modules.length, 2);
+  assert.deepEqual(manifest.staticAssets?.artifactDigests, [digest("asset-bytes")]);
+  const metadata = workerReleaseManifestUploadMetadata(manifest, "release:manifest", "anyam-manifest", "asset-upload-jwt");
+  assert.deepEqual(metadata.assets, { jwt: "asset-upload-jwt" });
+});
+
 test("Worker Release Manifest read-back blocks binding drift and accepts an exact provider observation", () => {
   const manifest = createCloudflareWorkerReleaseManifest({
     release: release(),
@@ -75,6 +94,10 @@ test("Worker Release Manifest read-back blocks binding drift and accepts an exac
     },
   };
   assert.match(assertCloudflareWorkerVersionReadback({ manifest, version }), /readback=verified/);
+  const moduleReadback = { ...version, resources: { ...version.resources, script: { modules: manifest.modules.map((module) => ({ name: module.name })) } } };
+  assert.match(assertCloudflareWorkerVersionReadback({ manifest, version: moduleReadback }), /readback=verified/);
+  const moduleDrift = { ...moduleReadback, resources: { ...moduleReadback.resources, script: { modules: [{ name: "wrong.js" }] } } };
+  assert.throws(() => assertCloudflareWorkerVersionReadback({ manifest, version: moduleDrift }), (error: unknown) => error instanceof WorkerReleaseManifestError && error.code === "readback-mismatch");
   const drifted = { ...version, resources: { ...version.resources, bindings: [{ name: "DB", type: "d1", database_id: "other-db" }] } };
   assert.throws(() => assertCloudflareWorkerVersionReadback({ manifest, version: drifted }), (error: unknown) => error instanceof WorkerReleaseManifestError && error.code === "readback-mismatch");
 });

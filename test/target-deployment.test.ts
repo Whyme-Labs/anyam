@@ -119,6 +119,24 @@ test("Target Promotion requires an explicit complete profile", () => {
       return true;
     },
   );
+  assert.throws(
+    () => assertTargetCanPromote(target("unknown-environment", profile({ environment: "custom" }))),
+    (error: unknown) => {
+      assert.ok(error instanceof TargetDeploymentProfileError);
+      assert.equal(error.code, "incomplete-profile");
+      assert.match(error.receipt, /risk=unknown/);
+      return true;
+    },
+  );
+  assert.throws(
+    () => assertTargetCanPromote(target("unknown-data", profile({ dataClass: "custom" }))),
+    (error: unknown) => {
+      assert.ok(error instanceof TargetDeploymentProfileError);
+      assert.equal(error.code, "incomplete-profile");
+      assert.match(error.receipt, /risk=unknown/);
+      return true;
+    },
+  );
   assert.doesNotThrow(() => assertTargetCanPromote(target("complete", profile())));
 });
 

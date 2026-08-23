@@ -16,7 +16,7 @@ import {
   type CloudflareWorkerVersionList,
 } from "../src/cloudflare/worker-target.ts";
 import { createCloudflareWorkerReleaseManifest } from "../src/cloudflare/worker-release-manifest.ts";
-import { CONTRACT_VERSIONS } from "../src/kernel/contracts.ts";
+import { CONTRACT_VERSIONS, type Target } from "../src/kernel/contracts.ts";
 import {
   createWorkerTarget,
   sealVerifiedRelease,
@@ -59,6 +59,32 @@ function context(directory: string): LocalExecutionContext {
     workspaceId: "workspace:cloudflare-worker-target:v1",
     targetId: "target:worker",
     declaredEffects: ["artifact.create", "target.promote"],
+  };
+}
+
+function cloudflareTargetRecord(id: string, name: string): Target {
+  return {
+    protocol: CONTRACT_VERSIONS.target,
+    id,
+    projectId: "project:worker",
+    name,
+    adapterId: "cloudflare.worker",
+    acceptedArtifactTypes: ["worker.bundle"],
+    requiredEvidenceKeys: [],
+    state: "configured",
+    deploymentProfile: createTargetDeploymentProfile({
+      environment: "staging",
+      channel: "alpha",
+      audience: id,
+      runtimeIdentity: `worker:${id}`,
+      routeIdentities: [`route:${id}`],
+      bindingIdentities: [`binding:${id}`],
+      dataResourceIdentities: [`data:${id}`],
+      configurationDigests: [`sha256:${id.replaceAll(/[^A-Za-z0-9]/gu, "") || "target"}`],
+      secretUseAliases: [],
+      dataClass: "isolated",
+      resourceSharing: "isolated",
+    }),
   };
 }
 
@@ -224,16 +250,7 @@ test("Cloudflare Worker Target uploads digest-bound versions, promotes after pre
     });
 
     const target = createWorkerTarget({
-      target: {
-        protocol: CONTRACT_VERSIONS.target,
-        id: "target:worker",
-        projectId: "project:worker",
-        name: "Cloudflare Worker Target test",
-        adapterId: "cloudflare.worker",
-        acceptedArtifactTypes: ["worker.bundle"],
-        requiredEvidenceKeys: [],
-        state: "configured",
-      },
+      target: cloudflareTargetRecord("target:worker", "Cloudflare Worker Target test"),
       capabilities: { preview: true, promote: true, healthCheck: true, rollback: true },
     });
     const coordinator = new WorkerPromotionCoordinator({ projectId: "project:worker", target, adapter: configuredAdapter });
@@ -275,16 +292,7 @@ test("Cloudflare Worker Target rejects a stale 2xx health response from a previo
     assert.ok(artifact?.outputPath);
     const bytes = new Uint8Array(await readFile(join(candidate.directory, artifact.outputPath)));
     const target = createWorkerTarget({
-      target: {
-        protocol: CONTRACT_VERSIONS.target,
-        id: "target:stale-health",
-        projectId: "project:worker",
-        name: "Stale health test",
-        adapterId: "cloudflare.worker",
-        acceptedArtifactTypes: ["worker.bundle"],
-        requiredEvidenceKeys: [],
-        state: "configured",
-      },
+      target: cloudflareTargetRecord("target:stale-health", "Stale health test"),
       capabilities: { preview: true, promote: true, healthCheck: true, rollback: true },
     });
     const adapter = new CloudflareWorkerTargetAdapter({
@@ -335,16 +343,7 @@ test("Cloudflare Worker Target retries transient preview transport failures when
     assert.ok(artifact?.outputPath);
     const bytes = new Uint8Array(await readFile(join(candidate.directory, artifact.outputPath)));
     const target = createWorkerTarget({
-      target: {
-        protocol: CONTRACT_VERSIONS.target,
-        id: "target:transport-retry",
-        projectId: "project:worker",
-        name: "Transport retry test",
-        adapterId: "cloudflare.worker",
-        acceptedArtifactTypes: ["worker.bundle"],
-        requiredEvidenceKeys: [],
-        state: "configured",
-      },
+      target: cloudflareTargetRecord("target:transport-retry", "Transport retry test"),
       capabilities: { preview: true, promote: true, healthCheck: true, rollback: true },
     });
     let fetchAttempts = 0;
@@ -407,16 +406,7 @@ test("Cloudflare Worker Target fails a non-2xx preview before deployment", async
       fetch: async () => new Response("preview-broken", { status: 503 }),
     });
     const result = await adapter.preview({ promotionId: "promotion:preview-failure", attempt: 1, release: candidate.release, target: createWorkerTarget({
-      target: {
-        protocol: CONTRACT_VERSIONS.target,
-        id: "target:preview-failure",
-        projectId: "project:worker",
-        name: "Preview failure test",
-        adapterId: "cloudflare.worker",
-        acceptedArtifactTypes: ["worker.bundle"],
-        requiredEvidenceKeys: [],
-        state: "configured",
-      },
+      target: cloudflareTargetRecord("target:preview-failure", "Preview failure test"),
       capabilities: { preview: true, promote: true, healthCheck: true, rollback: true },
     }) });
     assert.equal(result.status, "failed");

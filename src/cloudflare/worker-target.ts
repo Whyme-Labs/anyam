@@ -169,6 +169,16 @@ export type CloudflareWorkerTargetAdapterConfig = {
   /** Builds the immutable provider manifest from the sealed Anyam Release. */
   workerReleaseManifest?: (input: { release: ImmutableRelease; target: WorkerTarget }) => WorkerReleaseManifest;
   /**
+   * Customer-owned asset upload boundary. The returned JWT is used only in
+   * the immediate Version upload and is never persisted in Anyam state.
+   */
+  staticAssetUploader?: (input: {
+    manifest: WorkerReleaseManifest;
+    artifacts: readonly Artifact[];
+    readArtifact: (artifact: Artifact) => Promise<Uint8Array>;
+    operation: "preview" | "apply";
+  }) => Promise<{ jwt: string; receipt: string }>;
+  /**
    * Cloudflare returns whether preview is available on a version, while the
    * workers.dev subdomain belongs to the customer account. Keeping URL
    * construction injected makes custom domains and customer-owned accounts
@@ -880,8 +890,20 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     if (!isFailure(existing)) return existing;
     if (!existing.errorCode.endsWith("not-found") && existing.errorCode !== "cloudflare.http_404") return existing;
     const artifactsByDigest = new Map(input.release.artifacts.map((artifact) => [artifact.digest, artifact]));
+    let assetsJwt: string | undefined;
+    if (manifest.staticAssets) {
+      if (typeof this.config.staticAssetUploader !== "function") return failure({ operation, code: "assets.uploader-missing", message: `Worker Release ${input.release.release.id} declares static assets without an asset upload boundary.`, recoveryAction: "configure the customer-owned asset uploader for this Target or publish a Release without static assets", receipt: `releaseDigest=${input.release.releaseDigest}; staticAssets=declared; uploader=missing; providerMutation=false` });
+      const assets = manifest.staticAssets.artifactDigests?.map((artifactDigest) => artifactsByDigest.get(artifactDigest)).filter((artifact): artifact is Artifact => artifact !== undefined) ?? [];
+      try {
+        const uploaded = await this.config.staticAssetUploader({ manifest, artifacts: assets, readArtifact: (artifact) => this.config.artifactReader.read(artifact), operation });
+        if (!uploaded.jwt || uploaded.jwt.trim().length === 0 || !uploaded.receipt || !credentialMetadataSafe(uploaded.receipt, "staticAssetReceipt")) throw new Error("static asset uploader returned an incomplete receipt");
+        assetsJwt = uploaded.jwt;
+      } catch (error) {
+        return failure({ operation, code: "assets.upload", message: `Cloudflare Worker static asset upload failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "inspect the customer-owned asset upload receipt and retry the same immutable Release", receipt: `releaseDigest=${input.release.releaseDigest}; staticAssets=upload-indeterminate; providerMutation=unknown; credentialMaterialStored=false` });
+      }
+    }
     const form = new FormData();
-    form.append("metadata", JSON.stringify(workerReleaseManifestUploadMetadata(manifest, input.release.release.id, tagForRelease(input.release))));
+    form.append("metadata", JSON.stringify(workerReleaseManifestUploadMetadata(manifest, input.release.release.id, tagForRelease(input.release), assetsJwt)));
     for (const module of manifest.modules) {
       const artifact = artifactsByDigest.get(module.digest);
       if (!artifact) return failure({ operation, code: "manifest.artifact-missing", message: `Worker Release Manifest module ${module.name} is not bound to a sealed Artifact.`, recoveryAction: "bind every manifest module to an exact verified Release Artifact before provider upload", receipt: `releaseDigest=${input.release.releaseDigest}; module=${module.name}; artifactDigest=${module.digest}; providerMutation=false` });

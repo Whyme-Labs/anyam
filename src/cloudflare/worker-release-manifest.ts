@@ -26,6 +26,8 @@ export type WorkerReleaseBinding = {
 export type WorkerReleaseStaticAssets = {
   manifestDigest: string;
   namespaceDigest: string;
+  /** Exact Release Artifacts that the customer asset uploader must publish. */
+  artifactDigests?: readonly string[];
   providerFields?: Readonly<Record<string, string>>;
 };
 
@@ -56,7 +58,9 @@ export type WorkerReleaseManifest = {
 
 export type CloudflareWorkerVersionResources = {
   bindings?: readonly Readonly<Record<string, unknown>>[];
-  script?: Readonly<Record<string, unknown>>;
+  script?: Readonly<Record<string, unknown>> & {
+    modules?: readonly Readonly<Record<string, unknown>>[];
+  };
   script_runtime?: {
     compatibility_date?: string;
     compatibility_flags?: readonly string[];
@@ -170,10 +174,15 @@ export function createCloudflareWorkerReleaseManifest(input: {
   compatibilityFlags?: readonly string[];
   bindings?: readonly WorkerReleaseBinding[];
   staticAssets?: WorkerReleaseStaticAssets;
+  staticAssetArtifactIds?: readonly string[];
   durableObjectMigrations?: WorkerReleaseDurableObjectMigrations;
   healthPaths?: readonly string[];
 }): WorkerReleaseManifest {
-  const artifacts = input.release.artifacts;
+  const staticAssetIds = new Set(input.staticAssetArtifactIds ?? []);
+  const artifacts = input.release.artifacts.filter((artifact) => !staticAssetIds.has(artifact.id));
+  const staticAssetArtifacts = input.release.artifacts.filter((artifact) => staticAssetIds.has(artifact.id));
+  if (staticAssetIds.size !== staticAssetArtifacts.length) throw new WorkerReleaseManifestError({ code: "artifact-missing", message: `Release ${input.release.release.id} does not contain every declared static asset Artifact.`, recoveryAction: "declare only exact static asset Artifact IDs from the sealed Release before provider upload", receipt: `release=${input.release.release.id}; staticAssetArtifacts=${staticAssetIds.size}; found=${staticAssetArtifacts.length}; manifest=invalid; providerMutation=false` });
+  if (staticAssetArtifacts.length > 0 && !input.staticAssets) throw new WorkerReleaseManifestError({ code: "invalid", message: `Release ${input.release.release.id} declares static asset Artifacts without static asset configuration.`, recoveryAction: "provide staticAssets metadata and a customer-owned asset uploader for the exact static asset Artifacts", receipt: `release=${input.release.release.id}; staticAssets=configuration-missing; manifest=invalid; providerMutation=false` });
   if (artifacts.length === 0) throw new WorkerReleaseManifestError({ code: "invalid", message: `Release ${input.release.release.id} has no Worker Artifacts.`, recoveryAction: "attach at least one verified Worker module Artifact before provider upload", receipt: `release=${input.release.release.id}; modules=0; manifest=invalid; providerMutation=false` });
   const modules = artifacts.map((artifact) => ({ name: moduleNameForArtifact(artifact), type: moduleTypeForArtifact(artifact), digest: digestString(artifact.digest, `artifact ${artifact.id}.digest`) }));
   if (new Set(modules.map((module) => module.name)).size !== modules.length) throw new WorkerReleaseManifestError({ code: "invalid", message: `Release ${input.release.release.id} contains duplicate Worker module names.`, recoveryAction: "give every uploaded Worker module a unique output path", receipt: `release=${input.release.release.id}; modules=${modules.length}; uniqueModules=${new Set(modules.map((module) => module.name)).size}; manifest=invalid; providerMutation=false` });
@@ -186,7 +195,7 @@ export function createCloudflareWorkerReleaseManifest(input: {
     mainModule,
     applicationArtifactDigest: digest({ projectRevisionId: input.release.release.projectRevisionId, artifactDigests: modules.map((module) => module.digest) }),
     modules,
-    ...(input.staticAssets ? { staticAssets: input.staticAssets } : {}),
+    ...(input.staticAssets ? { staticAssets: { ...input.staticAssets, ...(staticAssetArtifacts.length > 0 ? { artifactDigests: staticAssetArtifacts.map((artifact) => digestString(artifact.digest, `artifact ${artifact.id}.digest`)) } : {}) } } : {}),
     compatibility: { date: required(input.compatibilityDate, "compatibilityDate"), flags: [...(input.compatibilityFlags ?? [])].map((flag) => required(flag, "compatibilityFlag")) },
     bindings: [...(input.bindings ?? [])],
     ...(input.durableObjectMigrations ? { durableObjectMigrations: input.durableObjectMigrations } : {}),
@@ -195,13 +204,13 @@ export function createCloudflareWorkerReleaseManifest(input: {
   return { ...withoutDigest, digest: digest(manifestWithoutDigest(withoutDigest)) };
 }
 
-export function workerReleaseManifestUploadMetadata(manifest: WorkerReleaseManifest, releaseId: string, tag: string): Record<string, unknown> {
+export function workerReleaseManifestUploadMetadata(manifest: WorkerReleaseManifest, releaseId: string, tag: string, assetsJwt?: string): Record<string, unknown> {
   return {
     main_module: manifest.mainModule,
     compatibility_date: manifest.compatibility.date,
     compatibility_flags: [...manifest.compatibility.flags],
     bindings: manifest.bindings.map((binding) => ({ name: binding.name, type: binding.kind, ...(binding.providerFields ?? {}) })),
-    ...(manifest.staticAssets ? { assets: { ...(manifest.staticAssets.providerFields ?? {}) } } : {}),
+    ...(manifest.staticAssets ? { assets: { ...(manifest.staticAssets.providerFields ?? {}), ...(assetsJwt ? { jwt: assetsJwt } : {}) } } : {}),
     ...(manifest.durableObjectMigrations ? { migrations: manifest.durableObjectMigrations } : {}),
     annotations: {
       "workers/message": `Anyam Release ${releaseId}; manifest=${manifest.digest}`,
@@ -236,6 +245,12 @@ export function assertCloudflareWorkerVersionReadback(input: { manifest: WorkerR
   if (!resources?.script_runtime) throw new WorkerReleaseManifestError({ code: "readback-missing", message: `Cloudflare version ${version.id} did not return script runtime configuration for read-back.`, recoveryAction: "use the version-detail API that returns runtime configuration before treating the Worker version as deployable", receipt: `providerVersionId=${version.id}; readback=missing; field=script_runtime; providerMutation=false` });
   if (resources.script_runtime.compatibility_date !== manifest.compatibility.date || JSON.stringify([...(resources.script_runtime.compatibility_flags ?? [])].sort()) !== JSON.stringify([...manifest.compatibility.flags].sort())) throw new WorkerReleaseManifestError({ code: "readback-mismatch", message: `Cloudflare version ${version.id} runtime configuration does not match the Worker Release Manifest.`, recoveryAction: "reconcile compatibility date and flags with the immutable Release before deployment", receipt: `providerVersionId=${version.id}; expectedCompatibilityDate=${manifest.compatibility.date}; observedCompatibilityDate=${resources.script_runtime.compatibility_date ?? "missing"}; readback=blocked; providerMutation=false` });
   const observedBindings = resources.bindings ?? [];
+  const observedModules = resources.script?.modules;
+  if (observedModules) {
+    const moduleNames = observedModules.map((module) => typeof module.name === "string" ? module.name : "").sort();
+    const expectedNames = manifest.modules.map((module) => module.name).sort();
+    if (JSON.stringify(moduleNames) !== JSON.stringify(expectedNames)) throw new WorkerReleaseManifestError({ code: "readback-mismatch", message: `Cloudflare version ${version.id} modules do not match the Worker Release Manifest.`, recoveryAction: "reconcile the provider module set with the immutable Release before deployment", receipt: `providerVersionId=${version.id}; expectedModules=${expectedNames.join(",")}; observedModules=${moduleNames.join(",")}; readback=blocked; providerMutation=false` });
+  }
   for (const expected of manifest.bindings) {
     const observed = observedBindings.find((binding) => binding.name === expected.name && binding.type === expected.kind);
     if (!observed || !providerFieldMatches(expected, observed)) throw new WorkerReleaseManifestError({ code: "readback-mismatch", message: `Cloudflare version ${version.id} binding ${expected.name} does not match the Worker Release Manifest.`, recoveryAction: "reconcile Worker bindings and resource identities with the immutable Release before deployment", receipt: `providerVersionId=${version.id}; binding=${expected.name}; expectedKind=${expected.kind}; readback=blocked; providerMutation=false` });

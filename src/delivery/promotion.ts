@@ -9,7 +9,7 @@ import {
   type Release,
   type Target,
 } from "../kernel/contracts.ts";
-import { assertTargetCanPromote, createTargetDeploymentProfile, targetDeploymentContractDigest, targetDeploymentProfile, TargetDeploymentProfileError } from "./target-deployment.ts";
+import { assertTargetCanPromote, targetDeploymentContractDigest, targetDeploymentProfile, TargetDeploymentProfileError } from "./target-deployment.ts";
 import { assertReleaseInputSetMatches, deriveReleaseInputSet } from "./release-input.ts";
 import { assertMigrationPlanSafeForTarget, automaticMigrationRollbackDecision, createMigrationPlan, defaultMigrationPlan } from "./migration-plan.ts";
 
@@ -325,26 +325,11 @@ export function createWorkerTarget(input: {
       receipt: `target=${input.target.id}; currentRelease=${input.currentReleaseId}; history=${releaseHistory.join(",")}`,
     });
   }
-  const deploymentProfile = input.target.deploymentProfile && input.target.deploymentProfile.configurationDigests.length > 0
-    ? input.target.deploymentProfile
-    : createTargetDeploymentProfile({
-      environment: "custom",
-      channel: "custom",
-      audience: input.target.id,
-      runtimeIdentity: `target:${input.target.id}`,
-      routeIdentities: [],
-      bindingIdentities: [],
-      dataResourceIdentities: [],
-      configurationDigests: [targetDeploymentContractDigest(input.target)],
-      secretUseAliases: [],
-      dataClass: "custom",
-      resourceSharing: "isolated",
-      });
   return {
     ...clone(input.target),
     acceptedArtifactTypes: [...input.target.acceptedArtifactTypes],
     requiredEvidenceKeys: [...input.target.requiredEvidenceKeys],
-    deploymentProfile,
+    ...(input.target.deploymentProfile ? { deploymentProfile: input.target.deploymentProfile } : {}),
     currentReleaseId: input.currentReleaseId ?? null,
     releaseHistory,
     capabilities: { ...input.capabilities },

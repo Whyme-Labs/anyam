@@ -13,6 +13,7 @@ import {
 } from "../src/cloudflare/worker-target.ts";
 import { createCloudflareWorkerReleaseManifest } from "../src/cloudflare/worker-release-manifest.ts";
 import { CONTRACT_VERSIONS, type Artifact, type Release } from "../src/kernel/contracts.ts";
+import { createTargetDeploymentProfile } from "../src/delivery/target-deployment.ts";
 import { createWorkerTarget, type ImmutableRelease } from "../src/delivery/promotion.ts";
 
 function digest(value: string): string {
@@ -23,7 +24,7 @@ function fixture(): { release: ImmutableRelease; target: ReturnType<typeof creat
   const bytes = new TextEncoder().encode("export default { fetch() { return new Response('ok'); } };\n");
   const artifact: Artifact = { protocol: CONTRACT_VERSIONS.artifact, id: "artifact:rollout", type: "worker.bundle", digest: digest(new TextDecoder().decode(bytes)), projectRevisionId: "project-revision:rollout", outputPath: "worker.js" };
   const release: Release = { protocol: CONTRACT_VERSIONS.release, id: "release:rollout", projectRevisionId: artifact.projectRevisionId, artifactIds: [artifact.id], evidenceIds: [], configurationDigests: [digest("config")], stateAssumptions: ["rollout test"], policyVersion: "policy:rollout", status: "ready" };
-  const target = createWorkerTarget({ target: { protocol: CONTRACT_VERSIONS.target, id: "target:rollout", projectId: "project:rollout", name: "Rollout Target", adapterId: "cloudflare.worker", acceptedArtifactTypes: ["worker.bundle"], requiredEvidenceKeys: [], state: "configured" }, capabilities: { preview: true, promote: true, healthCheck: true, rollback: true } });
+  const target = createWorkerTarget({ target: { protocol: CONTRACT_VERSIONS.target, id: "target:rollout", projectId: "project:rollout", name: "Rollout Target", adapterId: "cloudflare.worker", acceptedArtifactTypes: ["worker.bundle"], requiredEvidenceKeys: [], state: "configured", deploymentProfile: createTargetDeploymentProfile({ environment: "staging", channel: "beta", audience: "rollout", runtimeIdentity: "worker:rollout", routeIdentities: ["route:rollout"], bindingIdentities: [], dataResourceIdentities: [], configurationDigests: [digest("config")], secretUseAliases: [], dataClass: "isolated", resourceSharing: "isolated" }) }, capabilities: { preview: true, promote: true, healthCheck: true, rollback: true } });
   return { bytes, target, release: { protocol: CONTRACT_VERSIONS.verifiedRelease, id: "verified-release:rollout", projectId: "project:rollout", release, artifacts: [artifact], evidence: [], releaseDigest: digest("release:rollout"), receipt: "fixture=rollout" } };
 }
 

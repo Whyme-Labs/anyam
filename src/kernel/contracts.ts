@@ -592,6 +592,11 @@ export type TargetEnvironment = "preview" | "development" | "staging" | "product
 export type TargetChannel = "alpha" | "beta" | "stable" | "custom";
 export type TargetDataClass = "synthetic" | "isolated" | "production-shaped" | "production" | "custom";
 export type TargetResourceSharing = "isolated" | "owner-approved";
+export type TargetPreviewStrategy =
+  | { kind: "version-url" }
+  | { kind: "isolated-target"; targetId: string }
+  | { kind: "custom-domain-version-override"; hostname: string }
+  | { kind: "staging-only"; requiredEvidenceKeys: readonly string[] };
 
 export type TargetDeploymentProfile = {
   protocol: typeof CONTRACT_VERSIONS.targetDeployment;
@@ -607,6 +612,7 @@ export type TargetDeploymentProfile = {
   dataClass: TargetDataClass;
   resourceSharing: TargetResourceSharing;
   sharingPolicyDigest?: string;
+  previewStrategy: TargetPreviewStrategy;
   profileDigest: string;
 };
 

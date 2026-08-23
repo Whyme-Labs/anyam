@@ -6,15 +6,17 @@ import type {
   TargetDataClass,
   TargetDeploymentProfile,
   TargetEnvironment,
+  TargetPreviewStrategy,
   TargetResourceSharing,
 } from "../kernel/contracts.ts";
 
-export type { TargetChannel, TargetDataClass, TargetDeploymentProfile, TargetEnvironment, TargetResourceSharing } from "../kernel/contracts.ts";
+export type { TargetChannel, TargetDataClass, TargetDeploymentProfile, TargetEnvironment, TargetPreviewStrategy, TargetResourceSharing } from "../kernel/contracts.ts";
 
 export const TARGET_DEPLOYMENT_PROFILE_PROTOCOL = "anyam.target-deployment/v1" as const;
 
-export type TargetDeploymentProfileInput = Omit<TargetDeploymentProfile, "protocol" | "profileDigest"> & {
+export type TargetDeploymentProfileInput = Omit<TargetDeploymentProfile, "protocol" | "profileDigest" | "previewStrategy"> & {
   profileDigest?: string;
+  previewStrategy?: TargetPreviewStrategy;
 };
 
 export class TargetDeploymentProfileError extends Error {
@@ -79,8 +81,27 @@ function enumValue<T extends string>(value: T | undefined, field: string, allowe
   return normalized;
 }
 
+function previewStrategy(value: TargetPreviewStrategy | undefined, environment: TargetEnvironment): TargetPreviewStrategy {
+  const selected = value ?? (environment === "preview" ? { kind: "version-url" as const } : { kind: "version-url" as const });
+  switch (selected.kind) {
+    case "version-url":
+      return selected;
+    case "isolated-target":
+      return { kind: selected.kind, targetId: nonEmpty(selected.targetId, "previewStrategy.targetId") };
+    case "custom-domain-version-override":
+      return { kind: selected.kind, hostname: nonEmpty(selected.hostname, "previewStrategy.hostname") };
+    case "staging-only":
+      return { kind: selected.kind, requiredEvidenceKeys: list(selected.requiredEvidenceKeys, "previewStrategy.requiredEvidenceKeys") };
+    default: {
+      const exhaustive: never = selected;
+      return exhaustive;
+    }
+  }
+}
+
 function profileBody(input: TargetDeploymentProfileInput): Omit<TargetDeploymentProfile, "protocol" | "profileDigest"> {
   const resourceSharing = enumValue(input.resourceSharing, "resourceSharing", ["isolated", "owner-approved"] as const, "isolated");
+  const environment = enumValue(input.environment, "environment", ["preview", "development", "staging", "production", "custom"] as const, "custom");
   const sharingPolicyDigest = input.sharingPolicyDigest === undefined ? undefined : nonEmpty(input.sharingPolicyDigest, "sharingPolicyDigest");
   if (resourceSharing === "owner-approved" && sharingPolicyDigest === undefined) {
     fail({ code: "invalid-profile", message: "owner-approved resource sharing requires a sharing policy digest.", recoveryAction: "record the owner-approved sharing policy digest or use isolated sharing", receipt: "resourceSharing=owner-approved; sharingPolicyDigest=missing" });
@@ -89,7 +110,7 @@ function profileBody(input: TargetDeploymentProfileInput): Omit<TargetDeployment
     fail({ code: "invalid-profile", message: "isolated resource sharing cannot carry an approval digest.", recoveryAction: "remove sharingPolicyDigest or explicitly select owner-approved sharing", receipt: "resourceSharing=isolated; sharingPolicyDigest=unexpected" });
   }
   return {
-    environment: enumValue(input.environment, "environment", ["preview", "development", "staging", "production", "custom"] as const, "custom"),
+    environment,
     channel: enumValue(input.channel, "channel", ["alpha", "beta", "stable", "custom"] as const, "stable"),
     audience: nonEmpty(input.audience, "audience"),
     runtimeIdentity: nonEmpty(input.runtimeIdentity, "runtimeIdentity"),
@@ -101,6 +122,7 @@ function profileBody(input: TargetDeploymentProfileInput): Omit<TargetDeployment
     dataClass: enumValue(input.dataClass, "dataClass", ["synthetic", "isolated", "production-shaped", "production", "custom"] as const, "custom"),
     resourceSharing,
     ...(sharingPolicyDigest ? { sharingPolicyDigest } : {}),
+    previewStrategy: previewStrategy(input.previewStrategy, environment),
   };
 }
 

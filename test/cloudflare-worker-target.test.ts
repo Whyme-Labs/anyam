@@ -23,6 +23,7 @@ import {
   WorkerPromotionCoordinator,
   type ImmutableRelease,
 } from "../src/delivery/promotion.ts";
+import { createTargetDeploymentProfile } from "../src/delivery/target-deployment.ts";
 import {
   normalizeProjectManifest,
   runLocalRelease,
@@ -88,6 +89,7 @@ class InMemoryCloudflareWorkerApi {
   readonly versions: CloudflareWorkerVersion[] = [];
   readonly deployments: CloudflareWorkerDeployment[] = [];
   nextManifest: ReturnType<typeof createCloudflareWorkerReleaseManifest> | undefined;
+  previewAvailable = true;
   private sequence = 0;
 
   async request<T>(request: CloudflareWorkerApiRequest): Promise<CloudflareWorkerApiResponse<T>> {
@@ -113,7 +115,7 @@ class InMemoryCloudflareWorkerApi {
       const manifest = this.nextManifest;
       const version: CloudflareWorkerVersion = {
         id: `version:${++this.sequence}`,
-        metadata: { hasPreview: true, annotations: metadata.annotations },
+        metadata: { hasPreview: this.previewAvailable, annotations: metadata.annotations },
         resources: {
           bindings: manifest.bindings.map((binding) => ({ name: binding.name, type: binding.kind, ...(binding.providerFields ?? {}) })),
           script_runtime: { compatibility_date: manifest.compatibility.date, compatibility_flags: manifest.compatibility.flags },
@@ -424,6 +426,68 @@ test("Cloudflare Worker Target fails a non-2xx preview before deployment", async
       assert.match(result.receipt, /httpStatus=503/);
     }
     assert.equal(api.deployments.length, 0);
+  } finally {
+    await rm(candidate.directory, { recursive: true, force: true });
+  }
+});
+
+test("Cloudflare Worker Target uses an explicit isolated preview strategy when version URLs are unavailable", async () => {
+  const candidate = await release("isolated-preview");
+  try {
+    const api = new InMemoryCloudflareWorkerApi();
+    api.previewAvailable = false;
+    const artifact = candidate.release.artifacts[0];
+    assert.ok(artifact?.outputPath);
+    const bytes = new Uint8Array(await readFile(join(candidate.directory, artifact.outputPath)));
+    const target = createWorkerTarget({
+      target: {
+        protocol: CONTRACT_VERSIONS.target,
+        id: "target:isolated-preview",
+        projectId: "project:worker",
+        name: "Durable Object-safe isolated preview",
+        adapterId: "cloudflare.worker",
+        acceptedArtifactTypes: ["worker.bundle"],
+        requiredEvidenceKeys: [],
+        state: "configured",
+        deploymentProfile: createTargetDeploymentProfile({
+          environment: "staging",
+          channel: "alpha",
+          audience: "staging",
+          runtimeIdentity: "worker:staging",
+          routeIdentities: ["route:staging"],
+          bindingIdentities: ["do:isolated"],
+          dataResourceIdentities: ["d1:isolated"],
+          configurationDigests: ["sha256:isolated-preview-config"],
+          secretUseAliases: [],
+          dataClass: "isolated",
+          resourceSharing: "isolated",
+          previewStrategy: { kind: "isolated-target", targetId: "target:isolated-preview" },
+        }),
+      },
+      capabilities: { preview: true, promote: true, healthCheck: true, rollback: true },
+    });
+    const adapter = new CloudflareWorkerTargetAdapter({
+      accountId: "account:isolated-preview",
+      scriptName: "anyam-isolated-preview",
+      targetId: target.id,
+      transport: api,
+      credentialBroker: {
+        async issue(input) { return { token: "isolated-preview-token", credentialId: `credential:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=fixture; providerAuthorization=observed; credentialMaterialStored=false" }; },
+        async probe() { return { credentialId: "credential:probe", expiresAt: "2099-01-01T00:00:00.000Z", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=fixture; providerAuthorization=observed; credentialMaterialStored=false" }; },
+      },
+      workerReleaseManifest: manifestBuilder(api),
+      artifactReader: { async read() { return bytes; } },
+      previewUrlForVersion: (versionId) => `https://${versionId}.preview.workers.dev`,
+      previewUrlForStrategy: ({ strategy }) => strategy.kind === "isolated-target" ? "https://isolated-target.preview.example/health" : undefined,
+      healthUrl: "https://isolated-target.example/health",
+      fetch: async (url) => url.toString().includes("isolated-target.preview") ? new Response(JSON.stringify({ status: "healthy", releaseId: candidate.release.release.id }), { status: 200, headers: { "content-type": "application/json" } }) : new Response("unexpected", { status: 500 }),
+    });
+    const preview = await adapter.preview({ promotionId: "promotion:isolated-preview", attempt: 1, release: candidate.release, target });
+    assert.equal(preview.status, "succeeded");
+    if (preview.status === "succeeded") {
+      assert.match(preview.receipt, /previewUrl=https:\/\/isolated-target\.preview\.example\/health/);
+      assert.match(preview.receipt, /releaseDigest=/);
+    }
   } finally {
     await rm(candidate.directory, { recursive: true, force: true });
   }

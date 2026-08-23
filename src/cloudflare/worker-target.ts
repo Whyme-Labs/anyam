@@ -17,6 +17,8 @@ import {
   type WorkerTarget,
   type WorkerTargetAdapter,
 } from "../delivery/promotion.ts";
+import { targetDeploymentProfile } from "../delivery/target-deployment.ts";
+import type { TargetPreviewStrategy } from "../kernel/contracts.ts";
 import {
   assertCloudflareWorkerVersionReadback,
   WorkerReleaseManifestError,
@@ -147,6 +149,8 @@ export type CloudflareWorkerTargetAdapterConfig = {
    * explicit instead of guessing them in the kernel.
    */
   previewUrlForVersion: (versionId: string) => string;
+  /** Resolves non-version-url strategies to an explicit isolated/controlled route. */
+  previewUrlForStrategy?: (input: { strategy: TargetPreviewStrategy; target: WorkerTarget; release: ImmutableRelease; providerVersionId: string }) => string | undefined;
   healthUrl: string | ((input: { target: WorkerTarget; deploymentId?: string; providerVersionId: string }) => string);
   /**
    * Validates the application response against the expected Release. A
@@ -517,6 +521,24 @@ function deploymentBody(versionId: string, message: string): string {
   });
 }
 
+function previewUrlForStrategy(config: CloudflareWorkerTargetAdapterConfig, input: WorkerAdapterInput, version: CloudflareWorkerVersion): string | DeliveryAdapterFailure {
+  const strategy = targetDeploymentProfile(input.target).previewStrategy;
+  if (strategy.kind === "version-url") {
+    if (version.metadata?.hasPreview === false) {
+      return failure({ operation: "preview", code: "preview.unavailable", message: `Cloudflare version ${version.id} does not expose a version preview URL.`, recoveryAction: "configure an isolated-target, custom-domain-version-override, or staging-only Preview Strategy for this Target", receipt: `providerVersionId=${version.id}; previewStrategy=version-url; providerPreview=false; providerMutation=false` });
+    }
+    return config.previewUrlForVersion(version.id);
+  }
+  if (!config.previewUrlForStrategy) {
+    return failure({ operation: "preview", code: "preview.strategy-unconfigured", message: `Target ${input.target.id} declares Preview Strategy ${strategy.kind} without an execution route.`, recoveryAction: "configure an explicit previewUrlForStrategy for the Target or keep the Promotion blocked", receipt: `target=${input.target.id}; previewStrategy=${strategy.kind}; route=missing; providerMutation=false` });
+  }
+  const url = config.previewUrlForStrategy({ strategy, target: input.target, release: input.release, providerVersionId: version.id });
+  if (!url || url.trim().length === 0) {
+    return failure({ operation: "preview", code: "preview.strategy-unavailable", message: `Target ${input.target.id} Preview Strategy ${strategy.kind} did not produce a health URL.`, recoveryAction: "materialize the isolated preview Target or required Evidence route before retrying", receipt: `target=${input.target.id}; previewStrategy=${strategy.kind}; route=unavailable; providerMutation=false` });
+  }
+  return url;
+}
+
 export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
   readonly protocol = CONTRACT_VERSIONS.targetAdapter;
   readonly id = CLOUDFLARE_WORKER_TARGET_ADAPTER_ID;
@@ -552,7 +574,8 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     if (targetBinding) return targetBinding;
     const version = await this.ensureVersion(input, "preview");
     if (isFailure(version)) return version;
-    const previewUrl = this.config.previewUrlForVersion(version.id);
+    const previewUrl = previewUrlForStrategy(this.config, input, version);
+    if (isFailure(previewUrl)) return previewUrl;
     const previewResponse = await this.fetchHealth(previewUrl, this.config.routeReadinessRetry, "preview");
     if (isFailure(previewResponse)) return previewResponse;
     const validation = validateHealthResponse({

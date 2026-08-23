@@ -4,7 +4,9 @@ import { readFile } from "node:fs/promises";
 import { emptyAuthorityPlaneSnapshot } from "../src/cloudflare/authority-plane.ts";
 import { createPromotionExecutionContext, PROMOTION_HANDOFF_TTL_MS, signPromotionHandoff } from "../src/cloudflare/promotion-execution.ts";
 import { createPromotionExecutorHandler } from "../src/cloudflare/promotion-executor.ts";
-import { CONTRACT_VERSIONS, type Artifact, type Release } from "../src/kernel/contracts.ts";
+import { createCloudflareWorkerReleaseManifest } from "../src/cloudflare/worker-release-manifest.ts";
+import { CONTRACT_VERSIONS, type Artifact, type Evidence, type Release } from "../src/kernel/contracts.ts";
+import { createTargetDeploymentProfile } from "../src/delivery/target-deployment.ts";
 
 const protocol = "anyam.promotion-executor-qualification/v1" as const;
 const session = {
@@ -30,26 +32,33 @@ function fixture(): { context: ReturnType<typeof createPromotionExecutionContext
   const bytes = new TextEncoder().encode("export default { fetch() { return new Response(JSON.stringify({ status: 'healthy', releaseId: 'release:promotion-executor-qualification' }), { headers: { 'content-type': 'application/json' } }); } };\n");
   const artifact: Artifact = { protocol: CONTRACT_VERSIONS.artifact, id: "artifact:promotion-executor-qualification", type: "worker.bundle", digest: digest(bytes), projectRevisionId: "project-revision:promotion-executor-qualification", outputPath: "worker.js" };
   snapshot.artifacts[artifact.id] = artifact;
-  const release: Release = { protocol: CONTRACT_VERSIONS.release, id: "release:promotion-executor-qualification", projectRevisionId: artifact.projectRevisionId, artifactIds: [artifact.id], evidenceIds: [], configurationDigests: ["sha256:promotion-executor-qualification"], stateAssumptions: ["disposable boundary; no customer data"], policyVersion: "policy:promotion-executor-qualification:v1", status: "ready" };
+  const evidence: Evidence = { protocol: CONTRACT_VERSIONS.evidence, version: "v1", id: "evidence:promotion-executor-qualification", key: "worker-build", criterion: "Worker build", outcome: "passed", validityKey: "qualification", actionId: "action:worker-build", verifierId: "verifier:worker-build", toolchainDigest: "sha256:toolchain", dependencyDigest: "sha256:dependencies", environmentDigest: "sha256:environment", inputDigests: ["sha256:source"], effectDigests: [], outputDigest: artifact.digest, createdAt: "2026-08-12T00:00:00.000Z", producer: { kind: "run", id: "run:promotion-executor-qualification", version: "v1" }, projectRevisionId: artifact.projectRevisionId, projectViewId: "project-view:promotion-executor-qualification", runId: "run:promotion-executor-qualification", actor: session, runnerId: "runner:qualification", policyVersion: session.realmId, authorizationEpoch: "1", capabilityGrantId: "grant:qualification", disclosure: { projectionId: "project-view:promotion-executor-qualification", classification: "project" }, receipt: "evidence=passed; credentialFree=true", invalidators: [], owner: "promotion-executor-qualification" };
+  snapshot.evidence[evidence.id] = evidence;
+  const release: Release = { protocol: CONTRACT_VERSIONS.release, id: "release:promotion-executor-qualification", projectRevisionId: artifact.projectRevisionId, artifactIds: [artifact.id], evidenceIds: [evidence.id], configurationDigests: ["sha256:promotion-executor-qualification"], stateAssumptions: ["disposable boundary; no customer data"], policyVersion: "policy:promotion-executor-qualification:v1", status: "ready" };
   snapshot.releases[release.id] = release;
-  snapshot.targets["target:promotion-executor-qualification"] = { protocol: CONTRACT_VERSIONS.target, id: "target:promotion-executor-qualification", projectId: "project:promotion-executor-qualification", name: "Promotion executor qualification target", adapterId: "cloudflare.worker", acceptedArtifactTypes: ["worker.bundle"], requiredEvidenceKeys: [], state: "configured", currentReleaseId: null, releaseHistory: [] };
+  snapshot.targets["target:promotion-executor-qualification"] = { protocol: CONTRACT_VERSIONS.target, id: "target:promotion-executor-qualification", projectId: "project:promotion-executor-qualification", name: "Promotion executor qualification target", adapterId: "cloudflare.worker", acceptedArtifactTypes: ["worker.bundle"], requiredEvidenceKeys: [], state: "configured", deploymentProfile: createTargetDeploymentProfile({ environment: "staging", channel: "alpha", audience: "qualification", runtimeIdentity: "worker:promotion-executor-qualification", routeIdentities: ["route:promotion-executor-qualification"], bindingIdentities: [], dataResourceIdentities: [], configurationDigests: ["sha256:promotion-executor-qualification"], secretUseAliases: [], dataClass: "synthetic", resourceSharing: "isolated" }), currentReleaseId: null, releaseHistory: [] };
   snapshot.promotions["promotion:promotion-executor-qualification"] = { protocol: CONTRACT_VERSIONS.promotion, id: "promotion:promotion-executor-qualification", projectId: "project:promotion-executor-qualification", targetId: "target:promotion-executor-qualification", releaseId: release.id, releaseDigest: "declared:promotion-executor-qualification", previousReleaseId: null, expectedCurrentReleaseId: null, state: "blocked", attempt: 0, kind: "promotion", idempotencyKey: "request:promotion-executor-qualification", actor: { principalId: session.principalId, actorId: session.actorId, sessionId: session.sessionId, clientId: session.clientId }, createdAt: "2026-08-12T00:00:00.000Z", updatedAt: "2026-08-12T00:00:00.000Z", receipt: "promotion=blocked" };
   return { context: createPromotionExecutionContext({ snapshot, promotionId: "promotion:promotion-executor-qualification", executionIdempotencyKey: "execute:promotion-executor-qualification", session }), bytes };
 }
 
 function fakeFetch(releaseId: string): typeof fetch {
-  const versions: Array<{ id: string; tag: string }> = [];
+  const versions: Array<{ id: string; tag: string; metadata: { annotations: { "workers/tag": string; "workers/message": string } }; resources: { bindings: readonly Readonly<Record<string, unknown>>[]; script_runtime: { compatibility_date?: string; compatibility_flags: readonly string[] } } }> = [];
   let sequence = 0;
   return async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     if (url.hostname === "api.cloudflare.com") {
-      if (url.pathname.endsWith("/versions") && (init?.method ?? "GET") === "GET") return new Response(JSON.stringify({ result: { items: versions.map((version) => ({ id: version.id, metadata: { annotations: { "workers/tag": version.tag } } })) }, errors: [], messages: [] }), { status: 200 });
+      if (url.pathname.endsWith("/versions") && (init?.method ?? "GET") === "GET") return new Response(JSON.stringify({ result: { items: versions }, errors: [], messages: [] }), { status: 200 });
       if (url.pathname.endsWith("/versions") && init?.method === "POST") {
         const form = init.body as FormData;
-        const metadata = JSON.parse(String(form.get("metadata"))) as { annotations: { "workers/tag": string } };
-        const version = { id: `qualification-version-${++sequence}`, tag: metadata.annotations["workers/tag"] };
+        const metadata = JSON.parse(String(form.get("metadata"))) as { annotations: { "workers/tag": string; "workers/message": string }; compatibility_date?: string; compatibility_flags?: readonly string[]; bindings?: readonly Readonly<Record<string, unknown>>[] };
+        const version = { id: `qualification-version-${++sequence}`, tag: metadata.annotations["workers/tag"], metadata: { annotations: metadata.annotations }, resources: { bindings: metadata.bindings ?? [], script_runtime: { compatibility_date: metadata.compatibility_date ?? "", compatibility_flags: metadata.compatibility_flags ?? [] } } };
         versions.push(version);
         return new Response(JSON.stringify({ result: { id: version.id }, errors: [], messages: [] }), { status: 200 });
+      }
+      if (url.pathname.includes("/versions/") && (init?.method ?? "GET") === "GET") {
+        const versionId = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
+        const version = versions.find((candidate) => candidate.id === versionId);
+        return new Response(JSON.stringify({ result: version, errors: [], messages: [] }), { status: version ? 200 : 404 });
       }
       if (url.pathname.endsWith("/deployments") && init?.method === "POST") return new Response(JSON.stringify({ result: { id: `qualification-deployment-${++sequence}`, versions: [] }, errors: [], messages: [] }), { status: 200 });
     }
@@ -107,6 +116,7 @@ async function localQualification(): Promise<Record<string, unknown>> {
     handoffNonceStore: { async claim(input) { if (claimed.has(input.nonce)) return false; claimed.add(input.nonce); return true; } },
     fetch: fakeFetch(context.release.id),
     artifactStore: { async get(key) { return key === `artifacts/${context.artifacts[0]?.digest}` ? { arrayBuffer: async () => new Uint8Array(bytes).buffer as ArrayBuffer } : null; } },
+    workerReleaseManifest: ({ release }) => createCloudflareWorkerReleaseManifest({ release, compatibilityDate: "2026-01-01", bindings: [], healthPaths: ["/health"] }),
   });
   const nonce = `nonce:${crypto.randomUUID()}`;
   const expiresAt = new Date(Date.now() + PROMOTION_HANDOFF_TTL_MS).toISOString();

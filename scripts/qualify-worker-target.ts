@@ -20,6 +20,7 @@ import {
   WorkerPromotionCoordinator,
   type ImmutableRelease,
 } from "../src/delivery/promotion.ts";
+import { createTargetDeploymentProfile } from "../src/delivery/target-deployment.ts";
 
 const protocol = "anyam.cloudflare-worker-target-qualification/v1" as const;
 const projectId = "project:cloudflare-worker-target-qualification";
@@ -123,6 +124,7 @@ function release(input: { id: string; fileName: string; bytes: Uint8Array }): { 
       acceptedArtifactTypes: ["worker.bundle"],
       requiredEvidenceKeys: [],
       state: "configured",
+      deploymentProfile: createTargetDeploymentProfile({ environment: "staging", channel: "alpha", audience: "qualification", runtimeIdentity: "worker:cloudflare-worker-target-qualification", routeIdentities: ["route:cloudflare-worker-target-qualification"], bindingIdentities: [], dataResourceIdentities: [], configurationDigests: ["sha256:cloudflare-worker-target-qualification-config"], secretUseAliases: [], dataClass: "synthetic", resourceSharing: "isolated" }),
     },
     capabilities: { preview: true, promote: true, healthCheck: true, rollback: true },
   });
@@ -210,6 +212,7 @@ async function run(): Promise<Record<string, unknown>> {
       acceptedArtifactTypes: ["worker.bundle"],
       requiredEvidenceKeys: [],
       state: "configured",
+      deploymentProfile: createTargetDeploymentProfile({ environment: "staging", channel: "alpha", audience: "qualification", runtimeIdentity: "worker:cloudflare-worker-target-qualification", routeIdentities: ["route:cloudflare-worker-target-qualification"], bindingIdentities: [], dataResourceIdentities: [], configurationDigests: ["sha256:cloudflare-worker-target-qualification-config"], secretUseAliases: [], dataClass: "synthetic", resourceSharing: "isolated" }),
     },
     capabilities: { preview: true, promote: true, healthCheck: true, rollback: true },
   });

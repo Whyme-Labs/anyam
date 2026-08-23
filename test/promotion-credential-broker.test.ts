@@ -108,6 +108,7 @@ test("operation-specific source can narrow credentials when the provider support
   const sources: Record<string, CloudflareApiTokenMaterial> = {
     preview: { token: "read-token", sourceId: "secret:read", scopes: ["workers:read"] },
     apply: { token: "write-token", sourceId: "secret:write", scopes: ["workers:write"] },
+    "version-upload": { token: "upload-token", sourceId: "secret:upload", scopes: ["workers:write"] },
   };
   const instance = new CloudflareApiTokenCredentialBroker({
     accountId: "account:broker-test",
@@ -117,14 +118,32 @@ test("operation-specific source can narrow credentials when the provider support
     operationTokenSource: {
       preview: async () => sources.preview!,
       apply: async () => sources.apply!,
+      "version-upload": async () => sources["version-upload"]!,
     },
     transport: fixture,
     now: () => "2026-08-21T00:00:00.000Z",
   });
   const preview = await instance.issue({ accountId: "account:broker-test", scriptName: "worker-broker-test", targetId: "target:broker-test", operation: "preview", audience: "aud:anyam:deployment" });
   const apply = await instance.issue({ accountId: "account:broker-test", scriptName: "worker-broker-test", targetId: "target:broker-test", operation: "apply", audience: "aud:anyam:promotion" });
+  const upload = await instance.issue({ accountId: "account:broker-test", scriptName: "worker-broker-test", targetId: "target:broker-test", operation: "version-upload", audience: "aud:anyam:deployment" });
   assert.equal(fixture.requests[1]?.token, "read-token");
   assert.equal(fixture.requests[3]?.token, "write-token");
+  assert.equal(fixture.requests[5]?.token, "upload-token");
   assert.match(preview.receipt, /credentialSource=secret:read/);
   assert.match(apply.receipt, /credentialSource=secret:write/);
+  assert.match(upload.receipt, /credentialSource=secret:upload/);
+
+  const readOnlyUpload = new CloudflareApiTokenCredentialBroker({
+    accountId: "account:broker-test",
+    scriptName: "worker-broker-test",
+    targetId: "target:broker-test",
+    tokenSource: async () => sources.preview!,
+    operationTokenSource: { "version-upload": async () => sources.preview! },
+    transport: fixture,
+    now: () => "2026-08-21T00:00:00.000Z",
+  });
+  await assert.rejects(
+    readOnlyUpload.issue({ accountId: "account:broker-test", scriptName: "worker-broker-test", targetId: "target:broker-test", operation: "version-upload", audience: "aud:anyam:deployment" }),
+    (error: unknown) => error instanceof PromotionCredentialBrokerError && error.code === "scope-missing" && /version-upload/.test(error.receipt),
+  );
 });

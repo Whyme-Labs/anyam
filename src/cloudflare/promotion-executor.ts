@@ -49,17 +49,30 @@ export type PromotionExecutorArtifactStore = {
   get(key: string): Promise<PromotionExecutorArtifactObject | null>;
 };
 
-export type PromotionExecutorConfig = {
+export type PromotionExecutorTargetRoute = {
+  targetId: string;
   accountId: string;
   scriptName: string;
-  targetId: string;
-  adapterId?: string;
   previewSubdomain: string;
   healthUrl?: string;
-  /** Provider authority is available only through this customer-owned broker. */
   credentialBroker: CloudflareWorkerCredentialBroker;
+  workerReleaseManifest?: (input: { release: ImmutableRelease; target: WorkerTarget }) => WorkerReleaseManifest;
+};
+
+export type PromotionExecutorConfig = {
+  /** Legacy single-route fields remain accepted as one route during migration. */
+  accountId?: string;
+  scriptName?: string;
+  targetId?: string;
+  adapterId?: string;
+  previewSubdomain?: string;
+  healthUrl?: string;
+  /** Provider authority is available only through this customer-owned broker. */
+  credentialBroker?: CloudflareWorkerCredentialBroker;
   artifactStore: PromotionExecutorArtifactStore;
   workerReleaseManifest?: (input: { release: ImmutableRelease; target: WorkerTarget }) => WorkerReleaseManifest;
+  /** Authoritative Target routes. The caller supplies only a Target identity; the executor selects the rest. */
+  targetRoutes?: readonly PromotionExecutorTargetRoute[];
   fetch?: typeof fetch;
   now?: () => string;
   routeReadinessRetry?: CloudflareWorkerRouteReadinessRetry;
@@ -266,16 +279,37 @@ function createArtifactReader(store: PromotionExecutorArtifactStore) {
   };
 }
 
-function targetForContext(context: PromotionExecutionContext, config: PromotionExecutorConfig): WorkerTarget {
+function configuredRoutes(config: PromotionExecutorConfig): readonly PromotionExecutorTargetRoute[] {
+  if (config.targetRoutes && config.targetRoutes.length > 0) return config.targetRoutes;
+  if (config.accountId && config.scriptName && config.targetId && config.previewSubdomain && config.credentialBroker) {
+    return [{ targetId: config.targetId, accountId: config.accountId, scriptName: config.scriptName, previewSubdomain: config.previewSubdomain, ...(config.healthUrl ? { healthUrl: config.healthUrl } : {}), credentialBroker: config.credentialBroker, ...(config.workerReleaseManifest ? { workerReleaseManifest: config.workerReleaseManifest } : {}) }];
+  }
+  throw new PromotionExecutorConfigurationError(
+    "Customer-operated Promotion executor has no complete Target route.",
+    "configure one or more authoritative Target routes with account, script, preview, and credential-broker bindings before binding the service",
+    "executor=routes-missing; providerInvocation=false; credentialMaterialStored=false",
+  );
+}
+
+function validateRoutes(routes: readonly PromotionExecutorTargetRoute[]): void {
+  if (routes.length === 0) throw new PromotionExecutorConfigurationError("Customer-operated Promotion executor has no Target routes.", "configure at least one authoritative Target route", "executor=routes-empty; providerInvocation=false; credentialMaterialStored=false");
+  const ids = new Set<string>();
+  for (const route of routes) {
+    if (!route.targetId || !route.accountId || !route.scriptName || !route.previewSubdomain || !route.credentialBroker) throw new PromotionExecutorConfigurationError("Customer-operated Promotion executor Target route is incomplete.", "configure targetId, accountId, scriptName, previewSubdomain, and credentialBroker on every route", `target=${route.targetId || "missing"}; executor=route-invalid; providerInvocation=false; credentialMaterialStored=false`);
+    if (ids.has(route.targetId)) throw new PromotionExecutorConfigurationError(`Customer-operated Promotion executor has duplicate Target route ${route.targetId}.`, "configure one authoritative provider route per Target identity", `target=${route.targetId}; executor=route-duplicate; providerInvocation=false; credentialMaterialStored=false`);
+    ids.add(route.targetId);
+  }
+}
+
+function targetForContext(context: PromotionExecutionContext, route: PromotionExecutorTargetRoute, adapterId: string): WorkerTarget {
   const target = safeObject(context.target, "target") as unknown as Target;
-  if (target.id !== config.targetId) {
+  if (target.id !== route.targetId) {
     throw new PromotionExecutorInputError(
       `Target ${target.id} is not the Target configured for this executor.`,
       "route the exact Target to its customer-operated executor service; provider invocation was not attempted",
-      `target=${target.id}; configuredTarget=${config.targetId}; adapterSelection=mismatch; providerInvocation=false`,
+      `target=${target.id}; configuredTarget=${route.targetId}; adapterSelection=mismatch; providerInvocation=false`,
     );
   }
-  const adapterId = config.adapterId ?? CLOUDFLARE_WORKER_TARGET_ADAPTER_ID;
   if (target.adapterId !== adapterId || adapterId !== CLOUDFLARE_WORKER_TARGET_ADAPTER_ID) {
     throw new PromotionExecutorInputError(
       `Target ${target.id} requests unsupported adapter ${target.adapterId}.`,
@@ -298,7 +332,7 @@ function targetForContext(context: PromotionExecutionContext, config: PromotionE
   });
 }
 
-function validateContext(value: unknown, config: PromotionExecutorConfig): PromotionExecutionContext {
+function validateContext(value: unknown): PromotionExecutionContext {
   const context = safeObject(value, "context");
   allowedContextKeys(context);
   const forbidden = credentialMaterial(context);
@@ -330,13 +364,6 @@ function validateContext(value: unknown, config: PromotionExecutorConfig): Promo
       `Promotion ${promotionId} is not bound to one exact Project, Release, and Target.`,
       "return the untouched Authority context; provider invocation was not attempted",
       `promotion=${promotionId}; exactBinding=false; providerInvocation=false`,
-    );
-  }
-  if (targetId !== config.targetId) {
-    throw new PromotionExecutorInputError(
-      `Target ${targetId} is not configured for this executor.`,
-      "bind the Realm to the customer-operated executor selected for this Target; provider invocation was not attempted",
-      `target=${targetId}; configuredTarget=${config.targetId}; providerInvocation=false`,
     );
   }
   digestFormat(requiredString(context.executionDigest, "executionDigest"), "executionDigest");
@@ -427,10 +454,12 @@ function mapPromotionResult(context: PromotionExecutionContext, local: Promotion
 }
 
 export function createPromotionExecutor(config: PromotionExecutorConfig): { execute(context: Readonly<PromotionExecutionContext>): Promise<PromotionExecutionResult> } {
-  if (!config.accountId || !config.scriptName || !config.targetId || !config.previewSubdomain || !config.credentialBroker || !config.handoffKeys?.active?.id || !config.handoffKeys.active.secret || !config.handoffNonceStore) {
+  const routes = configuredRoutes(config);
+  validateRoutes(routes);
+  if (!config.handoffKeys?.active?.id || !config.handoffKeys.active.secret || !config.handoffNonceStore) {
     throw new PromotionExecutorConfigurationError(
       "Customer-operated Promotion executor configuration is incomplete.",
-      "configure account ID, Worker script, Target ID, preview subdomain, customer-owned credential broker, active handoff key, and nonce store before binding the service",
+      "configure the active handoff key and durable nonce store before binding the service",
       `executor=config-incomplete; handoffKey=${config.handoffKeys?.active?.id ? "present" : "missing"}; nonceStore=${config.handoffNonceStore ? "present" : "missing"}; providerInvocation=false; credentialMaterialStored=false`,
     );
   }
@@ -446,16 +475,18 @@ export function createPromotionExecutor(config: PromotionExecutorConfig): { exec
     );
   }
   const transport = createCloudflareWorkerRestTransport(config.fetch ? { fetch: config.fetch } : {});
-  const adapter = new CloudflareWorkerTargetAdapter({
-    accountId: config.accountId,
-    scriptName: config.scriptName,
-    targetId: config.targetId,
+  const artifactReader = createArtifactReader(config.artifactStore);
+  const routesByTarget = new Map(routes.map((route) => [route.targetId, route]));
+  const adapterForRoute = (route: PromotionExecutorTargetRoute): CloudflareWorkerTargetAdapter => new CloudflareWorkerTargetAdapter({
+    accountId: route.accountId,
+    scriptName: route.scriptName,
+    targetId: route.targetId,
     transport,
-    credentialBroker: config.credentialBroker,
-    artifactReader: createArtifactReader(config.artifactStore),
-    ...(config.workerReleaseManifest ? { workerReleaseManifest: config.workerReleaseManifest } : {}),
-    previewUrlForVersion: (versionId) => `https://${versionId.slice(0, 8)}-${config.scriptName}.${config.previewSubdomain}.workers.dev/?anyam_preview=1`,
-    healthUrl: config.healthUrl ?? `https://${config.scriptName}.${config.previewSubdomain}.workers.dev/health`,
+    credentialBroker: route.credentialBroker,
+    artifactReader,
+    ...((route.workerReleaseManifest ?? config.workerReleaseManifest) ? { workerReleaseManifest: route.workerReleaseManifest ?? config.workerReleaseManifest } : {}),
+    previewUrlForVersion: (versionId) => `https://${versionId.slice(0, 8)}-${route.scriptName}.${route.previewSubdomain}.workers.dev/?anyam_preview=1`,
+    healthUrl: route.healthUrl ?? config.healthUrl ?? `https://${route.scriptName}.${route.previewSubdomain}.workers.dev/health`,
     healthResponseValidator: workerHealthValidator(),
     routeReadinessRetry: routeRetry(config),
     rollbackRouteReadinessRetry: rollbackRouteRetry(config),
@@ -466,8 +497,17 @@ export function createPromotionExecutor(config: PromotionExecutorConfig): { exec
 
   return {
     async execute(rawContext) {
-      const context = validateContext(rawContext, config);
-      const target = targetForContext(context, config);
+      const context = validateContext(rawContext);
+      const route = routesByTarget.get(context.target.id);
+      if (!route) {
+        throw new PromotionExecutorInputError(
+          `Target ${context.target.id} is not configured for this executor.`,
+          "add the authoritative Target route to the customer-operated executor registry; provider invocation was not attempted",
+          `target=${context.target.id}; route=missing; providerInvocation=false`,
+        );
+      }
+      const target = targetForContext(context, route, adapterId);
+      const adapter = adapterForRoute(route);
       const candidate = immutableRelease({ release: context.release, artifacts: context.artifacts, evidence: context.evidence }, context.project.id, target);
       const previous = context.previousRelease
         ? immutableRelease(context.previousRelease, context.project.id, target)
@@ -501,7 +541,9 @@ export function createPromotionExecutor(config: PromotionExecutorConfig): { exec
 }
 
 export async function probePromotionExecutorProviderAuthorization(config: PromotionExecutorConfig): Promise<CloudflareWorkerCredentialObservation> {
-  return config.credentialBroker.probe({ accountId: config.accountId, scriptName: config.scriptName, targetId: config.targetId });
+  const route = configuredRoutes(config)[0];
+  if (!route) throw new PromotionExecutorConfigurationError("Customer-operated Promotion executor has no Target route to probe.", "configure an authoritative Target route before probing provider authorization", "executor=routes-empty; providerInvocation=false; credentialMaterialStored=false");
+  return route.credentialBroker.probe({ accountId: route.accountId, scriptName: route.scriptName, targetId: route.targetId });
 }
 
 export function createPromotionExecutorHandler(config: PromotionExecutorConfig): (request: Request) => Promise<Response> {
@@ -526,7 +568,7 @@ export function createPromotionExecutorHandler(config: PromotionExecutorConfig):
       return jsonResponse({ protocol: PROMOTION_EXECUTOR_PROTOCOL, status: "blocked", code: "invalid_json", message: "Promotion execution body must be valid JSON.", recoveryAction: "send the exact serialized Authority handoff context", receipt: "executor=customer-operated; body=invalid-json; providerInvocation=false; credentialMaterialStored=false" }, 422);
     }
     try {
-      const context = validateContext(body, config);
+      const context = validateContext(body);
       const nonce = request.headers.get("x-anyam-promotion-nonce")?.trim() ?? "";
       const expiresAt = request.headers.get("x-anyam-promotion-expires-at")?.trim() ?? "";
       const signature = request.headers.get("x-anyam-promotion-handoff")?.trim() ?? "";

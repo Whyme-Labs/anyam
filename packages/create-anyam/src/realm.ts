@@ -37,6 +37,20 @@ export type RealmState = {
   receipt: string;
 };
 
+export type RealmProviderAdapterResult = {
+  readonly status: "succeeded" | "blocked" | "indeterminate";
+  readonly providerOperationId: string;
+  readonly receipt: string;
+  readonly recoveryAction: string;
+};
+
+/** Customer-owned mutation seam. Provider credentials never enter RealmState. */
+export type RealmProviderAdapter = {
+  install(input: { plan: RealmPlan; checkpoint: RealmState }): Promise<RealmProviderAdapterResult>;
+  upgrade(input: { state: RealmState; desiredVersion: string }): Promise<RealmProviderAdapterResult>;
+  destroy(input: { state: RealmState }): Promise<RealmProviderAdapterResult>;
+};
+
 export type RealmCommandResult = {
   protocol: typeof ANYAM_CLI_REALM_PROTOCOL;
   status: "planned" | "succeeded" | "blocked" | "unchanged";
@@ -63,6 +77,19 @@ function digest(value: unknown): string {
 function required(value: string | undefined, field: string): string {
   if (!value?.trim()) throw new Error(`realm ${field} is required`);
   return value.trim();
+}
+
+function providerReceipt(value: string, field: string): string {
+  const receipt = required(value, field);
+  if (/(?:Bearer\s+\S+|(?:token|secret|password|api[_-]?key|private[_-]?key)\s*[=:]\s*\S+)/iu.test(receipt)) throw new Error(`${field} contains credential material`);
+  return receipt;
+}
+
+function providerResult(input: RealmProviderAdapterResult): RealmProviderAdapterResult {
+  const providerOperationId = required(input.providerOperationId, "providerOperationId");
+  const receipt = providerReceipt(input.receipt, "providerReceipt");
+  const recoveryAction = required(input.recoveryAction, "providerRecoveryAction");
+  return { status: input.status, providerOperationId, receipt, recoveryAction };
 }
 
 function resourcePermissions(resources: readonly string[]): readonly string[] {
@@ -140,17 +167,23 @@ export function realmPlan(input: { directory: string; installationId: string; ac
   return { protocol: ANYAM_CLI_REALM_PROTOCOL, status: "planned", operation: "plan", directory: resolve(input.directory), plan, recoveryAction: "Review the plan, then run realm install with the same installation and account identities.", receipt: `operation=plan; installation=${plan.installationId}; account=${plan.accountId}; resources=${plan.resources.join(",")}; readOnly=true; providerMutation=false; credentialMaterialStored=false` };
 }
 
-export async function realmInstall(input: { directory: string; installationId: string; accountId: string; resources: readonly string[]; domains?: readonly string[]; desiredVersion?: string }): Promise<RealmCommandResult> {
+export async function realmInstall(input: { directory: string; installationId: string; accountId: string; resources: readonly string[]; domains?: readonly string[]; desiredVersion?: string; providerAdapter?: RealmProviderAdapter }): Promise<RealmCommandResult> {
   const directory = resolve(input.directory);
   const plan = createRealmPlan(input);
   const existing = await readRealmState(directory);
   if (existing && existing.planDigest === plan.digest && existing.phase === "installed") return { protocol: ANYAM_CLI_REALM_PROTOCOL, status: "unchanged", operation: "install", directory, state: existing, plan, recoveryAction: "No action is required; the installation checkpoint is already installed.", receipt: `${existing.receipt}; idempotent=true` };
   const state = stateWithCheckpoint({ protocol: ANYAM_CLI_REALM_PROTOCOL, version: "v1", installationId: plan.installationId, phase: "provider-pending", desiredVersion: input.desiredVersion?.trim() || "0.0.0", plan, planDigest: plan.digest, credentialFree: true, providerMutation: false, receipt: `operation=install; installation=${plan.installationId}; provider=not-invoked; checkpoint=resumable; credentialMaterialStored=false` });
   await writeState(directory, state);
+  if (input.providerAdapter) {
+    const result = providerResult(await input.providerAdapter.install({ plan, checkpoint: state }));
+    const completed = stateWithCheckpoint({ ...state, phase: result.status === "succeeded" ? "installed" : "provider-pending", receipt: `${state.receipt}; providerStatus=${result.status}; providerOperationId=${result.providerOperationId}; ${result.receipt}; providerMutation=observed; credentialFree=true` });
+    await writeState(directory, completed);
+    return { protocol: ANYAM_CLI_REALM_PROTOCOL, status: result.status === "succeeded" ? "succeeded" : "blocked", operation: "install", directory, state: completed, plan, recoveryAction: result.recoveryAction, receipt: `${completed.receipt}; stateFile=${STATE_FILE}` };
+  }
   return { protocol: ANYAM_CLI_REALM_PROTOCOL, status: "blocked", operation: "install", directory, state, plan, recoveryAction: "Run the customer-owned Cloudflare adapter/install route with this exact installation checkpoint; the CLI did not claim provider provisioning.", receipt: `${state.receipt}; stateFile=${STATE_FILE}; providerMutation=false` };
 }
 
-export async function realmUpgrade(input: { directory: string; desiredVersion: string }): Promise<RealmCommandResult> {
+export async function realmUpgrade(input: { directory: string; desiredVersion: string; providerAdapter?: RealmProviderAdapter }): Promise<RealmCommandResult> {
   const directory = resolve(input.directory);
   const current = await readRealmState(directory);
   if (!current) return { protocol: ANYAM_CLI_REALM_PROTOCOL, status: "blocked", operation: "upgrade", directory, recoveryAction: "Run realm plan and realm install before upgrading.", receipt: "operation=upgrade; state=missing; providerMutation=false" };
@@ -158,6 +191,12 @@ export async function realmUpgrade(input: { directory: string; desiredVersion: s
   if (current.desiredVersion === desiredVersion && current.phase === "installed") return { protocol: ANYAM_CLI_REALM_PROTOCOL, status: "unchanged", operation: "upgrade", directory, state: current, recoveryAction: "No upgrade is required.", receipt: `${current.receipt}; idempotent=true` };
   const state = stateWithCheckpoint({ ...current, phase: "upgrade-pending", desiredVersion, receipt: `operation=upgrade; from=${current.desiredVersion}; to=${desiredVersion}; provider=not-invoked; checkpoint=resumable; credentialMaterialStored=false` });
   await writeState(directory, state);
+  if (input.providerAdapter) {
+    const result = providerResult(await input.providerAdapter.upgrade({ state, desiredVersion }));
+    const completed = stateWithCheckpoint({ ...state, phase: result.status === "succeeded" ? "installed" : "upgrade-pending", receipt: `${state.receipt}; providerStatus=${result.status}; providerOperationId=${result.providerOperationId}; ${result.receipt}; providerMutation=observed; credentialFree=true` });
+    await writeState(directory, completed);
+    return { protocol: ANYAM_CLI_REALM_PROTOCOL, status: result.status === "succeeded" ? "succeeded" : "blocked", operation: "upgrade", directory, state: completed, recoveryAction: result.recoveryAction, receipt: `${completed.receipt}; stateFile=${STATE_FILE}` };
+  }
   return { protocol: ANYAM_CLI_REALM_PROTOCOL, status: "blocked", operation: "upgrade", directory, state, recoveryAction: "Run the customer-owned upgrade adapter against this checkpoint; no source, Target, or audit state was rewritten by the CLI.", receipt: `${state.receipt}; providerMutation=false` };
 }
 
@@ -189,11 +228,17 @@ export async function realmRestore(directory: string, exportPath: string): Promi
   return { protocol: ANYAM_CLI_REALM_PROTOCOL, status: "succeeded", operation: "restore", directory: resolved, state, exportPath: resolve(exportPath), recoveryAction: "Authenticate the customer owner and reconcile provider resources before activation.", receipt: `${state.receipt}; providerMutation=false` };
 }
 
-export async function realmDestroy(directory: string): Promise<RealmCommandResult> {
+export async function realmDestroy(directory: string, providerAdapter?: RealmProviderAdapter): Promise<RealmCommandResult> {
   const resolved = resolve(directory);
   const current = await readRealmState(resolved);
   if (!current) return { protocol: ANYAM_CLI_REALM_PROTOCOL, status: "unchanged", operation: "destroy", directory: resolved, recoveryAction: "No local installation state exists.", receipt: "operation=destroy; state=missing; providerMutation=false" };
   const state = stateWithCheckpoint({ ...current, phase: "destroy-pending", receipt: `operation=destroy; provider=not-invoked; explicit-provider-deletion-required; credentialMaterialStored=false` });
   await writeState(resolved, state);
+  if (providerAdapter) {
+    const result = providerResult(await providerAdapter.destroy({ state }));
+    const completed = stateWithCheckpoint({ ...state, receipt: `${state.receipt}; providerStatus=${result.status}; providerOperationId=${result.providerOperationId}; ${result.receipt}; providerMutation=observed; credentialFree=true` });
+    await writeState(resolved, completed);
+    return { protocol: ANYAM_CLI_REALM_PROTOCOL, status: result.status === "succeeded" ? "succeeded" : "blocked", operation: "destroy", directory: resolved, state: completed, recoveryAction: result.recoveryAction, receipt: `${completed.receipt}; stateFile=${STATE_FILE}` };
+  }
   return { protocol: ANYAM_CLI_REALM_PROTOCOL, status: "blocked", operation: "destroy", directory: resolved, state, recoveryAction: "Run the customer-owned provider destruction adapter after retaining the export; the CLI did not delete provider resources.", receipt: `${state.receipt}; providerMutation=false` };
 }

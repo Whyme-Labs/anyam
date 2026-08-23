@@ -178,3 +178,62 @@ test("customer-operated executor accepts the previous handoff key only during ro
   const unknown = await signedRequestWithKey(context, "handoff-key-vx", "promotion-executor-test-handoff-secret");
   assert.equal((await handler(unknown)).status, 401);
 });
+
+test("customer-operated executor routes two Targets to distinct provider configuration and credentials", async () => {
+  const { context, artifactBytes } = fixture();
+  const secondContext = {
+    ...context,
+    target: { ...context.target, id: "target:executor-beta" },
+    promotion: { ...context.promotion, id: "promotion:executor-beta", targetId: "target:executor-beta" },
+  };
+  const providerRequests: Array<{ path: string; token: string }> = [];
+  const versions = new Map<string, Record<string, unknown>>();
+  const fetcher: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    const path = url.pathname;
+    providerRequests.push({ path, token: String((init?.headers as Record<string, string> | undefined)?.authorization ?? "") });
+    if (url.hostname === "api.cloudflare.com") {
+      const scriptName = path.split("/").at(-2) ?? "unknown";
+      if (path.endsWith("/versions") && (init?.method ?? "GET") === "GET") return new Response(JSON.stringify({ result: { items: [] }, errors: [], messages: [] }), { status: 200 });
+      if (path.endsWith("/versions") && init?.method === "POST") {
+        const form = init.body as FormData;
+        const metadata = JSON.parse(String(form.get("metadata"))) as { annotations: Record<string, string>; compatibility_date: string; compatibility_flags: readonly string[]; bindings?: readonly Readonly<Record<string, unknown>>[] };
+        const id = `version-${scriptName}`;
+        versions.set(id, { id, metadata, resources: { bindings: metadata.bindings ?? [], script_runtime: { compatibility_date: metadata.compatibility_date, compatibility_flags: metadata.compatibility_flags ?? [] } } });
+        return new Response(JSON.stringify({ result: { id }, errors: [], messages: [] }), { status: 200 });
+      }
+      if (path.includes("/versions/") && (init?.method ?? "GET") === "GET") {
+        const id = decodeURIComponent(path.split("/").at(-1) ?? "");
+        return new Response(JSON.stringify({ result: versions.get(id), errors: [], messages: [] }), { status: versions.has(id) ? 200 : 404 });
+      }
+      if (path.endsWith("/deployments") && init?.method === "POST") return new Response(JSON.stringify({ result: { id: `deployment-${scriptName}`, versions: [] }, errors: [], messages: [] }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ status: "healthy", releaseId: context.release.id }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const credential = (token: string) => ({
+    async probe() { return { credentialId: `credential:${token}`, expiresAt: "2099-01-01T00:00:00.000Z", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=fixture; providerAuthorization=observed; credentialMaterialStored=false" }; },
+    async issue(input: { operation: string; audience: string }) { return { token, credentialId: `credential:${token}:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience as "aud:anyam:deployment" | "aud:anyam:promotion", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=fixture; providerAuthorization=observed; credentialMaterialStored=false" }; },
+  });
+  const claimed = new Set<string>();
+  const handler = createPromotionExecutorHandler({
+    targetRoutes: [
+      { targetId: "target:executor", accountId: "account:alpha", scriptName: "worker-alpha", previewSubdomain: "alpha", credentialBroker: credential("token-alpha") },
+      { targetId: "target:executor-beta", accountId: "account:beta", scriptName: "worker-beta", previewSubdomain: "beta", credentialBroker: credential("token-beta") },
+    ],
+    workerReleaseManifest: ({ release }) => createCloudflareWorkerReleaseManifest({ release, compatibilityDate: "2026-01-01", bindings: [], healthPaths: ["/health"] }),
+    handoffKeys: { active: { id: "handoff-key-v1", secret: "route-test-secret" } },
+    handoffNonceStore: { async claim(input) { if (claimed.has(input.nonce)) return false; claimed.add(input.nonce); return true; } },
+    artifactStore: { async get(key) { return key === `artifacts/${context.artifacts[0]?.digest}` ? { arrayBuffer: async () => new Uint8Array(artifactBytes).buffer as ArrayBuffer } : null; } },
+    fetch: fetcher,
+  });
+  const alpha = await handler(await signedRequestWithKey(context, "handoff-key-v1", "route-test-secret"));
+  const beta = await handler(await signedRequestWithKey(secondContext, "handoff-key-v1", "route-test-secret"));
+  assert.equal(alpha.status, 200, await alpha.text());
+  assert.equal(beta.status, 200, await beta.text());
+  const alphaRequests = providerRequests.filter((request) => request.path.includes("worker-alpha"));
+  const betaRequests = providerRequests.filter((request) => request.path.includes("worker-beta"));
+  assert.ok(alphaRequests.length > 0);
+  assert.ok(betaRequests.length > 0);
+  assert.equal(alphaRequests.every((request) => request.token.includes("token-alpha")), true);
+  assert.equal(betaRequests.every((request) => request.token.includes("token-beta")), true);
+});

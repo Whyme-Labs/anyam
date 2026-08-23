@@ -325,19 +325,21 @@ export function createWorkerTarget(input: {
       receipt: `target=${input.target.id}; currentRelease=${input.currentReleaseId}; history=${releaseHistory.join(",")}`,
     });
   }
-  const deploymentProfile = input.target.deploymentProfile ?? createTargetDeploymentProfile({
-    environment: "custom",
-    channel: "custom",
-    audience: input.target.id,
-    runtimeIdentity: `target:${input.target.id}`,
-    routeIdentities: [],
-    bindingIdentities: [],
-    dataResourceIdentities: [],
-    configurationDigests: [targetDeploymentContractDigest(input.target)],
-    secretUseAliases: [],
-    dataClass: "custom",
-    resourceSharing: "isolated",
-  });
+  const deploymentProfile = input.target.deploymentProfile && input.target.deploymentProfile.configurationDigests.length > 0
+    ? input.target.deploymentProfile
+    : createTargetDeploymentProfile({
+      environment: "custom",
+      channel: "custom",
+      audience: input.target.id,
+      runtimeIdentity: `target:${input.target.id}`,
+      routeIdentities: [],
+      bindingIdentities: [],
+      dataResourceIdentities: [],
+      configurationDigests: [targetDeploymentContractDigest(input.target)],
+      secretUseAliases: [],
+      dataClass: "custom",
+      resourceSharing: "isolated",
+      });
   return {
     ...clone(input.target),
     acceptedArtifactTypes: [...input.target.acceptedArtifactTypes],

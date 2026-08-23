@@ -96,3 +96,25 @@ export function assertMigrationPlanSafeForTarget(input: { plan: MigrationPlan; e
   if (normalized.compatibility === "unknown" || normalized.compatibility === "incompatible") fail({ code: "incompatible", message: `Production-sensitive Target cannot consume migration compatibility ${normalized.compatibility}.`, recoveryAction: "prove compatibility with the required migration Verifiers or keep the Release out of production-sensitive Targets", receipt: `migration=production-blocked; compatibility=${normalized.compatibility}; planDigest=${normalized.planDigest}` });
   if (normalized.rollback === "blocked") fail({ code: "incompatible", message: "Production-sensitive Target cannot consume a Release with blocked data rollback behavior.", recoveryAction: "provide a manual data recovery runbook or select a Release with a supported rollback mode", receipt: `migration=production-blocked; rollback=blocked; planDigest=${normalized.planDigest}` });
 }
+
+export type AutomaticMigrationRollbackDecision =
+  | { allowed: true; receipt: string }
+  | { allowed: false; recoveryAction: string; receipt: string };
+
+export function automaticMigrationRollbackDecision(plan: MigrationPlan): AutomaticMigrationRollbackDecision {
+  const normalized = createMigrationPlan(plan);
+  if (normalized.rollback === "safe") {
+    return { allowed: true, receipt: `migrationRollback=safe; automaticRollback=allowed; planDigest=${normalized.planDigest}` };
+  }
+  if (normalized.rollback === "application-only" && (normalized.compatibility === "backward-compatible" || normalized.compatibility === "bidirectional")) {
+    return { allowed: true, receipt: `migrationRollback=application-only; compatibility=${normalized.compatibility}; automaticRollback=allowed; planDigest=${normalized.planDigest}` };
+  }
+  const recoveryAction = normalized.rollback === "application-only"
+    ? "prove backward-compatible or bidirectional migration compatibility before allowing application rollback"
+    : "complete the required data recovery action and attach fresh Evidence before retrying rollback";
+  return {
+    allowed: false,
+    recoveryAction,
+    receipt: `migrationRollback=${normalized.rollback}; compatibility=${normalized.compatibility}; automaticRollback=blocked; planDigest=${normalized.planDigest}`,
+  };
+}

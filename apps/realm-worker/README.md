@@ -76,6 +76,12 @@ transport convenience only; it does not weaken the deployed HTTPS contract.
    binding/provider observations, policy/export/checkpoint observations, and
    explicit next actions. They never create resources, mint credentials,
    write canonical state, or promote a Target.
+   `GET /owner/control-room` renders the same status as a state-first board.
+   It remains indeterminate until the customer-owned
+   `ANYAM_OPERATIONS_LEDGER` contains verified receipts for sustained load,
+   queue recovery, Durable Object contention, backup/restore, key rotation,
+   authentication throttling, and incident alerting. Provider observations and
+   local fixtures are not production SLO receipts.
 
 The current Wrangler configuration uses a SQLite-backed Durable Object export,
 which is the current Cloudflare configuration shape for new Durable Object
@@ -485,6 +491,7 @@ run and independently observed.
 | `ANYAM_LAST_CHECKPOINT_DIGEST` | SHA-256 digest of the last verified recovery checkpoint | Operator status/preflight |
 | `ANYAM_RESTORE_DRILL_STATE` | `verified` or `failed` customer restore-drill observation | Operator status/preflight |
 | `ANYAM_PENDING_OPERATIONS_STATE` | `none`, `pending`, or `stale` operation-ledger observation | Operator status/preflight |
+| `ANYAM_OPERATIONS_LEDGER` | Credential-free JSON snapshot of `anyam.production-operations/v1` drill receipts | Operator status/control room |
 
 Configured bindings are reported by name only. The health response never
 returns binding values or credentials.
@@ -498,7 +505,7 @@ drill is `degraded`. Every non-healthy check includes a receipt and recovery
 action.
 
 The current source manifest receipt is generated locally (not a provider
-claim): `sha256:1ffa6cb53c2bf1ba5325106c82315ba1be1f925addb9eacf5a220aa1baab0021`.
+claim): `sha256:d54ea858cdb74e426b775ff69da4c709f092d44888b649b863444d2b8be54c5b`.
 Regenerate it whenever the manifest changes; do not copy a stale digest into a
 customer deployment.
 
@@ -516,6 +523,7 @@ The Worker exposes a customer-owned WebAuthn adapter boundary:
 | `POST /api/owner/session/export` | Owner-authenticated same-origin download of the opaque session value as `owner-session.txt`; response is no-store and never JSON/logged |
 | `GET /api/operator/status` | Owner-authenticated machine-readable installation status; read-only |
 | `GET /api/operator/preflight` | Owner-authenticated read-only binding/migration/policy/export preflight; no provider calls or mutations |
+| `GET /owner/control-room` | Owner-authenticated, no-store state-first control room for Change → Evidence → Landing → Release → Target → Deployment → Health |
 | `POST /api/owner/agent/delegations` | Creates or reuses one owner-authenticated, non-promotional Agent Task delegation for a real Project/Workspace/Change; credentials are not issued implicitly |
 | `POST /api/owner/agent/delegations/revoke` | Revokes one owner-owned Agent and closes its delegated authority without revoking the owner Session |
 | `POST /api/owner/agent/delegations/credentials` | Explicitly exchanges the exact generic delegation for short-lived, audience-bound `realm-api`, Git, and/or MCP credentials; provider, deployment, runner, and promotion credentials are rejected |

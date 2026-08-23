@@ -10,12 +10,31 @@ import {
   type CustomerRealmOperatorEnv,
 } from "../src/cloudflare/realm-operator.ts";
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "../apps/realm-worker/src/coordinator-protocol.ts";
+import { PRODUCTION_OPERATIONS_PROTOCOL, PRODUCTION_OPERATIONS_REQUIRED_DRILLS } from "../src/operations/production-operations.ts";
 
 const DIGEST_A = "sha256:" + "a".repeat(64);
 const DIGEST_B = "sha256:" + "b".repeat(64);
 const DIGEST_C = "sha256:" + "c".repeat(64);
 const DIGEST_D = "sha256:" + "d".repeat(64);
 const MANIFEST_DIGEST = await customerRealmInstallationManifestDigest();
+const OPERATIONS_LEDGER = JSON.stringify({
+  protocol: PRODUCTION_OPERATIONS_PROTOCOL,
+  receipts: PRODUCTION_OPERATIONS_REQUIRED_DRILLS.map((kind) => ({
+    protocol: PRODUCTION_OPERATIONS_PROTOCOL,
+    id: `drill:${kind}`,
+    kind,
+    status: "verified",
+    startedAt: "2026-08-23T00:00:00.000Z",
+    finishedAt: "2026-08-23T00:01:00.000Z",
+    observations: { workload: "test-fixture", measuredRequests: 1 },
+    evidenceRefs: [`evidence:${kind}`],
+    recoveryAction: "No recovery action is currently required.",
+    receipt: `drill=${kind}; status=verified; measurement=fixture; credentialFree=true`,
+    credentialFree: true,
+    providerFactsAreNotAnyamLimits: true,
+  })),
+  credentialFree: true,
+});
 
 function configuredEnv(overrides: Partial<CustomerRealmOperatorEnv> = {}): CustomerRealmOperatorEnv {
   return {
@@ -47,6 +66,7 @@ function configuredEnv(overrides: Partial<CustomerRealmOperatorEnv> = {}): Custo
     ANYAM_LAST_CHECKPOINT_DIGEST: DIGEST_B,
     ANYAM_RESTORE_DRILL_STATE: "verified",
     ANYAM_PENDING_OPERATIONS_STATE: "none",
+    ANYAM_OPERATIONS_LEDGER: OPERATIONS_LEDGER,
     ...overrides,
   };
 }
@@ -105,6 +125,13 @@ test("operator status remains indeterminate when provider, identity, release, an
   assert.equal(result.checks.some((item) => item.state === "indeterminate"), true);
   assert.equal(result.digests.release, null);
   assert.equal(result.exportCheckpoint.destinationConfigured, false);
+});
+
+test("operator status remains indeterminate when production-operation receipts are absent", async () => {
+  const result = await inspectCustomerRealmOperatorStatus(configuredEnv({ ANYAM_OPERATIONS_LEDGER: undefined }), healthyIdentity);
+  assert.equal(result.status, "indeterminate");
+  assert.equal(result.operations.status, "indeterminate");
+  assert.equal(result.checks.find((item) => item.id === "production-operations")?.state, "indeterminate");
 });
 
 test("read-only preflight exposes no mutation authority or credential material", async () => {
@@ -178,4 +205,8 @@ test("operator status is owner-authenticated while health remains the public rea
   assert.equal(body.protocol, "anyam.customer-realm-operator/v1");
   assert.equal(body.canonicalWrite, false);
   assert.equal(JSON.stringify(body).includes(kernelSessionId), false);
+  const room = await handleAnyamRealmOwnerRequest(new Request("https://realm.example/owner/control-room", { headers: { cookie: `anyam_owner_session=${encodeURIComponent(hostSessionId)}` } }), env);
+  assert.equal(room?.status, 200);
+  assert.equal(room?.headers.get("cache-control"), "no-store");
+  assert.match(await room!.text(), /Production operations/);
 });

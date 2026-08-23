@@ -769,7 +769,7 @@ implementation work package, not an unowned promise.
 | Evidence, threats, Cloudflare architecture | [ADR 0013](../adr/0013-evidence-validity-policy-and-provenance.md), [ADR 0014](../adr/0014-system-threat-model.md), [ADR 0015](../adr/0015-cloudflare-first-architecture-and-provider-boundaries.md) |
 | APIs, events, hosting, bootstrap | [ADR 0016](../adr/0016-normalized-service-data-api-and-event-contracts.md), [ADR 0018](../adr/0018-hosting-tenancy-and-ownership-modes.md), [ADR 0019](../adr/0019-bootstrap-onboarding-import-and-recovery.md), [ADR 0091](../adr/0091-customer-realm-cli-lifecycle.md), [ADR 0092](../adr/0092-production-operations-control-room.md) |
 | Stages, validation, operations, cost | [ADR 0020](../adr/0020-releasable-stages-and-entry-exit-gates.md), [ADR 0021](../adr/0021-evidence-backed-acceptance-and-validation.md), [ADR 0022](../adr/0022-reliability-operations-and-recovery-contract.md), [ADR 0023](../adr/0023-receipt-backed-costs-quotas-and-packaging.md) |
-| Governance, extensions, positioning, delivery | [ADR 0024](../adr/0024-open-governance-profiles-and-compliance-boundaries.md), [ADR 0025](../adr/0025-versioned-extension-contracts-and-trust.md), [ADR 0026](../adr/0026-positioning-documentation-and-adoption.md), [ADR 0027](../adr/0027-phased-delivery-program.md) |
+| Governance, extensions, positioning, delivery | [ADR 0024](../adr/0024-open-governance-profiles-and-compliance-boundaries.md), [ADR 0025](../adr/0025-versioned-extension-contracts-and-trust.md), [ADR 0026](../adr/0026-positioning-documentation-and-adoption.md), [ADR 0027](../adr/0027-phased-delivery-program.md), [ADR 0094](../adr/0094-hosted-team-authority-and-human-delivery-mcp.md) |
 
 ## No-fog audit
 

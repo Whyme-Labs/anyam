@@ -309,6 +309,24 @@ function capabilityForMcpCommand(command: string): Capability | undefined {
   return undefined;
 }
 
+function capabilityForAuthorityCommand(command: AuthorityCommandName): Capability | undefined {
+  switch (command) {
+    case "project.create": return "identity.manage";
+    case "workspace.create": return "workspace.write";
+    case "change.create":
+    case "revision.publish": return "change.publish_revision";
+    case "run.request": return "run.invoke";
+    case "landing.apply": return "landing.request";
+    case "release.create": return "release.create";
+    case "target.configure": return "target.configure";
+    case "promotion.request": return "promotion.request";
+    case "mirror.configure":
+    case "mirror.sync":
+    case "mirror.reconcile": return "source.propose";
+    default: return undefined;
+  }
+}
+
 function delegationCredentialClasses(body: CoordinatorRequestBody): CredentialClass[] {
   const values = body.allowedCredentialClasses === undefined ? [...GENERIC_AGENT_CREDENTIAL_CLASSES] : coordinatorStringArray(body, "allowedCredentialClasses") as CredentialClass[];
   const allowed = new Set(GENERIC_AGENT_CREDENTIAL_CLASSES);
@@ -825,6 +843,25 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     };
   }
 
+  private authorityCapabilitySession(humanSessionId: string, capability: Capability, resource: ResourceRef, requirePasskey = false): AuthoritySession {
+    const identity = this.requireIdentity();
+    const session = identity.validateSession(humanSessionId);
+    const actor = identity.getRecoverySnapshot().actors[session.actorId];
+    if (!actor || actor.kind !== "human") throw new RealmIdentityError({ code: "authority.human_session_required", message: "This hosted Authority operation requires a human Realm Session.", recoveryAction: "authenticate with a human Realm identity before requesting the operation", receipt: `capability=${capability}; actor=human-required; authorityCommand=not-accepted` });
+    if (requirePasskey && session.strength !== "passkey") throw new RealmIdentityError({ code: "authority.passkey_required", message: `Capability ${capability} requires a recent passkey-authenticated session.`, recoveryAction: "authenticate the Realm owner or team member with a passkey and retry the protected operation", receipt: `capability=${capability}; authenticationStrength=${session.strength}; passkey=required; authorityCommand=not-accepted` });
+    const capabilities = identity.activeCapabilitiesForPrincipal({ principalId: session.principalId, resource });
+    if (!capabilities.includes(capability)) throw new RealmIdentityError({ code: "authority.capability_denied", message: `Capability ${capability} is not granted for this Authority resource.`, recoveryAction: "grant the Principal an active Team/Organization relationship with this capability, then re-authenticate and retry", receipt: `principal=${session.principalId}; capability=${capability}; resourceProject=${resource.projectId ?? "realm"}; authorityCommand=not-accepted` });
+    return { realmId: session.realmId, principalId: session.principalId, actorId: session.actorId, sessionId: session.id, clientId: session.clientId, authorizationEpoch: identity.realm.authorizationEpoch, kind: "human" };
+  }
+
+  private authorityHumanSession(humanSessionId: string): AuthoritySession {
+    const identity = this.requireIdentity();
+    const session = identity.validateSession(humanSessionId);
+    const actor = identity.getRecoverySnapshot().actors[session.actorId];
+    if (!actor || actor.kind !== "human") throw new RealmIdentityError({ code: "authority.human_session_required", message: "This hosted Authority operation requires a human Realm Session.", recoveryAction: "authenticate with a human Realm identity before requesting the operation", receipt: "actor=human-required; authority=not-accepted" });
+    return { realmId: session.realmId, principalId: session.principalId, actorId: session.actorId, sessionId: session.id, clientId: session.clientId, authorizationEpoch: identity.realm.authorizationEpoch, kind: "human" };
+  }
+
   private async authoritySnapshot(): Promise<AuthorityPlaneSnapshot> {
     const stored = await this.ctx.storage.get<AuthorityPlaneSnapshot>(REALM_AUTHORITY_SNAPSHOT_KEY);
     return stored ? normalizeAuthorityPlaneSnapshot(stored) : emptyAuthorityPlaneSnapshot(this.requireIdentity().realm.id);
@@ -1053,38 +1090,42 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   }
 
   private async authorityProject(body: CoordinatorRequestBody): Promise<Response> {
-    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const projectId = coordinatorString(body, "projectId");
     const snapshot = await this.authoritySnapshot();
+    const session = this.authorityCapabilitySession(coordinatorString(body, "sessionId"), "project.inspect", { realmId: this.requireIdentity().realm.id, projectId });
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", ...this.authorityProjectSummary(snapshot, projectId), session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=project.inspect; project=${projectId}; readOnly=true; credentialFree=true; canonicalWrite=false` });
   }
 
   private async authorityProjects(body: CoordinatorRequestBody): Promise<Response> {
-    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const session = this.authorityHumanSession(coordinatorString(body, "sessionId"));
     const snapshot = await this.authoritySnapshot();
-    const projectIds = Object.keys(snapshot.projects).sort();
+    const projectIds = Object.keys(snapshot.projects).sort().filter((projectId) => this.requireIdentity().activeCapabilitiesForPrincipal({ principalId: session.principalId, resource: { realmId: this.requireIdentity().realm.id, projectId } }).includes("project.inspect"));
     const projects = projectIds.map((projectId) => this.authorityProjectSummary(snapshot, projectId));
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", projects, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=project.list; projectCount=${projects.length}; ordering=project-id-code-unit-ascending; readOnly=true; credentialFree=true; canonicalWrite=false` });
   }
 
   private async authorityWorkspaces(body: CoordinatorRequestBody): Promise<Response> {
-    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const session = this.authorityHumanSession(coordinatorString(body, "sessionId"));
     const projectId = body.projectId === undefined ? undefined : coordinatorString(body, "projectId");
     const workspaceId = body.workspaceId === undefined ? undefined : coordinatorString(body, "workspaceId");
     const snapshot = await this.authoritySnapshot();
     if (projectId !== undefined && !snapshot.projects[projectId]) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${projectId} is not available in this Realm.`, recoveryAction: "verify the Project identifier without probing undiscoverable resources", receipt: `project=${projectId}; operation=workspace.list; discoverable=false` });
     if (workspaceId !== undefined) {
       const summary = this.authorityWorkspaceSummary(snapshot, workspaceId);
+      this.authorityCapabilitySession(session.sessionId, "workspace.inspect", { realmId: this.requireIdentity().realm.id, projectId: summary.workspace.projectId, workspaceId });
       if (projectId !== undefined && summary.workspace.projectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Workspace ${workspaceId} is not available for Project ${projectId}.`, recoveryAction: "verify the Workspace identifier within the requested Project without probing undiscoverable resources", receipt: `workspace=${workspaceId}; project=${projectId}; operation=workspace.inspect; discoverable=false` });
       return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", ...summary, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=workspace.inspect; workspace=${workspaceId}; readOnly=true; credentialFree=true; canonicalWrite=false` });
     }
-    const workspaceIds = Object.keys(snapshot.workspaces).filter((id) => projectId === undefined || snapshot.workspaces[id]?.projectId === projectId).sort();
+    const workspaceIds = Object.keys(snapshot.workspaces).filter((id) => {
+      const workspace = snapshot.workspaces[id];
+      return workspace !== undefined && (projectId === undefined || workspace.projectId === projectId) && this.requireIdentity().activeCapabilitiesForPrincipal({ principalId: session.principalId, resource: { realmId: this.requireIdentity().realm.id, projectId: workspace.projectId, workspaceId: workspace.id } }).includes("workspace.inspect");
+    }).sort();
     const workspaces = workspaceIds.map((id) => this.authorityWorkspaceSummary(snapshot, id));
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", workspaces, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=workspace.list; workspaceCount=${workspaces.length}; ordering=workspace-id-code-unit-ascending;${projectId ? ` project=${projectId};` : ""} readOnly=true; credentialFree=true; canonicalWrite=false` });
   }
 
   private async authorityChanges(body: CoordinatorRequestBody): Promise<Response> {
-    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const session = this.authorityHumanSession(coordinatorString(body, "sessionId"));
     const projectId = body.projectId === undefined ? undefined : coordinatorString(body, "projectId");
     const workspaceId = body.workspaceId === undefined ? undefined : coordinatorString(body, "workspaceId");
     const changeId = body.changeId === undefined ? undefined : coordinatorString(body, "changeId");
@@ -1093,6 +1134,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     if (workspaceId !== undefined && !snapshot.workspaces[workspaceId]) throw new AuthorityPlaneError({ code: "not_found", message: `Workspace ${workspaceId} is not available in this Realm.`, recoveryAction: "verify the Workspace identifier without probing undiscoverable resources", receipt: `workspace=${workspaceId}; operation=change.list; discoverable=false` });
     if (changeId !== undefined) {
       const summary = this.authorityChangeSummary(snapshot, changeId);
+      this.authorityCapabilitySession(session.sessionId, "change.inspect", { realmId: this.requireIdentity().realm.id, projectId: summary.change.projectId, ...(summary.change.workspaceId ? { workspaceId: summary.change.workspaceId } : {}), changeId });
       if (projectId !== undefined && summary.change.projectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Change ${changeId} is not available for Project ${projectId}.`, recoveryAction: "verify the Change identifier within the requested Project without probing undiscoverable resources", receipt: `change=${changeId}; project=${projectId}; operation=change.inspect; discoverable=false` });
       if (workspaceId !== undefined && summary.change.workspaceId !== workspaceId) throw new AuthorityPlaneError({ code: "not_found", message: `Change ${changeId} is not available for Workspace ${workspaceId}.`, recoveryAction: "verify the Change identifier within the requested Workspace without probing undiscoverable resources", receipt: `change=${changeId}; workspace=${workspaceId}; operation=change.inspect; discoverable=false` });
       return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", ...summary, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=change.inspect; change=${changeId}; revisionCount=${summary.revisions.length}; readOnly=true; credentialFree=true; canonicalWrite=false` });
@@ -1100,7 +1142,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const changeIds = Object.keys(snapshot.changes)
       .filter((id) => {
         const change = snapshot.changes[id];
-        return change !== undefined && (projectId === undefined || change.projectId === projectId) && (workspaceId === undefined || change.workspaceId === workspaceId);
+        return change !== undefined && (projectId === undefined || change.projectId === projectId) && (workspaceId === undefined || change.workspaceId === workspaceId) && this.requireIdentity().activeCapabilitiesForPrincipal({ principalId: session.principalId, resource: { realmId: this.requireIdentity().realm.id, projectId: change.projectId, ...(change.workspaceId ? { workspaceId: change.workspaceId } : {}), changeId: change.id } }).includes("change.inspect");
       })
       .sort();
     const changes = changeIds.map((id) => {
@@ -1111,11 +1153,14 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   }
 
   private async authorityRun(body: CoordinatorRequestBody): Promise<Response> {
-    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const runId = coordinatorString(body, "runId");
     const snapshot = await this.authoritySnapshot();
     const run = snapshot.runs[runId];
     if (!run) throw new AuthorityPlaneError({ code: "not_found", message: `Run ${runId} is not available in this Realm.`, recoveryAction: "verify the Run identifier without probing undiscoverable resources", receipt: `run=${runId}; operation=run.inspect; discoverable=false` });
+    const projectId = snapshot.projectRevisions[run.projectRevisionId]?.projectId;
+    if (!projectId) throw new AuthorityPlaneError({ code: "indeterminate", message: `Run ${runId} has incomplete Project lineage.`, recoveryAction: "reconcile the Run Project Revision before exposing its status", receipt: `run=${runId}; project=missing; operation=run.inspect` });
+    const changeId = run.changeRevisionId ? snapshot.changeRevisions[run.changeRevisionId]?.changeId : undefined;
+    const session = this.authorityCapabilitySession(coordinatorString(body, "sessionId"), "evidence.read", { realmId: this.requireIdentity().realm.id, projectId, ...(run.workspaceId ? { workspaceId: run.workspaceId } : {}), ...(changeId ? { changeId } : {}) });
     const safeRun = {
       protocol: run.protocol,
       id: run.id,
@@ -1138,7 +1183,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   }
 
   private async authorityMirrors(body: CoordinatorRequestBody): Promise<Response> {
-    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const session = this.authorityHumanSession(coordinatorString(body, "sessionId"));
     const projectId = body.projectId === undefined ? undefined : coordinatorString(body, "projectId");
     const mirrorId = body.mirrorId === undefined ? undefined : coordinatorString(body, "mirrorId");
     const snapshot = await this.authoritySnapshot();
@@ -1146,20 +1191,26 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     if (mirrorId !== undefined) {
       const mirror = snapshot.mirrors[mirrorId];
       if (!mirror || (projectId !== undefined && mirror.projectId !== projectId)) throw new AuthorityPlaneError({ code: "not_found", message: `Repository Mirror ${mirrorId} is not available for this Project.`, recoveryAction: "verify the Mirror identifier within the requested Project without probing undiscoverable resources", receipt: `mirror=${mirrorId}; project=${projectId ?? "not-supplied"}; operation=mirror.inspect; discoverable=false` });
+      this.authorityCapabilitySession(session.sessionId, "project.inspect", { realmId: this.requireIdentity().realm.id, projectId: mirror.projectId });
       const operation = mirror.lastOperationId ? snapshot.mirrorOperations[mirror.lastOperationId] : undefined;
       const checkpoint = mirror.checkpointId ? snapshot.mirrorCheckpoints[mirror.checkpointId] : undefined;
       const proposals = Object.values(snapshot.externalProposals).filter((proposal) => proposal.mirrorId === mirror.id).map((proposal) => ({ ...proposal, observedHeadCommits: [...proposal.observedHeadCommits], changeRevisionIds: [...proposal.changeRevisionIds] }));
       const deliveries = Object.values(snapshot.mirrorDeliveries).filter((delivery) => delivery.mirrorId === mirror.id).map((delivery) => ({ ...delivery }));
       return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", mirror: { ...mirror, refMappings: mirror.refMappings.map((mapping) => ({ ...mapping })), canonicalRefs: mirror.canonicalRefs.map((ref) => ({ ...ref })), remoteRefs: mirror.remoteRefs.map((ref) => ({ ...ref })), pendingInboundChangeIds: [...mirror.pendingInboundChangeIds] }, ...(operation ? { operation } : {}), ...(checkpoint ? { checkpoint } : {}), proposals, deliveries, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=mirror.inspect; mirror=${mirror.id}; proposals=${proposals.length}; deliveries=${deliveries.length}; readOnly=true; credentialFree=true; canonicalWrite=false` });
     }
-    const mirrors = Object.values(snapshot.mirrors).filter((mirror) => projectId === undefined || mirror.projectId === projectId).sort((left, right) => left.id.localeCompare(right.id)).map((mirror) => ({ id: mirror.id, projectId: mirror.projectId, sourceSpaceId: mirror.sourceSpaceId, provider: mirror.provider, remoteRepository: mirror.remoteRepository, disclosure: mirror.disclosure, state: mirror.state, canonicalProjectRevisionId: mirror.canonicalProjectRevisionId, remoteGeneration: mirror.remoteGeneration, pendingInboundChangeIds: [...mirror.pendingInboundChangeIds], ...(mirror.lastOperationId ? { lastOperationId: mirror.lastOperationId } : {}), ...(mirror.checkpointId ? { checkpointId: mirror.checkpointId } : {}) }));
+    const mirrors = Object.values(snapshot.mirrors).filter((mirror) => (projectId === undefined || mirror.projectId === projectId) && this.requireIdentity().activeCapabilitiesForPrincipal({ principalId: session.principalId, resource: { realmId: this.requireIdentity().realm.id, projectId: mirror.projectId } }).includes("project.inspect")).sort((left, right) => left.id.localeCompare(right.id)).map((mirror) => ({ id: mirror.id, projectId: mirror.projectId, sourceSpaceId: mirror.sourceSpaceId, provider: mirror.provider, remoteRepository: mirror.remoteRepository, disclosure: mirror.disclosure, state: mirror.state, canonicalProjectRevisionId: mirror.canonicalProjectRevisionId, remoteGeneration: mirror.remoteGeneration, pendingInboundChangeIds: [...mirror.pendingInboundChangeIds], ...(mirror.lastOperationId ? { lastOperationId: mirror.lastOperationId } : {}), ...(mirror.checkpointId ? { checkpointId: mirror.checkpointId } : {}) }));
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", mirrors, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=mirror.list; mirrorCount=${mirrors.length}; readOnly=true; credentialFree=true; canonicalWrite=false` });
   }
 
   private async authorityPromotionExecute(body: CoordinatorRequestBody): Promise<Response> {
     await this.requireAuthorityActive();
-    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const promotionId = coordinatorString(body, "promotionId");
+    const snapshot = await this.authoritySnapshot();
+    const promotion = snapshot.promotions[promotionId];
+    if (!promotion) throw new AuthorityPlaneError({ code: "not_found", message: `Promotion ${promotionId} is not available in this Realm.`, recoveryAction: "verify the Promotion identifier without probing undiscoverable resources", receipt: `promotion=${promotionId}; operation=promotion.execute; discoverable=false` });
+    const target = snapshot.targets[promotion.targetId];
+    if (!target) throw new AuthorityPlaneError({ code: "indeterminate", message: `Promotion ${promotionId} has no readable Target.`, recoveryAction: "reconcile the Target lineage before requesting provider execution", receipt: `promotion=${promotionId}; target=${promotion.targetId}; operation=promotion.execute; lineage=incomplete` });
+    const session = this.authorityCapabilitySession(coordinatorString(body, "sessionId"), "target.promote", { realmId: this.requireIdentity().realm.id, projectId: promotion.projectId, targetId: target.id }, true);
     const executionIdempotencyKey = coordinatorString(body, "executionIdempotencyKey");
     const expectedVersion = body.expectedVersion === undefined ? undefined : typeof body.expectedVersion === "number" && Number.isSafeInteger(body.expectedVersion) && body.expectedVersion >= 0 ? body.expectedVersion : (() => { throw new AuthorityPlaneError({ code: "invalid_request", message: "expectedVersion must be a non-negative safe integer.", recoveryAction: "read the Authority version and retry with a safe expectedVersion", receipt: "expectedVersion=non-negative-safe-integer-required; promotionExecution=not-accepted" }); })();
     const executorBinding = this.env.ANYAM_PROMOTION_EXECUTOR;
@@ -1196,8 +1247,13 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
 
   private async authorityPromotionReconcile(body: CoordinatorRequestBody): Promise<Response> {
     await this.requireAuthorityActive();
-    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const promotionId = coordinatorString(body, "promotionId");
+    const snapshot = await this.authoritySnapshot();
+    const promotion = snapshot.promotions[promotionId];
+    if (!promotion) throw new AuthorityPlaneError({ code: "not_found", message: `Promotion ${promotionId} is not available in this Realm.`, recoveryAction: "verify the Promotion identifier without probing undiscoverable resources", receipt: `promotion=${promotionId}; operation=promotion.reconcile; discoverable=false` });
+    const target = snapshot.targets[promotion.targetId];
+    if (!target) throw new AuthorityPlaneError({ code: "indeterminate", message: `Promotion ${promotionId} has no readable Target.`, recoveryAction: "reconcile the Target lineage before reconciling provider execution", receipt: `promotion=${promotionId}; target=${promotion.targetId}; operation=promotion.reconcile; lineage=incomplete` });
+    const session = this.authorityCapabilitySession(coordinatorString(body, "sessionId"), "target.promote", { realmId: this.requireIdentity().realm.id, projectId: promotion.projectId, targetId: target.id }, true);
     const reconciliationIdempotencyKey = coordinatorString(body, "reconciliationIdempotencyKey");
     const expectedVersion = body.expectedVersion === undefined ? undefined : typeof body.expectedVersion === "number" && Number.isSafeInteger(body.expectedVersion) && body.expectedVersion >= 0 ? body.expectedVersion : (() => { throw new AuthorityPlaneError({ code: "invalid_request", message: "expectedVersion must be a non-negative safe integer.", recoveryAction: "read the Authority version and retry with a safe expectedVersion", receipt: "expectedVersion=non-negative-safe-integer-required; promotionReconcile=not-accepted" }); })();
     const executorBinding = this.env.ANYAM_PROMOTION_EXECUTOR;
@@ -1233,7 +1289,6 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   }
 
   private async authorityPromotionStatus(body: CoordinatorRequestBody): Promise<Response> {
-    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const promotionId = coordinatorString(body, "promotionId");
     const snapshot = await this.authoritySnapshot();
     const promotion = snapshot.promotions[promotionId];
@@ -1241,6 +1296,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const target = snapshot.targets[promotion.targetId];
     const release = snapshot.releases[promotion.releaseId];
     if (!target || !release) throw new AuthorityPlaneError({ code: "indeterminate", message: `Promotion ${promotionId} has incomplete Target or Release lineage.`, recoveryAction: "reconcile the Authority snapshot before exposing Promotion status", receipt: `promotion=${promotionId}; target=${promotion.targetId}; release=${promotion.releaseId}; operation=promotion.status; lineage=incomplete` });
+    const session = this.authorityCapabilitySession(coordinatorString(body, "sessionId"), "target.read", { realmId: this.requireIdentity().realm.id, projectId: promotion.projectId, targetId: target.id });
     const safePromotion = {
       protocol: promotion.protocol,
       id: promotion.id,
@@ -1279,19 +1335,31 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   }
 
   private async authorityCommand(body: CoordinatorRequestBody): Promise<Response> {
-    const session = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     await this.requireAuthorityActive();
     const command = coordinatorString(body, "command") as AuthorityCommandName;
     const allowed: readonly AuthorityCommandName[] = ["project.create", "workspace.create", "change.create", "revision.publish", "run.request", "landing.apply", "release.create", "target.configure", "promotion.request", "mirror.configure", "mirror.sync", "mirror.reconcile"];
     if (!allowed.includes(command)) throw new AuthorityPlaneError({ code: "invalid_request", message: `Authority command ${command} is not supported by this vertical slice.`, recoveryAction: `use one of ${allowed.join(", ")} and retry; no authority transition was accepted`, receipt: `command=${command}; transition=not-applied` });
     const payload = body.payload;
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new AuthorityPlaneError({ code: "invalid_request", message: "Authority command payload must be a JSON object.", recoveryAction: "send the command-specific payload as an object; no authority transition was accepted", receipt: `command=${command}; payload=object-required; transition=not-applied` });
+    const payloadRecord = payload as Record<string, unknown>;
+    const resource: ResourceRef = {
+      realmId: this.requireIdentity().realm.id,
+      ...(typeof payloadRecord.projectId === "string" ? { projectId: payloadRecord.projectId } : {}),
+      ...(typeof payloadRecord.workspaceId === "string" ? { workspaceId: payloadRecord.workspaceId } : {}),
+      ...(typeof payloadRecord.changeId === "string" ? { changeId: payloadRecord.changeId } : {}),
+      ...(typeof payloadRecord.targetId === "string" ? { targetId: payloadRecord.targetId } : {}),
+      ...(typeof payloadRecord.sourceSpaceId === "string" ? { sourceSpaceId: payloadRecord.sourceSpaceId } : {}),
+    };
+    const capability = capabilityForAuthorityCommand(command);
+    const session = capability
+      ? this.authorityCapabilitySession(coordinatorString(body, "sessionId"), capability, resource, command === "landing.apply" || command === "release.create" || command === "target.configure" || command === "promotion.request")
+      : this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const envelope: AuthorityCommand = {
       protocol: body.protocol === undefined ? AUTHORITY_COMMAND_PROTOCOL : coordinatorString(body, "protocol") as typeof AUTHORITY_COMMAND_PROTOCOL,
       command,
       idempotencyKey: coordinatorString(body, "idempotencyKey"),
       ...(typeof body.expectedVersion === "number" ? { expectedVersion: body.expectedVersion } : {}),
-      payload: payload as Record<string, unknown>,
+      payload: payloadRecord,
     };
     return await this.ctx.blockConcurrencyWhile(async () => {
       const current = await this.authoritySnapshot();

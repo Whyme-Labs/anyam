@@ -204,7 +204,8 @@ export class CloudflareWorkerArtifactError extends Error {
 export function createFilesystemWorkerArtifactReader(root: string): CloudflareWorkerArtifactReader {
   return {
     async read(artifact: Artifact): Promise<Uint8Array> {
-      if (!artifact.outputPath || artifact.outputPath.trim().length === 0) {
+      const outputPath = artifact.outputPath?.trim();
+      if (!outputPath) {
         throw new CloudflareWorkerArtifactError({
           code: "missing-output-path",
           message: `Worker Artifact ${artifact.id} does not identify an output path.`,
@@ -212,28 +213,67 @@ export function createFilesystemWorkerArtifactReader(root: string): CloudflareWo
           receipt: `artifact=${artifact.id}; outputPath=missing; providerMutation=false`,
         });
       }
-      const { readFile } = await import("node:fs/promises");
-      const { resolve, relative, sep } = await import("node:path");
-      const absoluteRoot = resolve(root);
-      const absolutePath = resolve(absoluteRoot, artifact.outputPath);
-      const relativePath = relative(absoluteRoot, absolutePath);
-      if (relativePath.startsWith(`..${sep}`) || relativePath === ".." || relativePath.includes(`${sep}.git${sep}`) || relativePath === ".git") {
+      const [{ lstat, open, realpath }, { constants }, { isAbsolute, join, relative, resolve, sep }] = await Promise.all([
+        import("node:fs/promises"),
+        import("node:fs"),
+        import("node:path"),
+      ]);
+      const rejectBoundary = (reason: string, message: string, recoveryAction = "restore a regular verified Artifact below the declared workspace root"): never => {
         throw new CloudflareWorkerArtifactError({
           code: "read-failed",
-          message: `Worker Artifact ${artifact.id} resolves outside the declared workspace.`,
-          recoveryAction: "use a workspace-relative output path below the Artifact root",
-          receipt: `artifact=${artifact.id}; outputPath=${artifact.outputPath}; providerMutation=false`,
+          message,
+          recoveryAction,
+          receipt: `artifact=${artifact.id}; outputPath=${outputPath}; reason=${reason}; providerMutation=false`,
         });
-      }
+      };
       try {
-        const bytes = new Uint8Array(await readFile(absolutePath));
+        const normalizedPath = outputPath.replaceAll("\\", "/");
+        if (normalizedPath.includes("\0") || isAbsolute(normalizedPath) || /^[A-Za-z]:\//u.test(normalizedPath)) {
+          rejectBoundary("path-invalid", `Worker Artifact ${artifact.id} does not use a workspace-relative output path.`, "use a relative output path below the Artifact root");
+        }
+        const absoluteRoot = await realpath(resolve(root));
+        const rootStat = await lstat(absoluteRoot);
+        if (!rootStat.isDirectory()) rejectBoundary("root-not-directory", `Worker Artifact ${artifact.id} root is not a directory.`);
+        const absolutePath = resolve(absoluteRoot, normalizedPath);
+        const relativePath = relative(absoluteRoot, absolutePath);
+        if (relativePath.startsWith(`..${sep}`) || relativePath === "..") {
+          rejectBoundary("outside-root", `Worker Artifact ${artifact.id} resolves outside the declared workspace.`, "use a workspace-relative output path below the Artifact root");
+        }
+        const segments = relativePath.split(sep).filter((segment) => segment.length > 0);
+        if (segments.some((segment) => segment.toLocaleLowerCase() === ".git")) {
+          rejectBoundary("git-metadata", `Worker Artifact ${artifact.id} points into Git metadata.`, "publish a Worker Artifact outside the repository's .git metadata");
+        }
+        let cursor = absoluteRoot;
+        for (const [index, segment] of segments.entries()) {
+          cursor = join(cursor, segment);
+          const entry = await lstat(cursor);
+          if (entry.isSymbolicLink()) rejectBoundary("symlink", `Worker Artifact ${artifact.id} contains a symlink path component.`);
+          if (index < segments.length - 1 && !entry.isDirectory()) rejectBoundary("non-directory", `Worker Artifact ${artifact.id} contains a non-directory path component.`);
+          if (index === segments.length - 1 && !entry.isFile()) rejectBoundary("non-regular", `Worker Artifact ${artifact.id} is not a regular file.`);
+        }
+        const resolvedPath = await realpath(absolutePath);
+        const resolvedRelativePath = relative(absoluteRoot, resolvedPath);
+        if (resolvedRelativePath.startsWith(`..${sep}`) || resolvedRelativePath === "..") {
+          rejectBoundary("symlink", `Worker Artifact ${artifact.id} resolves outside the declared workspace.`);
+        }
+        const noFollow = constants.O_NOFOLLOW ?? 0;
+        const nonBlocking = constants.O_NONBLOCK ?? 0;
+        const handle = await open(absolutePath, constants.O_RDONLY | noFollow | nonBlocking);
+        let bytes: Uint8Array;
+        try {
+          const opened = await handle.stat();
+          if (!opened.isFile()) rejectBoundary("non-regular", `Worker Artifact ${artifact.id} is not a regular file.`);
+          bytes = new Uint8Array(await handle.readFile());
+        } finally {
+          await handle.close();
+        }
         const actualDigest = sha256(bytes);
         if (actualDigest !== artifact.digest) {
           throw new CloudflareWorkerArtifactError({
             code: "digest-mismatch",
             message: `Worker Artifact ${artifact.id} changed after verification.`,
             recoveryAction: "restore the exact verified Artifact bytes and retry without rebuilding the Release",
-            receipt: `artifact=${artifact.id}; expectedDigest=${artifact.digest}; actualDigest=${actualDigest}; providerMutation=false`,
+            receipt: `artifact=${artifact.id}; outputPath=${outputPath}; bytes=${bytes.byteLength}; expectedDigest=${artifact.digest}; actualDigest=${actualDigest}; providerMutation=false`,
           });
         }
         return bytes;
@@ -244,7 +284,7 @@ export function createFilesystemWorkerArtifactReader(root: string): CloudflareWo
           code: "read-failed",
           message: `Worker Artifact ${artifact.id} could not be read: ${message}`,
           recoveryAction: "restore the verified Artifact output in the workspace and retry",
-          receipt: `artifact=${artifact.id}; outputPath=${artifact.outputPath}; providerMutation=false`,
+          receipt: `artifact=${artifact.id}; outputPath=${outputPath}; reason=filesystem-error; providerMutation=false`,
         });
       }
     },

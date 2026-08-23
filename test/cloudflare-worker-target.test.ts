@@ -15,6 +15,7 @@ import {
   type CloudflareWorkerVersion,
   type CloudflareWorkerVersionList,
 } from "../src/cloudflare/worker-target.ts";
+import { createCloudflareWorkerReleaseManifest } from "../src/cloudflare/worker-release-manifest.ts";
 import { CONTRACT_VERSIONS } from "../src/kernel/contracts.ts";
 import {
   createWorkerTarget,
@@ -86,12 +87,20 @@ class InMemoryCloudflareWorkerApi {
   readonly requests: RecordedRequest[] = [];
   readonly versions: CloudflareWorkerVersion[] = [];
   readonly deployments: CloudflareWorkerDeployment[] = [];
+  nextManifest: ReturnType<typeof createCloudflareWorkerReleaseManifest> | undefined;
   private sequence = 0;
 
   async request<T>(request: CloudflareWorkerApiRequest): Promise<CloudflareWorkerApiResponse<T>> {
     this.requests.push({ method: request.method, path: request.path, token: request.token });
     if (request.method === "GET" && request.path.includes("/versions?")) {
       return { status: 200, ok: true, result: { items: [...this.versions] } as CloudflareWorkerVersionList as T, errors: [], messages: [] };
+    }
+    if (request.method === "GET" && /\/versions\/[^/]+$/u.test(request.path)) {
+      const versionId = decodeURIComponent(request.path.split("/").at(-1) ?? "");
+      const version = this.versions.find((candidate) => candidate.id === versionId);
+      return version
+        ? { status: 200, ok: true, result: version as T, errors: [], messages: [] }
+        : { status: 404, ok: false, errors: [{ code: 1000, message: "version not found" }], messages: [] };
     }
     if (request.method === "POST" && request.path.endsWith("/versions")) {
       assert.ok(request.body instanceof FormData);
@@ -100,9 +109,17 @@ class InMemoryCloudflareWorkerApi {
       const file = form.get(metadata.main_module);
       assert.ok(file instanceof Blob);
       assert.ok((await file.arrayBuffer()).byteLength > 0);
+      assert.ok(this.nextManifest);
+      const manifest = this.nextManifest;
       const version: CloudflareWorkerVersion = {
         id: `version:${++this.sequence}`,
         metadata: { hasPreview: true, annotations: metadata.annotations },
+        resources: {
+          bindings: manifest.bindings.map((binding) => ({ name: binding.name, type: binding.kind, ...(binding.providerFields ?? {}) })),
+          script_runtime: { compatibility_date: manifest.compatibility.date, compatibility_flags: manifest.compatibility.flags },
+          ...(manifest.staticAssets ? { assets: {} } : {}),
+          ...(manifest.durableObjectMigrations ? { durable_object_migrations: { ...manifest.durableObjectMigrations } } : {}),
+        },
       };
       this.versions.unshift(version);
       return { status: 200, ok: true, result: version as T, errors: [], messages: [] };
@@ -116,6 +133,14 @@ class InMemoryCloudflareWorkerApi {
     }
     return { status: 404, ok: false, errors: [{ code: 1000, message: "unknown test provider route" }], messages: [] };
   }
+}
+
+function manifestBuilder(api: InMemoryCloudflareWorkerApi) {
+  return ({ release }: { release: ImmutableRelease; target: ReturnType<typeof createWorkerTarget> }) => {
+    const manifest = createCloudflareWorkerReleaseManifest({ release, compatibilityDate: "2026-01-01", bindings: [], healthPaths: ["/health"] });
+    api.nextManifest = manifest;
+    return manifest;
+  };
 }
 
 test("Cloudflare REST transport accepts successful responses that omit optional error arrays", async () => {
@@ -161,6 +186,7 @@ test("Cloudflare Worker Target uploads digest-bound versions, promotes after pre
         },
         async probe() { return { credentialId: "credential:probe", expiresAt: "2099-01-01T00:00:00.000Z", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=probe; providerAuthorization=observed; credentialMaterialStored=false" }; },
       },
+      workerReleaseManifest: manifestBuilder(api),
       artifactReader: {
         async read(artifact) {
           return artifact.id === firstArtifact.id ? firstBytes : secondBytes;
@@ -270,6 +296,7 @@ test("Cloudflare Worker Target rejects a stale 2xx health response from a previo
         },
         async probe() { return { credentialId: "credential:probe", expiresAt: "2099-01-01T00:00:00.000Z", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=probe; providerAuthorization=observed; credentialMaterialStored=false" }; },
       },
+      workerReleaseManifest: manifestBuilder(api),
       artifactReader: { async read() { return bytes; } },
       previewUrlForVersion: (versionId) => `https://${versionId}.preview.workers.dev`,
       healthUrl: "https://anyam-stale-health.workers.dev/health",
@@ -330,6 +357,7 @@ test("Cloudflare Worker Target retries transient preview transport failures when
         },
         async probe() { return { credentialId: "credential:probe", expiresAt: "2099-01-01T00:00:00.000Z", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=probe; providerAuthorization=observed; credentialMaterialStored=false" }; },
       },
+      workerReleaseManifest: manifestBuilder(api),
       artifactReader: { async read() { return bytes; } },
       previewUrlForVersion: (versionId) => `https://${versionId}.preview.workers.dev`,
       healthUrl: "https://anyam-transport-retry.workers.dev/health",
@@ -366,6 +394,7 @@ test("Cloudflare Worker Target fails a non-2xx preview before deployment", async
         },
         async probe() { return { credentialId: "credential:probe", expiresAt: "2099-01-01T00:00:00.000Z", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=probe; providerAuthorization=observed; credentialMaterialStored=false" }; },
       },
+      workerReleaseManifest: manifestBuilder(api),
       artifactReader: {
         async read() {
           return bytes;

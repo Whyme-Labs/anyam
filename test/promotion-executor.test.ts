@@ -6,6 +6,7 @@ import { createPromotionExecutionContext, PROMOTION_HANDOFF_TTL_MS, signPromotio
 import { CONTRACT_VERSIONS, type Artifact, type Release } from "../src/kernel/contracts.ts";
 import { emptyAuthorityPlaneSnapshot } from "../src/cloudflare/authority-plane.ts";
 import { createHash } from "node:crypto";
+import { createCloudflareWorkerReleaseManifest } from "../src/cloudflare/worker-release-manifest.ts";
 
 const session = {
   realmId: "realm:promotion-executor-test",
@@ -49,10 +50,20 @@ function fakeFetch(releaseId: string): typeof fetch {
       }
       if (url.pathname.endsWith("/versions") && init?.method === "POST") {
         const form = init.body as FormData;
-        const metadata = JSON.parse(String(form.get("metadata"))) as { annotations: { "workers/tag": string } };
-        const version = { id: `version-executor-${++versionNumber}`, tag: metadata.annotations["workers/tag"] };
+        const metadata = JSON.parse(String(form.get("metadata"))) as { annotations: { "workers/tag": string; "workers/message": string }; compatibility_date?: string; compatibility_flags?: readonly string[]; bindings?: readonly Readonly<Record<string, unknown>>[] };
+        const version = {
+          id: `version-executor-${++versionNumber}`,
+          tag: metadata.annotations["workers/tag"],
+          metadata: { annotations: metadata.annotations },
+          resources: { bindings: metadata.bindings ?? [], script_runtime: { compatibility_date: metadata.compatibility_date, compatibility_flags: metadata.compatibility_flags ?? [] } },
+        };
         versions.push(version);
         return new Response(JSON.stringify({ result: { id: version.id }, errors: [], messages: [] }), { status: 200 });
+      }
+      if (url.pathname.includes("/versions/") && (init?.method ?? "GET") === "GET") {
+        const versionId = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
+        const version = versions.find((candidate) => candidate.id === versionId);
+        return new Response(JSON.stringify({ result: version, errors: [], messages: [] }), { status: version ? 200 : 404 });
       }
       if (url.pathname.endsWith("/deployments") && init?.method === "POST") {
         return new Response(JSON.stringify({ result: { id: `deployment-executor-${++versionNumber}`, versions: [] }, errors: [], messages: [] }), { status: 200 });
@@ -88,6 +99,7 @@ function handlerFor(context: ReturnType<typeof createPromotionExecutionContext>,
         return key === `artifacts/${context.artifacts[0]?.digest}` ? { arrayBuffer: async () => new Uint8Array(artifactBytes).buffer as ArrayBuffer } : null;
       },
     },
+    workerReleaseManifest: ({ release }) => createCloudflareWorkerReleaseManifest({ release, compatibilityDate: "2026-01-01", bindings: [], healthPaths: ["/health"] }),
   });
 }
 

@@ -22,6 +22,7 @@ import {
   type CloudflareWorkerHealthResponseValidator,
   type CloudflareWorkerRouteReadinessRetry,
 } from "./worker-target.ts";
+import type { WorkerReleaseManifest } from "./worker-release-manifest.ts";
 import {
   PROMOTION_EXECUTION_PROTOCOL,
   type PromotionExecutionContext,
@@ -58,6 +59,7 @@ export type PromotionExecutorConfig = {
   /** Provider authority is available only through this customer-owned broker. */
   credentialBroker: CloudflareWorkerCredentialBroker;
   artifactStore: PromotionExecutorArtifactStore;
+  workerReleaseManifest?: (input: { release: ImmutableRelease; target: WorkerTarget }) => WorkerReleaseManifest;
   fetch?: typeof fetch;
   now?: () => string;
   routeReadinessRetry?: CloudflareWorkerRouteReadinessRetry;
@@ -451,6 +453,7 @@ export function createPromotionExecutor(config: PromotionExecutorConfig): { exec
     transport,
     credentialBroker: config.credentialBroker,
     artifactReader: createArtifactReader(config.artifactStore),
+    ...(config.workerReleaseManifest ? { workerReleaseManifest: config.workerReleaseManifest } : {}),
     previewUrlForVersion: (versionId) => `https://${versionId.slice(0, 8)}-${config.scriptName}.${config.previewSubdomain}.workers.dev/?anyam_preview=1`,
     healthUrl: config.healthUrl ?? `https://${config.scriptName}.${config.previewSubdomain}.workers.dev/health`,
     healthResponseValidator: workerHealthValidator(),

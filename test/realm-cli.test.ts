@@ -52,3 +52,28 @@ test("customer Realm lifecycle writes resumable install/upgrade checkpoints and 
   }
 });
 
+test("customer Realm lifecycle can consume an explicit provider adapter receipt without storing credentials", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "anyam-realm-cli-adapter-"));
+  const calls: string[] = [];
+  const providerAdapter = {
+    async install() { calls.push("install"); return { status: "succeeded" as const, providerOperationId: "provider:install", receipt: "provider=fixture; resources=verified; credentialFree=true", recoveryAction: "No recovery action is currently required." }; },
+    async upgrade() { calls.push("upgrade"); return { status: "succeeded" as const, providerOperationId: "provider:upgrade", receipt: "provider=fixture; upgrade=verified; credentialFree=true", recoveryAction: "No recovery action is currently required." }; },
+    async destroy() { calls.push("destroy"); return { status: "succeeded" as const, providerOperationId: "provider:destroy", receipt: "provider=fixture; destroy=verified; credentialFree=true", recoveryAction: "Retain the credential-free export for recovery." }; },
+  };
+  try {
+    const installed = await realmInstall({ directory, installationId: "installation:adapter", accountId: "account:customer", resources: ["d1"], providerAdapter });
+    assert.equal(installed.status, "succeeded");
+    assert.equal(installed.state?.phase, "installed");
+    const upgraded = await realmUpgrade({ directory, desiredVersion: "0.0.1", providerAdapter });
+    assert.equal(upgraded.status, "succeeded");
+    const destroyed = await realmDestroy(directory, providerAdapter);
+    assert.equal(destroyed.status, "succeeded");
+    assert.deepEqual(calls, ["install", "upgrade", "destroy"]);
+    const encoded = JSON.stringify(await readRealmState(directory));
+    assert.equal(encoded.includes("token"), false);
+    assert.equal(encoded.includes("cfat_"), false);
+    assert.equal(encoded.includes("Bearer "), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

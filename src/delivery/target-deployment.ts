@@ -18,7 +18,7 @@ export type TargetDeploymentProfileInput = Omit<TargetDeploymentProfile, "protoc
 };
 
 export class TargetDeploymentProfileError extends Error {
-  readonly code: "invalid-profile" | "resource-conflict";
+  readonly code: "invalid-profile" | "incomplete-profile" | "resource-conflict";
   readonly recoveryAction: string;
   readonly receipt: string;
 
@@ -133,6 +133,25 @@ export function targetDeploymentProfile(target: Target): TargetDeploymentProfile
   return target.deploymentProfile ?? defaultTargetDeploymentProfile(target);
 }
 
+/**
+ * A legacy Target can still be read and exported, but it must not enter a
+ * Promotion without a complete deployment contract. The configuration digest
+ * is the minimum proof that the Target's provider-facing configuration was
+ * intentionally assembled rather than synthesized by the legacy fallback.
+ */
+export function assertTargetCanPromote(target: Target): TargetDeploymentProfile {
+  const profile = target.deploymentProfile;
+  if (!profile || profile.configurationDigests.length === 0) {
+    fail({
+      code: "incomplete-profile",
+      message: `Target ${target.id} does not have a complete Deployment Profile.`,
+      recoveryAction: "configure an explicit Target Deployment Profile with a configuration digest before requesting Promotion",
+      receipt: `target=${target.id}; deploymentProfile=${profile ? "incomplete" : "missing"}; configurationDigests=${profile?.configurationDigests.length ?? 0}; promotion=blocked`,
+    });
+  }
+  return profile;
+}
+
 export function targetDeploymentContractDigest(target: Target): string {
   const profile = targetDeploymentProfile(target);
   return digest({
@@ -161,17 +180,20 @@ export function assertTargetResourceIsolation(input: { existing: readonly Target
   const candidateProfile = targetDeploymentProfile(input.candidate);
   const candidateResources = new Set(resourceIdentities(candidateProfile));
   for (const existing of input.existing) {
-    if (existing.projectId !== input.candidate.projectId || existing.id === input.candidate.id) continue;
+    if (existing.id === input.candidate.id) continue;
     const existingProfile = targetDeploymentProfile(existing);
     const overlap = resourceIdentities(existingProfile).filter((identity) => candidateResources.has(identity));
     if (overlap.length === 0) continue;
-    if (candidateProfile.resourceSharing === "owner-approved" && existingProfile.resourceSharing === "owner-approved") continue;
-    if (candidateProfile.environment !== "production" && existingProfile.environment !== "production") continue;
+    const matchingOwnerApproval = candidateProfile.resourceSharing === "owner-approved"
+      && existingProfile.resourceSharing === "owner-approved"
+      && candidateProfile.sharingPolicyDigest !== undefined
+      && candidateProfile.sharingPolicyDigest === existingProfile.sharingPolicyDigest;
+    if (matchingOwnerApproval) continue;
     fail({
       code: "resource-conflict",
-      message: `Target ${input.candidate.id} shares production-sensitive resource identity with Target ${existing.id}.`,
+      message: `Target ${input.candidate.id} shares resource identity with Target ${existing.id} without one matching owner-approved sharing policy.`,
       recoveryAction: "use an environment-specific resource identity or record matching owner-approved sharing policy digests on both Targets",
-      receipt: `candidate=${input.candidate.id}; existing=${existing.id}; overlap=${overlap.join(",")}; isolation=blocked`,
+      receipt: `candidate=${input.candidate.id}; existing=${existing.id}; overlap=${overlap.join(",")}; sharingPolicyMatch=${matchingOwnerApproval}; isolation=blocked`,
     });
   }
 }

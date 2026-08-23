@@ -80,6 +80,36 @@ test("production sealing blocks unknown migration compatibility", () => {
   );
 });
 
+test("custom or unknown-risk Target profiles do not downgrade migration safety", () => {
+  const customTarget: Target = {
+    ...productionTarget,
+    id: "target:custom",
+    deploymentProfile: createTargetDeploymentProfile({
+      environment: "custom",
+      channel: "custom",
+      audience: "custom",
+      runtimeIdentity: "worker:custom",
+      routeIdentities: [],
+      bindingIdentities: [],
+      dataResourceIdentities: [],
+      configurationDigests: ["sha256:custom-config"],
+      secretUseAliases: [],
+      dataClass: "custom",
+      resourceSharing: "isolated",
+    }),
+  };
+  const plan = createMigrationPlan({ strategy: "custom", compatibility: "unknown", rollback: "safe" });
+  assert.throws(
+    () => sealVerifiedRelease({ projectId: "project:migration", release: release(plan), artifacts: [artifact], evidence: [evidence], target: customTarget }),
+    (error: unknown) => {
+      assert.ok(error instanceof MigrationPlanError);
+      assert.equal(error.code, "incompatible");
+      assert.match(error.receipt, /production-blocked/);
+      return true;
+    },
+  );
+});
+
 test("expand-contract migration with application-only rollback remains explicit and promotable", () => {
   const plan = createMigrationPlan({ strategy: "expand-contract", beforeSchemaDigest: "sha256:schema-before", afterSchemaDigest: "sha256:schema-after", compatibility: "bidirectional", rollback: "application-only", migrationArtifactIds: [artifact.id], requiredEvidenceKeys: [evidence.key] });
   const sealed = sealVerifiedRelease({ projectId: "project:migration", release: release(plan), artifacts: [artifact], evidence: [evidence], target: productionTarget });

@@ -85,9 +85,14 @@ export function defaultMigrationPlan(): MigrationPlan {
   return createMigrationPlan({ strategy: "none" });
 }
 
-export function assertMigrationPlanSafeForTarget(input: { plan: MigrationPlan; environment: string }): void {
+export function assertMigrationPlanSafeForTarget(input: { plan: MigrationPlan; environment: string; dataClass?: string }): void {
   const normalized = createMigrationPlan(input.plan);
-  if (input.environment !== "production") return;
-  if (normalized.compatibility === "unknown" || normalized.compatibility === "incompatible") fail({ code: "incompatible", message: `Production Target cannot consume migration compatibility ${normalized.compatibility}.`, recoveryAction: "prove compatibility with the required migration Verifiers or keep the Release out of production", receipt: `migration=production-blocked; compatibility=${normalized.compatibility}; planDigest=${normalized.planDigest}` });
-  if (normalized.rollback === "blocked") fail({ code: "incompatible", message: "Production Target cannot consume a Release with blocked data rollback behavior.", recoveryAction: "provide a manual data recovery runbook or select a Release with a supported rollback mode", receipt: `migration=production-blocked; rollback=blocked; planDigest=${normalized.planDigest}` });
+  const productionSensitive = input.environment === "production"
+    || input.environment === "custom"
+    || input.dataClass === "production"
+    || input.dataClass === "production-shaped"
+    || input.dataClass === "custom";
+  if (!productionSensitive) return;
+  if (normalized.compatibility === "unknown" || normalized.compatibility === "incompatible") fail({ code: "incompatible", message: `Production-sensitive Target cannot consume migration compatibility ${normalized.compatibility}.`, recoveryAction: "prove compatibility with the required migration Verifiers or keep the Release out of production-sensitive Targets", receipt: `migration=production-blocked; compatibility=${normalized.compatibility}; planDigest=${normalized.planDigest}` });
+  if (normalized.rollback === "blocked") fail({ code: "incompatible", message: "Production-sensitive Target cannot consume a Release with blocked data rollback behavior.", recoveryAction: "provide a manual data recovery runbook or select a Release with a supported rollback mode", receipt: `migration=production-blocked; rollback=blocked; planDigest=${normalized.planDigest}` });
 }

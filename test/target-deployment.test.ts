@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assertTargetCanPromote,
   assertTargetResourceIsolation,
   createTargetDeploymentProfile,
   targetDeploymentContractDigest,
@@ -9,11 +10,11 @@ import {
 } from "../src/delivery/target-deployment.ts";
 import { CONTRACT_VERSIONS, type Target } from "../src/kernel/contracts.ts";
 
-function target(id: string, deploymentProfile: Target["deploymentProfile"]): Target {
+function target(id: string, deploymentProfile: Target["deploymentProfile"], projectId = "project:target-profile"): Target {
   const base: Target = {
     protocol: CONTRACT_VERSIONS.target,
     id,
-    projectId: "project:target-profile",
+    projectId,
     name: id,
     adapterId: "cloudflare.worker",
     acceptedArtifactTypes: ["worker.bundle"],
@@ -94,6 +95,55 @@ test("owner-approved sharing requires a policy digest", () => {
       assert.ok(error instanceof TargetDeploymentProfileError);
       assert.equal(error.code, "invalid-profile");
       assert.match(error.receipt, /sharingPolicyDigest=missing/);
+      return true;
+    },
+  );
+});
+
+test("Target Promotion requires an explicit complete profile", () => {
+  assert.throws(
+    () => assertTargetCanPromote(target("legacy", undefined)),
+    (error: unknown) => {
+      assert.ok(error instanceof TargetDeploymentProfileError);
+      assert.equal(error.code, "incomplete-profile");
+      assert.match(error.receipt, /deploymentProfile=missing/);
+      return true;
+    },
+  );
+  assert.throws(
+    () => assertTargetCanPromote(target("incomplete", profile({ configurationDigests: [] }))),
+    (error: unknown) => {
+      assert.ok(error instanceof TargetDeploymentProfileError);
+      assert.equal(error.code, "incomplete-profile");
+      assert.match(error.receipt, /configurationDigests=0/);
+      return true;
+    },
+  );
+  assert.doesNotThrow(() => assertTargetCanPromote(target("complete", profile())));
+});
+
+test("resource overlap requires exact owner approval and is Realm-wide", () => {
+  const existing = target("staging-a", profile({ environment: "staging", dataClass: "isolated", resourceSharing: "owner-approved", sharingPolicyDigest: "sha256:policy-a", runtimeIdentity: "worker:shared", bindingIdentities: ["d1:shared"] }), "project:a");
+  const mismatched = target("staging-b", profile({ environment: "staging", dataClass: "isolated", resourceSharing: "owner-approved", sharingPolicyDigest: "sha256:policy-b", runtimeIdentity: "worker:shared", bindingIdentities: ["d1:shared"] }), "project:b");
+  assert.throws(
+    () => assertTargetResourceIsolation({ existing: [existing], candidate: mismatched }),
+    (error: unknown) => {
+      assert.ok(error instanceof TargetDeploymentProfileError);
+      assert.equal(error.code, "resource-conflict");
+      assert.match(error.receipt, /sharingPolicyMatch=false/);
+      return true;
+    },
+  );
+
+  const approved = target("staging-c", profile({ environment: "staging", dataClass: "isolated", resourceSharing: "owner-approved", sharingPolicyDigest: "sha256:policy-a", runtimeIdentity: "worker:shared", bindingIdentities: ["d1:shared"] }), "project:c");
+  assert.doesNotThrow(() => assertTargetResourceIsolation({ existing: [existing], candidate: approved }));
+
+  const isolated = target("staging-d", profile({ environment: "staging", dataClass: "isolated", runtimeIdentity: "worker:shared", bindingIdentities: ["d1:shared"] }), "project:d");
+  assert.throws(
+    () => assertTargetResourceIsolation({ existing: [isolated], candidate: target("staging-e", profile({ environment: "staging", dataClass: "isolated", runtimeIdentity: "worker:shared", bindingIdentities: ["d1:shared"] }), "project:e") }),
+    (error: unknown) => {
+      assert.ok(error instanceof TargetDeploymentProfileError);
+      assert.equal(error.code, "resource-conflict");
       return true;
     },
   );

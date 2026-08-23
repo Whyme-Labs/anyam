@@ -9,7 +9,7 @@ import {
   type Release,
   type Target,
 } from "../kernel/contracts.ts";
-import { targetDeploymentContractDigest, targetDeploymentProfile } from "./target-deployment.ts";
+import { assertTargetCanPromote, createTargetDeploymentProfile, targetDeploymentContractDigest, targetDeploymentProfile, TargetDeploymentProfileError } from "./target-deployment.ts";
 import { assertReleaseInputSetMatches, deriveReleaseInputSet } from "./release-input.ts";
 import { assertMigrationPlanSafeForTarget, createMigrationPlan, defaultMigrationPlan } from "./migration-plan.ts";
 
@@ -325,7 +325,19 @@ export function createWorkerTarget(input: {
       receipt: `target=${input.target.id}; currentRelease=${input.currentReleaseId}; history=${releaseHistory.join(",")}`,
     });
   }
-  const deploymentProfile = targetDeploymentProfile(input.target);
+  const deploymentProfile = input.target.deploymentProfile ?? createTargetDeploymentProfile({
+    environment: "custom",
+    channel: "custom",
+    audience: input.target.id,
+    runtimeIdentity: `target:${input.target.id}`,
+    routeIdentities: [],
+    bindingIdentities: [],
+    dataResourceIdentities: [],
+    configurationDigests: [targetDeploymentContractDigest(input.target)],
+    secretUseAliases: [],
+    dataClass: "custom",
+    resourceSharing: "isolated",
+  });
   return {
     ...clone(input.target),
     acceptedArtifactTypes: [...input.target.acceptedArtifactTypes],
@@ -508,7 +520,8 @@ export function sealVerifiedRelease(input: {
       });
     }
   }
-  assertMigrationPlanSafeForTarget({ plan: normalizedMigrationPlan, environment: targetDeploymentProfile(input.target).environment });
+  const deploymentProfile = targetDeploymentProfile(input.target);
+  assertMigrationPlanSafeForTarget({ plan: normalizedMigrationPlan, environment: deploymentProfile.environment, dataClass: deploymentProfile.dataClass });
   release.migrationPlan = normalizedMigrationPlan;
 
   const targetContractDigest = "contractDigest" in input.target && typeof input.target.contractDigest === "string"
@@ -841,6 +854,13 @@ export class WorkerPromotionCoordinator {
     const release = this.releases.get(promotion.releaseId);
     if (!release) {
       this.fail(promotion, "failed", `Registered Release ${promotion.releaseId} disappeared before execution.`, "restore the immutable Release registry before retrying", `release=${promotion.releaseId}; registry=missing`);
+      return clone(promotion);
+    }
+    try {
+      assertTargetCanPromote(this.target);
+    } catch (error) {
+      if (!(error instanceof TargetDeploymentProfileError)) throw error;
+      this.fail(promotion, "blocked", error.message, error.recoveryAction, error.receipt);
       return clone(promotion);
     }
     if (!this.target.capabilities.preview) {

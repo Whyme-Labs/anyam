@@ -8,6 +8,7 @@ import {
   type CloudflareWorkerHealthResponseValidator,
 } from "../src/cloudflare/worker-target.ts";
 import { createCloudflareApiTokenCredentialBroker } from "../src/cloudflare/promotion-credential-broker.ts";
+import { createCloudflareWorkerReleaseManifest } from "../src/cloudflare/worker-release-manifest.ts";
 import {
   CONTRACT_VERSIONS,
   type Artifact,
@@ -191,6 +192,7 @@ async function run(): Promise<Record<string, unknown>> {
     targetId: "target:cloudflare-worker-target-qualification",
     transport,
     credentialBroker: qualificationBroker(token, accountId, scriptName, "target:cloudflare-worker-target-qualification"),
+    workerReleaseManifest: ({ release }) => createCloudflareWorkerReleaseManifest({ release, compatibilityDate: process.env.ANYAM_WORKER_TARGET_COMPATIBILITY_DATE?.trim() || "2026-01-01", bindings: [], healthPaths: ["/health"] }),
     artifactReader: createMapWorkerArtifactReader(contents),
     previewUrlForVersion: (versionId) => `https://${versionId.slice(0, 8)}-${scriptName}.${previewSubdomain}.workers.dev/?anyam_preview=1`,
     healthUrl,

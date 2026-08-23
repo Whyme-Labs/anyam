@@ -17,6 +17,14 @@ import {
   type WorkerTarget,
   type WorkerTargetAdapter,
 } from "../delivery/promotion.ts";
+import {
+  assertCloudflareWorkerVersionReadback,
+  WorkerReleaseManifestError,
+  workerReleaseManifestUploadMetadata,
+  workerReleaseModuleContentType,
+  type CloudflareWorkerVersionResources,
+  type WorkerReleaseManifest,
+} from "./worker-release-manifest.ts";
 
 /**
  * Cloudflare's Worker Versions API is deliberately kept behind this module.
@@ -108,6 +116,8 @@ export type CloudflareWorkerVersion = {
     };
     created_on?: string;
   };
+  resources?: CloudflareWorkerVersionResources;
+  readbackReceipt?: string;
   number?: number;
 };
 
@@ -128,6 +138,8 @@ export type CloudflareWorkerTargetAdapterConfig = {
   transport: CloudflareWorkerApiTransport;
   credentialBroker: CloudflareWorkerCredentialBroker;
   artifactReader: CloudflareWorkerArtifactReader;
+  /** Builds the immutable provider manifest from the sealed Anyam Release. */
+  workerReleaseManifest?: (input: { release: ImmutableRelease; target: WorkerTarget }) => WorkerReleaseManifest;
   /**
    * Cloudflare returns whether preview is available on a version, while the
    * workers.dev subdomain belongs to the customer account. Keeping URL
@@ -341,23 +353,6 @@ function tagForRelease(release: ImmutableRelease): string {
   return `anyam-${release.releaseDigest.replace(/^sha256:/, "")}`;
 }
 
-function artifactForRelease(release: ImmutableRelease): Artifact {
-  if (release.artifacts.length !== 1) {
-    throw new Error(`Cloudflare Worker Target requires exactly one verified Worker Artifact; received ${release.artifacts.length}`);
-  }
-  const artifact = release.artifacts[0];
-  if (!artifact) throw new Error("Cloudflare Worker Target requires one verified Worker Artifact");
-  return artifact;
-}
-
-function mainModuleForArtifact(artifact: Artifact): string {
-  const path = required(artifact.outputPath ?? "", "artifact.outputPath").replaceAll("\\", "/");
-  const segments = path.split("/");
-  const name = segments.at(-1);
-  if (!name || name === "." || name === ".." || name.includes("\0")) throw new Error(`Artifact ${artifact.id} has an invalid Worker module filename`);
-  return name;
-}
-
 function providerErrors(response: CloudflareWorkerApiResponse<unknown>): string {
   return [...response.errors, ...response.messages].map((error) => `${error.code ?? "unknown"}:${error.message}`).join(" | ") || `http-${response.status}`;
 }
@@ -546,6 +541,8 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
       protocol: CLOUDFLARE_WORKER_TARGET_PROTOCOL,
       adapter: CLOUDFLARE_WORKER_TARGET_ADAPTER_ID,
       api: "workers-scripts-versions-and-deployments",
+      releaseManifest: "anyam.worker-release-manifest/v1",
+      providerReadback: "version-detail-required",
       credentialAudiences: [CLOUDFLARE_WORKER_DEPLOYMENT_AUDIENCE, CLOUDFLARE_WORKER_PROMOTION_AUDIENCE],
     });
   }
@@ -637,7 +634,7 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
   async health(input: WorkerHealthInput): Promise<DeliveryAdapterResult<HealthObservation>> {
     const targetBinding = targetBindingFailure("health", input.target, this.config.targetId);
     if (targetBinding) return targetBinding;
-    const version = await this.versionForRelease(input.release, "health");
+    const version = await this.versionForRelease(input.release, input.target, "health");
     if (isFailure(version)) return version;
     const healthUrl = typeof this.config.healthUrl === "string"
       ? this.config.healthUrl
@@ -682,7 +679,7 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
   async rollback(input: WorkerRollbackInput): Promise<DeliveryAdapterResult<WorkerDeployment>> {
     const targetBinding = targetBindingFailure("rollback", input.target, this.config.targetId);
     if (targetBinding) return targetBinding;
-    const previousVersion = await this.versionForRelease(input.previousRelease, "rollback");
+    const previousVersion = await this.versionForRelease(input.previousRelease, input.target, "rollback");
     if (isFailure(previousVersion)) return previousVersion;
     const operation = "rollback" as const;
     const credential = await this.issueCredential(operation);
@@ -738,33 +735,68 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     }
   }
 
-  private async ensureVersion(input: WorkerAdapterInput, operation: "preview" | "apply"): Promise<CloudflareWorkerVersion | DeliveryAdapterFailure> {
-    const existing = await this.versionForRelease(input.release, operation);
-    if (!isFailure(existing)) return existing;
-    if (!existing.errorCode.endsWith("not-found") && existing.errorCode !== "cloudflare.http_404") return existing;
-    let artifact: Artifact;
-    try {
-      artifact = artifactForRelease(input.release);
-    } catch (error) {
-      return failure({ operation, code: "artifact.invalid", message: error instanceof Error ? error.message : String(error), recoveryAction: "attach exactly one verified Worker Artifact to the immutable Release and retry", receipt: `releaseDigest=${input.release.releaseDigest}; providerMutation=false` });
+  private workerManifest(release: ImmutableRelease, target: WorkerTarget, operation: CloudflareWorkerTargetOperation): WorkerReleaseManifest | DeliveryAdapterFailure {
+    if (typeof this.config.workerReleaseManifest !== "function") {
+      return failure({ operation, code: "manifest.missing", message: `Cloudflare Worker Release ${release.release.id} has no immutable Worker Release Manifest builder.`, recoveryAction: "configure a Worker Release Manifest covering modules, assets, compatibility, bindings, migrations, and health identity before provider upload", receipt: `releaseDigest=${release.releaseDigest}; manifest=missing; providerMutation=false` });
     }
-    let bytes: Uint8Array;
     try {
-      bytes = await this.config.artifactReader.read(artifact);
+      const manifest = this.config.workerReleaseManifest({ release, target });
+      if (manifest.protocol !== "anyam.worker-release-manifest/v1" || !manifest.digest || manifest.modules.length === 0 || manifest.modules[0]?.name !== manifest.mainModule) throw new WorkerReleaseManifestError({ code: "invalid", message: `Worker Release Manifest for ${release.release.id} is incomplete.`, recoveryAction: "return a digest-bound manifest with a main module and complete provider inputs", receipt: `releaseDigest=${release.releaseDigest}; manifest=invalid; providerMutation=false` });
+      const artifactDigests = new Set(release.artifacts.map((artifact) => artifact.digest));
+      const missing = manifest.modules.find((module) => !artifactDigests.has(module.digest));
+      if (missing) throw new WorkerReleaseManifestError({ code: "artifact-missing", message: `Worker Release Manifest module ${missing.name} is not present in the sealed Release.`, recoveryAction: "bind every manifest module to an exact verified Release Artifact before provider upload", receipt: `releaseDigest=${release.releaseDigest}; module=${missing.name}; artifactDigest=${missing.digest}; manifest=invalid; providerMutation=false` });
+      return manifest;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return failure({ operation, code: "artifact.read", message, recoveryAction: "restore the exact verified Worker Artifact and retry without rebuilding the Release", receipt: `artifactDigest=${artifact.digest}; providerMutation=false` });
+      return failure({ operation, code: "manifest.invalid", message, recoveryAction: "repair the immutable Worker Release Manifest and retry without changing the Release", receipt: `releaseDigest=${release.releaseDigest}; manifest=invalid; providerMutation=false` });
     }
-    const mainModule = mainModuleForArtifact(artifact);
+  }
+
+  private async readVersionDetail(version: CloudflareWorkerVersion, manifest: WorkerReleaseManifest, operation: CloudflareWorkerTargetOperation): Promise<CloudflareWorkerVersion | DeliveryAdapterFailure> {
+    const credential = await this.issueCredential("version-read");
+    if (isFailure(credential)) return credential;
+    let response: CloudflareWorkerApiResponse<CloudflareWorkerVersion>;
+    try {
+      response = await this.config.transport.request<CloudflareWorkerVersion>({
+        method: "GET",
+        path: `${operationPath(this.config.accountId, this.config.scriptName, `/versions/${encodeURIComponent(version.id)}`)}`,
+        token: credential.token,
+      });
+    } catch (error) {
+      return failure({ operation, code: "cloudflare.readback.transport", message: `Cloudflare Worker version read-back transport failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "inspect the exact provider version detail and retry the same immutable Release operation", receipt: `providerVersionId=${version.id}; manifestDigest=${manifest.digest}; readback=indeterminate; credentialMaterialStored=false` });
+    }
+    const detail = responseResultWithCredential(response, operation, credential);
+    if (isFailure(detail)) return detail;
+    try {
+      const receipt = assertCloudflareWorkerVersionReadback({ manifest, version: detail });
+      return { ...version, ...detail, resources: detail.resources, metadata: detail.metadata, readbackReceipt: receipt } as CloudflareWorkerVersion;
+    } catch (error) {
+      const manifestError = error instanceof WorkerReleaseManifestError ? error : undefined;
+      return failure({ operation, code: `cloudflare.readback.${manifestError?.code ?? "invalid"}`, message: error instanceof Error ? error.message : String(error), recoveryAction: manifestError?.recoveryAction ?? "reconcile provider version detail before deployment", receipt: `${manifestError?.receipt ?? `providerVersionId=${version.id}; manifestDigest=${manifest.digest}; readback=invalid`}; credentialMaterialStored=false` });
+    }
+  }
+
+  private async ensureVersion(input: WorkerAdapterInput, operation: "preview" | "apply"): Promise<CloudflareWorkerVersion | DeliveryAdapterFailure> {
+    const manifest = this.workerManifest(input.release, input.target, operation);
+    if (isFailure(manifest)) return manifest;
+    const existing = await this.versionForRelease(input.release, input.target, operation, manifest);
+    if (!isFailure(existing)) return existing;
+    if (!existing.errorCode.endsWith("not-found") && existing.errorCode !== "cloudflare.http_404") return existing;
+    const artifactsByDigest = new Map(input.release.artifacts.map((artifact) => [artifact.digest, artifact]));
     const form = new FormData();
-    form.append("metadata", JSON.stringify({
-      main_module: mainModule,
-      annotations: {
-        "workers/message": `Anyam Release ${input.release.release.id}`,
-        "workers/tag": tagForRelease(input.release),
-      },
-    }));
-    form.append(mainModule, new Blob([Buffer.from(bytes)], { type: "application/javascript+module" }), mainModule);
+    form.append("metadata", JSON.stringify(workerReleaseManifestUploadMetadata(manifest, input.release.release.id, tagForRelease(input.release))));
+    for (const module of manifest.modules) {
+      const artifact = artifactsByDigest.get(module.digest);
+      if (!artifact) return failure({ operation, code: "manifest.artifact-missing", message: `Worker Release Manifest module ${module.name} is not bound to a sealed Artifact.`, recoveryAction: "bind every manifest module to an exact verified Release Artifact before provider upload", receipt: `releaseDigest=${input.release.releaseDigest}; module=${module.name}; artifactDigest=${module.digest}; providerMutation=false` });
+      let bytes: Uint8Array;
+      try {
+        bytes = await this.config.artifactReader.read(artifact);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return failure({ operation, code: "artifact.read", message, recoveryAction: "restore the exact verified Worker Artifact and retry without rebuilding the Release", receipt: `artifactDigest=${artifact.digest}; providerMutation=false` });
+      }
+      form.append(module.name, new Blob([Buffer.from(bytes)], { type: workerReleaseModuleContentType(module.type) }), module.name);
+    }
     const credential = await this.issueCredential("version-upload");
     if (isFailure(credential)) return credential;
     let response: CloudflareWorkerApiResponse<CloudflareWorkerVersion>;
@@ -776,18 +808,22 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
         body: form,
       });
     } catch (error) {
-      return failure({ operation, code: "cloudflare.transport", message: `Cloudflare Worker version upload transport failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "list Worker versions by the Anyam Release tag before retrying the same immutable operation", receipt: `artifactDigest=${artifact.digest}; providerMutation=unknown; credentialMaterialStored=false` });
+      return failure({ operation, code: "cloudflare.transport", message: `Cloudflare Worker version upload transport failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "list Worker versions by the Anyam Release tag before retrying the same immutable operation", receipt: `manifestDigest=${manifest.digest}; providerMutation=unknown; credentialMaterialStored=false` });
     }
     const result = responseResultWithCredential(response, operation, credential);
     if (isFailure(result)) return result;
-    if (!result.id) return failure({ operation, code: "cloudflare.response", message: "Cloudflare accepted the Worker version request without returning a version identity.", outcome: "indeterminate", retryable: true, recoveryAction: "inspect the Worker versions list and reconcile the version tagged with this Release digest", receipt: `artifactDigest=${artifact.digest}; providerMutation=accepted; providerVersionId=missing` });
-    this.versionsByPromotion.set(input.release.releaseDigest, result);
-    return result;
+    if (!result.id) return failure({ operation, code: "cloudflare.response", message: "Cloudflare accepted the Worker version request without returning a version identity.", outcome: "indeterminate", retryable: true, recoveryAction: "inspect the Worker versions list and reconcile the version tagged with this Release digest", receipt: `manifestDigest=${manifest.digest}; providerMutation=accepted; providerVersionId=missing` });
+    const verified = await this.readVersionDetail(result, manifest, operation);
+    if (isFailure(verified)) return verified;
+    this.versionsByPromotion.set(input.release.releaseDigest, verified);
+    return verified;
   }
 
-  private async versionForRelease(release: ImmutableRelease, operation: CloudflareWorkerTargetOperation): Promise<CloudflareWorkerVersion | DeliveryAdapterFailure> {
+  private async versionForRelease(release: ImmutableRelease, target: WorkerTarget, operation: CloudflareWorkerTargetOperation, expectedManifest?: WorkerReleaseManifest): Promise<CloudflareWorkerVersion | DeliveryAdapterFailure> {
     const cached = this.versionsByPromotion.get(release.releaseDigest);
     if (cached) return cached;
+    const manifest = expectedManifest ?? this.workerManifest(release, target, operation);
+    if (isFailure(manifest)) return manifest;
     const credential = await this.issueCredential("version-read");
     if (isFailure(credential)) return credential;
     let response: CloudflareWorkerApiResponse<CloudflareWorkerVersionList>;
@@ -805,8 +841,10 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     const tag = tagForRelease(release);
     const version = (result.items ?? []).find((candidate) => candidate.metadata?.annotations?.["workers/tag"] === tag);
     if (!version) return failure({ operation, code: "cloudflare.version-not-found", message: `Cloudflare Worker version for Release ${release.release.id} was not found by its immutable tag.`, recoveryAction: "upload the exact verified Release Artifact or reconcile the provider version list before retrying", receipt: `releaseDigest=${release.releaseDigest}; tag=${tag}; providerOperation=version-list; found=false` });
-    this.versionsByPromotion.set(release.releaseDigest, version);
-    return version;
+    const verified = await this.readVersionDetail(version, manifest, operation);
+    if (isFailure(verified)) return verified;
+    this.versionsByPromotion.set(release.releaseDigest, verified);
+    return verified;
   }
 
   private async fetchHealth(url: string, retry: CloudflareWorkerRouteReadinessRetry | undefined, operation: "preview" | "health"): Promise<{ status: number; body: Uint8Array; bodyDigest: string; attempts: number } | DeliveryAdapterFailure> {

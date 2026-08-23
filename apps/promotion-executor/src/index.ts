@@ -10,6 +10,7 @@ import {
 import { createCloudflareApiTokenCredentialBroker } from "../../../src/cloudflare/promotion-credential-broker.ts";
 import { promotionExecutorHealth } from "./health.ts";
 import { claimPromotionNonce } from "../../../src/cloudflare/promotion-executor-nonce.ts";
+import { createCloudflareWorkerReleaseManifest } from "../../../src/cloudflare/worker-release-manifest.ts";
 
 export interface Env {
   ANYAM_PROMOTION_EXECUTOR_ACCOUNT_ID?: string;
@@ -31,6 +32,8 @@ export interface Env {
   ANYAM_PROMOTION_HEALTH_RECEIPT?: string;
   ANYAM_PROMOTION_NONCE_STORE?: DurableObjectNamespace;
   ANYAM_PROMOTION_ARTIFACTS: R2Bucket;
+  ANYAM_PROMOTION_WORKER_COMPATIBILITY_DATE?: string;
+  ANYAM_PROMOTION_WORKER_COMPATIBILITY_FLAGS?: string;
 }
 
 // Route contract: GET /health is an authenticated operator/service probe;
@@ -46,6 +49,10 @@ function scopes(value: string | undefined): readonly string[] {
   const parsed = (value ?? "").split(",").map((scope) => scope.trim()).filter(Boolean);
   if (parsed.length === 0) throw new Error("ANYAM_PROMOTION_CREDENTIAL_SCOPES is required and must list the customer-declared provider scopes");
   return parsed;
+}
+
+function flags(value: string | undefined): readonly string[] {
+  return (value ?? "").split(",").map((flag) => flag.trim()).filter(Boolean);
 }
 
 function configFromEnv(env: Env): PromotionExecutorConfig {
@@ -85,6 +92,13 @@ function configFromEnv(env: Env): PromotionExecutorConfig {
     ...(env.ANYAM_PROMOTION_EXECUTOR_HEALTH_URL?.trim() ? { healthUrl: env.ANYAM_PROMOTION_EXECUTOR_HEALTH_URL.trim() } : {}),
     ...(env.ANYAM_PROMOTION_EXECUTOR_ADAPTER_ID?.trim() ? { adapterId: env.ANYAM_PROMOTION_EXECUTOR_ADAPTER_ID.trim() } : {}),
     artifactStore,
+    workerReleaseManifest: ({ release }) => createCloudflareWorkerReleaseManifest({
+      release,
+      compatibilityDate: required(env.ANYAM_PROMOTION_WORKER_COMPATIBILITY_DATE, "ANYAM_PROMOTION_WORKER_COMPATIBILITY_DATE"),
+      compatibilityFlags: flags(env.ANYAM_PROMOTION_WORKER_COMPATIBILITY_FLAGS),
+      bindings: [],
+      healthPaths: ["/health"],
+    }),
   };
 }
 

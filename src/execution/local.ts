@@ -23,7 +23,7 @@ import {
   type EvidenceRequirement,
   type StageGateDecision,
 } from "../kernel/evidence.ts";
-import { targetDeploymentProfile } from "../delivery/target-deployment.ts";
+import { createTargetDeploymentProfile } from "../delivery/target-deployment.ts";
 import { createReleaseInputSet } from "../delivery/release-input.ts";
 import { defaultMigrationPlan } from "../delivery/migration-plan.ts";
 
@@ -1432,5 +1432,20 @@ export function targetFromManifest(target: NormalizedTarget, projectId: string):
     requiredEvidenceKeys: [],
     state: "configured",
   };
-  return { ...targetValue, deploymentProfile: targetDeploymentProfile(targetValue) };
+  return {
+    ...targetValue,
+    deploymentProfile: createTargetDeploymentProfile({
+      environment: "development",
+      channel: "alpha",
+      audience: target.id,
+      runtimeIdentity: `target:${projectId}:${target.id}`,
+      routeIdentities: [],
+      bindingIdentities: [],
+      dataResourceIdentities: [],
+      configurationDigests: [target.contractDigest],
+      secretUseAliases: [],
+      dataClass: "isolated",
+      resourceSharing: "isolated",
+    }),
+  };
 }

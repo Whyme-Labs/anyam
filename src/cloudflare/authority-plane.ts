@@ -33,6 +33,7 @@ import {
 } from "../kernel/contracts.ts";
 import type { PromotionReconciliationCheckpoint, PromotionRecord } from "../delivery/promotion.ts";
 import {
+  assertTargetCanPromote,
   assertTargetResourceIsolation,
   createTargetDeploymentProfile,
   defaultTargetDeploymentProfile,
@@ -1731,6 +1732,12 @@ export class AuthorityPlaneCoordinator {
         if (!next.projects[promotionProjectId] || !release || !target) throw new AuthorityPlaneError({ code: "not_found", message: "Promotion requires an existing Project, Release, and Target.", recoveryAction: "verify the Project, Release, and Target identifiers without probing hidden resources before requesting Promotion", receipt: `promotion=not-created; discoverable=false` });
         const releaseProjectId = next.projectRevisions[release.projectRevisionId]?.projectId;
         if (!releaseProjectId || releaseProjectId !== promotionProjectId || target.projectId !== promotionProjectId) throw new AuthorityPlaneError({ code: "conflict", message: "Promotion Project, Release, and Target bindings do not match.", recoveryAction: "request Promotion against the Target and Release belonging to the same Project", receipt: `project=${promotionProjectId}; promotion=not-created; exact-project-binding-required` });
+        try {
+          assertTargetCanPromote(target);
+        } catch (error) {
+          if (error instanceof TargetDeploymentProfileError) throw new AuthorityPlaneError({ code: "blocked", message: error.message, recoveryAction: error.recoveryAction, receipt: error.receipt });
+          throw error;
+        }
         const expectedCurrentReleaseId = optionalString(payload.expectedCurrentReleaseId) ?? target.currentReleaseId ?? null;
         if (expectedCurrentReleaseId !== (target.currentReleaseId ?? null)) throw new AuthorityPlaneError({ code: "conflict", message: `Promotion expected Release ${expectedCurrentReleaseId ?? "none"}, but Target ${target.id} is at ${target.currentReleaseId ?? "none"}.`, recoveryAction: "read the current Target pointer and request Promotion with that exact expected Release ID", receipt: `target=${target.id}; expectedCurrent=${expectedCurrentReleaseId ?? "none"}; actualCurrent=${target.currentReleaseId ?? "none"}; promotion=not-created` });
         const promotion: PromotionRecord = { protocol: CONTRACT_VERSIONS.promotion, id: optionalString(payload.promotionId) ?? opaqueId("promotion"), projectId: promotionProjectId, targetId, releaseId, releaseDigest: optionalString(payload.releaseDigest) ?? `declared:${release.id}`, previousReleaseId: expectedCurrentReleaseId, expectedCurrentReleaseId, state: "blocked", attempt: 0, kind: "promotion", idempotencyKey: command.idempotencyKey, actor, createdAt: now(), updatedAt: now(), receipt: `promotion=blocked; project=${promotionProjectId}; target=${targetId}; release=${releaseId}; expectedCurrentRelease=${expectedCurrentReleaseId ?? "not-declared"}; providerAdapter=${target.adapterId}; canonicalWrite=false`, recoveryAction: "qualify and bind the Target adapter, then request Promotion again after inspecting the immutable Release lineage" };

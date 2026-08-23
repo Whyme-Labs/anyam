@@ -9,9 +9,9 @@ import {
   type Release,
   type Target,
 } from "../kernel/contracts.ts";
-import { targetDeploymentContractDigest, targetDeploymentProfile } from "./target-deployment.ts";
+import { assertTargetCanPromote, createTargetDeploymentProfile, targetDeploymentContractDigest, targetDeploymentProfile, TargetDeploymentProfileError } from "./target-deployment.ts";
 import { assertReleaseInputSetMatches, deriveReleaseInputSet } from "./release-input.ts";
-import { assertMigrationPlanSafeForTarget, createMigrationPlan, defaultMigrationPlan } from "./migration-plan.ts";
+import { assertMigrationPlanSafeForTarget, automaticMigrationRollbackDecision, createMigrationPlan, defaultMigrationPlan } from "./migration-plan.ts";
 
 /**
  * A Target adapter is deliberately smaller than the Promotion authority. It
@@ -325,7 +325,21 @@ export function createWorkerTarget(input: {
       receipt: `target=${input.target.id}; currentRelease=${input.currentReleaseId}; history=${releaseHistory.join(",")}`,
     });
   }
-  const deploymentProfile = targetDeploymentProfile(input.target);
+  const deploymentProfile = input.target.deploymentProfile && input.target.deploymentProfile.configurationDigests.length > 0
+    ? input.target.deploymentProfile
+    : createTargetDeploymentProfile({
+      environment: "custom",
+      channel: "custom",
+      audience: input.target.id,
+      runtimeIdentity: `target:${input.target.id}`,
+      routeIdentities: [],
+      bindingIdentities: [],
+      dataResourceIdentities: [],
+      configurationDigests: [targetDeploymentContractDigest(input.target)],
+      secretUseAliases: [],
+      dataClass: "custom",
+      resourceSharing: "isolated",
+      });
   return {
     ...clone(input.target),
     acceptedArtifactTypes: [...input.target.acceptedArtifactTypes],
@@ -508,7 +522,8 @@ export function sealVerifiedRelease(input: {
       });
     }
   }
-  assertMigrationPlanSafeForTarget({ plan: normalizedMigrationPlan, environment: targetDeploymentProfile(input.target).environment });
+  const deploymentProfile = targetDeploymentProfile(input.target);
+  assertMigrationPlanSafeForTarget({ plan: normalizedMigrationPlan, environment: deploymentProfile.environment, dataClass: deploymentProfile.dataClass });
   release.migrationPlan = normalizedMigrationPlan;
 
   const targetContractDigest = "contractDigest" in input.target && typeof input.target.contractDigest === "string"
@@ -843,6 +858,13 @@ export class WorkerPromotionCoordinator {
       this.fail(promotion, "failed", `Registered Release ${promotion.releaseId} disappeared before execution.`, "restore the immutable Release registry before retrying", `release=${promotion.releaseId}; registry=missing`);
       return clone(promotion);
     }
+    try {
+      assertTargetCanPromote(this.target);
+    } catch (error) {
+      if (!(error instanceof TargetDeploymentProfileError)) throw error;
+      this.fail(promotion, "blocked", error.message, error.recoveryAction, error.receipt);
+      return clone(promotion);
+    }
     if (!this.target.capabilities.preview) {
       this.fail(promotion, "blocked", `Target ${this.target.id} does not declare preview capability.`, "qualify a preview-capable Worker Target before Promotion", `target=${this.target.id}; capability=preview; enabled=false`);
       return clone(promotion);
@@ -930,6 +952,13 @@ export class WorkerPromotionCoordinator {
     promotion.receipt = `promotion=health-failed; release=${release.release.id}; ${receipt}`;
     this.target.state = "degraded";
     this.transition(promotion, "degraded", promotion.receipt);
+    const migrationDecision = automaticMigrationRollbackDecision(release.release.migrationPlan ?? defaultMigrationPlan());
+    if (!migrationDecision.allowed) {
+      promotion.recoveryAction = migrationDecision.recoveryAction;
+      promotion.receipt = `${promotion.receipt}; ${migrationDecision.receipt}`;
+      return;
+    }
+    promotion.receipt = `${promotion.receipt}; ${migrationDecision.receipt}`;
     if (!promotion.previousReleaseId || !this.target.capabilities.rollback) {
       promotion.recoveryAction = promotion.previousReleaseId
         ? "Target is degraded; qualify rollback capability or reconcile the provider before retrying"

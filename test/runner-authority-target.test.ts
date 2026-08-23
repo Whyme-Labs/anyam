@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   AUTHORITY_COMMAND_PROTOCOL,
+  AuthorityPlaneError,
   AuthorityPlaneCoordinator,
   emptyAuthorityPlaneSnapshot,
   type AuthorityCommandName,
@@ -463,4 +464,55 @@ test("external Runner completion composes through Authority into a non-web Targe
   assert.equal(promotedReceipt.includes(lease.credential.token), false);
   assert.equal(promotedReceipt.includes("Bearer "), false);
   assert.match(promotedReceipt, /credentialFree=true/);
+});
+
+test("Authority keeps legacy Targets inspectable but blocks Promotion without a complete profile", () => {
+  const snapshot = emptyAuthorityPlaneSnapshot(session.realmId);
+  snapshot.projects["project:legacy-target"] = {
+    protocol: CONTRACT_VERSIONS.project,
+    id: "project:legacy-target",
+    name: "Legacy Target Project",
+    referenceType: "git",
+    sourceSpaceIds: [],
+  };
+  snapshot.projectRevisions["project-revision:legacy-target"] = {
+    protocol: CONTRACT_VERSIONS.kernel,
+    id: "project-revision:legacy-target",
+    projectId: "project:legacy-target",
+    sourceSpaceSnapshots: {},
+  };
+  snapshot.canonicalByProject["project:legacy-target"] = "project-revision:legacy-target";
+  snapshot.releases["release:legacy-target"] = {
+    protocol: CONTRACT_VERSIONS.release,
+    id: "release:legacy-target",
+    projectRevisionId: "project-revision:legacy-target",
+    artifactIds: [],
+    evidenceIds: [],
+    configurationDigests: ["sha256:legacy-config"],
+    stateAssumptions: [],
+    policyVersion: "policy:legacy-target",
+    status: "ready",
+  };
+  const authority = new AuthorityPlaneCoordinator(snapshot);
+  const configured = command(authority, "target.configure", "legacy-target:configure", {
+    projectId: "project:legacy-target",
+    targetId: "target:legacy",
+    name: "Legacy Target",
+    adapterId: "generic.release-assets",
+    acceptedArtifactTypes: ["cli.archive"],
+  });
+  assert.equal(configured.status, "succeeded");
+  assert.throws(
+    () => command(authority, "promotion.request", "legacy-target:promotion", {
+      projectId: "project:legacy-target",
+      releaseId: "release:legacy-target",
+      targetId: "target:legacy",
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof AuthorityPlaneError);
+      assert.equal(error.code, "blocked");
+      assert.match(error.receipt, /deploymentProfile=incomplete/);
+      return true;
+    },
+  );
 });

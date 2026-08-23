@@ -86,7 +86,7 @@ function credentialProviderOperationId(operation: string, credentialId: string, 
 }
 
 function requiredScopes(operation: CloudflareWorkerTargetOperation): readonly string[] {
-  return operation === "apply" || operation === "rollback" ? ["workers:write"] : ["workers:read"];
+  return operation === "apply" || operation === "rollback" || operation === "version-upload" ? ["workers:write"] : ["workers:read"];
 }
 
 function verifyPath(accountId: string): string {

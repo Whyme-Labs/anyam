@@ -228,6 +228,7 @@ test("Cloudflare Worker Target uploads digest-bound versions, promotes after pre
     assert.equal(coordinator.getTarget().state, "healthy");
     assert.equal(api.versions.length, 2);
     assert.equal(api.deployments.length, 3);
+    assert.equal(issued.some((entry) => entry.operation === "version-upload" && entry.audience === "aud:anyam:deployment"), true);
     assert.equal(issued.some((entry) => entry.operation === "apply" && entry.audience === "aud:anyam:promotion"), true);
     assert.equal(issued.some((entry) => entry.operation === "rollback" && entry.audience === "aud:anyam:promotion"), true);
     assert.equal(JSON.stringify(secondPromotion).includes("provider-secret-never-in-receipt"), false);

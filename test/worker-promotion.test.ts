@@ -18,6 +18,8 @@ import {
   type WorkerTarget,
   type WorkerTargetAdapter,
 } from "../src/delivery/promotion.ts";
+import { createMigrationPlan } from "../src/delivery/migration-plan.ts";
+import type { Release } from "../src/kernel/contracts.ts";
 import {
   normalizeProjectManifest,
   runLocalRelease,
@@ -57,7 +59,7 @@ function context(directory: string): LocalExecutionContext {
   };
 }
 
-async function workerRelease(name: string): Promise<{ release: ImmutableRelease; directory: string; target: WorkerTarget }> {
+async function workerRelease(name: string, migrationPlan?: Release["migrationPlan"]): Promise<{ release: ImmutableRelease; directory: string; target: WorkerTarget }> {
   const directory = await mkdtemp(join(tmpdir(), `anyam-worker-promotion-${name}-`));
   await cp(join(fixtureRoot, "worker"), directory, { recursive: true });
   const manifest = JSON.parse(await readFile(join(directory, "anyam.json"), "utf8")) as unknown;
@@ -76,7 +78,7 @@ async function workerRelease(name: string): Promise<{ release: ImmutableRelease;
     target,
     release: sealVerifiedRelease({
       projectId: normalized.projectId,
-      release: result.release,
+      release: migrationPlan === undefined ? result.release : { ...result.release, migrationPlan },
       artifacts: result.artifacts,
       evidence: result.evidence,
       target,
@@ -248,6 +250,33 @@ test("unhealthy Worker Promotion keeps the previous Release serving and records 
     assert.equal(secondHealthCall?.targetCurrentReleaseId, first.release.release.id);
   } finally {
     await closeReleases(first, second);
+  }
+});
+
+test("health-failure rollback obeys every Migration Plan rollback mode", async () => {
+  const modes: Array<{ name: string; plan: Release["migrationPlan"]; expectedState: "rolled-back" | "degraded" }> = [
+    { name: "safe", plan: createMigrationPlan({ strategy: "manual", compatibility: "unknown", rollback: "safe" }), expectedState: "rolled-back" },
+    { name: "application-only-proven", plan: createMigrationPlan({ strategy: "expand-contract", beforeSchemaDigest: "sha256:before", afterSchemaDigest: "sha256:after", compatibility: "bidirectional", rollback: "application-only" }), expectedState: "rolled-back" },
+    { name: "application-only-unknown", plan: createMigrationPlan({ strategy: "custom", compatibility: "unknown", rollback: "application-only" }), expectedState: "degraded" },
+    { name: "manual-data-action", plan: createMigrationPlan({ strategy: "manual", compatibility: "forward-only", rollback: "manual-data-action" }), expectedState: "degraded" },
+    { name: "blocked", plan: createMigrationPlan({ strategy: "custom", compatibility: "backward-compatible", rollback: "blocked" }), expectedState: "degraded" },
+  ];
+  for (const mode of modes) {
+    const first = await workerRelease(`worker-release-migration-${mode.name}-first`);
+    const second = await workerRelease(`worker-release-migration-${mode.name}-candidate`, mode.plan);
+    try {
+      const adapter = new ScriptedWorkerAdapter({ healthStates: ["healthy", "unhealthy", "healthy"] });
+      const coordinator = new WorkerPromotionCoordinator({ projectId: "project:worker", target: first.target, adapter });
+      coordinator.registerRelease(first.release);
+      coordinator.registerRelease(second.release);
+      await coordinator.promote({ releaseId: first.release.release.id, idempotencyKey: `ship:worker:migration:${mode.name}:first`, actor });
+      const failed = await coordinator.promote({ releaseId: second.release.release.id, idempotencyKey: `ship:worker:migration:${mode.name}:candidate`, actor });
+      assert.equal(failed.state, mode.expectedState, mode.name);
+      assert.match(failed.receipt, new RegExp(`migrationRollback=${mode.plan?.rollback}`));
+      if (mode.expectedState === "degraded") assert.equal(failed.rollbackHealth, undefined, mode.name);
+    } finally {
+      await closeReleases(first, second);
+    }
   }
 });
 

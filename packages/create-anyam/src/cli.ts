@@ -2,12 +2,19 @@ import { proposedManifest, runLocalCheck, scaffoldProject, startChange, type Pro
 import { gitCredentialGet, LocalAgentManager, readGitCredentialContext, runMcpStdio, setupAgent } from "./agent.js";
 import { loginAnyam } from "./auth.js";
 import { connectGitHubActions } from "./github-actions-bridge.js";
+import { realmDestroy, realmDoctor, realmExport, realmInstall, realmPlan, realmRestore, realmUpgrade } from "./realm.js";
 import type { WorkspaceBoundaryMode } from "./workspace-boundary.js";
 import type { Readable } from "node:stream";
 
 function valueAfter(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   return index >= 0 ? args[index + 1] : undefined;
+}
+
+function valuesAfter(args: readonly string[], flag: string): readonly string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index += 1) if (args[index] === flag && args[index + 1]) values.push(args[index + 1]!);
+  return values;
 }
 
 function requiredValue(args: readonly string[], flag: string, command: string): string {
@@ -25,7 +32,7 @@ function kindFrom(args: readonly string[]): ProjectTemplateKind {
 
 function positionalArgs(args: readonly string[], command: string): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule"]);
+  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation"]);
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -40,7 +47,7 @@ function positionalArgs(args: readonly string[], command: string): readonly stri
 
 function subcommandPositionals(args: readonly string[]): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule"]);
+  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation"]);
   for (let index = 2; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -56,6 +63,7 @@ function subcommandPositionals(args: readonly string[]): readonly string[] {
 function printHelp(): void {
   console.log("connect github --method actions  generate a reviewable GitHub Actions Bridge workflow");
   console.log("Bridge options: --realm <url> --project <id> --connection <id> --action-ref <owner/repo@sha> [--workflow-path <path>] [--remote <name>] [--schedule <cron>]");
+  console.log("realm plan|install|upgrade|doctor|export|restore|destroy  customer-operated lifecycle");
   console.log(`Anyam local CLI\n\nCommands:\n  init [directory]                 create a local TypeScript Project\n  doctor [directory]               inspect manifest and source metadata locally\n  check [directory]                compatibility alias for doctor\n  change start <title>             start a local Change\n  agent setup <agent>              configure the local MCP broker and instructions\n  agent start [agent]              start or resume a local agent session\n  agent exec <agent> -- <command>  launch an agent through the Workspace boundary\n  agent handoff <agent>            revoke the current session and start another\n  agent status                     inspect the current local session\n  agent revoke                     revoke the current local session\n  mcp serve --stdio                serve the semantic MCP tools over stdio\n  auth login --realm <url>         authenticate through OAuth PKCE and the OS keychain\n  auth revoke                      revoke the current local session\n  git-credential-anyam get         issue a context-bound memory-only Workspace Git credential\n\nOptions:\n  --type worker|library             choose the template (default: worker)\n  --name <name>                     choose the Project name\n  --agent codex|claude|cursor|cli   choose the local coding agent\n  --mode enforceable|supervised     choose the Workspace boundary mode\n  --directory <path>               choose a Project directory\n  --json                            print machine-readable output\n  --dry-run                         print the proposed manifest without writing\n\nThe local broker never stores bearer credentials, writes canonical Git refs, reads secret values, approves Changes, or promotes production.`);
 }
 
@@ -123,6 +131,31 @@ export async function main(args: readonly string[], cwd = process.cwd(), input: 
       console.log(result.status === "passed" ? "Project doctor passed." : "Project doctor blocked; fix the named receipt and rerun anyam doctor.");
     }
     return result.status === "passed" ? 0 : 1;
+  }
+
+  if (command === "realm") {
+    const directory = valueAfter(args, "--directory") ?? cwd;
+    const installationId = valueAfter(args, "--installation") ?? `installation:local:${directory.replaceAll(/[^A-Za-z0-9._-]+/gu, "-")}`;
+    const resources = valuesAfter(args, "--resource").length > 0 ? valuesAfter(args, "--resource") : (process.env.ANYAM_REALM_RESOURCES ?? "d1,r2,queues,workflows").split(",").map((value) => value.trim()).filter(Boolean);
+    const domains = valuesAfter(args, "--domain");
+    const desiredVersion = valueAfter(args, "--version") ?? "0.0.0";
+    const result = subcommand === "plan"
+      ? realmPlan({ directory, installationId, accountId: requiredValue(args, "--account", "realm plan"), resources, ...(domains.length > 0 ? { domains } : {}) })
+      : subcommand === "install"
+        ? await realmInstall({ directory, installationId, accountId: requiredValue(args, "--account", "realm install"), resources, ...(domains.length > 0 ? { domains } : {}), desiredVersion })
+        : subcommand === "upgrade"
+          ? await realmUpgrade({ directory, desiredVersion })
+          : subcommand === "doctor"
+            ? await realmDoctor(directory)
+            : subcommand === "export"
+              ? await realmExport(directory, requiredValue(args, "--path", "realm export"))
+              : subcommand === "restore"
+                ? await realmRestore(directory, requiredValue(args, "--path", "realm restore"))
+                : subcommand === "destroy"
+                  ? await realmDestroy(directory)
+                  : (() => { throw new Error("realm requires plan, install, upgrade, doctor, export, restore, or destroy"); })();
+    printResult(result, json, `${result.status.toUpperCase()} ${result.operation}: ${result.receipt}\nRecovery: ${result.recoveryAction}`);
+    return result.status === "blocked" ? 1 : 0;
   }
 
   if (command === "connect" && subcommand === "github") {

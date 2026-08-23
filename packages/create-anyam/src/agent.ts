@@ -323,7 +323,8 @@ export type LocalAgentManagerOptions = {
 };
 
 export type AgentLaunchInput = {
-  agent: string;
+  agent?: string;
+  sessionId?: string;
   command: string;
   args?: readonly string[];
   mode?: WorkspaceBoundaryMode;
@@ -331,6 +332,13 @@ export type AgentLaunchInput = {
   network?: readonly string[];
   workspaceDirectory?: string;
   resourceLimits?: WorkspaceResourceLimits;
+};
+
+export type LocalWorkspaceSummary = {
+  readonly session: LocalAgentSession;
+  readonly grant: LocalCapabilityGrant;
+  readonly context: AgentContextManifest;
+  readonly activeCredentialCount: number;
 };
 
 export type AgentLaunchResult = {
@@ -1009,8 +1017,8 @@ export class LocalAgentManager {
     return true;
   }
 
-  private activeSession(state: AgentState): { session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest } | null {
-    const id = state.currentSessionId;
+  private activeSession(state: AgentState, sessionId = state.currentSessionId): { session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest } | null {
+    const id = sessionId;
     if (!id) return null;
     const session = state.sessions[id];
     if (!session) return null;
@@ -1020,10 +1028,10 @@ export class LocalAgentManager {
     return { session, grant, context };
   }
 
-  private async requireActiveSessionUnlocked(): Promise<{ state: AgentState; session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+  private async requireActiveSessionUnlocked(sessionId?: string): Promise<{ state: AgentState; session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
     const state = await this.readState();
-    const active = this.activeSession(state);
-    if (!active) throw new LocalAgentError({ code: "agent.session.missing", message: "No active local agent session is available for this Project.", recoveryAction: "run anyam agent start <codex|claude|cursor|cli>", receipt: "currentSessionId did not resolve to an active session" });
+    const active = this.activeSession(state, sessionId);
+    if (!active) throw new LocalAgentError({ code: "agent.session.missing", message: `No active local agent session is available for ${sessionId ?? "the selected Project"}.`, recoveryAction: sessionId ? "inspect anyam workspace list and select an active Workspace session" : "run anyam agent start <codex|claude|cursor|cli>", receipt: `session=${sessionId ?? "current"}; active=false` });
     if (this.expireIfNeeded(state, active.session, active.grant)) {
       state.currentSessionId = null;
       await this.writeState(state);
@@ -1033,7 +1041,7 @@ export class LocalAgentManager {
     return { state, session: active.session, grant: active.grant, context: active.context };
   }
 
-  private async startSessionUnlocked(input: { agent: string; changeId?: string; mode?: WorkspaceBoundaryMode; authorizedPaths?: readonly string[]; network?: readonly string[]; executablePaths?: readonly string[]; workspaceDirectory?: string; resourceLimits?: WorkspaceResourceLimits }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+  private async startSessionUnlocked(input: { agent: string; changeId?: string; parallel?: boolean; mode?: WorkspaceBoundaryMode; authorizedPaths?: readonly string[]; network?: readonly string[]; executablePaths?: readonly string[]; workspaceDirectory?: string; resourceLimits?: WorkspaceResourceLimits }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
     const agent = ensureAgent(input.agent);
     const mode = input.mode ?? "supervised";
     const resourceLimits = input.resourceLimits ?? this.resourceLimits;
@@ -1043,8 +1051,14 @@ export class LocalAgentManager {
     if (input.changeId && input.changeId !== change.id) throw new LocalAgentError({ code: "change.not_active", message: `Requested Change ${input.changeId} is not the local active Change ${change.id}.`, affectedObject: input.changeId, recoveryAction: "switch to the Change Workspace before starting the agent", receipt: `active-change=${change.id}` });
 
     const state = await this.readState();
-    const existing = this.activeSession(state);
-    if (existing && !this.expireIfNeeded(state, existing.session, existing.grant)) {
+    const existing = Object.values(state.sessions)
+      .map((session) => {
+        const grant = state.grants[session.grantId];
+        const context = state.contexts[session.id];
+        return grant && context ? { session, grant, context } : null;
+      })
+      .find((candidate) => candidate !== null && candidate.session.changeId === change.id && !this.expireIfNeeded(state, candidate.session, candidate.grant)) ?? null;
+    if (existing && !input.parallel && !this.expireIfNeeded(state, existing.session, existing.grant)) {
       if (existing.session.agent !== agent) throw new LocalAgentError({ code: "agent.session.busy", message: `Change ${change.id} already has an active ${existing.session.agent} session; hand it off before starting ${agent}.`, affectedObject: existing.session.id, recoveryAction: `run anyam agent handoff ${agent}`, receipt: `active-session=${existing.session.id}` });
       const existingMode = existing.session.workspaceMode ?? "supervised";
       if (existingMode !== mode) throw new LocalAgentError({ code: "agent.session.mode_mismatch", message: `Change ${change.id} already has an active ${existingMode} session; it cannot be reused as ${mode}.`, affectedObject: existing.session.id, recoveryAction: "revoke the current session and start a new session with the requested Workspace mode", receipt: `active-mode=${existingMode}; requested-mode=${mode}` });
@@ -1153,7 +1167,7 @@ export class LocalAgentManager {
     return { session, grant, context };
   }
 
-  async startSession(input: { agent: string; changeId?: string; mode?: WorkspaceBoundaryMode; authorizedPaths?: readonly string[]; network?: readonly string[]; executablePaths?: readonly string[]; workspaceDirectory?: string; resourceLimits?: WorkspaceResourceLimits }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+  async startSession(input: { agent: string; changeId?: string; parallel?: boolean; mode?: WorkspaceBoundaryMode; authorizedPaths?: readonly string[]; network?: readonly string[]; executablePaths?: readonly string[]; workspaceDirectory?: string; resourceLimits?: WorkspaceResourceLimits }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
     return this.withStateLock(() => this.startSessionUnlocked(input));
   }
 
@@ -1213,15 +1227,20 @@ export class LocalAgentManager {
 
   async launchAgent(input: AgentLaunchInput): Promise<AgentLaunchResult> {
     const mode = input.mode ?? "enforceable";
-    const started = await this.startSession({
-      agent: input.agent,
-      mode,
-      ...(input.authorizedPaths ? { authorizedPaths: input.authorizedPaths } : {}),
-      ...(input.network ? { network: input.network } : {}),
-      executablePaths: [input.command],
-      ...(input.workspaceDirectory ? { workspaceDirectory: input.workspaceDirectory } : {}),
-      ...(input.resourceLimits ? { resourceLimits: input.resourceLimits } : {}),
-    });
+    const started = input.sessionId
+      ? await this.withStateLock(async () => {
+          const active = await this.requireActiveSessionUnlocked(input.sessionId);
+          return { session: clone(active.session), grant: clone(active.grant), context: clone(active.context) };
+        })
+      : await this.startSession({
+          agent: input.agent ?? (() => { throw new LocalAgentError({ code: "agent.required", message: "Agent launch requires an agent unless an explicit sessionId is selected.", recoveryAction: "pass --agent for a new session or --session for an existing Workspace", receipt: "agent=required; session=not-selected" }); })(),
+          mode,
+          ...(input.authorizedPaths ? { authorizedPaths: input.authorizedPaths } : {}),
+          ...(input.network ? { network: input.network } : {}),
+          executablePaths: [input.command],
+          ...(input.workspaceDirectory ? { workspaceDirectory: input.workspaceDirectory } : {}),
+          ...(input.resourceLimits ? { resourceLimits: input.resourceLimits } : {}),
+        });
     const boundary = this.boundaries.get(started.session.id);
     if (!boundary) throw new LocalAgentError({ code: "workspace.boundary_missing", message: `Agent session ${started.session.id} has no live Workspace boundary; no process was started.`, affectedObject: started.session.id, recoveryAction: "revoke the session and start the agent again through the boundary launcher", receipt: `mode=${mode}; boundary=missing` });
     await this.withStateLock(async () => {
@@ -1268,10 +1287,10 @@ export class LocalAgentManager {
     return { session: clone(started.session), boundary, command: commandResult };
   }
 
-  async handoff(input: { agent: string; changeId?: string }): Promise<{ previousSessionId: string | null; next: Awaited<ReturnType<LocalAgentManager["startSession"]>> }> {
+  async handoff(input: { agent: string; changeId?: string; sessionId?: string }): Promise<{ previousSessionId: string | null; next: Awaited<ReturnType<LocalAgentManager["startSession"]>> }> {
     return this.withStateLock(async () => {
       const state = await this.readState();
-      const previousSessionId = state.currentSessionId;
+      const previousSessionId = input.sessionId ?? state.currentSessionId;
       if (previousSessionId) await this.revokeUnlocked(previousSessionId);
       const next = await this.startSessionUnlocked({ agent: input.agent, ...(input.changeId ? { changeId: input.changeId } : {}) });
       const nextState = await this.readState();
@@ -1281,12 +1300,37 @@ export class LocalAgentManager {
     });
   }
 
-  async status(): Promise<AgentStatus> {
+  async listSessions(): Promise<readonly LocalWorkspaceSummary[]> {
     return this.withStateLock(async () => {
       const state = await this.readState();
-      const active = this.activeSession(state);
+      let changed = false;
+      const summaries: LocalWorkspaceSummary[] = [];
+      for (const session of Object.values(state.sessions)) {
+        const grant = state.grants[session.grantId];
+        const context = state.contexts[session.id];
+        if (!grant || !context) continue;
+        if (this.expireIfNeeded(state, session, grant)) {
+          changed = true;
+          continue;
+        }
+        summaries.push({ session: clone(session), grant: clone(grant), context: clone(context), activeCredentialCount: Object.values(state.credentials).filter((credential) => credential.sessionId === session.id && !isExpired(credential.expiresAt, this.now)).length });
+      }
+      if (changed) await this.writeState(state);
+      return summaries.sort((left, right) => left.session.startedAt.localeCompare(right.session.startedAt));
+    });
+  }
+
+  async inspectSession(sessionId: string): Promise<LocalWorkspaceSummary | null> {
+    const summaries = await this.listSessions();
+    return summaries.find((summary) => summary.session.id === sessionId) ?? null;
+  }
+
+  async status(sessionId?: string): Promise<AgentStatus> {
+    return this.withStateLock(async () => {
+      const state = await this.readState();
+      const active = this.activeSession(state, sessionId);
       if (active && this.expireIfNeeded(state, active.session, active.grant)) {
-        state.currentSessionId = null;
+        if (state.currentSessionId === active.session.id) state.currentSessionId = null;
         await this.writeState(state);
         return { session: null, grant: null, context: null, activeCredentialCount: 0, auditCount: state.audit.length };
       }
@@ -1297,8 +1341,7 @@ export class LocalAgentManager {
 
   async issueWorkspaceCredential(sessionId?: string): Promise<WorkspaceCredential> {
     return this.withStateLock(async () => {
-      const active = await this.requireActiveSessionUnlocked();
-      if (sessionId && sessionId !== active.session.id) throw new LocalAgentError({ code: "credential.session_mismatch", message: `Credential request targeted ${sessionId}, not the active session ${active.session.id}.`, affectedObject: sessionId, recoveryAction: "request a credential for the active Change Workspace", receipt: `active-session=${active.session.id}` });
+      const active = await this.requireActiveSessionUnlocked(sessionId);
       const issuedAt = nowIso(this.now);
       const expiry = expiresAt(this.now, this.credentialLifetimeMs);
       const token = randomBytes(32).toString("base64url");

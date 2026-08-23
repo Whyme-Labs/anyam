@@ -28,7 +28,7 @@ export const CLOUDFLARE_WORKER_TARGET_ADAPTER_ID = "cloudflare.worker" as const;
 export const CLOUDFLARE_WORKER_DEPLOYMENT_AUDIENCE = "aud:anyam:deployment" as const;
 export const CLOUDFLARE_WORKER_PROMOTION_AUDIENCE = "aud:anyam:promotion" as const;
 
-export type CloudflareWorkerTargetOperation = "preview" | "apply" | "health" | "rollback" | "version-read";
+export type CloudflareWorkerTargetOperation = "preview" | "apply" | "health" | "rollback" | "version-read" | "version-upload";
 
 /**
  * The broker owns the real provider credential. The adapter receives it only
@@ -406,7 +406,7 @@ function failure(input: {
 }
 
 function isMutation(operation: CloudflareWorkerTargetOperation): boolean {
-  return operation === "preview" || operation === "apply" || operation === "rollback";
+  return operation === "preview" || operation === "apply" || operation === "rollback" || operation === "version-upload";
 }
 
 function audienceFor(operation: CloudflareWorkerTargetOperation): CloudflareWorkerCredential["audience"] {
@@ -725,7 +725,7 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
       },
     }));
     form.append(mainModule, new Blob([Buffer.from(bytes)], { type: "application/javascript+module" }), mainModule);
-    const credential = await this.issueCredential(operation);
+    const credential = await this.issueCredential("version-upload");
     if (isFailure(credential)) return credential;
     let response: CloudflareWorkerApiResponse<CloudflareWorkerVersion>;
     try {

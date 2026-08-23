@@ -7,6 +7,10 @@ import {
   type CustomerRealmWorkerConfiguration,
   type CustomerRealmWorkerEnv,
 } from "./realm-worker.ts";
+import {
+  parseProductionOperationsLedger,
+  type ProductionOperationsReadiness,
+} from "../operations/production-operations.ts";
 
 export const CUSTOMER_REALM_OPERATOR_PROTOCOL = "anyam.customer-realm-operator/v1" as const;
 export const CUSTOMER_REALM_OPERATOR_PREFLIGHT_PROTOCOL = "anyam.customer-realm-preflight/v1" as const;
@@ -42,6 +46,7 @@ export const CUSTOMER_REALM_INSTALLATION_MANIFEST = {
     "ANYAM_LAST_CHECKPOINT_DIGEST",
     "ANYAM_RESTORE_DRILL_STATE",
     "ANYAM_PENDING_OPERATIONS_STATE",
+    "ANYAM_OPERATIONS_LEDGER",
   ],
 } as const;
 
@@ -69,6 +74,8 @@ export type CustomerRealmOperatorEnv = CustomerRealmWorkerEnv & {
   readonly ANYAM_LAST_CHECKPOINT_DIGEST?: string | undefined;
   readonly ANYAM_RESTORE_DRILL_STATE?: string | undefined;
   readonly ANYAM_PENDING_OPERATIONS_STATE?: string | undefined;
+  /** Credential-free JSON snapshot of customer-run operational drill receipts. */
+  readonly ANYAM_OPERATIONS_LEDGER?: string | undefined;
 };
 
 export type CustomerRealmOperatorIdentityObservation = {
@@ -136,6 +143,7 @@ export type CustomerRealmOperatorStatus = {
     readonly lastVerifiedCheckpointDigest: string | null;
     readonly restoreDrillState: CustomerRealmOperatorRestoreState;
   };
+  readonly operations: ProductionOperationsReadiness;
   readonly checks: readonly CustomerRealmOperatorCheck[];
   readonly nextActions: readonly string[];
   readonly credentialFree: true;
@@ -316,6 +324,22 @@ function pendingCheck(env: CustomerRealmOperatorEnv): CustomerRealmOperatorCheck
   return check({ id: "pending-operations", state: "indeterminate", receipt: "pendingOperations=not-observed; readOnly=true", recoveryAction: "Read the customer-owned operation ledger and record whether any pending operation remains.", observed: { state: "not-observed" } });
 }
 
+function operationsCheck(env: CustomerRealmOperatorEnv): { readonly readiness: ProductionOperationsReadiness; readonly check: CustomerRealmOperatorCheck } {
+  try {
+    const readiness = parseProductionOperationsLedger(env.ANYAM_OPERATIONS_LEDGER).evaluate();
+    if (readiness.status === "ready") return { readiness, check: check({ id: "production-operations", state: "healthy", receipt: `${readiness.receipt}; readOnly=true`, recoveryAction: "No recovery action is currently required.", observed: { verified: readiness.verifiedKinds.length, required: readiness.requiredKinds.length } }) };
+    const state: CustomerRealmOperatorStatusState = readiness.status === "blocked" ? "blocked" : "indeterminate";
+    return { readiness, check: check({ id: "production-operations", state, receipt: `${readiness.receipt}; readOnly=true`, recoveryAction: readiness.recoveryAction, observed: { verified: readiness.verifiedKinds.length, required: readiness.requiredKinds.length, missing: readiness.missingKinds.length, failed: readiness.failedKinds.length, indeterminate: readiness.indeterminateKinds.length } }) };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "production_operations_ledger_invalid";
+    const empty = parseProductionOperationsLedger(undefined).evaluate();
+    return {
+      readiness: { ...empty, status: "blocked", recoveryAction: "Repair the customer-owned production-operation ledger and rerun the read-only control-room check.", receipt: `operations=blocked; ledger=invalid; detail=${detail}; credentialFree=true` },
+      check: check({ id: "production-operations", state: "blocked", receipt: `operations=blocked; ledger=invalid; readOnly=true`, recoveryAction: "Repair the customer-owned production-operation ledger and rerun the read-only control-room check.", observed: { ledger: "invalid" } }),
+    };
+  }
+}
+
 export async function inspectCustomerRealmOperatorStatus(env: CustomerRealmOperatorEnv, identity: CustomerRealmOperatorIdentityObservation = {}): Promise<CustomerRealmOperatorStatus> {
   const configuration = inspectCustomerRealmWorkerConfiguration(env);
   const manifestDigest = await customerRealmInstallationManifestDigest();
@@ -326,6 +350,7 @@ export async function inspectCustomerRealmOperatorStatus(env: CustomerRealmOpera
     migration: safeDigest(env.ANYAM_MIGRATION_DIGEST),
     configuration: safeDigest(env.ANYAM_CONFIGURATION_DIGEST),
   } as const;
+  const operations = operationsCheck(env);
   const checks = [
     manifestCheck(env.ANYAM_INSTALLATION_MANIFEST_DIGEST, manifestDigest),
     configurationCheck(configuration),
@@ -338,6 +363,7 @@ export async function inspectCustomerRealmOperatorStatus(env: CustomerRealmOpera
     policyCheck(env),
     exportCheck(env, digests),
     pendingCheck(env),
+    operations.check,
   ] as const;
   const status = aggregate(checks);
   return {
@@ -387,6 +413,7 @@ export async function inspectCustomerRealmOperatorStatus(env: CustomerRealmOpera
       lastVerifiedCheckpointDigest: safeDigest(env.ANYAM_LAST_CHECKPOINT_DIGEST),
       restoreDrillState: restoreState(env.ANYAM_RESTORE_DRILL_STATE),
     },
+    operations: operations.readiness,
     checks,
     nextActions: uniqueActions(checks),
     credentialFree: true,

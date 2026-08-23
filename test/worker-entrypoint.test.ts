@@ -683,6 +683,50 @@ test("Realm Worker MCP entrypoint validates the live delivery grant before autho
   assert.equal(JSON.stringify(body).includes("session:mcp-entrypoint-delivery"), false);
 });
 
+test("human delivery MCP authorization is reachable without delegated Agent fields", async () => {
+  const installationId = "authorization-delivery-test";
+  const realm = `realm:${installationId}`;
+  const kernelSessionId = "session:human-delivery";
+  const hostSessionId = "host-session:human-delivery";
+  const oauthKv = new MemoryKV();
+  await oauthKv.put(`anyam:passkey:session:${hostSessionId}`, JSON.stringify({
+    protocol: "anyam.passkey-owner/v1",
+    sessionId: hostSessionId,
+    realmId: realm,
+    userId: "owner:delivery",
+    displayName: "Delivery Owner",
+    credentialId: "credential:delivery",
+    kernelSessionId,
+    actorId: "actor:delivery",
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    createdAt: "2026-08-23T00:00:00.000Z",
+  }));
+  const namespace = {
+    idFromName: (): string => "delivery-do",
+    get: () => ({
+      fetch: async (request: Request): Promise<Response> => {
+        assert.equal(request.headers.get(REALM_COORDINATOR_INTERNAL_HEADER), REALM_COORDINATOR_INTERNAL_VALUE);
+        assert.equal(new URL(request.url).pathname, "/identity/session/validate");
+        return new Response(JSON.stringify({ protocol: "anyam.realm-coordinator/v1", status: "session-valid", session: { id: kernelSessionId, actorId: "actor:delivery", principalId: "owner:delivery" } }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    }),
+  };
+  const env = { ANYAM_INSTALLATION_ID: installationId, OAUTH_KV: oauthKv, REALM_COORDINATOR: namespace } as unknown as AnyamRealmOAuthEnv;
+  const resource = `https://realm.example/mcp/projects/project:demo?sourceSpaceId=source:public`;
+  const result = await (await import("../apps/realm-worker/src/passkey-owner.ts")).anyamPasskeyOwnerAuthorization({
+    env,
+    rawRequest: new Request("https://realm.example/authorize", { headers: { cookie: `anyam_owner_session=${encodeURIComponent(hostSessionId)}` } }),
+    request: { responseType: "code", clientId: "client:mcp", redirectUri: "https://client.example/callback", scope: ["landing.request"], state: "state", resource },
+    client: { clientId: "client:mcp", clientName: "MCP client", redirectUris: ["https://client.example/callback"], tokenEndpointAuthMethod: "none" },
+  });
+  assert.equal(result.status, "authorized");
+  if (result.status === "authorized") {
+    assert.equal(result.props?.agentId, undefined);
+    assert.equal(result.props?.taskId, undefined);
+    assert.match(result.authorizationReceipt, /human-delivery-grant/);
+  }
+});
+
 test("Realm Worker owner delegation edge keeps task authority bounded and credential-free", async () => {
   const oauthKv = new MemoryKV();
   const hostSessionId = "host-session:agent-delegation";

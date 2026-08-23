@@ -11,7 +11,7 @@ import {
 } from "../kernel/contracts.ts";
 import { assertTargetCanPromote, createTargetDeploymentProfile, targetDeploymentContractDigest, targetDeploymentProfile, TargetDeploymentProfileError } from "./target-deployment.ts";
 import { assertReleaseInputSetMatches, deriveReleaseInputSet } from "./release-input.ts";
-import { assertMigrationPlanSafeForTarget, createMigrationPlan, defaultMigrationPlan } from "./migration-plan.ts";
+import { assertMigrationPlanSafeForTarget, automaticMigrationRollbackDecision, createMigrationPlan, defaultMigrationPlan } from "./migration-plan.ts";
 
 /**
  * A Target adapter is deliberately smaller than the Promotion authority. It
@@ -952,6 +952,13 @@ export class WorkerPromotionCoordinator {
     promotion.receipt = `promotion=health-failed; release=${release.release.id}; ${receipt}`;
     this.target.state = "degraded";
     this.transition(promotion, "degraded", promotion.receipt);
+    const migrationDecision = automaticMigrationRollbackDecision(release.release.migrationPlan ?? defaultMigrationPlan());
+    if (!migrationDecision.allowed) {
+      promotion.recoveryAction = migrationDecision.recoveryAction;
+      promotion.receipt = `${promotion.receipt}; ${migrationDecision.receipt}`;
+      return;
+    }
+    promotion.receipt = `${promotion.receipt}; ${migrationDecision.receipt}`;
     if (!promotion.previousReleaseId || !this.target.capabilities.rollback) {
       promotion.recoveryAction = promotion.previousReleaseId
         ? "Target is degraded; qualify rollback capability or reconcile the provider before retrying"

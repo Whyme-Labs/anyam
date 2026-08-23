@@ -1435,8 +1435,8 @@ export function targetFromManifest(target: NormalizedTarget, projectId: string):
   return {
     ...targetValue,
     deploymentProfile: createTargetDeploymentProfile({
-      environment: "custom",
-      channel: "custom",
+      environment: "development",
+      channel: "alpha",
       audience: target.id,
       runtimeIdentity: `target:${projectId}:${target.id}`,
       routeIdentities: [],
@@ -1444,7 +1444,7 @@ export function targetFromManifest(target: NormalizedTarget, projectId: string):
       dataResourceIdentities: [],
       configurationDigests: [target.contractDigest],
       secretUseAliases: [],
-      dataClass: "custom",
+      dataClass: "isolated",
       resourceSharing: "isolated",
     }),
   };

@@ -120,17 +120,43 @@ export type CloudflareWorkerVersion = {
   };
   resources?: CloudflareWorkerVersionResources;
   readbackReceipt?: string;
+  readbackDigest?: string;
   number?: number;
 };
 
 export type CloudflareWorkerVersionList = {
   items?: readonly CloudflareWorkerVersion[];
+  result_info?: { page?: number; per_page?: number; total_pages?: number; count?: number };
 };
 
 export type CloudflareWorkerDeployment = {
   id: string;
   versions: readonly { version_id: string; percentage: number }[];
   created_on?: string;
+};
+
+export type CloudflareWorkerRolloutStep = {
+  percentage: number;
+  minimumObservationMs: number;
+};
+
+export type CloudflareWorkerRolloutPolicy = {
+  steps: readonly CloudflareWorkerRolloutStep[];
+  versionAffinityRequired: boolean;
+};
+
+export type CloudflareWorkerProviderIdentity = {
+  targetId: string;
+  releaseDigest: string;
+  providerVersionId: string;
+  providerDeploymentId?: string;
+  providerReadbackDigest: string;
+  receipt: string;
+};
+
+export type CloudflareWorkerProviderIdentityLedger = {
+  load(input: { targetId: string; releaseDigest: string }): Promise<CloudflareWorkerProviderIdentity | undefined>;
+  save(identity: CloudflareWorkerProviderIdentity): Promise<void>;
 };
 
 export type CloudflareWorkerTargetAdapterConfig = {
@@ -151,6 +177,9 @@ export type CloudflareWorkerTargetAdapterConfig = {
   previewUrlForVersion: (versionId: string) => string;
   /** Resolves non-version-url strategies to an explicit isolated/controlled route. */
   previewUrlForStrategy?: (input: { strategy: TargetPreviewStrategy; target: WorkerTarget; release: ImmutableRelease; providerVersionId: string }) => string | undefined;
+  rolloutPolicy?: CloudflareWorkerRolloutPolicy;
+  rolloutObserver?: (input: { step: CloudflareWorkerRolloutStep; release: ImmutableRelease; target: WorkerTarget; providerVersionId: string; deploymentId: string }) => Promise<{ status: "continue" | "abort"; receipt: string }>;
+  providerIdentityLedger?: CloudflareWorkerProviderIdentityLedger;
   healthUrl: string | ((input: { target: WorkerTarget; deploymentId?: string; providerVersionId: string }) => string);
   /**
    * Validates the application response against the expected Release. A
@@ -378,6 +407,17 @@ function validateRouteReadinessRetry(retry: CloudflareWorkerRouteReadinessRetry,
   }
 }
 
+function validateRolloutPolicy(policy: CloudflareWorkerRolloutPolicy): void {
+  if (!Array.isArray(policy.steps) || policy.steps.length === 0) throw new Error("rolloutPolicy.steps must contain at least one step");
+  let previous = 0;
+  for (const step of policy.steps) {
+    if (!Number.isFinite(step.percentage) || step.percentage <= previous || step.percentage > 100) throw new Error(`rolloutPolicy percentage must increase from ${previous} to at most 100; received ${step.percentage}`);
+    if (!Number.isFinite(step.minimumObservationMs) || step.minimumObservationMs < 0) throw new Error(`rolloutPolicy.minimumObservationMs must be non-negative; received ${step.minimumObservationMs}`);
+    previous = step.percentage;
+  }
+  if (previous !== 100) throw new Error(`rolloutPolicy final percentage must be 100; received ${previous}`);
+}
+
 function validateHealthResponse(input: {
   operation: "preview" | "health";
   status: number;
@@ -513,10 +553,10 @@ function isFailure<T>(value: T | DeliveryAdapterFailure): value is DeliveryAdapt
   return typeof value === "object" && value !== null && "status" in value && (value as { status?: unknown }).status === "failed";
 }
 
-function deploymentBody(versionId: string, message: string): string {
+function deploymentBody(versionId: string, message: string, percentage = 100): string {
   return JSON.stringify({
     strategy: "percentage",
-    versions: [{ percentage: 100, version_id: versionId }],
+    versions: [{ percentage, version_id: versionId }],
     annotations: { "workers/message": message },
   });
 }
@@ -557,6 +597,7 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
       validateRouteReadinessRetry(config.routeReadinessRetry, "routeReadinessRetry");
     }
     if (config.rollbackRouteReadinessRetry) validateRouteReadinessRetry(config.rollbackRouteReadinessRetry, "rollbackRouteReadinessRetry");
+    if (config.rolloutPolicy) validateRolloutPolicy(config.rolloutPolicy);
     this.now = config.now ?? (() => new Date().toISOString());
     this.fetcher = config.fetch ?? fetch;
     this.contractDigest = config.contractDigest ?? digest({
@@ -623,23 +664,43 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     const credential = await this.issueCredential(operation);
     if (isFailure(credential)) return credential;
     const path = operationPath(this.config.accountId, this.config.scriptName, "/deployments");
-    let response: CloudflareWorkerApiResponse<CloudflareWorkerDeployment>;
-    try {
-      response = await this.config.transport.request<CloudflareWorkerDeployment>({
-        method: "POST",
-        path,
-        token: credential.token,
-        headers: { "content-type": "application/json" },
-        body: deploymentBody(version.id, `Anyam Release ${input.release.release.id}`),
-      });
-    } catch (error) {
-      return failure({ operation, code: "cloudflare.transport", message: `Cloudflare Worker deployment transport failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "inspect the deployment by its Release tag before retrying the same immutable promotion", receipt: `providerVersionId=${version.id}; credentialMaterialStored=false` });
+    const rollout = this.config.rolloutPolicy ?? { steps: [{ percentage: 100, minimumObservationMs: 0 }], versionAffinityRequired: true };
+    let result: CloudflareWorkerDeployment | undefined;
+    const deploymentIds: string[] = [];
+    for (const step of rollout.steps) {
+      let response: CloudflareWorkerApiResponse<CloudflareWorkerDeployment>;
+      try {
+        response = await this.config.transport.request<CloudflareWorkerDeployment>({
+          method: "POST",
+          path,
+          token: credential.token,
+          headers: { "content-type": "application/json" },
+          body: deploymentBody(version.id, `Anyam Release ${input.release.release.id}; rollout=${step.percentage}%`, step.percentage),
+        });
+      } catch (error) {
+        return failure({ operation, code: "cloudflare.transport", message: `Cloudflare Worker deployment transport failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "inspect the exact rollout deployment IDs by Release before retrying the same immutable promotion", receipt: `providerVersionId=${version.id}; rolloutStepsCompleted=${deploymentIds.length}; rolloutDeploymentIds=${deploymentIds.join(",") || "none"}; credentialMaterialStored=false` });
+      }
+      const stepResult = responseResultWithCredential(response, operation, credential);
+      if (isFailure(stepResult)) return stepResult;
+      result = stepResult;
+      deploymentIds.push(result.id);
+      this.deploymentsById.set(result.id, version.id);
+      if (step.minimumObservationMs > 0) {
+        if (!this.config.rolloutObserver) return failure({ operation, code: "rollout.observer-missing", message: `Rollout step ${step.percentage}% requires an observation callback.`, outcome: "indeterminate", retryable: false, recoveryAction: "configure a measured rollout observer before continuing traffic to the next step", receipt: `providerVersionId=${version.id}; rolloutPercentage=${step.percentage}; minimumObservationMs=${step.minimumObservationMs}; observation=missing; providerMutation=true` });
+        let observation: { status: "continue" | "abort"; receipt: string };
+        try {
+          observation = await this.config.rolloutObserver({ step, release: input.release, target: input.target, providerVersionId: version.id, deploymentId: result.id });
+        } catch (error) {
+          return failure({ operation, code: "rollout.observer", message: `Rollout observation failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "inspect the current rollout step and provider deployment before retrying the same immutable operation", receipt: `providerVersionId=${version.id}; rolloutPercentage=${step.percentage}; observation=failed; providerMutation=true` });
+        }
+        if (observation.status !== "continue") return failure({ operation, code: "rollout.aborted", message: `Rollout aborted at ${step.percentage}% by its observation policy.`, outcome: "indeterminate", retryable: false, recoveryAction: "inspect the rollout observation and explicitly reconcile or roll back the provider deployment", receipt: `providerVersionId=${version.id}; deploymentId=${result.id}; rolloutPercentage=${step.percentage}; observation=abort; ${observation.receipt}; providerMutation=true` });
+      }
     }
-    const result = responseResultWithCredential(response, operation, credential);
-    if (isFailure(result)) return result;
-    this.deploymentsById.set(result.id, version.id);
+    if (!result) return failure({ operation, code: "rollout.empty", message: "Cloudflare Worker rollout produced no deployment result.", outcome: "indeterminate", retryable: false, recoveryAction: "configure at least one rollout step and retry the immutable promotion", receipt: `providerVersionId=${version.id}; rollout=empty; providerMutation=false` });
     const providerOperationId = `deployment:${result.id}`;
-    const receipt = `provider=cloudflare-workers; operation=apply; providerOperationId=${providerOperationId}; providerVersionId=${version.id}; releaseDigest=${input.release.releaseDigest}; artifactDigest=${input.release.artifacts.map((artifact) => artifact.digest).join(",")}; credentialMaterialStored=false`;
+    const ledgerFailure = await this.persistProviderIdentity({ targetId: input.target.id, releaseDigest: input.release.releaseDigest, providerVersionId: version.id, providerDeploymentId: result.id, providerReadbackDigest: version.readbackDigest ?? digest(version), receipt: `provider=cloudflare-workers; identity=deployment; target=${input.target.id}; releaseDigest=${input.release.releaseDigest}; providerVersionId=${version.id}; providerDeploymentId=${result.id}; rolloutDeploymentIds=${deploymentIds.join(",")}; versionAffinity=${rollout.versionAffinityRequired}; credentialMaterialStored=false` }, operation);
+    if (ledgerFailure) return ledgerFailure;
+    const receipt = `provider=cloudflare-workers; operation=apply; providerOperationId=${providerOperationId}; providerVersionId=${version.id}; releaseDigest=${input.release.releaseDigest}; artifactDigest=${input.release.artifacts.map((artifact) => artifact.digest).join(",")}; rolloutSteps=${rollout.steps.map((step) => `${step.percentage}%`).join(",")}; rolloutDeploymentIds=${deploymentIds.join(",")}; versionAffinity=${rollout.versionAffinityRequired}; credentialMaterialStored=false`;
     return {
       status: "succeeded",
       value: {
@@ -723,6 +784,8 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     const result = responseResultWithCredential(response, operation, credential);
     if (isFailure(result)) return result;
     this.deploymentsById.set(result.id, previousVersion.id);
+    const ledgerFailure = await this.persistProviderIdentity({ targetId: input.target.id, releaseDigest: input.previousRelease.releaseDigest, providerVersionId: previousVersion.id, providerDeploymentId: result.id, providerReadbackDigest: previousVersion.readbackDigest ?? digest(previousVersion), receipt: `provider=cloudflare-workers; identity=rollback-deployment; target=${input.target.id}; releaseDigest=${input.previousRelease.releaseDigest}; providerVersionId=${previousVersion.id}; providerDeploymentId=${result.id}; credentialMaterialStored=false` }, operation);
+    if (ledgerFailure) return ledgerFailure;
     const providerOperationId = `deployment:${result.id}`;
     const receipt = `provider=cloudflare-workers; operation=rollback; providerOperationId=${providerOperationId}; providerVersionId=${previousVersion.id}; releaseDigest=${input.previousRelease.releaseDigest}; artifactDigest=${input.previousRelease.artifacts.map((artifact) => artifact.digest).join(",")}; credentialMaterialStored=false`;
     return {
@@ -792,10 +855,21 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     if (isFailure(detail)) return detail;
     try {
       const receipt = assertCloudflareWorkerVersionReadback({ manifest, version: detail });
-      return { ...version, ...detail, resources: detail.resources, metadata: detail.metadata, readbackReceipt: receipt } as CloudflareWorkerVersion;
+      const readbackDigest = digest({ id: detail.id, metadata: detail.metadata, resources: detail.resources });
+      return { ...version, ...detail, readbackReceipt: receipt, readbackDigest };
     } catch (error) {
       const manifestError = error instanceof WorkerReleaseManifestError ? error : undefined;
       return failure({ operation, code: `cloudflare.readback.${manifestError?.code ?? "invalid"}`, message: error instanceof Error ? error.message : String(error), recoveryAction: manifestError?.recoveryAction ?? "reconcile provider version detail before deployment", receipt: `${manifestError?.receipt ?? `providerVersionId=${version.id}; manifestDigest=${manifest.digest}; readback=invalid`}; credentialMaterialStored=false` });
+    }
+  }
+
+  private async persistProviderIdentity(identity: CloudflareWorkerProviderIdentity, operation: CloudflareWorkerTargetOperation): Promise<DeliveryAdapterFailure | undefined> {
+    if (!this.config.providerIdentityLedger) return undefined;
+    try {
+      await this.config.providerIdentityLedger.save(identity);
+      return undefined;
+    } catch (error) {
+      return failure({ operation, code: "provider.identity-ledger", message: `Cloudflare Worker provider identity ledger could not be persisted: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "persist the exact provider version/deployment identity before retrying the immutable operation", receipt: `target=${identity.targetId}; releaseDigest=${identity.releaseDigest}; providerVersionId=${identity.providerVersionId}; providerDeploymentId=${identity.providerDeploymentId ?? "not-provided"}; ledger=unavailable; providerMutation=false` });
     }
   }
 
@@ -838,6 +912,8 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     if (!result.id) return failure({ operation, code: "cloudflare.response", message: "Cloudflare accepted the Worker version request without returning a version identity.", outcome: "indeterminate", retryable: true, recoveryAction: "inspect the Worker versions list and reconcile the version tagged with this Release digest", receipt: `manifestDigest=${manifest.digest}; providerMutation=accepted; providerVersionId=missing` });
     const verified = await this.readVersionDetail(result, manifest, operation);
     if (isFailure(verified)) return verified;
+    const ledgerFailure = await this.persistProviderIdentity({ targetId: input.target.id, releaseDigest: input.release.releaseDigest, providerVersionId: verified.id, providerReadbackDigest: verified.readbackDigest ?? digest(verified), receipt: `provider=cloudflare-workers; identity=version; target=${input.target.id}; releaseDigest=${input.release.releaseDigest}; providerVersionId=${verified.id}; readbackDigest=${verified.readbackDigest ?? "not-observed"}; credentialMaterialStored=false` }, operation);
+    if (ledgerFailure) return ledgerFailure;
     this.versionsByPromotion.set(input.release.releaseDigest, verified);
     return verified;
   }
@@ -847,25 +923,52 @@ export class CloudflareWorkerTargetAdapter implements WorkerTargetAdapter {
     if (cached) return cached;
     const manifest = expectedManifest ?? this.workerManifest(release, target, operation);
     if (isFailure(manifest)) return manifest;
+    if (this.config.providerIdentityLedger) {
+      let identity: CloudflareWorkerProviderIdentity | undefined;
+      try {
+        identity = await this.config.providerIdentityLedger.load({ targetId: target.id, releaseDigest: release.releaseDigest });
+      } catch (error) {
+        return failure({ operation, code: "provider.identity-ledger", message: `Cloudflare Worker provider identity ledger could not be loaded: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "restore the provider identity ledger before retrying the immutable Release operation", receipt: `target=${target.id}; releaseDigest=${release.releaseDigest}; ledger=unavailable; providerMutation=false` });
+      }
+      if (identity) {
+        const stored = await this.readVersionDetail({ id: identity.providerVersionId }, manifest, operation);
+        if (!isFailure(stored)) {
+          if (stored.readbackDigest !== identity.providerReadbackDigest) return failure({ operation, code: "provider.identity-mismatch", message: `Stored provider identity for Release ${release.release.id} has a different read-back digest.`, recoveryAction: "reconcile the Target ledger with the exact provider version detail before retrying", receipt: `target=${target.id}; releaseDigest=${release.releaseDigest}; providerVersionId=${identity.providerVersionId}; expectedReadbackDigest=${identity.providerReadbackDigest}; observedReadbackDigest=${stored.readbackDigest ?? "missing"}; ledger=blocked; providerMutation=false` });
+          this.versionsByPromotion.set(release.releaseDigest, stored);
+          return stored;
+        }
+        if (stored.errorCode !== "cloudflare.http_404") return stored;
+      }
+    }
     const credential = await this.issueCredential("version-read");
     if (isFailure(credential)) return credential;
-    let response: CloudflareWorkerApiResponse<CloudflareWorkerVersionList>;
-    try {
-      response = await this.config.transport.request<CloudflareWorkerVersionList>({
-        method: "GET",
-        path: `${operationPath(this.config.accountId, this.config.scriptName, "/versions")}?per_page=100`,
-        token: credential.token,
-      });
-    } catch (error) {
-      return failure({ operation, code: "cloudflare.transport", message: `Cloudflare Worker version lookup transport failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "inspect provider reachability and retry the same immutable Release operation", receipt: "providerOperation=version-list; credentialMaterialStored=false" });
+    const versions: CloudflareWorkerVersion[] = [];
+    let page = 1;
+    while (true) {
+      let response: CloudflareWorkerApiResponse<CloudflareWorkerVersionList>;
+      try {
+        response = await this.config.transport.request<CloudflareWorkerVersionList>({
+          method: "GET",
+          path: `${operationPath(this.config.accountId, this.config.scriptName, "/versions")}?per_page=100&page=${page}`,
+          token: credential.token,
+        });
+      } catch (error) {
+        return failure({ operation, code: "cloudflare.transport", message: `Cloudflare Worker version lookup transport failed: ${error instanceof Error ? error.message : String(error)}`, outcome: "indeterminate", retryable: true, recoveryAction: "inspect provider reachability and retry the same immutable Release operation", receipt: `providerOperation=version-list; page=${page}; credentialMaterialStored=false` });
+      }
+      const result = responseResultWithCredential(response, operation, credential);
+      if (isFailure(result)) return result;
+      versions.push(...(result.items ?? []));
+      const totalPages = result.result_info?.total_pages;
+      if ((totalPages !== undefined && page >= totalPages) || (totalPages === undefined && (result.items ?? []).length < 100)) break;
+      page += 1;
     }
-    const result = responseResultWithCredential(response, operation, credential);
-    if (isFailure(result)) return result;
     const tag = tagForRelease(release);
-    const version = (result.items ?? []).find((candidate) => candidate.metadata?.annotations?.["workers/tag"] === tag);
-    if (!version) return failure({ operation, code: "cloudflare.version-not-found", message: `Cloudflare Worker version for Release ${release.release.id} was not found by its immutable tag.`, recoveryAction: "upload the exact verified Release Artifact or reconcile the provider version list before retrying", receipt: `releaseDigest=${release.releaseDigest}; tag=${tag}; providerOperation=version-list; found=false` });
+    const version = versions.find((candidate) => candidate.metadata?.annotations?.["workers/tag"] === tag);
+    if (!version) return failure({ operation, code: "cloudflare.version-not-found", message: `Cloudflare Worker version for Release ${release.release.id} was not found by its immutable tag.`, recoveryAction: "upload the exact verified Release Artifact or reconcile the provider version list before retrying", receipt: `releaseDigest=${release.releaseDigest}; tag=${tag}; providerOperation=version-list; pages=${page}; versions=${versions.length}; found=false` });
     const verified = await this.readVersionDetail(version, manifest, operation);
     if (isFailure(verified)) return verified;
+    const ledgerFailure = await this.persistProviderIdentity({ targetId: target.id, releaseDigest: release.releaseDigest, providerVersionId: verified.id, providerReadbackDigest: verified.readbackDigest ?? digest(verified), receipt: `provider=cloudflare-workers; identity=version; target=${target.id}; releaseDigest=${release.releaseDigest}; providerVersionId=${verified.id}; readbackDigest=${verified.readbackDigest ?? "not-observed"}; ledger=discovered; credentialMaterialStored=false` }, operation);
+    if (ledgerFailure) return ledgerFailure;
     this.versionsByPromotion.set(release.releaseDigest, verified);
     return verified;
   }

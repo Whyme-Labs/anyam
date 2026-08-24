@@ -13,6 +13,7 @@
     "qualification:worker-target": "tsx scripts/qualify-worker-target.ts",
     "qualification:cloudflare-golden-path": "tsx scripts/qualify-cloudflare-golden-path.ts",
     "qualification:cloudflare-golden-recovery": "tsx scripts/qualify-cloudflare-golden-recovery.ts",
+    "qualification:team-simulation": "tsx scripts/qualify-team-simulation.ts",
     "qualification:linux-egress": "tsx scripts/qualify-linux-egress.ts",
     "qualification:linux-workspace": "tsx scripts/qualify-linux-workspace.ts",
     "qualification:promotion-executor": "tsx scripts/qualify-promotion-executor.ts",

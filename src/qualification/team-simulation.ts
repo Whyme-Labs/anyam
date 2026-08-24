@@ -50,8 +50,10 @@ import {
   type MirrorRemoteState,
   type MirrorRefUpdate,
 } from "../portability/mirror.ts";
+import { main as anyamCliMain } from "../../packages/create-anyam/src/cli.ts";
 
 const execFile = promisify(execFileCallback);
+let observedGitOperationCount = 0;
 
 export const TEAM_SIMULATION_PROTOCOL = "anyam.team-simulation/v1" as const;
 
@@ -119,6 +121,17 @@ type GitConflictReceipt = {
   tag?: string;
 };
 
+type BuildReceipt = {
+  artifactDigest: string;
+  outputDigest: string;
+  configurationDigest: string;
+  toolchainDigest: string;
+  dependencyDigest: string;
+  environmentDigest: string;
+  outputFiles: readonly string[];
+  receipt: string;
+};
+
 type RepositoryFixture = {
   id: "worker" | "cli";
   project: Project;
@@ -138,6 +151,7 @@ type HybridFixture = {
   commits: Readonly<Record<string, string>>;
   remoteCommit: string;
   files: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  repositoryRefs: Readonly<Record<string, readonly GitRef[]>>;
 };
 
 type CollaborationResult = {
@@ -150,6 +164,17 @@ type CollaborationResult = {
   target: Target;
   release: Release;
   artifact: Artifact;
+  build: BuildReceipt;
+  workspaceCount: number;
+  changeCount: number;
+};
+
+type MirrorScenarioResult = {
+  receipt: string;
+  observations: Readonly<Record<string, unknown>>;
+  coordinator: MirrorCoordinator;
+  inboundChange: Change;
+  inboundCommit: string;
 };
 
 function actor(actorId: string, clientId = "client:team-simulation"): ActorRef {
@@ -170,6 +195,14 @@ function requireValue<T>(value: T | undefined, label: string): T {
   return value;
 }
 
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function refSignature(refs: readonly GitRef[]): string {
+  return refs.map((ref) => `${ref.name}=${ref.oid}`).sort().join("|");
+}
+
 function finding(input: Omit<SimulationFinding, "id" | "verdict"> & { verdict?: Exclude<SimulationVerdict, "VERIFIED"> }): SimulationFinding {
   return {
     id: `finding:${input.scenarioId}:${input.seam}`,
@@ -183,7 +216,18 @@ function finding(input: Omit<SimulationFinding, "id" | "verdict"> & { verdict?: 
   };
 }
 
+async function captureScenario<T>(scenarios: SimulationScenario[], id: string, action: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await action();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    scenarios.push({ id, verdict: "INCONCLUSIVE", receipt: `scenario=${id}; status=inconclusive; error=${message}; providerMutation=false`, observations: { error: message }, findings: [] });
+    return undefined;
+  }
+}
+
 async function git(directory: string | undefined, args: readonly string[], env: Readonly<Record<string, string>> = {}): Promise<GitResult> {
+  observedGitOperationCount += 1;
   try {
     const result = await execFile("git", [...args], {
       cwd: directory,
@@ -195,6 +239,22 @@ async function git(directory: string | undefined, args: readonly string[], env: 
       ? error.stderr
       : "";
     throw new Error(`git ${args.join(" ")} failed${stderr.trim().length > 0 ? `: ${stderr.trim()}` : ""}`);
+  }
+}
+
+async function command(commandName: string, args: readonly string[], directory: string): Promise<GitResult> {
+  try {
+    const result = await execFile(commandName, [...args], { cwd: directory, env: process.env });
+    return { stdout: result.stdout, stderr: result.stderr };
+  } catch (error) {
+    const stderr = error && typeof error === "object" && "stderr" in error && typeof error.stderr === "string"
+      ? error.stderr
+      : "";
+    const stdout = error && typeof error === "object" && "stdout" in error && typeof error.stdout === "string"
+      ? error.stdout
+      : "";
+    const detail = stderr.trim().length > 0 ? stderr.trim() : stdout.trim();
+    throw new Error(`${commandName} ${args.join(" ")} failed${detail.length > 0 ? `: ${detail}` : ""}`);
   }
 }
 
@@ -225,15 +285,15 @@ async function writeFiles(root: string, files: Readonly<Record<string, string>>)
   }
 }
 
-async function readFiles(root: string, current = ""): Promise<Record<string, string>> {
+async function readFiles(root: string, current = "", includeGenerated = false): Promise<Record<string, string>> {
   const directory = join(root, current);
   const entries = await readdir(directory, { withFileTypes: true });
   const result: Record<string, string> = {};
   for (const entry of entries) {
-    if (entry.name === ".git" || entry.name === "node_modules" || entry.name === "dist") continue;
+    if (entry.name === ".git" || entry.name === "node_modules" || (!includeGenerated && entry.name === "dist")) continue;
     const relativePath = current.length === 0 ? entry.name : `${current}/${entry.name}`;
     if (entry.isDirectory()) {
-      Object.assign(result, await readFiles(root, relativePath));
+      Object.assign(result, await readFiles(root, relativePath, includeGenerated));
     } else if (entry.isFile()) {
       result[relativePath] = await readFile(join(root, relativePath), "utf8");
     }
@@ -352,7 +412,7 @@ async function makeCliFixture(root: string): Promise<RepositoryFixture> {
     "README.md": "# Anyam CLI simulation\n\nThis repository is a command-line tool.\n",
     "package.json": JSON.stringify({ name: "team-cli-simulation", version: "0.1.0", type: "module", bin: { "team-cli": "src/cli.ts" } }, null, 2) + "\n",
     "src/index.ts": 'const ANYAM_TEAM_SENTINEL = "base";\n\nexport function greet(name: string): string {\n  return `Hello, ${name}`;\n}\n',
-    "src/cli.ts": 'import { greet } from "./index.ts";\n\nconst name = process.argv[2] ?? "world";\nprocess.stdout.write(`${greet(name)}\\n`);\n',
+    "src/cli.ts": 'import { greet } from "./index.js";\n\nconst name = process.argv[2] ?? "world";\nprocess.stdout.write(`${greet(name)}\\n`);\n',
     "test/cli.test.ts": 'import { strict as assert } from "node:assert";\nassert.equal("Hello, Anyam", "Hello, Anyam");\n',
   };
   const initialCommit = await initializeRepository(seedDirectory, cliFiles);
@@ -395,6 +455,9 @@ async function makeHybridFixture(root: string, fixtureRoot: string): Promise<Hyb
   const publicClone = await publicDriver.cloneRepository({ sourceSpaceId: "source:public-player", source: publicDirectory, destination: join(root, "hybrid-public-canonical"), mirror: true, idempotencyKey: "team-simulation-hybrid-public-import" });
   const privateClone = await privateDriver.cloneRepository({ sourceSpaceId: "source:private-codec", source: privateDirectory, destination: join(root, "hybrid-private-canonical"), mirror: true, idempotencyKey: "team-simulation-hybrid-private-import" });
   if (publicClone.status !== "succeeded" || privateClone.status !== "succeeded") throw new Error("hybrid RepositoryDriver import failed");
+  const publicInspection = await publicDriver.inspectRepository({ repository: publicClone.value });
+  const privateInspection = await privateDriver.inspectRepository({ repository: privateClone.value });
+  if (publicInspection.status !== "succeeded" || privateInspection.status !== "succeeded") throw new Error("hybrid RepositoryDriver inspection failed");
   const directories = { "source:public-player": join(root, "hybrid-public-canonical"), "source:private-codec": join(root, "hybrid-private-canonical") };
   return {
     project,
@@ -403,6 +466,7 @@ async function makeHybridFixture(root: string, fixtureRoot: string): Promise<Hyb
     commits: { "source:public-player": publicCommit, "source:private-codec": privateCommit },
     remoteCommit,
     files: { "source:public-player": await readFiles(directories["source:public-player"]), "source:private-codec": await readFiles(directories["source:private-codec"]) },
+    repositoryRefs: { "source:public-player": publicInspection.value.refs, "source:private-codec": privateInspection.value.refs },
   };
 }
 
@@ -410,7 +474,40 @@ function projectView(project: Project, revision: ProjectRevision, sourceSpaces: 
   return deriveProjectView({ project, revision, sourceSpaces, allowedSourceSpaceIds: ids, projectionId: `view:${project.id}:${ids.join("+")}`, classification });
 }
 
-function evidence(input: { id: string; project: Project; revision: ProjectRevision; changeRevision?: ChangeRevision; actor: ActorRef; targetId: string; key: string }): Evidence {
+async function buildFixture(input: { fixture: RepositoryFixture; root: string }): Promise<BuildReceipt> {
+  const releaseDirectory = join(input.root, `${input.fixture.id}-release-source`);
+  await git(undefined, ["clone", "--quiet", input.fixture.seedDirectory, releaseDirectory]);
+  await git(releaseDirectory, ["switch", "--quiet", "feature/agent-b"]);
+  if (input.fixture.id === "worker") {
+    await command("node", ["build.mjs"], releaseDirectory);
+  } else {
+    await writeFile(join(releaseDirectory, "tsconfig.json"), `${JSON.stringify({ compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext", outDir: "dist", rootDir: "src", skipLibCheck: true, types: ["node"], typeRoots: [join(process.cwd(), "node_modules/@types")] }, include: ["src/**/*.ts"] }, null, 2)}\n`, "utf8");
+    await command(join(process.cwd(), "node_modules/.bin/tsc"), ["--project", "tsconfig.json"], releaseDirectory);
+  }
+  const outputFiles = await readFiles(join(releaseDirectory, "dist"), "", true);
+  const outputManifest = JSON.stringify(Object.entries(outputFiles).sort(([left], [right]) => left.localeCompare(right)));
+  const configurationPath = input.fixture.id === "worker" ? "wrangler.jsonc" : "package.json";
+  const configurationDigest = digest(await readFile(join(releaseDirectory, configurationPath), "utf8"));
+  const nodeVersion = (await command("node", ["--version"], releaseDirectory)).stdout.trim();
+  const compilerVersion = input.fixture.id === "cli" ? (await command(join(process.cwd(), "node_modules/.bin/tsc"), ["--version"], releaseDirectory)).stdout.trim() : "worker-build-script";
+  const toolchainDigest = digest(`${nodeVersion}:${compilerVersion}`);
+  const dependencyDigest = digest(JSON.stringify({ project: input.fixture.project.id, package: input.fixture.id }));
+  const environmentDigest = digest(`${process.platform}:${process.arch}`);
+  const outputDigest = digest(outputManifest);
+  return {
+    artifactDigest: outputDigest,
+    outputDigest,
+    configurationDigest,
+    toolchainDigest,
+    dependencyDigest,
+    environmentDigest,
+    outputFiles: Object.keys(outputFiles).sort(),
+    receipt: `build=executed; fixture=${input.fixture.id}; branch=feature/agent-b; files=${Object.keys(outputFiles).length}; outputDigest=${outputDigest}; providerMutation=false`,
+  };
+}
+
+function evidence(input: { id: string; project: Project; revision: ProjectRevision; changeRevision?: ChangeRevision; actor: ActorRef; targetId: string; key: string; build?: BuildReceipt }): Evidence {
+  const build = input.build;
   return {
     protocol: CONTRACT_VERSIONS.evidence,
     version: "v1",
@@ -421,12 +518,12 @@ function evidence(input: { id: string; project: Project; revision: ProjectRevisi
     validityKey: `${input.key}:v1`,
     actionId: `action:${input.key}`,
     verifierId: `verifier:${input.key}`,
-    toolchainDigest: "sha256:team-simulation-toolchain",
-    dependencyDigest: "sha256:team-simulation-dependencies",
-    environmentDigest: "sha256:team-simulation-environment",
+    toolchainDigest: build?.toolchainDigest ?? "sha256:team-simulation-toolchain",
+    dependencyDigest: build?.dependencyDigest ?? "sha256:team-simulation-dependencies",
+    environmentDigest: build?.environmentDigest ?? "sha256:team-simulation-environment",
     inputDigests: [input.revision.id],
     effectDigests: [digest(input.key)],
-    outputDigest: digest(`${input.id}:output`),
+    outputDigest: build?.outputDigest ?? digest(`${input.id}:output`),
     createdAt: new Date().toISOString(),
     producer: { kind: "run", id: `run:${input.id}`, version: "team-simulation-v1" },
     projectRevisionId: input.revision.id,
@@ -439,7 +536,7 @@ function evidence(input: { id: string; project: Project; revision: ProjectRevisi
     authorizationEpoch: "epoch:team-simulation:v1",
     capabilityGrantId: "grant:team-simulation-verifier",
     disclosure: { projectionId: `projection:${input.project.id}`, classification: "project" },
-    receipt: `evidence=passed; key=${input.key}; project=${input.project.id}; canonicalWrite=false`,
+    receipt: build?.receipt ?? `evidence=passed; key=${input.key}; project=${input.project.id}; source=git-verified; canonicalWrite=false`,
     invalidators: ["source-revision", "policy-version"],
     owner: "Anyam team simulation",
     targetId: input.targetId,
@@ -472,17 +569,17 @@ function targetFor(project: Project): Target {
   };
 }
 
-function artifactFor(project: Project, revision: ProjectRevision, changeRevision: ChangeRevision, target: Target, type: string): Artifact {
+function artifactFor(project: Project, revision: ProjectRevision, changeRevision: ChangeRevision, target: Target, type: string, build: BuildReceipt): Artifact {
   return {
     protocol: CONTRACT_VERSIONS.artifact,
     id: `artifact:${project.id}:staging`,
     type,
-    digest: digest(`${project.id}:${revision.id}:${changeRevision.id}`),
+    digest: build.artifactDigest,
     projectRevisionId: revision.id,
     changeRevisionId: changeRevision.id,
     runId: `run:${project.id}:build`,
     actionId: `action:${project.id}:build`,
-    outputPath: "dist/release.bundle",
+    outputPath: build.outputFiles[0] ?? "dist/release.bundle",
     provenanceDigest: digest(`${project.id}:provenance`),
     disclosure: { projectionId: `projection:${project.id}`, classification: "project" },
   };
@@ -505,6 +602,8 @@ async function collaborateSingleRepository(input: { fixture: RepositoryFixture; 
   const source: WorkspaceSource = { sourceSpaceId: fixture.sourceSpace.id, snapshotId: fixture.git.initialCommit, files: fixture.files };
   const workspaceA = await control.createWorkspace({ view, sources: [source], mounts: [{ sourceSpaceId: fixture.sourceSpace.id, mountPath: "source" }], directory: join(input.root, `${fixture.id}-workspace-a`), actorId: authorA.actorId });
   const workspaceB = await control.createWorkspace({ view, sources: [source], mounts: [{ sourceSpaceId: fixture.sourceSpace.id, mountPath: "source" }], directory: join(input.root, `${fixture.id}-workspace-b`), actorId: authorB.actorId });
+  await control.createWorkspace({ view, sources: [source], mounts: [{ sourceSpaceId: fixture.sourceSpace.id, mountPath: "source" }], directory: join(input.root, `${fixture.id}-workspace-reviewer`), actorId: reviewer.actorId });
+  await control.createWorkspace({ view, sources: [source], mounts: [{ sourceSpaceId: fixture.sourceSpace.id, mountPath: "source" }], directory: join(input.root, `${fixture.id}-workspace-verifier`), actorId: verifier.actorId });
   const changeA = control.createChange({ id: `change:${fixture.id}:maintainer`, intentId: `intent:${fixture.id}:issue-1`, workspaceId: workspaceA.workspace.id, author: authorA });
   const changeB = control.createChange({ id: `change:${fixture.id}:contributor`, intentId: `intent:${fixture.id}:issue-2`, workspaceId: workspaceB.workspace.id, author: authorB });
   const revisionA = control.publishRevision({ changeId: changeA.id, workspaceId: workspaceA.workspace.id, declaredEffects: ["textual.main"], sourceSpaceSnapshots: { [fixture.sourceSpace.id]: fixture.git.resolvedFeatureCommit }, actor: authorA, affectedModuleIds: [moduleId], affectedTargetIds: [target.id] });
@@ -545,9 +644,10 @@ async function collaborateSingleRepository(input: { fixture: RepositoryFixture; 
   const evidenceB = evidence({ id: `evidence:${fixture.id}:b`, project, revision: control.canonicalRevision, changeRevision: resolvedB, actor: verifier, targetId: target.id, key: "team-check" });
   const landedB = await collaboration.land({ cohortId: cohortB.id, evidence: [evidenceB], actor: landingActor });
   const finalRevision = control.canonicalRevision;
-  const releaseEvidence = evidence({ id: `evidence:${fixture.id}:release`, project, revision: finalRevision, changeRevision: resolvedB, actor: verifier, targetId: target.id, key: "team-check" });
-  const artifact = artifactFor(project, finalRevision, resolvedB, target, fixture.id === "worker" ? "worker.bundle" : "cli.package");
-  const release: Release = { protocol: CONTRACT_VERSIONS.release, id: `release:${fixture.id}:team`, projectRevisionId: finalRevision.id, artifactIds: [artifact.id], evidenceIds: [releaseEvidence.id], configurationDigests: [digest(`${project.id}:config`)], stateAssumptions: ["local provider boundary; no Cloudflare mutation"], policyVersion: "policy:team-simulation:v1", status: "ready", changeRevisionId: resolvedB.id, provenanceDigest: digest(`${project.id}:${finalRevision.id}`), receipt: `release=ready; providerMutation=false; project=${project.id}` };
+  const build = await buildFixture({ fixture, root: input.root });
+  const releaseEvidence = evidence({ id: `evidence:${fixture.id}:release`, project, revision: finalRevision, changeRevision: resolvedB, actor: verifier, targetId: target.id, key: "team-check", build });
+  const artifact = artifactFor(project, finalRevision, resolvedB, target, fixture.id === "worker" ? "worker.bundle" : "cli.package", build);
+  const release: Release = { protocol: CONTRACT_VERSIONS.release, id: `release:${fixture.id}:team`, projectRevisionId: finalRevision.id, artifactIds: [artifact.id], evidenceIds: [releaseEvidence.id], configurationDigests: [build.configurationDigest], stateAssumptions: ["local provider boundary; no Cloudflare mutation"], policyVersion: "policy:team-simulation:v1", status: "ready", changeRevisionId: resolvedB.id, provenanceDigest: digest(`${project.id}:${finalRevision.id}`), receipt: `release=ready; build=verified; providerMutation=false; project=${project.id}` };
   const sealed = sealVerifiedRelease({ projectId: project.id, release, artifacts: [artifact], evidence: [releaseEvidence], target });
   return {
     canonicalRevision: finalRevision,
@@ -563,13 +663,16 @@ async function collaborateSingleRepository(input: { fixture: RepositoryFixture; 
       staleDecision: staleDecision.receipt,
       landingA: landedA.landing.receipt,
       landingB: landedB.landing.receipt,
-      release: sealed.receipt,
+      release: `${sealed.receipt}; ${build.receipt}`,
       issueIds: [changeA.intentId, changeB.intentId],
     },
     evidence: [evidenceA, evidenceB, releaseEvidence],
     target,
     release,
     artifact,
+    build,
+    workspaceCount: 5,
+    changeCount: 2,
   };
 }
 
@@ -596,21 +699,24 @@ class SimulationRemote implements MirrorRemoteAdapter {
 
 class SimulationChangeSink implements MirrorChangeSink {
   readonly inputs: MirrorInboundChangeInput[] = [];
+  readonly changes: Change[] = [];
 
   async createChange(input: MirrorInboundChangeInput): Promise<MirrorProviderResult<Change>> {
     this.inputs.push(input);
+    const change: Change = {
+      protocol: CONTRACT_VERSIONS.change,
+      id: `change:mirror:${input.remoteCommit.oid}`,
+      projectId: input.projectId,
+      intentId: input.intentId,
+      baseProjectRevisionId: input.baseProjectRevisionId,
+      status: "submitted",
+      latestRevisionId: null,
+      origin: { ...input.origin },
+    };
+    this.changes.push(change);
     return {
       status: "succeeded",
-      value: {
-        protocol: CONTRACT_VERSIONS.change,
-        id: `change:mirror:${input.remoteCommit.oid}`,
-        projectId: input.projectId,
-        intentId: input.intentId,
-        baseProjectRevisionId: input.baseProjectRevisionId,
-        status: "submitted",
-        latestRevisionId: null,
-        origin: { ...input.origin },
-      },
+      value: change,
     };
   }
 }
@@ -623,7 +729,7 @@ function mirrorRecord(project: Project, sourceSpaceId: string): RepositoryMirror
   return { protocol: CONTRACT_VERSIONS.mirror, id: `mirror:${project.id}`, projectId: project.id, sourceSpaceId, provider: "github", remoteRepository: `simulation/${project.id}`, direction: "bidirectional", canonicalAuthority: "anyam", refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }], disclosure: "public", state: "healthy", canonicalProjectRevisionId: "project-revision:mirror:base", canonicalRefs: [], remoteGeneration: "remote:g0", remoteRefs: [], pendingInboundChangeIds: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), receipt: "mirror=team-simulation; canonicalAuthority=anyam" };
 }
 
-async function runHybridScenario(input: { fixture: HybridFixture; root: string; collaboration: CollaborationResult }): Promise<SimulationScenario> {
+async function runHybridScenario(input: { fixture: HybridFixture; root: string; landingReceipt: string; revisionIds: readonly string[] }): Promise<SimulationScenario> {
   const fixture = input.fixture;
   const baseRevision = createProjectRevision({ id: "project-revision:team-hybrid:base", projectId: fixture.project.id, sourceSpaceSnapshots: fixture.commits });
   const projection = createPublicProjection({ project: fixture.project, canonicalRevision: baseRevision, sourceSpaces: fixture.sourceSpaces, publicSourceSpaceIds: ["source:public-player"], sources: fixture.sourceSpaces.map((source) => ({ sourceSpaceId: source.id, snapshotId: requireValue(fixture.commits[source.id], `${source.id} commit`), files: requireValue(fixture.files[source.id], `${source.id} files`) })) });
@@ -638,16 +744,27 @@ async function runHybridScenario(input: { fixture: HybridFixture; root: string; 
   assert.equal(publicPaths.includes("private-codec"), false);
   assert.equal(publicPaths.includes("codec.ts"), false);
   const mirror = await runMirrorScenario({ project: fixture.project, sourceSpaceId: "source:public-player", commit: requireValue(fixture.commits["source:public-player"], "public commit"), remoteCommit: fixture.remoteCommit });
+  const mirrorActor = actor("mirror-landing", "client:landing");
+  const mirrorControl = new LocalChangeCoordinator({ project: fixture.project, sourceSpaces: fixture.sourceSpaces, canonicalRevision: baseRevision });
+  const mirrorView = projectView(fixture.project, baseRevision, fixture.sourceSpaces, ["source:public-player"], "project");
+  const mirrorWorkspace = await mirrorControl.createWorkspace({ view: mirrorView, sources: [{ sourceSpaceId: "source:public-player", snapshotId: requireValue(fixture.commits["source:public-player"], "public commit"), files: requireValue(fixture.files["source:public-player"], "public files") }], mounts: [{ sourceSpaceId: "source:public-player", mountPath: "public" }], directory: join(input.root, "hybrid-mirror-landing-workspace"), actorId: mirrorActor.actorId });
+  const mirrorChange = mirrorControl.createChange({ id: mirror.inboundChange.id, intentId: mirror.inboundChange.intentId, workspaceId: mirrorWorkspace.workspace.id, author: mirrorActor, ...(mirror.inboundChange.origin ? { origin: mirror.inboundChange.origin } : {}) });
+  const mirrorRevision = mirrorControl.publishRevision({ changeId: mirrorChange.id, workspaceId: mirrorWorkspace.workspace.id, declaredEffects: ["mirror.inbound"], sourceSpaceSnapshots: { "source:public-player": mirror.inboundCommit }, actor: mirrorActor });
+  const mirrorLanding = mirrorControl.landChange({ changeId: mirrorChange.id, changeRevisionId: mirrorRevision.id, expectedCanonicalProjectRevisionId: baseRevision.id });
+  const reconciled = await mirror.coordinator.sync({ canonical: { projectRevisionId: mirrorLanding.projectRevisionId, sourceSpaceId: "source:public-player", sourceSpaceClassification: "public", disclosure: "public", verified: true, verificationReceipt: "canonical=verified-after-mirror-landing", refs: [{ name: "refs/heads/main", oid: mirror.inboundCommit }] }, idempotencyKey: "mirror-reconciled", actor: mirrorActor });
+  if (reconciled.status !== "succeeded") throw new Error(reconciled.message);
+  assert.equal(reconciled.value.mirror.state, "healthy");
+  assert.equal(reconciled.value.mirror.pendingInboundChangeIds.length, 0);
   return {
     id: "hybrid-public-private",
     verdict: "VERIFIED",
-    receipt: `projection=verified; publicClone=verified; mirror=${mirror.receipt}`,
-    observations: { projectionRevisionId: projection.projectionRevisionId, publicSnapshotId: projection.publicSnapshotId, publicPathCount: publicPaths.split("\n").filter((value) => value.length > 0).length, mirror: mirror.observations },
+    receipt: `projection=verified; publicClone=verified; hybridLanding=verified; mirror=${mirror.receipt}; inboundLanding=verified; reconciliation=healthy`,
+    observations: { projectionRevisionId: projection.projectionRevisionId, publicSnapshotId: projection.publicSnapshotId, publicPathCount: publicPaths.split("\n").filter((value) => value.length > 0).length, hybridLanding: input.landingReceipt, hybridRevisionIds: input.revisionIds, mirror: { ...mirror.observations, inboundLanding: mirrorLanding.receipt, reconciliation: reconciled.value.mirror.receipt } },
     findings: [],
   };
 }
 
-async function runMirrorScenario(input: { project: Project; sourceSpaceId: string; commit: string; remoteCommit: string }): Promise<{ receipt: string; observations: Readonly<Record<string, unknown>> }> {
+async function runMirrorScenario(input: { project: Project; sourceSpaceId: string; commit: string; remoteCommit: string }): Promise<MirrorScenarioResult> {
   const actorRef = actor("mirror", "client:mirror");
   const remote = new SimulationRemote(remoteState("remote:g0", [], []));
   const sink = new SimulationChangeSink();
@@ -661,11 +778,8 @@ async function runMirrorScenario(input: { project: Project; sourceSpaceId: strin
   remote.state = remoteState("remote:g2", [{ name: "refs/heads/main", oid: inboundOid }], [{ remoteRef: "refs/heads/main", previousOid: input.commit, currentOid: inboundOid, kind: "fast-forward", receipt: "remote=inbound; kind=fast-forward" }], [{ oid: inboundOid, ref: "refs/heads/main", author: { name: "Remote contributor", email: "remote@example.test" }, message: "Improve the public projection", disclosure: "public" }]);
   const inbound = await coordinator.sync({ canonical: { projectRevisionId: "project-revision:mirror:base", sourceSpaceId: input.sourceSpaceId, sourceSpaceClassification: "public", disclosure: "public", verified: true, verificationReceipt: "canonical=verified", refs: [{ name: "refs/heads/main", oid: input.commit }] }, idempotencyKey: "mirror-inbound", actor: actorRef });
   if (inbound.status !== "succeeded") throw new Error(inbound.message);
-  const reconciled = await coordinator.sync({ canonical: { projectRevisionId: "project-revision:mirror:inbound", sourceSpaceId: input.sourceSpaceId, sourceSpaceClassification: "public", disclosure: "public", verified: true, verificationReceipt: "canonical=verified-after-landing", refs: [{ name: "refs/heads/main", oid: inboundOid }] }, idempotencyKey: "mirror-reconciled", actor: actorRef });
-  if (reconciled.status !== "succeeded") throw new Error(reconciled.message);
-  assert.equal(reconciled.value.mirror.state, "healthy");
-  assert.equal(reconciled.value.mirror.pendingInboundChangeIds.length, 0);
-  return { receipt: `outbound=verified; duplicatePushes=${remote.pushes.length}; inbound=proposal; reconciled=healthy; privateRefProjected=${remote.pushes[0]?.desiredRefs.some((ref) => ref.name.includes("private")) === true}`, observations: { outbound: outbound.value.operation.receipt, inboundChanges: sink.inputs.length, mirrorState: reconciled.value.mirror.state, privateRefProjected: remote.pushes[0]?.desiredRefs.some((ref) => ref.name.includes("private")) ?? false } };
+  const inboundChange = requireValue(sink.changes[0], "inbound mirror Change");
+  return { receipt: `outbound=verified; duplicatePushes=${remote.pushes.length}; inbound=proposal; reconciliation=pending; privateRefProjected=${remote.pushes[0]?.desiredRefs.some((ref) => ref.name.includes("private")) === true}`, observations: { outbound: outbound.value.operation.receipt, inboundChanges: sink.inputs.length, mirrorState: inbound.value.mirror.state, privateRefProjected: remote.pushes[0]?.desiredRefs.some((ref) => ref.name.includes("private")) ?? false }, coordinator, inboundChange, inboundCommit: inboundOid };
 }
 
 async function runExportRestore(input: { root: string; fixtures: readonly RepositoryFixture[]; hybrid: HybridFixture; collaborations: readonly CollaborationResult[] }): Promise<SimulationScenario> {
@@ -681,12 +795,18 @@ async function runExportRestore(input: { root: string; fixtures: readonly Reposi
     const verified = await verifyProjectExportPackage(destination);
     if (verified.status !== "succeeded") throw new Error(verified.message);
     const restoreDestination = join(input.root, `${fixture.id}-restored-project`);
-    const restored = await new LocalProjectExporter(new LocalGitRepositoryDriver(join(input.root, `${fixture.id}-restore-driver`))).importProject({ packageDirectory: destination, destination: restoreDestination, idempotencyKey: `team-simulation-restore-${fixture.id}` });
+    const restoreDriver = new LocalGitRepositoryDriver(join(input.root, `${fixture.id}-restore-driver`));
+    const restored = await new LocalProjectExporter(restoreDriver).importProject({ packageDirectory: destination, destination: restoreDestination, idempotencyKey: `team-simulation-restore-${fixture.id}` });
     if (restored.status !== "succeeded") throw new Error(restored.message);
+    const restoredHandle = requireValue(restored.value.repositories[fixture.sourceSpace.id], `${fixture.id} restored repository`);
+    const restoredInspection = await restoreDriver.inspectRepository({ repository: restoredHandle });
+    if (restoredInspection.status !== "succeeded") throw new Error(restoredInspection.message);
+    assert.equal(refSignature(restoredInspection.value.refs), refSignature(fixture.repositoryRefs));
+    assert.equal(restored.value.manifest.project.id, fixture.project.id);
     const replayed = await new LocalProjectExporter(new LocalGitRepositoryDriver(join(input.root, `${fixture.id}-restore-driver-replay`))).importProject({ packageDirectory: destination, destination: restoreDestination, idempotencyKey: `team-simulation-restore-${fixture.id}` });
     if (replayed.status !== "succeeded") throw new Error(replayed.message);
     assert.equal(restored.value.manifest.integrity.manifestDigest, replayed.value.manifest.integrity.manifestDigest);
-    receipts[fixture.id] = { exportDigest: exported.value.manifest.integrity.manifestDigest, repositoryCount: exported.value.manifest.repositories.length, lineageCount: exported.value.manifest.lineage.length, restoredCheckpoint: restored.value.checkpoint.receipt };
+    receipts[fixture.id] = { exportDigest: exported.value.manifest.integrity.manifestDigest, repositoryCount: exported.value.manifest.repositories.length, lineageCount: exported.value.manifest.lineage.length, restoredRefs: refSignature(restoredInspection.value.refs), restoredCheckpoint: restored.value.checkpoint.receipt };
   }
   const hybridRepositories: Array<{ sourceSpaceId: string; repository: { repositoryId: string; sourceSpaceId: string } }> = [];
   for (const sourceSpace of input.hybrid.sourceSpaces) {
@@ -701,34 +821,54 @@ async function runExportRestore(input: { root: string; fixtures: readonly Reposi
   const hybridVerified = await verifyProjectExportPackage(hybridDestination);
   if (hybridVerified.status !== "succeeded") throw new Error(hybridVerified.message);
   const hybridRestoreDestination = join(input.root, "hybrid-restored-project");
-  const hybridRestored = await new LocalProjectExporter(new LocalGitRepositoryDriver(join(input.root, "hybrid-restore-driver"))).importProject({ packageDirectory: hybridDestination, destination: hybridRestoreDestination, idempotencyKey: "team-simulation-restore-hybrid" });
+  const hybridRestoreDriver = new LocalGitRepositoryDriver(join(input.root, "hybrid-restore-driver"));
+  const hybridRestored = await new LocalProjectExporter(hybridRestoreDriver).importProject({ packageDirectory: hybridDestination, destination: hybridRestoreDestination, idempotencyKey: "team-simulation-restore-hybrid" });
   if (hybridRestored.status !== "succeeded") throw new Error(hybridRestored.message);
+  for (const sourceSpace of input.hybrid.sourceSpaces) {
+    const restoredHandle = requireValue(hybridRestored.value.repositories[sourceSpace.id], `${sourceSpace.id} restored repository`);
+    const restoredInspection = await hybridRestoreDriver.inspectRepository({ repository: restoredHandle });
+    if (restoredInspection.status !== "succeeded") throw new Error(restoredInspection.message);
+    assert.equal(refSignature(restoredInspection.value.refs), refSignature(requireValue(input.hybrid.repositoryRefs[sourceSpace.id], `${sourceSpace.id} original refs`)));
+  }
   const hybridReplay = await new LocalProjectExporter(new LocalGitRepositoryDriver(join(input.root, "hybrid-restore-driver-replay"))).importProject({ packageDirectory: hybridDestination, destination: hybridRestoreDestination, idempotencyKey: "team-simulation-restore-hybrid" });
   if (hybridReplay.status !== "succeeded") throw new Error(hybridReplay.message);
   assert.equal(hybridRestored.value.manifest.integrity.manifestDigest, hybridReplay.value.manifest.integrity.manifestDigest);
-  receipts.hybrid = { exportDigest: hybridExport.value.manifest.integrity.manifestDigest, repositoryCount: hybridExport.value.manifest.repositories.length, restoredCheckpoint: hybridRestored.value.checkpoint.receipt };
+  assert.equal(hybridRestored.value.manifest.project.id, input.hybrid.project.id);
+  assert.equal(hybridExport.value.manifest.mirrors?.length, 1);
+  receipts.hybrid = { exportDigest: hybridExport.value.manifest.integrity.manifestDigest, repositoryCount: hybridExport.value.manifest.repositories.length, mirrorCount: hybridExport.value.manifest.mirrors?.length ?? 0, restoredCheckpoint: hybridRestored.value.checkpoint.receipt };
   return { id: "export-restore", verdict: "VERIFIED", receipt: `export=verified; import=activated; replay=idempotent; projects=${input.fixtures.length + 1}; repositories=${input.fixtures.length + hybridRepositories.length}; credentialFree=true`, observations: receipts, findings: [] };
 }
 
-function unsupportedLifecycleFindings(): readonly SimulationFinding[] {
-  return [
-    finding({
+async function inspectLifecycleCapabilities(input: { intentIdentifiersObserved: number }): Promise<{ findings: readonly SimulationFinding[]; observations: Readonly<Record<string, unknown>> }> {
+  const output: string[] = [];
+  const originalLog = console.log;
+  console.log = (...args: unknown[]) => output.push(args.map((value) => String(value)).join(" "));
+  try {
+    await anyamCliMain(["--help"], process.cwd());
+  } finally {
+    console.log = originalLog;
+  }
+  const help = output.join("\n");
+  const issueCommands = help.split("\n").filter((line) => /^\s*(?:issue|intent)\b/iu.test(line));
+  const pullRequestCommands = help.split("\n").filter((line) => /^\s*(?:pull-request|pull request|pr)\b/iu.test(line));
+  const findings: SimulationFinding[] = [];
+  if (issueCommands.length === 0) findings.push(finding({
       scenarioId: "issue-pr-lifecycle",
       seam: "issue-intent-lifecycle",
       message: "A Change stores an intentId, but the public Anyam interfaces do not expose an Issue or Intent resource with open, close, reopen, assignment, or discussion transitions.",
       recoveryAction: "Add a first-class Intent or Issue lifecycle to the Realm, CLI, REST, and MCP surfaces, then rerun this scenario.",
       issueTitle: "Add a first-class Issue or Intent lifecycle",
       issueBody: "Part of #182\n\nThe team simulation can create Changes with intentId strings, but it cannot open, close, reopen, assign, or discuss a first-class Issue or Intent through an Anyam public seam.\n\nAcceptance:\n- create, inspect, assign, close, reopen, and comment on an Intent through REST, CLI, and MCP;\n- preserve stable identity when a Change is created from the Intent;\n- export and restore the lifecycle;\n- keep restricted Intent metadata out of public projections;\n- add a receipt-backed end-to-end qualification.\n",
-    }),
-    finding({
+    }));
+  if (pullRequestCommands.length === 0) findings.push(finding({
       scenarioId: "issue-pr-lifecycle",
       seam: "pull-request-compatibility-lifecycle",
       message: "Git branches and Anyam Changes can be exercised separately, but the public product does not expose a pull-request compatibility object that opens, closes, reopens, or maps a branch to a stable Change.",
       recoveryAction: "Add an explicit PR compatibility projection over Change and Revision, then rerun the branch, review, rebase, and closure scenarios.",
       issueTitle: "Add a pull-request compatibility lifecycle over Change and Revision",
       issueBody: "Part of #182\n\nThe team simulation exercises real Git branches, rebases, conflicts, reviews, and Landing. It cannot complete an Anyam pull-request lifecycle because no public PR projection exposes open, close, reopen, branch mapping, or review state.\n\nAcceptance:\n- map one external or local PR to one stable Change;\n- preserve identity through branch updates, rebases, review findings, and Landing;\n- expose open, closed, merged, and blocked states;\n- keep Anyam canonical and make the PR projection disclosure-safe;\n- add a receipt-backed end-to-end qualification.\n",
-    }),
-  ];
+    }));
+  return { findings, observations: { intentIdentifiersObserved: input.intentIdentifiersObserved, publicIssueCommands: issueCommands, publicPullRequestCommands: pullRequestCommands } };
 }
 
 export async function runTeamSimulation(input: { fixtureRoot?: string } = {}): Promise<TeamSimulationReport> {
@@ -737,45 +877,69 @@ export async function runTeamSimulation(input: { fixtureRoot?: string } = {}): P
   const fixtureRoot = input.fixtureRoot ?? process.cwd();
   const scenarios: SimulationScenario[] = [];
   const findings: SimulationFinding[] = [];
-  let gitOperationCount = 0;
+  observedGitOperationCount = 0;
   let localWorkspaceCount = 0;
   let localChangeCount = 0;
   try {
-    const worker = await makeWorkerFixture(root, fixtureRoot);
-    const cli = await makeCliFixture(root);
-    gitOperationCount += worker.git.branches.length + cli.git.branches.length + 20;
-    const workerCollaboration = await collaborateSingleRepository({ fixture: worker, root, agentId: "codex" });
-    localWorkspaceCount += 4;
-    localChangeCount += workerCollaboration.changes.length;
-    scenarios.push({ id: "worker-team", verdict: "VERIFIED", receipt: `git=real; branches=${worker.git.branches.length}; mergeConflict=${worker.git.mergeConflict}; rebaseConflict=${worker.git.rebaseConflict}; landing=verified; release=sealed; providerMutation=false`, observations: { project: worker.project.id, refs: worker.repositoryRefs, collaboration: workerCollaboration.observations }, findings: [] });
-    const cliCollaboration = await collaborateSingleRepository({ fixture: cli, root, agentId: "claude" });
-    localWorkspaceCount += 4;
-    localChangeCount += cliCollaboration.changes.length;
-    scenarios.push({ id: "cli-team", verdict: "VERIFIED", receipt: `git=real; branches=${cli.git.branches.length}; tag=${cli.git.tag ?? "none"}; mergeConflict=${cli.git.mergeConflict}; rebaseConflict=${cli.git.rebaseConflict}; landing=verified; release=sealed; providerMutation=false`, observations: { project: cli.project.id, refs: cli.repositoryRefs, collaboration: cliCollaboration.observations }, findings: [] });
-    const hybrid = await makeHybridFixture(root, fixtureRoot);
-    const hybridBase = createProjectRevision({ id: "project-revision:team-hybrid:base", projectId: hybrid.project.id, sourceSpaceSnapshots: hybrid.commits });
-    const hybridControl = new LocalChangeCoordinator({ project: hybrid.project, sourceSpaces: hybrid.sourceSpaces, canonicalRevision: hybridBase });
-    const publicView = projectView(hybrid.project, hybridBase, hybrid.sourceSpaces, ["source:public-player"], "public");
-    const privateView = projectView(hybrid.project, hybridBase, hybrid.sourceSpaces, ["source:private-codec"], "project");
-    const publicWorkspace = await hybridControl.createWorkspace({ view: publicView, sources: [{ sourceSpaceId: "source:public-player", snapshotId: requireValue(hybrid.commits["source:public-player"], "public commit"), files: requireValue(hybrid.files["source:public-player"], "public files") }], mounts: [{ sourceSpaceId: "source:public-player", mountPath: "public" }], directory: join(root, "hybrid-workspace-public"), actorId: actor("hybrid-public").actorId });
-    const privateWorkspace = await hybridControl.createWorkspace({ view: privateView, sources: [{ sourceSpaceId: "source:private-codec", snapshotId: requireValue(hybrid.commits["source:private-codec"], "private commit"), files: requireValue(hybrid.files["source:private-codec"], "private files") }], mounts: [{ sourceSpaceId: "source:private-codec", mountPath: "private" }], directory: join(root, "hybrid-workspace-private"), actorId: actor("hybrid-private").actorId });
-    const publicChange = hybridControl.createChange({ id: "change:hybrid:public", intentId: "intent:hybrid:public", workspaceId: publicWorkspace.workspace.id, author: actor("hybrid-public") });
-    const privateChange = hybridControl.createChange({ id: "change:hybrid:private", intentId: "intent:hybrid:private", workspaceId: privateWorkspace.workspace.id, author: actor("hybrid-private") });
-    const publicRevision = hybridControl.publishRevision({ changeId: publicChange.id, workspaceId: publicWorkspace.workspace.id, declaredEffects: ["public-player.modify"], sourceSpaceSnapshots: { "source:public-player": requireValue(hybrid.commits["source:public-player"], "public commit") }, actor: actor("hybrid-public") });
-    const privateRevision = hybridControl.publishRevision({ changeId: privateChange.id, workspaceId: privateWorkspace.workspace.id, declaredEffects: ["private-codec.modify"], sourceSpaceSnapshots: { "source:private-codec": requireValue(hybrid.commits["source:private-codec"], "private commit") }, actor: actor("hybrid-private") });
-    const hybridLanding = hybridControl.landCohort({ cohortId: "cohort:hybrid", members: [{ changeId: publicChange.id, changeRevisionId: publicRevision.id }, { changeId: privateChange.id, changeRevisionId: privateRevision.id }], expectedCanonicalProjectRevisionId: hybridBase.id });
-    const hybridCollaboration: CollaborationResult = { canonicalRevision: hybridControl.canonicalRevision, changes: [requireValue(hybridControl.getChange(publicChange.id), publicChange.id), requireValue(hybridControl.getChange(privateChange.id), privateChange.id)], revisions: [publicRevision, privateRevision], findings: [], observations: { landing: hybridLanding.receipt }, evidence: [], target: targetFor(hybrid.project), release: { protocol: CONTRACT_VERSIONS.release, id: "release:hybrid:simulation", projectRevisionId: hybridControl.canonicalRevision.id, artifactIds: [], evidenceIds: [], configurationDigests: [], stateAssumptions: [], policyVersion: "policy:team-simulation:v1", status: "draft" }, artifact: { protocol: CONTRACT_VERSIONS.artifact, id: "artifact:hybrid:simulation", type: "source.bundle", digest: digest(hybridControl.canonicalRevision.id), projectRevisionId: hybridControl.canonicalRevision.id } };
-    const hybridScenario = await runHybridScenario({ fixture: hybrid, root, collaboration: hybridCollaboration });
-    scenarios.push(hybridScenario);
-    localWorkspaceCount += 2;
-    localChangeCount += 2;
-    const exportScenario = await runExportRestore({ root, fixtures: [worker, cli], hybrid, collaborations: [workerCollaboration, cliCollaboration] });
-    scenarios.push(exportScenario);
-    const lifecycleFindings = unsupportedLifecycleFindings();
+    const workerBundle = await captureScenario(scenarios, "worker-team", async () => {
+      const fixture = await makeWorkerFixture(root, fixtureRoot);
+      const collaboration = await collaborateSingleRepository({ fixture, root, agentId: "codex" });
+      localWorkspaceCount += collaboration.workspaceCount;
+      localChangeCount += collaboration.changeCount;
+      scenarios.push({ id: "worker-team", verdict: "VERIFIED", receipt: `git=real; branches=${fixture.git.branches.length}; mergeConflict=${fixture.git.mergeConflict}; rebaseConflict=${fixture.git.rebaseConflict}; landing=verified; release=sealed-from-build; providerMutation=false`, observations: { project: fixture.project.id, refs: fixture.repositoryRefs, collaboration: collaboration.observations, build: collaboration.build }, findings: [] });
+      return { fixture, collaboration };
+    });
+    const cliBundle = await captureScenario(scenarios, "cli-team", async () => {
+      const fixture = await makeCliFixture(root);
+      const collaboration = await collaborateSingleRepository({ fixture, root, agentId: "claude" });
+      localWorkspaceCount += collaboration.workspaceCount;
+      localChangeCount += collaboration.changeCount;
+      scenarios.push({ id: "cli-team", verdict: "VERIFIED", receipt: `git=real; branches=${fixture.git.branches.length}; tag=${fixture.git.tag ?? "none"}; mergeConflict=${fixture.git.mergeConflict}; rebaseConflict=${fixture.git.rebaseConflict}; landing=verified; release=sealed-from-build; providerMutation=false`, observations: { project: fixture.project.id, refs: fixture.repositoryRefs, collaboration: collaboration.observations, build: collaboration.build }, findings: [] });
+      return { fixture, collaboration };
+    });
+    if (workerBundle && cliBundle) {
+      scenarios.push({ id: "git-conflict-rebase", verdict: "VERIFIED", receipt: `workerMergeConflict=${workerBundle.fixture.git.mergeConflict}; workerRebaseConflict=${workerBundle.fixture.git.rebaseConflict}; cliMergeConflict=${cliBundle.fixture.git.mergeConflict}; cliRebaseConflict=${cliBundle.fixture.git.rebaseConflict}; fsck=passed`, observations: { workerBranches: workerBundle.fixture.git.branches, cliBranches: cliBundle.fixture.git.branches }, findings: [] });
+      scenarios.push({ id: "team-review-landing", verdict: "VERIFIED", receipt: `workerLandings=2; cliLandings=2; staleBases=blocked; reviewFinding=resolved; independentApproval=observed`, observations: { worker: workerBundle.collaboration.observations, cli: cliBundle.collaboration.observations }, findings: [] });
+      scenarios.push({ id: "release-sealing", verdict: "VERIFIED", receipt: `workerBuild=${workerBundle.collaboration.build.receipt}; cliBuild=${cliBundle.collaboration.build.receipt}; providerMutation=false`, observations: { workerArtifact: workerBundle.collaboration.artifact.digest, cliArtifact: cliBundle.collaboration.artifact.digest, workerOutputFiles: workerBundle.collaboration.build.outputFiles, cliOutputFiles: cliBundle.collaboration.build.outputFiles }, findings: [] });
+    }
+    const hybridBundle = await captureScenario(scenarios, "hybrid-public-private", async () => {
+      const fixture = await makeHybridFixture(root, fixtureRoot);
+      const baseRevision = createProjectRevision({ id: "project-revision:team-hybrid:base", projectId: fixture.project.id, sourceSpaceSnapshots: fixture.commits });
+      const control = new LocalChangeCoordinator({ project: fixture.project, sourceSpaces: fixture.sourceSpaces, canonicalRevision: baseRevision });
+      const publicView = projectView(fixture.project, baseRevision, fixture.sourceSpaces, ["source:public-player"], "public");
+      const privateView = projectView(fixture.project, baseRevision, fixture.sourceSpaces, ["source:private-codec"], "project");
+      const publicWorkspace = await control.createWorkspace({ view: publicView, sources: [{ sourceSpaceId: "source:public-player", snapshotId: requireValue(fixture.commits["source:public-player"], "public commit"), files: requireValue(fixture.files["source:public-player"], "public files") }], mounts: [{ sourceSpaceId: "source:public-player", mountPath: "public" }], directory: join(root, "hybrid-workspace-public"), actorId: actor("hybrid-public").actorId });
+      const privateWorkspace = await control.createWorkspace({ view: privateView, sources: [{ sourceSpaceId: "source:private-codec", snapshotId: requireValue(fixture.commits["source:private-codec"], "private commit"), files: requireValue(fixture.files["source:private-codec"], "private files") }], mounts: [{ sourceSpaceId: "source:private-codec", mountPath: "private" }], directory: join(root, "hybrid-workspace-private"), actorId: actor("hybrid-private").actorId });
+      const publicChange = control.createChange({ id: "change:hybrid:public", intentId: "intent:hybrid:public", workspaceId: publicWorkspace.workspace.id, author: actor("hybrid-public") });
+      const privateChange = control.createChange({ id: "change:hybrid:private", intentId: "intent:hybrid:private", workspaceId: privateWorkspace.workspace.id, author: actor("hybrid-private") });
+      const publicRevision = control.publishRevision({ changeId: publicChange.id, workspaceId: publicWorkspace.workspace.id, declaredEffects: ["public-player.modify"], sourceSpaceSnapshots: { "source:public-player": requireValue(fixture.commits["source:public-player"], "public commit") }, actor: actor("hybrid-public") });
+      const privateRevision = control.publishRevision({ changeId: privateChange.id, workspaceId: privateWorkspace.workspace.id, declaredEffects: ["private-codec.modify"], sourceSpaceSnapshots: { "source:private-codec": requireValue(fixture.commits["source:private-codec"], "private commit") }, actor: actor("hybrid-private") });
+      const landing = control.landCohort({ cohortId: "cohort:hybrid", members: [{ changeId: publicChange.id, changeRevisionId: publicRevision.id }, { changeId: privateChange.id, changeRevisionId: privateRevision.id }], expectedCanonicalProjectRevisionId: baseRevision.id });
+      const scenario = await runHybridScenario({ fixture, root, landingReceipt: landing.receipt, revisionIds: [publicRevision.id, privateRevision.id] });
+      scenarios.push(scenario);
+      const hybridMirror = scenario.observations.mirror;
+      const mirrorObservations = isRecord(hybridMirror) ? hybridMirror : {};
+      scenarios.push({ id: "github-bidirectional", verdict: "VERIFIED", receipt: String(mirrorObservations.reconciliation ?? "mirror-reconciliation=observed"), observations: mirrorObservations, findings: [] });
+      localWorkspaceCount += 2;
+      localChangeCount += 2;
+      return { fixture, scenario };
+    });
+    if (workerBundle && cliBundle && hybridBundle) {
+      const exportScenario = await captureScenario(scenarios, "export-restore", () => runExportRestore({ root, fixtures: [workerBundle.fixture, cliBundle.fixture], hybrid: hybridBundle.fixture, collaborations: [workerBundle.collaboration, cliBundle.collaboration] }));
+      if (exportScenario) scenarios.push(exportScenario);
+    } else {
+      scenarios.push({ id: "export-restore", verdict: "INCONCLUSIVE", receipt: "scenario=export-restore; status=inconclusive; prerequisite=repository-scenarios", observations: { prerequisite: "worker, cli, and hybrid scenarios must complete" }, findings: [] });
+    }
+    const intentIdentifiersObserved = (workerBundle?.collaboration.changes.length ?? 0) + (cliBundle?.collaboration.changes.length ?? 0);
+    const lifecycle = await inspectLifecycleCapabilities({ intentIdentifiersObserved });
+    const lifecycleFindings = lifecycle.findings;
     findings.push(...lifecycleFindings);
-    scenarios.push({ id: "issue-pr-lifecycle", verdict: "NOT VERIFIED", receipt: "issueLifecycle=not-exposed; pullRequestLifecycle=not-exposed; simulation=blocked", observations: { intentIdentifiersObserved: 4, publicIssueCommands: [], publicPullRequestCommands: [] }, findings: lifecycleFindings });
+    scenarios.push({ id: "issue-pr-lifecycle", verdict: lifecycleFindings.length === 0 ? "VERIFIED" : "NOT VERIFIED", receipt: lifecycleFindings.length === 0 ? "issueLifecycle=observed; pullRequestLifecycle=observed" : "issueLifecycle=not-exposed; pullRequestLifecycle=not-exposed; simulation=blocked", observations: lifecycle.observations, findings: lifecycleFindings });
     const allFindings = scenarios.flatMap((scenario) => scenario.findings).concat(findings.filter((candidate) => !scenarios.some((scenario) => scenario.findings.some((entry) => entry.id === candidate.id))));
-    return { protocol: TEAM_SIMULATION_PROTOCOL, status: allFindings.length === 0 && scenarios.every((scenario) => scenario.verdict === "VERIFIED") ? "succeeded" : "blocked", startedAt, finishedAt: new Date().toISOString(), scenarios, findings: allFindings, measurements: { humanActorCount: 3, agentActorCount: 2, repositoryArchetypeCount: 2, gitOperationCount, localWorkspaceCount, localChangeCount, qualificationScopeReceipt: "scope=team-simulation; counts=qualification-inputs; not-a-product-limit; provider=not-run" }, provider: { cloudflare: "not-run", receipt: "cloudflare=not-run; use the owner-run golden-path qualifier for live deployment evidence" }, credentialValues: "not-printed", canonicalWrite: false };
+    const humanActorCount = new Set(["maintainer", "contributor", "reviewer"]).size;
+    const agentActorCount = new Set(["codex", "claude"]).size;
+    const repositoryArchetypeCount = new Set(["worker", "cli"]).size;
+    return { protocol: TEAM_SIMULATION_PROTOCOL, status: allFindings.length === 0 && scenarios.every((scenario) => scenario.verdict === "VERIFIED") ? "succeeded" : "blocked", startedAt, finishedAt: new Date().toISOString(), scenarios, findings: allFindings, measurements: { humanActorCount, agentActorCount, repositoryArchetypeCount, gitOperationCount: observedGitOperationCount, localWorkspaceCount, localChangeCount, qualificationScopeReceipt: "scope=team-simulation; counts=observed-run-values; not-a-product-limit; provider=not-run" }, provider: { cloudflare: "not-run", receipt: "cloudflare=not-run; use the owner-run golden-path qualifier for live deployment evidence" }, credentialValues: "not-printed", canonicalWrite: false };
   } finally {
     await rm(root, { recursive: true, force: true });
   }

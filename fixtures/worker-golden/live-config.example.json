@@ -1,0 +1,78 @@
+{
+  "accountId": "replace-with-customer-cloudflare-account-id",
+  "previewSubdomain": "replace-with-customer-workers-dev-subdomain",
+  "compatibilityDate": "2026-01-01",
+  "compatibilityFlags": ["nodejs_compat"],
+  "migration": {
+    "beforeSchemaDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "afterSchemaDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "compatibility": "bidirectional",
+    "rollback": "application-only"
+  },
+  "durableObjectMigrations": {
+    "toTag": "v1",
+    "steps": [
+      { "new_sqlite_classes": ["GoldenObject"] }
+    ]
+  },
+  "rollout": {
+    "versionAffinityRequired": true,
+    "steps": [
+      { "percentage": 1, "minimumObservationMs": 5000 },
+      { "percentage": 100, "minimumObservationMs": 0 }
+    ]
+  },
+  "routeReadinessRetry": {
+    "maxAttempts": 10,
+    "delayMs": 1000,
+    "retryStatuses": ["404"],
+    "retryTransportErrors": true
+  },
+  "targets": [
+    {
+      "id": "target:golden-preview",
+      "role": "preview",
+      "scriptName": "anyam-golden-preview-replace",
+      "healthUrl": "https://anyam-golden-preview-replace.replace-with-subdomain.workers.dev/health",
+      "bindings": [
+        { "name": "DB", "kind": "d1", "resourceIdentity": "d1:golden-preview", "providerFields": { "database_id": "replace-with-preview-d1-id" } },
+        { "name": "EXPORTS", "kind": "r2_bucket", "resourceIdentity": "r2:golden-preview", "providerFields": { "bucket_name": "anyam-golden-preview-exports" } },
+        { "name": "CACHE", "kind": "kv_namespace", "resourceIdentity": "kv:golden-preview", "providerFields": { "namespace_id": "replace-with-preview-kv-id" } },
+        { "name": "EVENTS", "kind": "queue", "resourceIdentity": "queue:golden-preview", "providerFields": { "queue_name": "anyam-golden-preview-events" } },
+        { "name": "AUX", "kind": "service", "resourceIdentity": "service:golden-preview", "providerFields": { "service": "replace-with-preview-aux-worker" } },
+        { "name": "GOLDEN_OBJECT", "kind": "durable_object_namespace", "resourceIdentity": "do:golden-preview", "providerFields": { "class_name": "GoldenObject", "namespace_id": "replace-with-preview-do-id" } },
+        { "name": "WORKFLOW", "kind": "workflow", "resourceIdentity": "workflow:golden-preview", "providerFields": { "workflow_name": "replace-with-preview-workflow", "script_name": "replace-with-workflow-host-script" } }
+      ]
+    },
+    {
+      "id": "target:golden-staging",
+      "role": "staging",
+      "scriptName": "anyam-golden-staging-replace",
+      "healthUrl": "https://anyam-golden-staging-replace.replace-with-subdomain.workers.dev/health",
+      "bindings": [
+        { "name": "DB", "kind": "d1", "resourceIdentity": "d1:golden-staging", "providerFields": { "database_id": "replace-with-staging-d1-id" } },
+        { "name": "EXPORTS", "kind": "r2_bucket", "resourceIdentity": "r2:golden-staging", "providerFields": { "bucket_name": "anyam-golden-staging-exports" } },
+        { "name": "CACHE", "kind": "kv_namespace", "resourceIdentity": "kv:golden-staging", "providerFields": { "namespace_id": "replace-with-staging-kv-id" } },
+        { "name": "EVENTS", "kind": "queue", "resourceIdentity": "queue:golden-staging", "providerFields": { "queue_name": "anyam-golden-staging-events" } },
+        { "name": "AUX", "kind": "service", "resourceIdentity": "service:golden-staging", "providerFields": { "service": "replace-with-staging-aux-worker" } },
+        { "name": "GOLDEN_OBJECT", "kind": "durable_object_namespace", "resourceIdentity": "do:golden-staging", "providerFields": { "class_name": "GoldenObject", "namespace_id": "replace-with-staging-do-id" } },
+        { "name": "WORKFLOW", "kind": "workflow", "resourceIdentity": "workflow:golden-staging", "providerFields": { "workflow_name": "replace-with-staging-workflow", "script_name": "replace-with-workflow-host-script" } }
+      ]
+    },
+    {
+      "id": "target:golden-production",
+      "role": "production",
+      "scriptName": "anyam-golden-production-replace",
+      "healthUrl": "https://anyam-golden-production-replace.replace-with-subdomain.workers.dev/health",
+      "bindings": [
+        { "name": "DB", "kind": "d1", "resourceIdentity": "d1:golden-production", "providerFields": { "database_id": "replace-with-production-d1-id" } },
+        { "name": "EXPORTS", "kind": "r2_bucket", "resourceIdentity": "r2:golden-production", "providerFields": { "bucket_name": "anyam-golden-production-exports" } },
+        { "name": "CACHE", "kind": "kv_namespace", "resourceIdentity": "kv:golden-production", "providerFields": { "namespace_id": "replace-with-production-kv-id" } },
+        { "name": "EVENTS", "kind": "queue", "resourceIdentity": "queue:golden-production", "providerFields": { "queue_name": "anyam-golden-production-events" } },
+        { "name": "AUX", "kind": "service", "resourceIdentity": "service:golden-production", "providerFields": { "service": "replace-with-production-aux-worker" } },
+        { "name": "GOLDEN_OBJECT", "kind": "durable_object_namespace", "resourceIdentity": "do:golden-production", "providerFields": { "class_name": "GoldenObject", "namespace_id": "replace-with-production-do-id" } },
+        { "name": "WORKFLOW", "kind": "workflow", "resourceIdentity": "workflow:golden-production", "providerFields": { "workflow_name": "replace-with-production-workflow", "script_name": "replace-with-workflow-host-script" } }
+      ]
+    }
+  ]
+}

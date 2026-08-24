@@ -1,0 +1,12 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-golden-workflow-host-20260824",
+  "main": "workflow-worker.ts",
+  "compatibility_date": "2026-01-01",
+  "workers_dev": true,
+  "workflows": [
+    { "binding": "GOLDEN_PREVIEW_WORKFLOW", "name": "anyam-golden-preview-20260824-workflow", "class_name": "GoldenWorkflow" },
+    { "binding": "GOLDEN_STAGING_WORKFLOW", "name": "anyam-golden-staging-20260824-workflow", "class_name": "GoldenWorkflow" },
+    { "binding": "GOLDEN_PRODUCTION_WORKFLOW", "name": "anyam-golden-production-20260824-workflow", "class_name": "GoldenWorkflow" }
+  ]
+}

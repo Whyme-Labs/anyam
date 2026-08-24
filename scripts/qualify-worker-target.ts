@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import {
   CloudflareWorkerTargetAdapter,
   createCloudflareWorkerRestTransport,
@@ -10,20 +8,16 @@ import {
 import { createCloudflareApiTokenCredentialBroker } from "../src/cloudflare/promotion-credential-broker.ts";
 import { createCloudflareWorkerReleaseManifest } from "../src/cloudflare/worker-release-manifest.ts";
 import {
-  CONTRACT_VERSIONS,
-  type Artifact,
-  type Release,
-} from "../src/kernel/contracts.ts";
-import {
-  createWorkerTarget,
-  sealVerifiedRelease,
   WorkerPromotionCoordinator,
-  type ImmutableRelease,
 } from "../src/delivery/promotion.ts";
-import { createTargetDeploymentProfile } from "../src/delivery/target-deployment.ts";
+import {
+  CLOUDFLARE_WORKER_TARGET_QUALIFICATION_PROJECT_ID,
+  createWorkerTargetQualificationRelease,
+  createWorkerTargetQualificationTarget,
+} from "../src/qualification/cloudflare-worker-target.ts";
 
 const protocol = "anyam.cloudflare-worker-target-qualification/v1" as const;
-const projectId = "project:cloudflare-worker-target-qualification";
+const projectId = CLOUDFLARE_WORKER_TARGET_QUALIFICATION_PROJECT_ID;
 const qualificationPrefix = "anyam-worker-target-qualification-";
 
 function required(name: string): string {
@@ -46,10 +40,6 @@ function nonNegativeNumber(name: string, fallback: number): number {
   const value = Number(raw);
   if (!Number.isFinite(value) || value < 0) throw new Error(`${name} must be a non-negative finite number; received ${raw}`);
   return value;
-}
-
-function digest(bytes: Uint8Array): string {
-  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 function responseErrors<T>(response: CloudflareWorkerApiResponse<T>): string {
@@ -91,44 +81,6 @@ function workerModuleUpload(bytes: Uint8Array): FormData {
   form.append("metadata", new Blob([JSON.stringify({ main_module: "worker.js" })], { type: "application/json" }), "metadata.json");
   form.append("worker.js", new Blob([Buffer.from(bytes)], { type: "application/javascript+module" }), "worker.js");
   return form;
-}
-
-function release(input: { id: string; fileName: string; bytes: Uint8Array }): { immutable: ImmutableRelease; artifact: Artifact } {
-  const artifact: Artifact = {
-    protocol: CONTRACT_VERSIONS.artifact,
-    id: `artifact:${input.id}`,
-    type: "worker.bundle",
-    digest: digest(input.bytes),
-    projectRevisionId: `${projectId}:revision`,
-    outputPath: input.fileName,
-  };
-  const base: Release = {
-    protocol: CONTRACT_VERSIONS.release,
-    id: `release:${input.id}`,
-    projectRevisionId: artifact.projectRevisionId,
-    artifactIds: [artifact.id],
-    evidenceIds: [],
-    configurationDigests: ["sha256:cloudflare-worker-target-qualification-config"],
-    stateAssumptions: ["disposable Worker; no customer data; cleanup is required"],
-    policyVersion: "policy:cloudflare-worker-target-qualification:v1",
-    status: "ready",
-    name: input.id,
-  };
-  const target = createWorkerTarget({
-    target: {
-      protocol: CONTRACT_VERSIONS.target,
-      id: "target:cloudflare-worker-target-qualification",
-      projectId,
-      name: "Disposable Cloudflare Worker Target qualification",
-      adapterId: "cloudflare.worker",
-      acceptedArtifactTypes: ["worker.bundle"],
-      requiredEvidenceKeys: [],
-      state: "configured",
-      deploymentProfile: createTargetDeploymentProfile({ environment: "staging", channel: "alpha", audience: "qualification", runtimeIdentity: "worker:cloudflare-worker-target-qualification", routeIdentities: ["route:cloudflare-worker-target-qualification"], bindingIdentities: [], dataResourceIdentities: [], configurationDigests: ["sha256:cloudflare-worker-target-qualification-config"], secretUseAliases: [], dataClass: "synthetic", resourceSharing: "isolated" }),
-    },
-    capabilities: { preview: true, promote: true, healthCheck: true, rollback: true },
-  });
-  return { artifact, immutable: sealVerifiedRelease({ projectId, release: base, artifacts: [artifact], evidence: [], target }) };
 }
 
 /** Build a provider-observing broker without putting the token into Anyam state or receipts. */
@@ -185,8 +137,8 @@ async function run(): Promise<Record<string, unknown>> {
     throw new Error(`Worker subdomain preview enablement failed: HTTP ${subdomain.status}: ${responseErrors(subdomain)}`);
   }
 
-  const first = release({ id: "healthy", fileName: "healthy.js", bytes: healthyBytes });
-  const second = release({ id: "failing", fileName: "failing.js", bytes: failingBytes });
+  const first = createWorkerTargetQualificationRelease({ id: "healthy", fileName: "healthy.js", bytes: healthyBytes });
+  const second = createWorkerTargetQualificationRelease({ id: "failing", fileName: "failing.js", bytes: failingBytes });
   const contents = new Map<string, Uint8Array>([[first.artifact.digest, healthyBytes], [second.artifact.digest, failingBytes]]);
   const adapter = new CloudflareWorkerTargetAdapter({
     accountId,
@@ -202,20 +154,7 @@ async function run(): Promise<Record<string, unknown>> {
     routeReadinessRetry,
     rollbackRouteReadinessRetry,
   });
-  const target = createWorkerTarget({
-    target: {
-      protocol: CONTRACT_VERSIONS.target,
-      id: "target:cloudflare-worker-target-qualification",
-      projectId,
-      name: "Disposable Cloudflare Worker Target qualification",
-      adapterId: "cloudflare.worker",
-      acceptedArtifactTypes: ["worker.bundle"],
-      requiredEvidenceKeys: [],
-      state: "configured",
-      deploymentProfile: createTargetDeploymentProfile({ environment: "staging", channel: "alpha", audience: "qualification", runtimeIdentity: "worker:cloudflare-worker-target-qualification", routeIdentities: ["route:cloudflare-worker-target-qualification"], bindingIdentities: [], dataResourceIdentities: [], configurationDigests: ["sha256:cloudflare-worker-target-qualification-config"], secretUseAliases: [], dataClass: "synthetic", resourceSharing: "isolated" }),
-    },
-    capabilities: { preview: true, promote: true, healthCheck: true, rollback: true },
-  });
+  const target = createWorkerTargetQualificationTarget();
   const coordinator = new WorkerPromotionCoordinator({ projectId, target, adapter });
   coordinator.registerRelease(first.immutable);
   coordinator.registerRelease(second.immutable);

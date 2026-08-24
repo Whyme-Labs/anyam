@@ -32,12 +32,17 @@ class RolloutProvider {
   readonly requests: CloudflareWorkerApiRequest[] = [];
   readonly versions = new Map<string, CloudflareWorkerVersion>();
   readonly deployments: Array<{ id: string; percentage: number; versionId: string }> = [];
+  readonly deploymentVersionSets: Array<readonly { version_id: string; percentage: number }[]> = [];
+  activeDeployment: CloudflareWorkerDeployment = { id: "deployment:seed", versions: [{ percentage: 100, version_id: "version:seed" }] };
   responseLossAtPercentage: number | undefined;
   listShouldFail = false;
   private sequence = 0;
 
   async request<T>(request: CloudflareWorkerApiRequest): Promise<CloudflareWorkerApiResponse<T>> {
     this.requests.push(request);
+    if (request.method === "GET" && request.path.endsWith("/deployments")) {
+      return { status: 200, ok: true, result: { deployments: [this.activeDeployment] } as T, errors: [], messages: [] };
+    }
     if (request.method === "GET" && request.path.includes("/versions?")) {
       if (this.listShouldFail) throw new Error("version list unavailable");
       const page = new URL(`https://provider.test${request.path}`).searchParams.get("page") ?? "1";
@@ -51,9 +56,11 @@ class RolloutProvider {
     }
     if (request.method === "POST" && request.path.endsWith("/versions")) {
       const form = request.body as FormData;
-      const metadata = JSON.parse(String(form.get("metadata"))) as { annotations: { "workers/tag": string; "workers/message": string }; compatibility_date: string; compatibility_flags: readonly string[]; bindings?: readonly Readonly<Record<string, unknown>>[] };
+      const metadataPart = form.get("metadata");
+      const metadataText = metadataPart instanceof Blob ? await metadataPart.text() : String(metadataPart);
+      const metadata = JSON.parse(metadataText) as { main_module?: string; annotations: { "workers/tag": string; "workers/message": string }; compatibility_date: string; compatibility_flags: readonly string[]; bindings?: readonly Readonly<Record<string, unknown>>[] };
       const id = `version:${++this.sequence}`;
-      this.versions.set(id, { id, metadata: { annotations: metadata.annotations, hasPreview: true }, resources: { bindings: metadata.bindings ?? [], script_runtime: { compatibility_date: metadata.compatibility_date, compatibility_flags: metadata.compatibility_flags } } });
+      this.versions.set(id, { id, metadata: { annotations: metadata.annotations, hasPreview: true }, resources: { bindings: metadata.bindings ?? [], script: { main_module: metadata.main_module ?? "worker.js", modules: [{ name: metadata.main_module ?? "worker.js" }] }, script_runtime: { compatibility_date: metadata.compatibility_date, compatibility_flags: metadata.compatibility_flags } } });
       return { status: 200, ok: true, result: { id } as T, errors: [], messages: [] };
     }
     if (request.method === "POST" && request.path.endsWith("/deployments")) {
@@ -62,7 +69,9 @@ class RolloutProvider {
       if (this.responseLossAtPercentage === step.percentage) throw new Error("provider response lost after deployment");
       const id = `deployment:${++this.sequence}`;
       this.deployments.push({ id, percentage: step.percentage, versionId: step.version_id });
-      return { status: 200, ok: true, result: { id, versions: body.versions } as CloudflareWorkerDeployment as T, errors: [], messages: [] };
+      this.deploymentVersionSets.push(body.versions);
+      this.activeDeployment = { id, versions: body.versions };
+      return { status: 200, ok: true, result: this.activeDeployment as T, errors: [], messages: [] };
     }
     return { status: 404, ok: false, errors: [{ code: 1000, message: "unknown provider route" }], messages: [] };
   }
@@ -98,6 +107,8 @@ test("Worker rollout records staged provider identities, preserves version affin
   assert.equal(result.status, "succeeded");
   assert.deepEqual(provider.deployments.map((deployment) => deployment.percentage), [1, 100]);
   assert.equal(new Set(provider.deployments.map((deployment) => deployment.versionId)).size, 1);
+  assert.deepEqual(provider.deploymentVersionSets[0]?.map((version) => version.percentage), [1, 99]);
+  assert.equal(provider.deploymentVersionSets[0]?.reduce((sum, version) => sum + version.percentage, 0), 100);
   assert.equal(ledger.size, 1);
   provider.listShouldFail = true;
   const health = await adapter(provider, input, ledger).health({ promotionId: "promotion:rollout", attempt: 1, release: input.release, target: input.target });

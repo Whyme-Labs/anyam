@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS golden_events (id TEXT PRIMARY KEY, region TEXT);

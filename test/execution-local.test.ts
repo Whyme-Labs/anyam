@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -410,6 +411,23 @@ test("affected planning falls back to execution when no exact reusable result ex
     assert.deepEqual(result.plan.fallbackActionIds, ["action:check", "action:build"]);
     assert.deepEqual(result.plan.reusedActionIds, []);
     assert.match(result.plan.receipt, /fallbackActions=action:check,action:build/);
+  } finally {
+    await rm(copied.directory, { recursive: true, force: true });
+  }
+});
+
+test("local Worker Artifact digests are raw-byte digests compatible with provider Artifact readers", async () => {
+  const copied = await copyFixture("worker");
+  try {
+    const result = await runLocalRelease({
+      manifest: copied.manifest,
+      context: context(copied.directory, "target:worker"),
+      releaseName: "raw-byte-digest",
+    });
+    const artifact = result.artifacts.find((candidate) => candidate.outputPath === "dist/worker.bundle");
+    assert.ok(artifact);
+    const bytes = await readFile(join(copied.directory, artifact.outputPath!));
+    assert.equal(artifact.digest, `sha256:${createHash("sha256").update(bytes).digest("hex")}`);
   } finally {
     await rm(copied.directory, { recursive: true, force: true });
   }

@@ -7,12 +7,9 @@
   "workers_dev": false,
   "preview_urls": false,
   "vars": {
-    "ANYAM_PROMOTION_EXECUTOR_ACCOUNT_ID": "replace-with-customer-cloudflare-account-id",
-    "ANYAM_PROMOTION_EXECUTOR_TARGET_ID": "replace-with-customer-target-id",
-    "ANYAM_PROMOTION_EXECUTOR_SCRIPT_NAME": "replace-with-customer-worker-script",
-    "ANYAM_PROMOTION_EXECUTOR_PREVIEW_SUBDOMAIN": "replace-with-customer-workers-dev-subdomain",
-    "ANYAM_PROMOTION_CREDENTIAL_SCOPES": "workers:read,workers:write",
-    "ANYAM_PROMOTION_CREDENTIAL_SOURCE_ID": "customer-secret-binding-v1",
+    // Non-secret route metadata. The named credential bindings are set with
+    // `wrangler secret put` and are deliberately not represented here.
+    "ANYAM_PROMOTION_TARGET_ROUTES": "[{\"targetId\":\"target:staging\",\"accountId\":\"replace-with-customer-cloudflare-account-id\",\"scriptName\":\"replace-with-staging-worker-script\",\"previewSubdomain\":\"replace-with-customer-workers-dev-subdomain\",\"credentialBinding\":\"ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN_STAGING\",\"credentialScopes\":[\"workers:read\",\"workers:write\"]},{\"targetId\":\"target:production\",\"accountId\":\"replace-with-customer-cloudflare-account-id\",\"scriptName\":\"replace-with-production-worker-script\",\"previewSubdomain\":\"replace-with-customer-workers-dev-subdomain\",\"credentialBinding\":\"ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN_PRODUCTION\",\"credentialScopes\":[\"workers:read\",\"workers:write\"]}]",
     "ANYAM_PROMOTION_HEALTH_RECEIPT": "replace-with-credential-free-installation-probe-receipt",
     "ANYAM_PROMOTION_HANDOFF_KEY_ID": "replace-with-customer-promotion-handoff-key-id",
     "ANYAM_PROMOTION_HANDOFF_PREVIOUS_KEY_ID": "replace-with-previous-promotion-handoff-key-id-or-omit"

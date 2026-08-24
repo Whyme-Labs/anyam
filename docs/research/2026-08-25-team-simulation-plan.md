@@ -27,8 +27,9 @@ for every required scenario:
    explicit rebase.
 8. Bidirectional mirror projection sends public refs outward and turns a remote
    commit into a proposed Change without advancing canonical state.
-9. A Project Export contains both repositories, Change history, mirror state,
-   and recovery metadata. Import restores exact refs and is idempotent.
+9. The Worker, CLI, and hybrid Project Exports contain their declared
+   repositories, Change history, mirror state, and recovery metadata. Import
+   restores exact refs and is idempotent.
 10. Any unsupported product capability is reported as `NOT VERIFIED` with a
     concrete issue candidate. It is never represented by a synthetic pass.
 
@@ -45,7 +46,7 @@ Anyam limits, capacity claims, or production SLOs.
 | `git-conflict-rebase` | two branches editing the same line | Git merge, abort, rebase, Local Change rebase | Conflict is durable, resolution is explicit, and the final revision is new |
 | `team-review-landing` | three human actors and two agent actors | Collaboration Coordinator | Finding blocks, independent approval unblocks, Landing is canonical-only |
 | `github-bidirectional` | scripted remote refs and a remote commit | Mirror Coordinator | Outbound projection is idempotent; inbound commit becomes a Change proposal |
-| `export-restore` | both repositories plus collaboration and mirror state | Local Project Exporter and Local Git Driver | Export verifies, import activates, and replay does not duplicate state |
+| `export-restore` | Worker, CLI, and hybrid Project packages | Local Project Exporter and Local Git Driver | Export verifies, import activates, restored refs match, and replay does not duplicate state |
 
 ## Run order
 
@@ -101,7 +102,8 @@ qualifier with a customer credential.
 
 ## Receipts
 
-The runner writes its decision trail to `.audit/team-simulation.tsv` and emits
-the final JSON receipt to stdout. A successful local run is evidence for the
-tested seams only. It is not evidence for a production team, a Cloudflare
-account, or a general availability claim.
+The development run keeps its append-only decision trail in
+`.audit/team-simulation.tsv`. The committed runner emits the final JSON receipt
+to stdout so a caller can redirect it to customer-controlled storage. A
+successful local run is evidence for the tested seams only. It is not evidence
+for a production team, a Cloudflare account, or a general availability claim.

@@ -23,8 +23,13 @@ Every Target Deployment Profile carries a discriminated Preview Strategy:
   boundary.
 
 The Cloudflare adapter resolves `version-url` only when the provider version
-reports preview availability. Other strategies require an explicit route
-resolver. Missing or unavailable strategy execution is a blocked Promotion,
+reports preview availability. `isolated-target` and
+`custom-domain-version-override` require an explicit route resolver.
+`staging-only` is different: it succeeds only when every named
+`requiredEvidenceKeys` entry is present as passed Evidence on the immutable
+Release. It does not perform a health request against an already-serving
+route, so it cannot accidentally certify the previous Release as the
+candidate. Missing or unavailable strategy execution is a blocked Promotion,
 never an implicit preview skip.
 
 ## Consequences
@@ -44,4 +49,3 @@ never an implicit preview skip.
   telling the operator.
 - **Infer a staging route from environment names:** route and resource
   isolation must be explicit and digest-bound.
-

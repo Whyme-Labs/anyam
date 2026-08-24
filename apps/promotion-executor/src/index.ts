@@ -11,8 +11,15 @@ import { createCloudflareApiTokenCredentialBroker } from "../../../src/cloudflar
 import { promotionExecutorHealth } from "./health.ts";
 import { claimPromotionNonce } from "../../../src/cloudflare/promotion-executor-nonce.ts";
 import { createCloudflareWorkerReleaseManifest } from "../../../src/cloudflare/worker-release-manifest.ts";
+import { parsePromotionExecutorTargetRoutes, type PromotionExecutorTargetRouteDefinition } from "./route-registry.ts";
 
 export interface Env {
+  /**
+   * Customer-owned, non-secret Target route registry. Each entry names the
+   * secret binding that contains its provider credential; the secret value is
+   * never embedded in this JSON.
+   */
+  ANYAM_PROMOTION_TARGET_ROUTES?: string;
   ANYAM_PROMOTION_EXECUTOR_ACCOUNT_ID?: string;
   ANYAM_PROMOTION_EXECUTOR_TARGET_ID?: string;
   ANYAM_PROMOTION_EXECUTOR_SCRIPT_NAME?: string;
@@ -34,6 +41,7 @@ export interface Env {
   ANYAM_PROMOTION_ARTIFACTS: R2Bucket;
   ANYAM_PROMOTION_WORKER_COMPATIBILITY_DATE?: string;
   ANYAM_PROMOTION_WORKER_COMPATIBILITY_FLAGS?: string;
+  [key: string]: unknown;
 }
 
 // Route contract: GET /health is an authenticated operator/service probe;
@@ -55,21 +63,82 @@ function flags(value: string | undefined): readonly string[] {
   return (value ?? "").split(",").map((flag) => flag.trim()).filter(Boolean);
 }
 
+function targetRoutesFromEnv(env: Env): readonly PromotionExecutorTargetRouteDefinition[] | undefined {
+  const registry = env.ANYAM_PROMOTION_TARGET_ROUTES?.trim();
+  if (!registry) return undefined;
+  const legacyFields = [
+    env.ANYAM_PROMOTION_EXECUTOR_ACCOUNT_ID,
+    env.ANYAM_PROMOTION_EXECUTOR_TARGET_ID,
+    env.ANYAM_PROMOTION_EXECUTOR_SCRIPT_NAME,
+    env.ANYAM_PROMOTION_EXECUTOR_PREVIEW_SUBDOMAIN,
+    env.ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN,
+  ].some((value) => typeof value === "string" && value.trim().length > 0);
+  if (legacyFields) throw new Error("ANYAM_PROMOTION_TARGET_ROUTES cannot be combined with legacy single-Target executor bindings");
+  return parsePromotionExecutorTargetRoutes(registry);
+}
+
+function secretBinding(env: Env, binding: string, field: string): string {
+  const value = env[binding];
+  if (typeof value !== "string" || value.trim().length === 0) throw new Error(`${field} secret binding ${binding} is unavailable`);
+  return value.trim();
+}
+
 function configFromEnv(env: Env): PromotionExecutorConfig {
   const artifactStore = env.ANYAM_PROMOTION_ARTIFACTS as unknown as PromotionExecutorArtifactStore;
   if (!artifactStore || typeof artifactStore.get !== "function") throw new Error("ANYAM_PROMOTION_ARTIFACTS binding is required");
+  const handoffKeyId = required(env.ANYAM_PROMOTION_HANDOFF_KEY_ID, "ANYAM_PROMOTION_HANDOFF_KEY_ID");
+  const handoffSecret = required(env.ANYAM_PROMOTION_HANDOFF_SECRET, "ANYAM_PROMOTION_HANDOFF_SECRET");
+  const previousKeyId = env.ANYAM_PROMOTION_HANDOFF_PREVIOUS_KEY_ID?.trim();
+  const previousSecret = env.ANYAM_PROMOTION_HANDOFF_PREVIOUS_SECRET?.trim();
+  if ((previousKeyId && !previousSecret) || (!previousKeyId && previousSecret)) throw new Error("ANYAM_PROMOTION_HANDOFF_PREVIOUS_KEY_ID and ANYAM_PROMOTION_HANDOFF_PREVIOUS_SECRET must be configured together");
+  const registry = targetRoutesFromEnv(env);
+  const compatibilityDate = required(env.ANYAM_PROMOTION_WORKER_COMPATIBILITY_DATE, "ANYAM_PROMOTION_WORKER_COMPATIBILITY_DATE");
+  const compatibilityFlags = flags(env.ANYAM_PROMOTION_WORKER_COMPATIBILITY_FLAGS);
+  const common: Pick<PromotionExecutorConfig, "handoffKeys" | "handoffNonceStore" | "artifactStore" | "workerReleaseManifest"> = {
+    handoffKeys: { active: { id: handoffKeyId, secret: handoffSecret }, ...(previousKeyId && previousSecret ? { previous: { id: previousKeyId, secret: previousSecret } } : {}) },
+    handoffNonceStore: {
+      async claim(input) {
+        if (!env.ANYAM_PROMOTION_NONCE_STORE) throw new Error("ANYAM_PROMOTION_NONCE_STORE binding is required");
+        const id = env.ANYAM_PROMOTION_NONCE_STORE.idFromName("promotion-handoff-nonces");
+        const response = await env.ANYAM_PROMOTION_NONCE_STORE.get(id).fetch("https://nonce-store/claim", { method: "POST", body: JSON.stringify(input), headers: { "content-type": "application/json" } });
+        return response.status === 201;
+      },
+    },
+    artifactStore,
+    workerReleaseManifest: ({ release }) => createCloudflareWorkerReleaseManifest({
+      release,
+      compatibilityDate,
+      compatibilityFlags,
+      bindings: [],
+      healthPaths: ["/health"],
+    }),
+  };
+  if (registry) {
+    return {
+      ...common,
+      targetRoutes: registry.map((route) => ({
+        targetId: route.targetId,
+        accountId: route.accountId,
+        scriptName: route.scriptName,
+        previewSubdomain: route.previewSubdomain,
+        ...(route.healthUrl ? { healthUrl: route.healthUrl } : {}),
+        credentialBroker: createCloudflareApiTokenCredentialBroker({
+          accountId: route.accountId,
+          scriptName: route.scriptName,
+          targetId: route.targetId,
+          tokenSource: async () => ({ token: secretBinding(env, route.credentialBinding, `Target ${route.targetId}`), sourceId: route.credentialSourceId ?? route.credentialBinding, scopes: route.credentialScopes }),
+        }),
+      })),
+    };
+  }
   const accountId = required(env.ANYAM_PROMOTION_EXECUTOR_ACCOUNT_ID, "ANYAM_PROMOTION_EXECUTOR_ACCOUNT_ID");
   const targetId = required(env.ANYAM_PROMOTION_EXECUTOR_TARGET_ID, "ANYAM_PROMOTION_EXECUTOR_TARGET_ID");
   const scriptName = required(env.ANYAM_PROMOTION_EXECUTOR_SCRIPT_NAME, "ANYAM_PROMOTION_EXECUTOR_SCRIPT_NAME");
   const credentialToken = required(env.ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN, "ANYAM_PROMOTION_CLOUDFLARE_API_TOKEN");
   const credentialScopes = scopes(env.ANYAM_PROMOTION_CREDENTIAL_SCOPES);
   const credentialSourceId = env.ANYAM_PROMOTION_CREDENTIAL_SOURCE_ID?.trim() || "customer-secret-binding";
-  const handoffKeyId = required(env.ANYAM_PROMOTION_HANDOFF_KEY_ID, "ANYAM_PROMOTION_HANDOFF_KEY_ID");
-  const handoffSecret = required(env.ANYAM_PROMOTION_HANDOFF_SECRET, "ANYAM_PROMOTION_HANDOFF_SECRET");
-  const previousKeyId = env.ANYAM_PROMOTION_HANDOFF_PREVIOUS_KEY_ID?.trim();
-  const previousSecret = env.ANYAM_PROMOTION_HANDOFF_PREVIOUS_SECRET?.trim();
-  if ((previousKeyId && !previousSecret) || (!previousKeyId && previousSecret)) throw new Error("ANYAM_PROMOTION_HANDOFF_PREVIOUS_KEY_ID and ANYAM_PROMOTION_HANDOFF_PREVIOUS_SECRET must be configured together");
   return {
+    ...common,
     accountId,
     targetId,
     scriptName,
@@ -80,25 +149,8 @@ function configFromEnv(env: Env): PromotionExecutorConfig {
       targetId,
       tokenSource: async () => ({ token: credentialToken, sourceId: credentialSourceId, scopes: credentialScopes }),
     }),
-    handoffKeys: { active: { id: handoffKeyId, secret: handoffSecret }, ...(previousKeyId && previousSecret ? { previous: { id: previousKeyId, secret: previousSecret } } : {}) },
-    handoffNonceStore: {
-      async claim(input) {
-        if (!env.ANYAM_PROMOTION_NONCE_STORE) throw new Error("ANYAM_PROMOTION_NONCE_STORE binding is required");
-        const id = env.ANYAM_PROMOTION_NONCE_STORE.idFromName("promotion-handoff-nonces");
-        const response = await env.ANYAM_PROMOTION_NONCE_STORE.get(id).fetch("https://nonce-store/claim", { method: "POST", body: JSON.stringify(input), headers: { "content-type": "application/json" } });
-        return response.status === 201;
-      },
-    },
     ...(env.ANYAM_PROMOTION_EXECUTOR_HEALTH_URL?.trim() ? { healthUrl: env.ANYAM_PROMOTION_EXECUTOR_HEALTH_URL.trim() } : {}),
     ...(env.ANYAM_PROMOTION_EXECUTOR_ADAPTER_ID?.trim() ? { adapterId: env.ANYAM_PROMOTION_EXECUTOR_ADAPTER_ID.trim() } : {}),
-    artifactStore,
-    workerReleaseManifest: ({ release }) => createCloudflareWorkerReleaseManifest({
-      release,
-      compatibilityDate: required(env.ANYAM_PROMOTION_WORKER_COMPATIBILITY_DATE, "ANYAM_PROMOTION_WORKER_COMPATIBILITY_DATE"),
-      compatibilityFlags: flags(env.ANYAM_PROMOTION_WORKER_COMPATIBILITY_FLAGS),
-      bindings: [],
-      healthPaths: ["/health"],
-    }),
   };
 }
 

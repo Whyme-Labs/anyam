@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-golden-reference",
+  "main": "dist/index.js",
+  "compatibility_date": "2026-01-01",
+  "vars": { "ANYAM_RELEASE_ID": "replace-with-release-identity" },
+  "assets": { "directory": "./dist/assets" },
+  "d1_databases": [{ "binding": "DB", "database_name": "replace-with-d1-name", "database_id": "replace-with-d1-id" }],
+  "r2_buckets": [{ "binding": "EXPORTS", "bucket_name": "replace-with-r2-bucket" }],
+  "kv_namespaces": [{ "binding": "CACHE", "id": "replace-with-kv-id" }],
+  "queues": {
+    "producers": [{ "binding": "EVENTS", "queue": "replace-with-queue" }],
+    "consumers": [{ "queue": "replace-with-queue", "max_batch_size": 10 }]
+  },
+  "services": [{ "binding": "AUX", "service": "replace-with-aux-worker" }],
+  "durable_objects": { "bindings": [{ "name": "GOLDEN_OBJECT", "class_name": "GoldenObject" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GoldenObject"] }],
+  "triggers": { "crons": ["*/5 * * * *"] }
+}

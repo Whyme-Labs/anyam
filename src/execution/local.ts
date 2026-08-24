@@ -219,6 +219,7 @@ function canonicalJson(value: unknown): string {
 }
 
 function digest(value: unknown): string {
+  if (value instanceof Uint8Array) return `sha256:${createHash("sha256").update(value).digest("hex")}`;
   return `sha256:${createHash("sha256").update(typeof value === "string" ? value : canonicalJson(value)).digest("hex")}`;
 }
 

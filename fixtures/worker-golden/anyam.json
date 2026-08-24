@@ -1,0 +1,33 @@
+{
+  "schema": "anyam.project/v1",
+  "id": "project:worker-golden",
+  "name": "Anyam Golden Cloudflare Worker",
+  "referenceType": "cloudflare-worker-golden-path",
+  "sourceSpaceIds": ["worker-golden-source"],
+  "source": { "root": ".", "provenance": "reference-fixture" },
+  "modules": [
+    {
+      "id": "module:worker-golden",
+      "root": ".",
+      "dependencies": [],
+      "actions": [
+        {
+          "id": "action:golden-build",
+          "command": "node build.mjs",
+          "inputs": ["anyam.json", "wrangler.jsonc", "build.mjs", "src/**/*.js", "assets/index.html", "migrations/*.sql"],
+          "outputs": ["dist/index.js", "dist/helper.js", "dist/assets/index.html", "dist/migrations/0001-add-region.sql"],
+          "network": [],
+          "resources": { "d1": "golden", "r2": "golden", "kv": "golden", "queue": "golden", "workflow": "golden", "durableObject": "golden", "serviceBinding": "golden", "scheduled": true }
+        }
+      ],
+      "artifactTypes": ["worker.bundle", "worker.module", "worker.asset", "d1.migration"]
+    }
+  ],
+  "verifiers": [
+    { "id": "verifier:golden-build", "actionId": "action:golden-build", "disclosure": "full", "requiredFor": ["release"] }
+  ],
+  "targets": [
+    { "id": "target:golden-staging", "adapter": "cloudflare.worker", "accepts": ["worker.bundle", "worker.module", "worker.asset", "d1.migration"], "requiredCapabilities": [] },
+    { "id": "target:golden-production", "adapter": "cloudflare.worker", "accepts": ["worker.bundle", "worker.module", "worker.asset", "d1.migration"], "requiredCapabilities": [] }
+  ]
+}

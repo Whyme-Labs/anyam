@@ -1,0 +1,7 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-golden-aux",
+  "main": "aux-worker.js",
+  "compatibility_date": "2026-01-01",
+  "workers_dev": true
+}

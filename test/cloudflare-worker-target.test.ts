@@ -116,10 +116,31 @@ class InMemoryCloudflareWorkerApi {
   readonly deployments: CloudflareWorkerDeployment[] = [];
   nextManifest: ReturnType<typeof createCloudflareWorkerReleaseManifest> | undefined;
   previewAvailable = true;
+  omitAnnotationsOnVersionDetail = false;
+  omitAnnotationsOnVersionUpload = false;
   private sequence = 0;
 
   async request<T>(request: CloudflareWorkerApiRequest): Promise<CloudflareWorkerApiResponse<T>> {
     this.requests.push({ method: request.method, path: request.path, token: request.token });
+    if (request.method === "GET" && request.path.includes("/workers/workers/")) {
+      const versionId = decodeURIComponent((request.path.split("/").at(-1) ?? "").split("?")[0] ?? "");
+      const version = this.versions.find((candidate) => candidate.id === versionId);
+      if (!version || !this.nextManifest) return { status: 404, ok: false, errors: [{ code: 1000, message: "beta version not found" }], messages: [] };
+      return {
+        status: 200,
+        ok: true,
+        result: {
+          id: version.id,
+          annotations: version.metadata?.annotations,
+          bindings: this.nextManifest.bindings.map((binding) => ({ name: binding.name, type: binding.kind, ...(binding.providerFields ?? {}) })),
+          compatibility_date: this.nextManifest.compatibility.date,
+          compatibility_flags: this.nextManifest.compatibility.flags,
+          modules: this.nextManifest.modules.map((module) => ({ name: module.name })),
+        } as T,
+        errors: [],
+        messages: [],
+      };
+    }
     if (request.method === "GET" && request.path.includes("/versions?")) {
       return { status: 200, ok: true, result: { items: [...this.versions] } as CloudflareWorkerVersionList as T, errors: [], messages: [] };
     }
@@ -127,13 +148,24 @@ class InMemoryCloudflareWorkerApi {
       const versionId = decodeURIComponent(request.path.split("/").at(-1) ?? "");
       const version = this.versions.find((candidate) => candidate.id === versionId);
       return version
-        ? { status: 200, ok: true, result: version as T, errors: [], messages: [] }
+        ? {
+          status: 200,
+          ok: true,
+          result: (this.omitAnnotationsOnVersionDetail && version.metadata
+            ? { ...version, metadata: { ...version.metadata, annotations: undefined } }
+            : version) as T,
+          errors: [],
+          messages: [],
+        }
         : { status: 404, ok: false, errors: [{ code: 1000, message: "version not found" }], messages: [] };
     }
     if (request.method === "POST" && request.path.endsWith("/versions")) {
       assert.ok(request.body instanceof FormData);
       const form = request.body as FormData;
-      const metadata = JSON.parse(String(form.get("metadata"))) as { main_module: string; annotations: { "workers/tag": string } };
+      const metadataPart = form.get("metadata");
+      assert.ok(metadataPart instanceof Blob);
+      assert.equal(metadataPart.type, "application/json");
+      const metadata = JSON.parse(await metadataPart.text()) as { main_module: string; annotations: { "workers/tag": string } };
       const file = form.get(metadata.main_module);
       assert.ok(file instanceof Blob);
       assert.ok((await file.arrayBuffer()).byteLength > 0);
@@ -144,13 +176,14 @@ class InMemoryCloudflareWorkerApi {
         metadata: { hasPreview: this.previewAvailable, annotations: metadata.annotations },
         resources: {
           bindings: manifest.bindings.map((binding) => ({ name: binding.name, type: binding.kind, ...(binding.providerFields ?? {}) })),
+          script: { main_module: manifest.mainModule, modules: manifest.modules.map((module) => ({ name: module.name })) },
           script_runtime: { compatibility_date: manifest.compatibility.date, compatibility_flags: manifest.compatibility.flags },
           ...(manifest.staticAssets ? { assets: {} } : {}),
           ...(manifest.durableObjectMigrations ? { durable_object_migrations: { ...manifest.durableObjectMigrations } } : {}),
         },
       };
       this.versions.unshift(version);
-      return { status: 200, ok: true, result: version as T, errors: [], messages: [] };
+      return { status: 200, ok: true, result: (this.omitAnnotationsOnVersionUpload ? { id: version.id } : version) as T, errors: [], messages: [] };
     }
     if (request.method === "POST" && request.path.endsWith("/deployments")) {
       const body = JSON.parse(String(request.body)) as { versions: readonly { version_id: string; percentage: number }[]; annotations?: Record<string, string> };
@@ -192,6 +225,8 @@ test("Cloudflare Worker Target uploads digest-bound versions, promotes after pre
   const second = await release("second");
   try {
     const api = new InMemoryCloudflareWorkerApi();
+    api.omitAnnotationsOnVersionDetail = true;
+    api.omitAnnotationsOnVersionUpload = true;
     const issued: Array<{ operation: CloudflareWorkerTargetOperation; audience: string }> = [];
     const productionHealthStates: readonly [number, number, number, number, number] = [404, 200, 503, 503, 200];
     let productionHealthIndex = 0;
@@ -259,6 +294,7 @@ test("Cloudflare Worker Target uploads digest-bound versions, promotes after pre
 
     const firstPromotion = await coordinator.promote({ releaseId: first.release.release.id, idempotencyKey: "ship:cloudflare:first", actor });
     assert.equal(firstPromotion.state, "healthy");
+    assert.ok(api.requests.some((request) => request.path.includes("/workers/workers/")));
     assert.match(firstPromotion.health?.receipt ?? "", /routeReadinessAttempts=2/);
     assert.match(firstPromotion.health?.receipt ?? "", /healthValidation=release-bound|healthValidation=status-mismatch/);
     assert.match(firstPromotion.health?.receipt ?? "", /phase=candidate/);
@@ -478,6 +514,63 @@ test("Cloudflare Worker Target uses an explicit isolated preview strategy when v
       assert.match(preview.receipt, /previewUrl=https:\/\/isolated-target\.preview\.example\/health/);
       assert.match(preview.receipt, /releaseDigest=/);
     }
+  } finally {
+    await rm(candidate.directory, { recursive: true, force: true });
+  }
+});
+
+test("Cloudflare Worker Target accepts an explicit staging-only preview only with named passed Evidence", async () => {
+  const candidate = await release("staging-only-preview");
+  try {
+    const evidenceKey = candidate.release.evidence[0]?.key;
+    assert.ok(evidenceKey);
+    const base = cloudflareTargetRecord("target:staging-only", "Staging-only preview");
+    const { profileDigest: ignoredProfileDigest, ...baseProfile } = base.deploymentProfile!;
+    void ignoredProfileDigest;
+    const targetWith = (requiredEvidenceKeys: readonly string[]) => createWorkerTarget({
+      target: {
+        ...base,
+        deploymentProfile: createTargetDeploymentProfile({
+          ...baseProfile,
+          previewStrategy: { kind: "staging-only", requiredEvidenceKeys },
+        }),
+      },
+      capabilities: { preview: true, promote: true, healthCheck: true, rollback: true },
+    });
+    const bytes = new Uint8Array(await readFile(join(candidate.directory, candidate.release.artifacts[0]?.outputPath ?? "")));
+    const adapterFor = (target: ReturnType<typeof targetWith>) => {
+      const api = new InMemoryCloudflareWorkerApi();
+      const adapter = new CloudflareWorkerTargetAdapter({
+        accountId: "account:staging-only",
+        scriptName: "anyam-staging-only",
+        targetId: target.id,
+        transport: api,
+        credentialBroker: {
+          async issue(input) { return { token: "staging-only-token", credentialId: `credential:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=fixture; providerAuthorization=observed; credentialMaterialStored=false" }; },
+          async probe() { return { credentialId: "credential:probe", expiresAt: "2099-01-01T00:00:00.000Z", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credential=fixture; providerAuthorization=observed; credentialMaterialStored=false" }; },
+        },
+        workerReleaseManifest: manifestBuilder(api),
+        artifactReader: { async read() { return bytes; } },
+        previewUrlForVersion: (versionId) => `https://${versionId}.preview.workers.dev`,
+        healthUrl: "https://staging-only.example/health",
+        fetch: async () => { throw new Error("staging-only preview must not fetch a version URL"); },
+      });
+      return { api, adapter };
+    };
+
+    const missing = adapterFor(targetWith(["release-owner-approval"]));
+    const blocked = await missing.adapter.preview({ promotionId: "promotion:staging-only-missing", attempt: 1, release: candidate.release, target: targetWith(["release-owner-approval"]) });
+    assert.equal(blocked.status, "failed");
+    if (blocked.status === "failed") {
+      assert.equal(blocked.errorCode, "preview.evidence-missing");
+      assert.match(blocked.receipt, /missingEvidenceKeys=release-owner-approval/);
+    }
+
+    const readyTarget = targetWith([evidenceKey]);
+    const ready = adapterFor(readyTarget);
+    const succeeded = await ready.adapter.preview({ promotionId: "promotion:staging-only-ready", attempt: 1, release: candidate.release, target: readyTarget });
+    assert.equal(succeeded.status, "succeeded");
+    if (succeeded.status === "succeeded") assert.match(succeeded.receipt, /previewStrategy=staging-only;.*evidence=verified/);
   } finally {
     await rm(candidate.directory, { recursive: true, force: true });
   }

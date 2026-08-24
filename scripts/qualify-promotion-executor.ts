@@ -42,7 +42,7 @@ function fixture(): { context: ReturnType<typeof createPromotionExecutionContext
 }
 
 function fakeFetch(releaseId: string): typeof fetch {
-  const versions: Array<{ id: string; tag: string; metadata: { annotations: { "workers/tag": string; "workers/message": string } }; resources: { bindings: readonly Readonly<Record<string, unknown>>[]; script_runtime: { compatibility_date?: string; compatibility_flags: readonly string[] } } }> = [];
+  const versions: Array<{ id: string; tag: string; metadata: { annotations: { "workers/tag": string; "workers/message": string } }; resources: { bindings: readonly Readonly<Record<string, unknown>>[]; script: { main_module: string; modules: readonly Readonly<Record<string, unknown>>[] }; script_runtime: { compatibility_date?: string; compatibility_flags: readonly string[] } } }> = [];
   let sequence = 0;
   return async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
@@ -50,8 +50,10 @@ function fakeFetch(releaseId: string): typeof fetch {
       if (url.pathname.endsWith("/versions") && (init?.method ?? "GET") === "GET") return new Response(JSON.stringify({ result: { items: versions }, errors: [], messages: [] }), { status: 200 });
       if (url.pathname.endsWith("/versions") && init?.method === "POST") {
         const form = init.body as FormData;
-        const metadata = JSON.parse(String(form.get("metadata"))) as { annotations: { "workers/tag": string; "workers/message": string }; compatibility_date?: string; compatibility_flags?: readonly string[]; bindings?: readonly Readonly<Record<string, unknown>>[] };
-        const version = { id: `qualification-version-${++sequence}`, tag: metadata.annotations["workers/tag"], metadata: { annotations: metadata.annotations }, resources: { bindings: metadata.bindings ?? [], script_runtime: { compatibility_date: metadata.compatibility_date ?? "", compatibility_flags: metadata.compatibility_flags ?? [] } } };
+        const metadataPart = form.get("metadata");
+        const metadataText = metadataPart instanceof Blob ? await metadataPart.text() : String(metadataPart);
+        const metadata = JSON.parse(metadataText) as { main_module?: string; annotations: { "workers/tag": string; "workers/message": string }; compatibility_date?: string; compatibility_flags?: readonly string[]; bindings?: readonly Readonly<Record<string, unknown>>[] };
+        const version = { id: `qualification-version-${++sequence}`, tag: metadata.annotations["workers/tag"], metadata: { annotations: metadata.annotations }, resources: { bindings: metadata.bindings ?? [], script: { main_module: metadata.main_module ?? "worker.js", modules: [{ name: metadata.main_module ?? "worker.js" }] }, script_runtime: { compatibility_date: metadata.compatibility_date ?? "", compatibility_flags: metadata.compatibility_flags ?? [] } } };
         versions.push(version);
         return new Response(JSON.stringify({ result: { id: version.id }, errors: [], messages: [] }), { status: 200 });
       }

@@ -51,12 +51,14 @@ function fakeFetch(releaseId: string): typeof fetch {
       }
       if (url.pathname.endsWith("/versions") && init?.method === "POST") {
         const form = init.body as FormData;
-        const metadata = JSON.parse(String(form.get("metadata"))) as { annotations: { "workers/tag": string; "workers/message": string }; compatibility_date?: string; compatibility_flags?: readonly string[]; bindings?: readonly Readonly<Record<string, unknown>>[] };
+        const metadataPart = form.get("metadata");
+        const metadataText = metadataPart instanceof Blob ? await metadataPart.text() : String(metadataPart);
+        const metadata = JSON.parse(metadataText) as { main_module?: string; annotations: { "workers/tag": string; "workers/message": string }; compatibility_date?: string; compatibility_flags?: readonly string[]; bindings?: readonly Readonly<Record<string, unknown>>[] };
         const version = {
           id: `version-executor-${++versionNumber}`,
           tag: metadata.annotations["workers/tag"],
           metadata: { annotations: metadata.annotations },
-          resources: { bindings: metadata.bindings ?? [], script_runtime: { compatibility_date: metadata.compatibility_date, compatibility_flags: metadata.compatibility_flags ?? [] } },
+          resources: { bindings: metadata.bindings ?? [], script: { main_module: metadata.main_module ?? "worker.js", modules: [{ name: metadata.main_module ?? "worker.js" }] }, script_runtime: { compatibility_date: metadata.compatibility_date, compatibility_flags: metadata.compatibility_flags ?? [] } },
         };
         versions.push(version);
         return new Response(JSON.stringify({ result: { id: version.id }, errors: [], messages: [] }), { status: 200 });
@@ -198,9 +200,11 @@ test("customer-operated executor routes two Targets to distinct provider configu
       if (path.endsWith("/versions") && (init?.method ?? "GET") === "GET") return new Response(JSON.stringify({ result: { items: [] }, errors: [], messages: [] }), { status: 200 });
       if (path.endsWith("/versions") && init?.method === "POST") {
         const form = init.body as FormData;
-        const metadata = JSON.parse(String(form.get("metadata"))) as { annotations: Record<string, string>; compatibility_date: string; compatibility_flags: readonly string[]; bindings?: readonly Readonly<Record<string, unknown>>[] };
+        const metadataPart = form.get("metadata");
+        const metadataText = metadataPart instanceof Blob ? await metadataPart.text() : String(metadataPart);
+        const metadata = JSON.parse(metadataText) as { main_module?: string; annotations: Record<string, string>; compatibility_date: string; compatibility_flags: readonly string[]; bindings?: readonly Readonly<Record<string, unknown>>[] };
         const id = `version-${scriptName}`;
-        versions.set(id, { id, metadata, resources: { bindings: metadata.bindings ?? [], script_runtime: { compatibility_date: metadata.compatibility_date, compatibility_flags: metadata.compatibility_flags ?? [] } } });
+        versions.set(id, { id, metadata, resources: { bindings: metadata.bindings ?? [], script: { main_module: metadata.main_module ?? "worker.js", modules: [{ name: metadata.main_module ?? "worker.js" }] }, script_runtime: { compatibility_date: metadata.compatibility_date, compatibility_flags: metadata.compatibility_flags ?? [] } } });
         return new Response(JSON.stringify({ result: { id }, errors: [], messages: [] }), { status: 200 });
       }
       if (path.includes("/versions/") && (init?.method ?? "GET") === "GET") {

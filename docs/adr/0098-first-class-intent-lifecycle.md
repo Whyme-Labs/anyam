@@ -56,8 +56,8 @@ redaction.
   lineage.
 - Public projections cannot infer restricted Intent authors, assignees, or
   comments from a placeholder object.
-- The pull-request compatibility projection remains a separate follow-up in
-  issue #280; Intent is not renamed to PR and does not take on Git hosting
+- The pull-request compatibility projection is a separate aggregate described
+  by ADR 0099; Intent is not renamed to PR and does not take on Git hosting
   semantics.
 
 ## Qualification receipt

@@ -173,6 +173,67 @@ async function intentRequest(request: Request, env: AnyamRealmOAuthEnv, path: In
   }
 }
 
+type PullRequestOperation = "update" | "review" | "close" | "reopen" | "block" | "merge";
+type PullRequestPath = { matched: boolean; malformed: boolean; pullRequestId?: string; operation?: PullRequestOperation };
+
+function isPullRequestOperation(value: string | undefined): value is PullRequestOperation {
+  return value === "update" || value === "review" || value === "close" || value === "reopen" || value === "block" || value === "merge";
+}
+
+function pullRequestPath(pathname: string): PullRequestPath {
+  const segments = pathname.split("/");
+  if (segments[1] !== "api" || segments[2] !== "pull-requests") return { matched: false, malformed: false };
+  if (segments.length === 3) return { matched: true, malformed: false };
+  if (!segments[3]) return { matched: true, malformed: true };
+  try {
+    const pullRequestId = decodeURIComponent(segments[3]);
+    if (!pullRequestId || pullRequestId.includes("/") || pullRequestId.includes("\\") || pullRequestId === "." || pullRequestId === "..") return { matched: true, malformed: true };
+    if (segments.length === 4) return { matched: true, malformed: false, pullRequestId };
+    if (segments.length !== 5 || !isPullRequestOperation(segments[4])) return { matched: true, malformed: true };
+    return { matched: true, malformed: false, pullRequestId, operation: segments[4] };
+  } catch {
+    return { matched: true, malformed: true };
+  }
+}
+
+function pullRequestCoordinatorError(error: unknown, operation: string): Response {
+  const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+  const status = detail.includes("not_found") ? 404 : detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : detail.includes("invalid_request") ? 422 : detail.includes("conflict") || detail.includes("stale_state") || detail.includes("idempotency_conflict") ? 409 : 503;
+  return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: status === 404 ? "pull_request_not_found" : status === 422 ? "invalid_request" : status === 409 ? "pull_request_conflict" : "authority_coordinator_rejected", recoveryAction: status === 404 ? "Verify the Pull Request identifier without probing undiscoverable resources." : status === 409 ? "Read the current Pull Request and Change state or reuse the original idempotent request." : "Inspect the Durable Object receipt and retry only the same idempotent Pull Request request when safe.", receipt: `authority=coordinator-rejected; operation=${operation}; credentialFree=true; canonicalWrite=false` }, status);
+}
+
+async function pullRequestRequest(request: Request, env: AnyamRealmOAuthEnv, path: PullRequestPath): Promise<Response> {
+  const sessionId = await anyamRealmOwnerSessionId(request, env);
+  if (!sessionId) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "owner_authentication_required", recoveryAction: "Authenticate the Realm owner through /owner/login before using the Pull Request surface.", receipt: "ownerSession=missing-or-invalid; pullRequest=not-accepted; canonicalWrite=false" }, 401);
+  if (path.malformed) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "invalid_pull_request_path", recoveryAction: "Use /api/pull-requests, /api/pull-requests/{id}, or a documented Pull Request transition path.", receipt: "pullRequestPath=malformed; transition=not-applied; canonicalWrite=false" }, 400);
+  const url = new URL(request.url);
+  const read = async (body: Record<string, unknown>, operation: string): Promise<Response> => {
+    try { return json(await requestAnyamRealmCoordinator(env, "/authority/pull-requests/internal", body)); } catch (error) { return pullRequestCoordinatorError(error, operation); }
+  };
+  if (path.pullRequestId && !path.operation && request.method === "GET") return read({ sessionId, pullRequestId: path.pullRequestId }, "pullRequest.inspect");
+  if (!path.pullRequestId && request.method === "GET") {
+    const keys = [...url.searchParams.keys()];
+    const projects = url.searchParams.getAll("projectId");
+    if (keys.some((key) => key !== "projectId") || projects.length > 1 || (projects[0] !== undefined && (!projects[0] || projects[0].includes("/") || projects[0].includes("\\")))) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "invalid_pull_request_query", recoveryAction: "Use only one safe projectId query parameter for Pull Request listing.", receipt: "pullRequestList=not-accepted; parameter=unsupported-or-malformed; canonicalWrite=false" }, 400);
+    return read({ sessionId, ...(projects[0] ? { projectId: projects[0] } : {}) }, "pullRequest.list");
+  }
+  if (path.pullRequestId && !path.operation) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "method_not_allowed", recoveryAction: "Use GET to inspect a Pull Request or POST a documented transition under its identifier.", receipt: "pullRequest=method-not-allowed; transition=not-applied; canonicalWrite=false" }, 405);
+  if (request.method !== "POST") return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "method_not_allowed", recoveryAction: "Use GET for Pull Request reads or POST with one Idempotency-Key for mutations.", receipt: "pullRequest=method-not-allowed; transition=not-applied; canonicalWrite=false" }, 405);
+  const idempotencyKey = request.headers.get("idempotency-key")?.trim();
+  if (!idempotencyKey) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "invalid_request", recoveryAction: "Send one non-empty Idempotency-Key header for the Pull Request mutation.", receipt: "pullRequest=idempotencyKey-required; transition=not-applied; canonicalWrite=false" }, 422);
+  const body = await readBody(request).catch(() => undefined);
+  if (!body) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "invalid_request", recoveryAction: "Send a JSON object containing the documented Pull Request fields.", receipt: "pullRequest=body-object-required; transition=not-applied; canonicalWrite=false" }, 422);
+  const command = path.operation === "update" ? "pullRequest.update" : path.operation === "review" ? "pullRequest.review" : path.operation === "close" ? "pullRequest.close" : path.operation === "reopen" ? "pullRequest.reopen" : path.operation === "block" ? "pullRequest.block" : path.operation === "merge" ? "pullRequest.merge" : "pullRequest.open";
+  const payload = path.pullRequestId ? { ...body, pullRequestId: path.pullRequestId } : body;
+  try {
+    const result = await requestAnyamRealmCoordinator(env, "/authority/command/internal", { protocol: AUTHORITY_COMMAND_PROTOCOL, command, idempotencyKey, payload, sessionId });
+    const value = result.value;
+    return json({ ...result, ...(value !== null && typeof value === "object" && !Array.isArray(value) ? value : {}) });
+  } catch (error) {
+    return pullRequestCoordinatorError(error, command);
+  }
+}
+
 function workspaceIdFromPath(pathname: string): { workspaceId?: string; malformed: boolean } {
   const segments = pathname.split("/");
   if (segments[1] !== "api" || segments[2] !== "workspaces") return { malformed: false };
@@ -725,6 +786,7 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   const projectRoute = projectIdFromPath(url.pathname);
   const changeRoute = changeIdFromPath(url.pathname);
   const intentRoute = intentPath(url.pathname);
+  const pullRequestRoute = pullRequestPath(url.pathname);
   const workspaceRoute = workspaceIdFromPath(url.pathname);
   const isProjectRoute = url.pathname === "/api/projects" || url.pathname.startsWith("/api/projects/");
   const isChangeRoute = url.pathname === "/api/changes" || url.pathname.startsWith("/api/changes/");
@@ -740,7 +802,7 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   const promotionExecutionRoute = promotionExecutionPath(url.pathname);
   const promotionStatusRoute = promotionStatusPath(url.pathname);
   const revisionRoute = revisionPublishPath(url.pathname);
-  if (!url.pathname.startsWith("/api/authority") && !isProjectRoute && !isChangeRoute && !isWorkspaceRoute && !isRunRoute && !isEvidenceRoute && !isArtifactRoute && !isLandingRoute && !isReleaseRoute && !isTargetRoute && !isPromotionRoute && !mirrorRoute.matched && !revisionRoute.matched && !intentRoute.matched) return undefined;
+  if (!url.pathname.startsWith("/api/authority") && !isProjectRoute && !isChangeRoute && !isWorkspaceRoute && !isRunRoute && !isEvidenceRoute && !isArtifactRoute && !isLandingRoute && !isReleaseRoute && !isTargetRoute && !isPromotionRoute && !mirrorRoute.matched && !revisionRoute.matched && !intentRoute.matched && !pullRequestRoute.matched) return undefined;
 
   const health = customerRealmWorkerHealth(env);
   if (health.status !== "ready") {
@@ -806,6 +868,8 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   }
 
   if (intentRoute.matched) return intentRequest(request, env, intentRoute);
+
+  if (pullRequestRoute.matched) return pullRequestRequest(request, env, pullRequestRoute);
 
   if (isChangeRoute) {
     if (changeRoute.malformed) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "invalid_change_path", recoveryAction: "Use GET /api/changes/{changeId} with one URL-encoded Change identifier.", receipt: "changeRead=not-accepted; path=malformed; canonicalWrite=false" }, 400);

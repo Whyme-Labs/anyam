@@ -92,6 +92,7 @@ test("CLI documents the hosted Intent lifecycle without implying local credentia
   }
   const help = output.join("\n");
   assert.match(help, /intent list\|inspect\|create\|assign\|comment\|close\|reopen/);
+  assert.match(help, /pr list\|inspect\|open\|update\|review\|close\|reopen\|block\|merge/);
   assert.match(help, /--owner-session or ANYAM_OWNER_SESSION/);
   assert.match(help, /never stores bearer credentials/);
 });

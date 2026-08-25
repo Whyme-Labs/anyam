@@ -48,6 +48,7 @@ Anyam limits, capacity claims, or production SLOs.
 | `team-review-landing` | three human actors and two agent actors | Collaboration Coordinator | Finding blocks, independent approval unblocks, Landing is canonical-only |
 | `github-bidirectional` | scripted remote refs and a remote commit | Mirror Coordinator | Outbound projection is idempotent; inbound commit becomes a Change proposal |
 | `intent-lifecycle` | Authority Intent and IntentComment records | Authority, REST/MCP/CLI surfaces, disclosure, and Project Export | Stable Intent identity survives all transitions, Change linkage, and export/restore |
+| `pull-request-lifecycle` | Real branch and rebased commit identities | Pull Request compatibility projection over Change/Revision, review, Landing | One stable PR identity survives branch updates, review findings, close/reopen/block, Landing, merge, and export/restore |
 | `export-restore` | Worker, CLI, and hybrid Project packages | Local Project Exporter and Local Git Driver | Export verifies, import activates, restored refs and Intent history match, and replay does not duplicate state |
 
 ## Run order
@@ -95,9 +96,10 @@ first-class Intent lifecycle. The runner must keep the `intent-lifecycle`
 scenario separate from the still-open pull-request compatibility scenario, so
 an Intent pass is not mistaken for a PR pass.
 
-The current CLI exposes Change and Workspace commands but not a complete GitHub
-style pull-request lifecycle. The runner must report that gap if it cannot
-open, review, close, and reopen a PR through an Anyam interface.
+The Pull Request compatibility projection is a Git vocabulary adapter over
+Anyam-owned Change and Revision state. The runner must keep its identity stable
+through branch updates and rebases, require review/Landing before merge, and
+report a concrete finding if any public REST, MCP, CLI, or export seam diverges.
 
 Cloudflare deployment remains a separate provider-backed qualification. The
 simulation may bind the Worker Release and Target records, but it must not

@@ -91,6 +91,36 @@ held outside the environment. The CLI requires an explicit Realm and does not
 persist the session or any bearer credential. Public projections omit
 restricted Intents rather than returning metadata-bearing placeholders.
 
+## Use the Git-compatible Pull Request projection
+
+Anyam also exposes familiar Pull Request vocabulary over its Change and
+Revision authority. A Pull Request is a projection, not a second canonical
+branch authority; `pr merge` is accepted only after the mapped Change lands:
+
+```bash
+anyam pr open \
+  --realm https://source.acme.com \
+  --project project:atlas \
+  --change change:atlas:invoice-export \
+  --pull-request pr:atlas:invoice-export \
+  --provider local \
+  --head-ref refs/heads/feature/invoice-export \
+  --base-ref refs/heads/main \
+  --head-commit <rebased-head-commit> \
+  --base-commit <base-commit> \
+  --title "Add invoice export"
+anyam pr review pr:atlas:invoice-export \
+  --realm https://source.acme.com \
+  --review-state approved \
+  --review-digest sha256:<review-receipt>
+anyam pr merge pr:atlas:invoice-export --realm https://source.acme.com
+```
+
+`pr update` retains the same Pull Request ID across branch updates and
+rebases. `pr close`, `pr reopen`, and `pr block` preserve the Change and
+Revision history. Public projections omit provider repository identity and
+private Change identifiers.
+
 ## Connect a private GitHub repository without a GitHub App
 
 For a customer-operated Realm, the Actions Bridge is the default GitHub

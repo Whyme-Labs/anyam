@@ -31,6 +31,8 @@ export const ANYAM_REALM_OAUTH_SCOPES = [
   "change.inspect",
   "intent.inspect",
   "intent.write",
+  "pullRequest.inspect",
+  "pullRequest.write",
   "source.read",
   "change.write",
   "run.invoke",

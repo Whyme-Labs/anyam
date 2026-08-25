@@ -12,6 +12,7 @@ import {
   type EvidenceOutcome,
   type Intent,
   type IntentComment,
+  type PullRequest,
   type Project,
   type ProjectRevision,
   type SourceSpace,
@@ -490,6 +491,23 @@ export type AudienceIntentSummary = {
   receipt: string;
 };
 
+export type AudiencePullRequestSummary = {
+  protocol: typeof CONTRACT_VERSIONS.disclosure;
+  version: "v1";
+  audience: DisclosureClassification;
+  projectId: string;
+  pullRequestId: string;
+  changeId?: string;
+  title: string;
+  description: string;
+  status: PullRequest["status"];
+  reviewState: PullRequest["reviewState"];
+  headRef: string;
+  baseRef: string;
+  revisionCount: number;
+  receipt: string;
+};
+
 /**
  * Produce the Intent surface an audience is allowed to see. A restricted or
  * project-only Intent is omitted entirely from a public projection; callers
@@ -527,6 +545,38 @@ export function summarizeIntentForAudience(input: {
     labels: [...input.intent.labels],
     comments,
     receipt: `audience=${input.audience}; intent=${input.intent.id}; inaccessible-metadata=omitted; author=omitted; assignees=omitted`,
+  };
+}
+
+/**
+ * Project a Pull Request without turning provider identity into a public
+ * authority or leaking a private Change identifier. Restricted Pull Requests
+ * are omitted rather than represented by a detectable placeholder.
+ */
+export function summarizePullRequestForAudience(input: {
+  project: Project;
+  pullRequest: PullRequest;
+  audience: DisclosureClassification;
+}): AudiencePullRequestSummary | undefined {
+  if (input.pullRequest.projectId !== input.project.id) {
+    fail({ code: "project-mismatch", message: "The Pull Request does not belong to the requested Project.", recoveryAction: "derive the Pull Request summary from the same Project that owns it", receipt: "rule=pull-request-project-equality" });
+  }
+  if (disclosureRank(input.pullRequest.disclosure) > disclosureRank(input.audience)) return undefined;
+  return {
+    protocol: CONTRACT_VERSIONS.disclosure,
+    version: "v1",
+    audience: input.audience,
+    projectId: input.project.id,
+    pullRequestId: input.pullRequest.id,
+    ...(input.audience === "public" ? {} : { changeId: input.pullRequest.changeId }),
+    title: input.pullRequest.title,
+    description: input.pullRequest.description,
+    status: input.pullRequest.status,
+    reviewState: input.pullRequest.reviewState,
+    headRef: input.pullRequest.headRef,
+    baseRef: input.pullRequest.baseRef,
+    revisionCount: input.pullRequest.revisionIds.length,
+    receipt: `audience=${input.audience}; pullRequest=${input.pullRequest.id}; provider-identity=omitted; remoteRepository=omitted; canonicalAuthority=anyam`,
   };
 }
 

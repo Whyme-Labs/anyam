@@ -12,5 +12,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts", "test/**/*.ts"],
-  "exclude": ["test/worker-entrypoint.test.ts", "test/promotion-execution-edge.test.ts", "test/realm-operator.test.ts"]
+  "exclude": ["test/worker-entrypoint.test.ts", "test/pull-request-rest.test.ts", "test/promotion-execution-edge.test.ts", "test/realm-operator.test.ts"]
 }

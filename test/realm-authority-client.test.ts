@@ -34,6 +34,15 @@ test("Realm Authority client sends the owner session as a host cookie and preser
   await client.commentIntent("intent:qualification", { body: "Comment" }, "qualification:intent:comment");
   await client.closeIntent("intent:qualification", "qualification:intent:close");
   await client.reopenIntent("intent:qualification", "qualification:intent:reopen");
+  await client.listPullRequests("project:qualification");
+  await client.inspectPullRequest("pr:qualification");
+  await client.openPullRequest({ projectId: "project:qualification", changeId: "change:qualification" }, "qualification:pr:open");
+  await client.updatePullRequest("pr:qualification", { headCommit: "commit:two" }, "qualification:pr:update");
+  await client.reviewPullRequest("pr:qualification", { reviewState: "approved", reviewDigest: "sha256:review" }, "qualification:pr:review");
+  await client.closePullRequest("pr:qualification", "qualification:pr:close");
+  await client.reopenPullRequest("pr:qualification", "qualification:pr:reopen");
+  await client.blockPullRequest("pr:qualification", "qualification:pr:block");
+  await client.mergePullRequest("pr:qualification", "qualification:pr:merge");
 
   assert.deepEqual(calls.map((call) => [call.method, new URL(call.url).pathname]), [
     ["GET", "/api/projects/project%3Aqualification"],
@@ -55,6 +64,15 @@ test("Realm Authority client sends the owner session as a host cookie and preser
     ["POST", "/api/intents/intent%3Aqualification/comment"],
     ["POST", "/api/intents/intent%3Aqualification/close"],
     ["POST", "/api/intents/intent%3Aqualification/reopen"],
+    ["GET", "/api/pull-requests"],
+    ["GET", "/api/pull-requests/pr%3Aqualification"],
+    ["POST", "/api/pull-requests"],
+    ["POST", "/api/pull-requests/pr%3Aqualification/update"],
+    ["POST", "/api/pull-requests/pr%3Aqualification/review"],
+    ["POST", "/api/pull-requests/pr%3Aqualification/close"],
+    ["POST", "/api/pull-requests/pr%3Aqualification/reopen"],
+    ["POST", "/api/pull-requests/pr%3Aqualification/block"],
+    ["POST", "/api/pull-requests/pr%3Aqualification/merge"],
   ]);
   assert.equal(calls[0]?.cookie, "anyam_owner_session=session%3Aowner-qualification");
   assert.equal(calls[1]?.body?.projectId, "project:qualification");
@@ -70,6 +88,9 @@ test("Realm Authority client sends the owner session as a host cookie and preser
   assert.equal(calls[14]?.body?.title, "Qualification Intent");
   assert.equal((calls[15]?.body?.assigneePrincipalIds as string[] | undefined)?.[0], "principal:reviewer");
   assert.equal(calls[16]?.body?.body, "Comment");
+  assert.equal(new URL(calls[19]!.url).search, "?projectId=project%3Aqualification");
+  assert.equal(calls[21]?.body?.changeId, "change:qualification");
+  assert.equal(calls[23]?.body?.reviewState, "approved");
 });
 
 test("Realm Authority client redacts provider response bodies from typed request errors", async () => {

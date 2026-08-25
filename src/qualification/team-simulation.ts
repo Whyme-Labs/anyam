@@ -26,6 +26,7 @@ import {
   type Evidence,
   type Intent,
   type IntentComment,
+  type PullRequest,
   type GitRef,
   type Project,
   type ProjectRevision,
@@ -186,6 +187,12 @@ type IntentLifecycleResult = {
   intentComments: readonly IntentComment[];
   observations: Readonly<Record<string, unknown>>;
   findings: readonly SimulationFinding[];
+};
+
+type PullRequestLifecycleResult = {
+  projectId: string;
+  pullRequests: readonly PullRequest[];
+  observations: Readonly<Record<string, unknown>>;
 };
 
 function actor(actorId: string, clientId = "client:team-simulation"): ActorRef {
@@ -799,7 +806,7 @@ async function runMirrorScenario(input: { project: Project; sourceSpaceId: strin
   return { receipt: `outbound=verified; duplicatePushes=${remote.pushes.length}; inbound=proposal; reconciliation=pending; privateRefProjected=${remote.pushes[0]?.desiredRefs.some((ref) => ref.name.includes("private")) === true}`, observations: { outbound: outbound.value.operation.receipt, inboundChanges: sink.inputs.length, mirrorState: inbound.value.mirror.state, privateRefProjected: remote.pushes[0]?.desiredRefs.some((ref) => ref.name.includes("private")) ?? false }, coordinator, inboundChange, inboundCommit: inboundOid };
 }
 
-async function runExportRestore(input: { root: string; fixtures: readonly RepositoryFixture[]; hybrid: HybridFixture; collaborations: readonly CollaborationResult[]; intentLifecycle?: IntentLifecycleResult }): Promise<SimulationScenario> {
+async function runExportRestore(input: { root: string; fixtures: readonly RepositoryFixture[]; hybrid: HybridFixture; collaborations: readonly CollaborationResult[]; intentLifecycle?: IntentLifecycleResult; pullRequestLifecycle?: PullRequestLifecycleResult }): Promise<SimulationScenario> {
   const driver = new LocalGitRepositoryDriver(join(input.root, "export-driver"));
   const receipts: Record<string, unknown> = {};
   for (const [index, fixture] of input.fixtures.entries()) {
@@ -808,7 +815,8 @@ async function runExportRestore(input: { root: string; fixtures: readonly Reposi
     const destination = join(input.root, `${fixture.id}-project-export`);
     const collaboration = requireValue(input.collaborations[index], `${fixture.id} collaboration`);
     const intentData = input.intentLifecycle?.projectId === fixture.project.id ? { intents: input.intentLifecycle.intents, intentComments: input.intentLifecycle.intentComments } : {};
-    const exported = await new LocalProjectExporter(driver).exportProject({ project: fixture.project, sourceSpaces: [fixture.sourceSpace], repositories: [{ sourceSpaceId: fixture.sourceSpace.id, repository: created.value }], destination, projectRevisions: [collaboration.canonicalRevision], ...intentData, changes: collaboration.changes, evidence: collaboration.evidence, artifacts: [collaboration.artifact], releases: [collaboration.release], targets: [collaboration.target], idempotencyKey: `team-simulation-export-${fixture.id}` });
+    const pullRequestData = input.pullRequestLifecycle?.projectId === fixture.project.id ? { pullRequests: input.pullRequestLifecycle.pullRequests } : {};
+    const exported = await new LocalProjectExporter(driver).exportProject({ project: fixture.project, sourceSpaces: [fixture.sourceSpace], repositories: [{ sourceSpaceId: fixture.sourceSpace.id, repository: created.value }], destination, projectRevisions: [collaboration.canonicalRevision], ...intentData, ...pullRequestData, changes: collaboration.changes, evidence: collaboration.evidence, artifacts: [collaboration.artifact], releases: [collaboration.release], targets: [collaboration.target], idempotencyKey: `team-simulation-export-${fixture.id}` });
     if (exported.status !== "succeeded") throw new Error(exported.message);
     const verified = await verifyProjectExportPackage(destination);
     if (verified.status !== "succeeded") throw new Error(verified.message);
@@ -824,7 +832,7 @@ async function runExportRestore(input: { root: string; fixtures: readonly Reposi
     const replayed = await new LocalProjectExporter(new LocalGitRepositoryDriver(join(input.root, `${fixture.id}-restore-driver-replay`))).importProject({ packageDirectory: destination, destination: restoreDestination, idempotencyKey: `team-simulation-restore-${fixture.id}` });
     if (replayed.status !== "succeeded") throw new Error(replayed.message);
     assert.equal(restored.value.manifest.integrity.manifestDigest, replayed.value.manifest.integrity.manifestDigest);
-    receipts[fixture.id] = { exportDigest: exported.value.manifest.integrity.manifestDigest, repositoryCount: exported.value.manifest.repositories.length, lineageCount: exported.value.manifest.lineage.length, intentCount: exported.value.manifest.intents.length, intentCommentCount: exported.value.manifest.intentComments.length, restoredRefs: refSignature(restoredInspection.value.refs), restoredCheckpoint: restored.value.checkpoint.receipt };
+    receipts[fixture.id] = { exportDigest: exported.value.manifest.integrity.manifestDigest, repositoryCount: exported.value.manifest.repositories.length, lineageCount: exported.value.manifest.lineage.length, intentCount: exported.value.manifest.intents.length, intentCommentCount: exported.value.manifest.intentComments.length, pullRequestCount: exported.value.manifest.pullRequests.length, restoredRefs: refSignature(restoredInspection.value.refs), restoredCheckpoint: restored.value.checkpoint.receipt };
   }
   const hybridRepositories: Array<{ sourceSpaceId: string; repository: { repositoryId: string; sourceSpaceId: string } }> = [];
   for (const sourceSpace of input.hybrid.sourceSpaces) {
@@ -894,14 +902,6 @@ async function inspectLifecycleCapabilities(input: { projectId: string; sourceSp
   const snapshot = coordinator.snapshot();
   const finalIntent = requireValue(snapshot.intents[createdIntent.id], "final Intent");
   const comments = Object.values(snapshot.intentComments).filter((comment) => comment.intentId === createdIntent.id);
-  if (pullRequestCommands.length === 0) findings.push(finding({
-      scenarioId: "issue-pr-lifecycle",
-      seam: "pull-request-compatibility-lifecycle",
-      message: "Git branches and Anyam Changes can be exercised separately, but the public product does not expose a pull-request compatibility object that opens, closes, reopens, or maps a branch to a stable Change.",
-      recoveryAction: "Add an explicit PR compatibility projection over Change and Revision, then rerun the branch, review, rebase, and closure scenarios.",
-      issueTitle: "Add a pull-request compatibility lifecycle over Change and Revision",
-      issueBody: "Part of #182\n\nThe team simulation exercises real Git branches, rebases, conflicts, reviews, and Landing. It cannot complete an Anyam pull-request lifecycle because no public PR projection exposes open, close, reopen, branch mapping, or review state.\n\nAcceptance:\n- map one external or local PR to one stable Change;\n- preserve identity through branch updates, rebases, review findings, and Landing;\n- expose open, closed, merged, and blocked states;\n- keep Anyam canonical and make the PR projection disclosure-safe;\n- add a receipt-backed end-to-end qualification.\n",
-    }));
   return {
     projectId: input.projectId,
     intents: [finalIntent],
@@ -921,6 +921,44 @@ async function inspectLifecycleCapabilities(input: { projectId: string; sourceSp
       authorityReceipt: "authority=coordinator; intentLifecycle=create-assign-comment-close-reopen-change-link; canonicalWrite=false",
     },
   };
+}
+
+async function inspectPullRequestCapabilities(input: { projectId: string; sourceSpaceId: string; baseSnapshotId: string; featureCommit: string; rebasedCommit: string }): Promise<PullRequestLifecycleResult> {
+  const session: AuthoritySession = { realmId: "realm:team-simulation", principalId: "principal:team-owner", actorId: "actor:team-owner", sessionId: "session:team-owner", clientId: "client:team-simulation", authorizationEpoch: 1, kind: "human" };
+  const coordinator = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot(session.realmId));
+  const projectValue = executeAuthorityIntentCommand(coordinator, session, "project.create", `team-simulation:pr:project:${input.projectId}`, { projectId: input.projectId, name: `Pull Request lifecycle ${input.projectId}`, referenceType: "git", sourceSpaces: [{ id: input.sourceSpaceId, name: "source", classification: "public", snapshotId: input.baseSnapshotId }] });
+  const canonicalRevisionId = requireValue((projectValue.canonicalRevision as { id?: string } | undefined)?.id, "Pull Request canonical revision");
+  const workspaceValue = executeAuthorityIntentCommand(coordinator, session, "workspace.create", `team-simulation:pr:workspace:${input.projectId}`, { projectId: input.projectId, workspaceId: `workspace:${input.projectId}:pull-request`, projectRevisionId: canonicalRevisionId, sourceSpaceIds: [input.sourceSpaceId], mounts: ["source"] });
+  const projectViewId = requireValue((workspaceValue.view as { id?: string } | undefined)?.id, "Pull Request Project View");
+  executeAuthorityIntentCommand(coordinator, session, "change.create", `team-simulation:pr:change:${input.projectId}`, { projectId: input.projectId, changeId: `change:${input.projectId}:pull-request`, intentId: `intent:${input.projectId}:pull-request`, baseProjectRevisionId: canonicalRevisionId, workspaceId: `workspace:${input.projectId}:pull-request` });
+  const revisionOne = executeAuthorityIntentCommand(coordinator, session, "revision.publish", `team-simulation:pr:revision-one:${input.projectId}`, { projectId: input.projectId, changeId: `change:${input.projectId}:pull-request`, workspaceId: `workspace:${input.projectId}:pull-request`, projectViewId, projectRevisionId: `project-revision:${input.projectId}:pr-one`, sourceSpaceSnapshots: { [input.sourceSpaceId]: input.featureCommit }, declaredEffects: ["branch.update"] });
+  const revisionOneId = requireValue((revisionOne.revision as { id?: string } | undefined)?.id, "Pull Request first Revision");
+  const opened = executeAuthorityIntentCommand(coordinator, session, "pullRequest.open", `team-simulation:pr:open:${input.projectId}`, { projectId: input.projectId, pullRequestId: `pull-request:${input.projectId}`, changeId: `change:${input.projectId}:pull-request`, provider: "local", externalKey: `local:${input.projectId}:pull-request`, headRef: "refs/heads/feature/agent-b", baseRef: "refs/heads/main", headCommit: input.featureCommit, baseCommit: input.baseSnapshotId, title: "Integrate the rebased Change", description: "Compatibility projection over a stable Anyam Change.", disclosure: "public", revisionIds: [revisionOneId] });
+  executeAuthorityIntentCommand(coordinator, session, "pullRequest.review", `team-simulation:pr:review-requested:${input.projectId}`, { projectId: input.projectId, pullRequestId: `pull-request:${input.projectId}`, reviewState: "changes-requested", reviewDigest: digest(`review-requested:${input.projectId}`) });
+  const revisionTwo = executeAuthorityIntentCommand(coordinator, session, "revision.publish", `team-simulation:pr:revision-two:${input.projectId}`, { projectId: input.projectId, changeId: `change:${input.projectId}:pull-request`, workspaceId: `workspace:${input.projectId}:pull-request`, projectViewId, projectRevisionId: `project-revision:${input.projectId}:pr-two`, sourceSpaceSnapshots: { [input.sourceSpaceId]: input.rebasedCommit }, declaredEffects: ["rebase.resolved"], kind: "rebase" });
+  const revisionTwoId = requireValue((revisionTwo.revision as { id?: string } | undefined)?.id, "Pull Request rebased Revision");
+  const updated = executeAuthorityIntentCommand(coordinator, session, "pullRequest.update", `team-simulation:pr:update:${input.projectId}`, { projectId: input.projectId, pullRequestId: `pull-request:${input.projectId}`, headRef: "refs/heads/feature/agent-b-rebased", headCommit: input.rebasedCommit, revisionId: revisionTwoId });
+  executeAuthorityIntentCommand(coordinator, session, "pullRequest.close", `team-simulation:pr:close:${input.projectId}`, { projectId: input.projectId, pullRequestId: `pull-request:${input.projectId}` });
+  executeAuthorityIntentCommand(coordinator, session, "pullRequest.reopen", `team-simulation:pr:reopen:${input.projectId}`, { projectId: input.projectId, pullRequestId: `pull-request:${input.projectId}` });
+  executeAuthorityIntentCommand(coordinator, session, "pullRequest.block", `team-simulation:pr:block:${input.projectId}`, { projectId: input.projectId, pullRequestId: `pull-request:${input.projectId}` });
+  executeAuthorityIntentCommand(coordinator, session, "pullRequest.reopen", `team-simulation:pr:reopen-after-block:${input.projectId}`, { projectId: input.projectId, pullRequestId: `pull-request:${input.projectId}` });
+  executeAuthorityIntentCommand(coordinator, session, "pullRequest.review", `team-simulation:pr:review-approved:${input.projectId}`, { projectId: input.projectId, pullRequestId: `pull-request:${input.projectId}`, reviewState: "approved", reviewDigest: digest(`review-approved:${input.projectId}`) });
+  executeAuthorityIntentCommand(coordinator, session, "landing.apply", `team-simulation:pr:landing:${input.projectId}`, { projectId: input.projectId, changeId: `change:${input.projectId}:pull-request`, changeRevisionId: revisionTwoId, expectedCanonicalProjectRevisionId: canonicalRevisionId, projectRevisionId: `project-revision:${input.projectId}:pr-landed` });
+  const merged = executeAuthorityIntentCommand(coordinator, session, "pullRequest.merge", `team-simulation:pr:merge:${input.projectId}`, { projectId: input.projectId, pullRequestId: `pull-request:${input.projectId}` });
+  const pullRequest = requireValue(merged.pullRequest as PullRequest | undefined, "merged Pull Request");
+  if (pullRequest.id !== `pull-request:${input.projectId}` || pullRequest.status !== "merged" || pullRequest.revisionIds.length !== 2) throw new Error(`Pull Request lifecycle did not preserve identity and two Revisions: id=${pullRequest.id}; status=${pullRequest.status}; revisions=${pullRequest.revisionIds.length}`);
+  return { projectId: input.projectId, pullRequests: [pullRequest], observations: { openedStatus: (opened.pullRequest as PullRequest).status, updatedHeadCommit: (updated.pullRequest as PullRequest).headCommit, reviewRequested: "changes-requested", closedAndReopened: true, blockedAndReopened: true, approvedReview: "approved", landedChange: `change:${input.projectId}:pull-request`, mergedStatus: pullRequest.status, stablePullRequestId: pullRequest.id, revisionIds: pullRequest.revisionIds, authorityReceipt: "authority=coordinator; pullRequestLifecycle=open-update-review-close-reopen-block-reopen-land-merge; canonicalWrite=false" } };
+}
+
+function pullRequestCompatibilityFinding(): SimulationFinding {
+  return finding({
+    scenarioId: "pull-request-lifecycle",
+    seam: "pull-request-compatibility-lifecycle",
+    message: "The team simulation could not complete the Pull Request compatibility projection over stable Change and Revision lineage.",
+    recoveryAction: "inspect the Pull Request lifecycle receipt, repair the failing Authority/REST/MCP/CLI seam, and rerun the same qualification",
+    issueTitle: "Add a pull-request compatibility lifecycle over Change and Revision",
+    issueBody: "Part of #182\n\nThe team simulation exercises real Git branches, rebases, conflicts, reviews, and Landing. The Pull Request compatibility projection must preserve one stable identity over the Anyam Change and its successive Revisions, expose open/closed/merged/blocked states, remain disclosure-safe, and never advance canonical state by itself.\n",
+  });
 }
 
 export async function runTeamSimulation(input: { fixtureRoot?: string } = {}): Promise<TeamSimulationReport> {
@@ -978,20 +1016,27 @@ export async function runTeamSimulation(input: { fixtureRoot?: string } = {}): P
     });
     const intentIdentifiersObserved = (workerBundle?.collaboration.changes.length ?? 0) + (cliBundle?.collaboration.changes.length ?? 0);
     const lifecycle = workerBundle
-      ? await captureScenario(scenarios, "issue-pr-lifecycle", async () => {
+      ? await captureScenario(scenarios, "intent-lifecycle", async () => {
         const result = await inspectLifecycleCapabilities({ projectId: workerBundle.fixture.project.id, sourceSpaceId: workerBundle.fixture.sourceSpace.id, baseSnapshotId: workerBundle.fixture.git.initialCommit, intentIdentifiersObserved });
-        const intentFindings = result.findings.filter((candidate) => candidate.seam !== "pull-request-compatibility-lifecycle");
-        scenarios.push({ id: "intent-lifecycle", verdict: intentFindings.length === 0 ? "VERIFIED" : "NOT VERIFIED", receipt: intentFindings.length === 0 ? `intentLifecycle=verified; intentCount=${result.intents.length}; commentCount=${result.intentComments.length}; changeLink=verified` : "intentLifecycle=not-verified; simulation=blocked", observations: result.observations, findings: intentFindings });
-        scenarios.push({ id: "issue-pr-lifecycle", verdict: result.findings.length === 0 ? "VERIFIED" : "NOT VERIFIED", receipt: result.findings.some((candidate) => candidate.seam === "pull-request-compatibility-lifecycle") ? `intentLifecycle=verified; pullRequestLifecycle=not-exposed; intentCount=${result.intents.length}; commentCount=${result.intentComments.length}` : `intentLifecycle=verified; pullRequestLifecycle=verified; intentCount=${result.intents.length}; commentCount=${result.intentComments.length}`, observations: result.observations, findings: result.findings });
+        scenarios.push({ id: "intent-lifecycle", verdict: result.findings.length === 0 ? "VERIFIED" : "NOT VERIFIED", receipt: result.findings.length === 0 ? `intentLifecycle=verified; intentCount=${result.intents.length}; commentCount=${result.intentComments.length}; changeLink=verified` : "intentLifecycle=not-verified; simulation=blocked", observations: result.observations, findings: result.findings });
+        return result;
+      })
+      : undefined;
+    const pullRequestLifecycle = workerBundle
+      ? await captureScenario(scenarios, "pull-request-lifecycle", async () => {
+        const result = await inspectPullRequestCapabilities({ projectId: workerBundle.fixture.project.id, sourceSpaceId: workerBundle.fixture.sourceSpace.id, baseSnapshotId: workerBundle.fixture.git.initialCommit, featureCommit: workerBundle.fixture.git.featureBBeforeRebase, rebasedCommit: workerBundle.fixture.git.resolvedFeatureBCommit });
+        scenarios.push({ id: "pull-request-lifecycle", verdict: "VERIFIED", receipt: `pullRequestLifecycle=verified; pullRequestCount=${result.pullRequests.length}; revisions=${result.pullRequests[0]?.revisionIds.length ?? 0}; merged=true`, observations: result.observations, findings: [] });
         return result;
       })
       : undefined;
     if (!workerBundle) {
       scenarios.push({ id: "intent-lifecycle", verdict: "INCONCLUSIVE", receipt: "scenario=intent-lifecycle; status=inconclusive; prerequisite=worker-repository", observations: { prerequisite: "worker repository scenario must complete" }, findings: [] });
-      scenarios.push({ id: "issue-pr-lifecycle", verdict: "INCONCLUSIVE", receipt: "scenario=issue-pr-lifecycle; status=inconclusive; prerequisite=worker-repository", observations: { prerequisite: "worker repository scenario must complete" }, findings: [] });
+      scenarios.push({ id: "pull-request-lifecycle", verdict: "INCONCLUSIVE", receipt: "scenario=pull-request-lifecycle; status=inconclusive; prerequisite=worker-repository", observations: { prerequisite: "worker repository scenario must complete" }, findings: [] });
     }
+    const lifecycleFindings = [...(lifecycle?.findings ?? []), ...(workerBundle && !pullRequestLifecycle ? [pullRequestCompatibilityFinding()] : [])];
+    scenarios.push({ id: "issue-pr-lifecycle", verdict: lifecycleFindings.length === 0 ? "VERIFIED" : "NOT VERIFIED", receipt: lifecycleFindings.length === 0 ? "intentLifecycle=verified; pullRequestLifecycle=verified" : "intentLifecycle-or-pullRequestLifecycle=not-verified; simulation=blocked", observations: { intent: lifecycle?.observations ?? { status: "inconclusive" }, pullRequest: pullRequestLifecycle?.observations ?? { status: "inconclusive" } }, findings: lifecycleFindings });
     if (workerBundle && cliBundle && hybridBundle) {
-      const exportScenario = await captureScenario(scenarios, "export-restore", () => runExportRestore({ root, fixtures: [workerBundle.fixture, cliBundle.fixture], hybrid: hybridBundle.fixture, collaborations: [workerBundle.collaboration, cliBundle.collaboration], ...(lifecycle ? { intentLifecycle: lifecycle } : {}) }));
+      const exportScenario = await captureScenario(scenarios, "export-restore", () => runExportRestore({ root, fixtures: [workerBundle.fixture, cliBundle.fixture], hybrid: hybridBundle.fixture, collaborations: [workerBundle.collaboration, cliBundle.collaboration], ...(lifecycle ? { intentLifecycle: lifecycle } : {}), ...(pullRequestLifecycle ? { pullRequestLifecycle } : {}) }));
       if (exportScenario) scenarios.push(exportScenario);
     } else {
       scenarios.push({ id: "export-restore", verdict: "INCONCLUSIVE", receipt: "scenario=export-restore; status=inconclusive; prerequisite=repository-scenarios", observations: { prerequisite: "worker, cli, and hybrid scenarios must complete" }, findings: [] });

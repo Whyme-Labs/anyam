@@ -161,6 +161,11 @@ test("Realm Authority persists mirror operations, maps one external proposal to 
   assert.equal(proposal.changeRevisionIds.length, 2);
   assert.deepEqual(proposal.observedHeadCommits, ["commit:one", "commit:two"]);
   assert.equal(proposal.status, "closed");
+  const pullRequest = Object.values(persisted.pullRequests)[0];
+  assert.equal(pullRequest?.changeId, proposal.changeId);
+  assert.equal(pullRequest?.status, "closed");
+  assert.equal(pullRequest?.revisionIds.length, 2);
+  assert.equal(pullRequest?.externalKey, proposal.proposalKey);
   assert.equal(persisted.mirrors["mirror:github"]?.canonicalProjectRevisionId, "project-revision:initial");
 });
 

@@ -34,7 +34,7 @@ function kindFrom(args: readonly string[]): ProjectTemplateKind {
 
 function positionalArgs(args: readonly string[], command: string): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label"]);
+  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -49,7 +49,7 @@ function positionalArgs(args: readonly string[], command: string): readonly stri
 
 function subcommandPositionals(args: readonly string[]): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label"]);
+  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
   for (let index = 2; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -67,6 +67,7 @@ function printHelp(): void {
   console.log("Bridge options: --realm <url> --project <id> --connection <id> --action-ref <owner/repo@sha> [--workflow-path <path>] [--remote <name>] [--schedule <cron>]");
   console.log("realm plan|install|upgrade|doctor|export|restore|destroy  customer-operated lifecycle");
   console.log("intent list|inspect|create|assign|comment|close|reopen  hosted Realm Intent lifecycle (--realm, --owner-session or ANYAM_OWNER_SESSION)");
+  console.log("pr list|inspect|open|update|review|close|reopen|block|merge  hosted Pull Request compatibility projection (--realm, --owner-session or ANYAM_OWNER_SESSION)");
   console.log("workspace start|list|inspect|exec  explicit concurrent local Workspace controls (use --session for selection)");
   console.log(`Anyam local CLI\n\nCommands:\n  init [directory]                 create a local TypeScript Project\n  doctor [directory]               inspect manifest and source metadata locally\n  check [directory]                compatibility alias for doctor\n  change start <title>             start a local Change\n  workspace list                   list all active local Workspaces\n  workspace inspect --session <id> inspect one explicit Workspace session\n  workspace exec --session <id> -- <command>  run in one existing Workspace\n  agent setup <agent>              configure the local MCP broker and instructions\n  agent start [agent]              start or resume an agent session\n  agent exec <agent> -- <command>  launch an agent through the Workspace boundary\n  agent handoff <agent>            revoke one selected session and start another\n  agent status [--session <id>]    inspect one selected or current session\n  agent revoke [--session <id>]    revoke one selected session\n  mcp serve --stdio                serve the semantic MCP tools over stdio\n  auth login --realm <url>         authenticate through OAuth PKCE and the OS keychain\n  auth revoke                      revoke the current local session\n  git-credential-anyam get         issue a context-bound memory-only Workspace Git credential\n\nOptions:\n  --type worker|library             choose the template (default: worker)\n  --name <name>                     choose the Project name\n  --agent codex|claude|cursor|cli   choose the local coding agent\n  --mode enforceable|supervised     choose the Workspace boundary mode\n  --session <id>                    select one explicit local Workspace/session\n  --directory <path>               choose a Project directory\n  --json                            print machine-readable output\n  --dry-run                         print the proposed manifest without writing\n\nThe local broker never stores bearer credentials, writes canonical Git refs, reads secret values, approves Changes, or promotes production.`);
 }
@@ -86,6 +87,16 @@ function intentIdentifier(args: readonly string[]): string {
 
 function intentIdempotency(args: readonly string[], operation: string, id: string): string {
   return valueAfter(args, "--idempotency-key") ?? `cli:intent:${operation}:${id}:${randomUUID()}`;
+}
+
+function pullRequestIdentifier(args: readonly string[]): string {
+  const id = valueAfter(args, "--pull-request") ?? valueAfter(args, "--id") ?? subcommandPositionals(args)[0];
+  if (!id?.trim()) throw new Error("pr requires a Pull Request ID as a positional argument, --pull-request, or --id");
+  return id.trim();
+}
+
+function pullRequestIdempotency(args: readonly string[], operation: string, id: string): string {
+  return valueAfter(args, "--idempotency-key") ?? `cli:pull-request:${operation}:${id}:${randomUUID()}`;
 }
 
 function agentValue(args: readonly string[], fallback?: string): string {
@@ -200,6 +211,34 @@ export async function main(args: readonly string[], cwd = process.cwd(), input: 
                   ? await client.reopenIntent(id, idempotencyKey)
                   : (() => { throw new Error("intent requires list, inspect, create, assign, comment, close, or reopen"); })();
     printResult(result, json, `${operation.toUpperCase()} Intent: ${String(result.receipt ?? "receipt=not-returned")}`);
+    return 0;
+  }
+
+  if (command === "pr" || command === "pull-request") {
+    const client = intentClient(args);
+    const operation = subcommand ?? "";
+    const id = operation === "inspect" || operation === "update" || operation === "review" || operation === "close" || operation === "reopen" || operation === "block" || operation === "merge" ? pullRequestIdentifier(args) : "collection";
+    const idempotencyKey = pullRequestIdempotency(args, operation, id);
+    const result = operation === "list"
+      ? await client.listPullRequests(valueAfter(args, "--project"))
+      : operation === "inspect"
+        ? await client.inspectPullRequest(id)
+        : operation === "open"
+          ? await client.openPullRequest({ projectId: requiredValue(args, "--project", "pr open"), changeId: requiredValue(args, "--change", "pr open"), pullRequestId: valueAfter(args, "--pull-request") ?? valueAfter(args, "--id"), provider: valueAfter(args, "--provider") ?? "local", headRef: requiredValue(args, "--head-ref", "pr open"), baseRef: requiredValue(args, "--base-ref", "pr open"), headCommit: requiredValue(args, "--head-commit", "pr open"), baseCommit: requiredValue(args, "--base-commit", "pr open"), title: requiredValue(args, "--title", "pr open"), ...(valueAfter(args, "--description") ? { description: valueAfter(args, "--description") } : {}), ...(valueAfter(args, "--disclosure") ? { disclosure: valueAfter(args, "--disclosure") } : {}), ...(valueAfter(args, "--external-key") ? { externalKey: valueAfter(args, "--external-key") } : {}), ...(valueAfter(args, "--remote-repository") ? { remoteRepository: valueAfter(args, "--remote-repository") } : {}), ...(valueAfter(args, "--revision") ? { revisionIds: [valueAfter(args, "--revision")] } : {}) }, idempotencyKey)
+          : operation === "update"
+            ? await client.updatePullRequest(id, { ...(valueAfter(args, "--head-ref") ? { headRef: valueAfter(args, "--head-ref") } : {}), ...(valueAfter(args, "--base-ref") ? { baseRef: valueAfter(args, "--base-ref") } : {}), ...(valueAfter(args, "--head-commit") ? { headCommit: valueAfter(args, "--head-commit") } : {}), ...(valueAfter(args, "--base-commit") ? { baseCommit: valueAfter(args, "--base-commit") } : {}), ...(valueAfter(args, "--title") ? { title: valueAfter(args, "--title") } : {}), ...(valueAfter(args, "--description") ? { description: valueAfter(args, "--description") } : {}), ...(valueAfter(args, "--revision") ? { revisionId: valueAfter(args, "--revision") } : {}) }, idempotencyKey)
+            : operation === "review"
+              ? await client.reviewPullRequest(id, { reviewState: requiredValue(args, "--review-state", "pr review"), reviewDigest: requiredValue(args, "--review-digest", "pr review") }, idempotencyKey)
+              : operation === "close"
+                ? await client.closePullRequest(id, idempotencyKey)
+                : operation === "reopen"
+                  ? await client.reopenPullRequest(id, idempotencyKey)
+                  : operation === "block"
+                    ? await client.blockPullRequest(id, idempotencyKey)
+                    : operation === "merge"
+                      ? await client.mergePullRequest(id, idempotencyKey)
+                      : (() => { throw new Error("pr requires list, inspect, open, update, review, close, reopen, block, or merge"); })();
+    printResult(result, json, `${operation.toUpperCase()} Pull Request: ${String(result.receipt ?? "receipt=not-returned")}`);
     return 0;
   }
 

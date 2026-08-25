@@ -425,6 +425,34 @@ callers that provide an unknown Intent ID receive a same-Project
 disclosure uses a separate audience projection and omits restricted Intents
 entirely.
 
+The owner-authenticated Pull Request compatibility surface keeps Git vocabulary
+over Anyam-owned Change and Revision state:
+
+```http
+POST /api/pull-requests
+Idempotency-Key: pull-request-open-1
+Content-Type: application/json
+
+{"projectId":"project:atlas","pullRequestId":"pr:atlas-feature","changeId":"change:atlas-feature","provider":"local","headRef":"refs/heads/feature/atlas","baseRef":"refs/heads/main","headCommit":"commit:feature","baseCommit":"commit:base","title":"Add Atlas feature","disclosure":"public","revisionIds":["change-revision:atlas-feature:1"]}
+```
+
+```http
+GET /api/pull-requests?projectId=project%3Aatlas
+GET /api/pull-requests/pr%3Aatlas-feature
+POST /api/pull-requests/pr%3Aatlas-feature/update
+POST /api/pull-requests/pr%3Aatlas-feature/review
+POST /api/pull-requests/pr%3Aatlas-feature/close
+POST /api/pull-requests/pr%3Aatlas-feature/reopen
+POST /api/pull-requests/pr%3Aatlas-feature/block
+POST /api/pull-requests/pr%3Aatlas-feature/merge
+```
+
+The projection retains one Pull Request ID across branch updates and rebases.
+Merge is rejected until the mapped Change is Landed. Provider mirror proposals
+of kind `pull-request` update the same projection, but cannot advance the
+canonical Project Revision. Public projections omit provider repository
+identity and private Change IDs.
+
 The owner-authenticated Agent delegation surface accepts an explicit
 Project/Workspace/Change resource, mounted Source Space IDs, agent identity
 metadata, non-promotional capabilities/effects, allowed `realm-api`/`git`/`mcp`

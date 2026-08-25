@@ -9,6 +9,7 @@ export const CONTRACT_VERSIONS = {
   workspace: "anyam.workspace/v1",
   intent: "anyam.intent/v1",
   intentComment: "anyam.intent-comment/v1",
+  pullRequest: "anyam.pull-request/v1",
   change: "anyam.change/v1",
   conflict: "anyam.conflict/v1",
   landing: "anyam.landing/v1",
@@ -141,6 +142,41 @@ export type IntentComment = {
   body: string;
   disclosure: DisclosureClassification;
   createdAt: string;
+  receipt: string;
+};
+
+export type PullRequestStatus = "open" | "closed" | "merged" | "blocked";
+export type PullRequestReviewState = "pending" | "changes-requested" | "approved";
+
+/**
+ * Git-compatible Pull Request projection. Anyam owns the stable Change and
+ * Revision lineage; provider identity and branch names are compatibility
+ * metadata, never a second canonical authority.
+ */
+export type PullRequest = {
+  protocol: typeof CONTRACT_VERSIONS.pullRequest;
+  id: string;
+  projectId: string;
+  changeId: string;
+  provider: string;
+  externalKey?: string;
+  remoteRepository?: string;
+  sourceSpaceId?: string;
+  headRef: string;
+  baseRef: string;
+  headCommit: string;
+  baseCommit: string;
+  title: string;
+  description: string;
+  status: PullRequestStatus;
+  reviewState: PullRequestReviewState;
+  reviewDigest?: string;
+  revisionIds: readonly string[];
+  disclosure: DisclosureClassification;
+  createdAt: string;
+  updatedAt: string;
+  closedAt?: string;
+  mergedAt?: string;
   receipt: string;
 };
 
@@ -308,6 +344,7 @@ export type Workspace = {
   mounts: readonly WorkspaceMount[];
   state: WorkspaceState;
   changeId?: string;
+  pullRequestId?: string;
   actorId?: string;
 };
 
@@ -942,6 +979,7 @@ export type ProjectExport = {
   projectRevisions: readonly ProjectRevision[];
   intents: readonly Intent[];
   intentComments: readonly IntentComment[];
+  pullRequests: readonly PullRequest[];
   changes: readonly Change[];
   evidence: readonly Evidence[];
   artifacts: readonly Artifact[];

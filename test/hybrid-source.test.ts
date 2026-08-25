@@ -21,9 +21,11 @@ import {
   runSealedVerifier,
   summarizeChangeForAudience,
   summarizeIntentForAudience,
+  summarizePullRequestForAudience,
   type ChangeRevision,
   type Intent,
   type IntentComment,
+  type PullRequest,
   type Project,
   type ProjectRevision,
   type SourceSpace,
@@ -275,6 +277,16 @@ test("restricted Intent metadata is omitted from public projections while public
   assert.equal(safe?.title, publicIntent.title);
   assert.equal(JSON.stringify(safe).includes("principal:maintainer"), false);
   assert.equal(JSON.stringify(safe).includes("Private codec"), false);
+});
+
+test("restricted Pull Request provider identity and Change IDs stay out of public projections", () => {
+  const restricted: PullRequest = { protocol: CONTRACT_VERSIONS.pullRequest, id: "pr:private", projectId: project.id, changeId: "change:private", provider: "github", externalKey: "17", remoteRepository: "acme/private", headRef: "refs/heads/private", baseRef: "refs/heads/main", headCommit: "commit:private", baseCommit: "commit:base", title: "Private codec change", description: "Private review details", status: "open", reviewState: "changes-requested", reviewDigest: "sha256:private-review", revisionIds: ["revision:private"], disclosure: "restricted", createdAt: "2026-08-03T00:00:00.000Z", updatedAt: "2026-08-03T00:00:00.000Z", receipt: "pullRequest=fixture; disclosure=restricted" };
+  assert.equal(summarizePullRequestForAudience({ project, pullRequest: restricted, audience: "public" }), undefined);
+  const publicPullRequest = summarizePullRequestForAudience({ project, pullRequest: { ...restricted, id: "pr:public", changeId: "change:public", title: "Public playback change", description: "Improve playback", disclosure: "public", provider: "local" }, audience: "public" });
+  assert.equal(publicPullRequest?.pullRequestId, "pr:public");
+  assert.equal(publicPullRequest?.changeId, undefined);
+  assert.equal(JSON.stringify(publicPullRequest).includes("acme/private"), false);
+  assert.equal(JSON.stringify(publicPullRequest).includes("commit:private"), false);
 });
 
 test("Publication Change creates independent lineage and revokes only future distribution", () => {

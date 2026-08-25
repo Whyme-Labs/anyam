@@ -108,6 +108,15 @@ export class RealmAuthorityHttpClient {
   commentIntent(intentId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}/comment`, { method: "POST", body, idempotencyKey }); }
   closeIntent(intentId: string, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}/close`, { method: "POST", body: {}, idempotencyKey }); }
   reopenIntent(intentId: string, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}/reopen`, { method: "POST", body: {}, idempotencyKey }); }
+  listPullRequests(projectId?: string): Promise<JsonObject> { return this.request(`/api/pull-requests${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`, { method: "GET" }); }
+  inspectPullRequest(pullRequestId: string): Promise<JsonObject> { return this.request(`/api/pull-requests/${encodeURIComponent(pullRequestId)}`, { method: "GET" }); }
+  openPullRequest(body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("/api/pull-requests", { method: "POST", body, idempotencyKey }); }
+  updatePullRequest(pullRequestId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/pull-requests/${encodeURIComponent(pullRequestId)}/update`, { method: "POST", body, idempotencyKey }); }
+  reviewPullRequest(pullRequestId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/pull-requests/${encodeURIComponent(pullRequestId)}/review`, { method: "POST", body, idempotencyKey }); }
+  closePullRequest(pullRequestId: string, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/pull-requests/${encodeURIComponent(pullRequestId)}/close`, { method: "POST", body: {}, idempotencyKey }); }
+  reopenPullRequest(pullRequestId: string, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/pull-requests/${encodeURIComponent(pullRequestId)}/reopen`, { method: "POST", body: {}, idempotencyKey }); }
+  blockPullRequest(pullRequestId: string, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/pull-requests/${encodeURIComponent(pullRequestId)}/block`, { method: "POST", body: {}, idempotencyKey }); }
+  mergePullRequest(pullRequestId: string, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/pull-requests/${encodeURIComponent(pullRequestId)}/merge`, { method: "POST", body: {}, idempotencyKey }); }
   createProject(body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("/api/projects", { method: "POST", body, idempotencyKey }); }
   createWorkspace(projectId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/projects/${encodeURIComponent(projectId)}/workspaces`, { method: "POST", body, idempotencyKey }); }
   configureMirror(body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("/api/mirrors", { method: "POST", body, idempotencyKey }); }

@@ -23,6 +23,7 @@ import {
   type ProjectExportIntegrity,
   type ProjectExportLineage,
   type ProjectRevision,
+  type PullRequest,
   type RepositoryExport,
   type RepositoryMirror,
   type MirrorCheckpoint,
@@ -78,6 +79,7 @@ export type ProjectExportInput = {
   projectRevisions?: readonly ProjectRevision[];
   intents?: readonly Intent[];
   intentComments?: readonly IntentComment[];
+  pullRequests?: readonly PullRequest[];
   changes?: readonly Change[];
   evidence?: readonly Evidence[];
   artifacts?: readonly Artifact[];
@@ -314,6 +316,25 @@ function manifestProblems(manifest: ProjectExport): readonly string[] {
     if (disclosureRank(comment.disclosure) < 0) problems.push(`Intent comment ${comment.id ?? "unknown"} has an invalid disclosure`);
     if (parent && disclosureRank(comment.disclosure) > disclosureRank(parent.disclosure)) problems.push(`Intent comment ${comment.id ?? "unknown"} disclosure exceeds its Intent`);
   }
+  const pullRequestsValue = (manifest as ProjectExport & { pullRequests?: unknown }).pullRequests;
+  if (!Array.isArray(pullRequestsValue)) problems.push("Pull Request compatibility array is missing");
+  const pullRequests = Array.isArray(pullRequestsValue) ? pullRequestsValue : [];
+  const pullRequestIds = new Set<string>();
+  for (const pullRequestValue of pullRequests) {
+    if (pullRequestValue === null || typeof pullRequestValue !== "object" || Array.isArray(pullRequestValue)) {
+      problems.push("Pull Request compatibility entry is not an object");
+      continue;
+    }
+    const pullRequest = pullRequestValue as Partial<PullRequest>;
+    if (typeof pullRequest.id !== "string" || pullRequest.id.length === 0) problems.push("Pull Request compatibility entry has no identity");
+    else if (pullRequestIds.has(pullRequest.id)) problems.push(`Pull Request ${pullRequest.id} is duplicated`);
+    else pullRequestIds.add(pullRequest.id);
+    if (pullRequest.projectId !== manifest.project.id) problems.push(`Pull Request ${pullRequest.id ?? "unknown"} names a different Project`);
+    if (typeof pullRequest.changeId !== "string" || pullRequest.changeId.length === 0) problems.push(`Pull Request ${pullRequest.id ?? "unknown"} has no Change identity`);
+    if (!["open", "closed", "merged", "blocked"].includes(String(pullRequest.status))) problems.push(`Pull Request ${pullRequest.id ?? "unknown"} has an invalid status`);
+    if (!["pending", "changes-requested", "approved"].includes(String(pullRequest.reviewState))) problems.push(`Pull Request ${pullRequest.id ?? "unknown"} has an invalid review state`);
+    if (pullRequest.disclosure !== "public" && pullRequest.disclosure !== "project" && pullRequest.disclosure !== "restricted") problems.push(`Pull Request ${pullRequest.id ?? "unknown"} has an invalid disclosure`);
+  }
   const artifactEntries = manifest.artifactFiles;
   if (manifest.artifacts.length > 0 && !artifactEntries) problems.push("Artifact byte disposition is missing");
   if (artifactEntries) {
@@ -428,6 +449,7 @@ function singleRepositoryProjectExport(input: {
     projectRevisions: [projectRevision],
     intents: [],
     intentComments: [],
+    pullRequests: [],
     changes: [],
     evidence: [],
     artifacts: [],
@@ -709,6 +731,7 @@ export class LocalProjectExporter {
         projectRevisions: [...(input.projectRevisions ?? [])],
         intents: [...(input.intents ?? [])],
         intentComments: [...(input.intentComments ?? [])],
+        pullRequests: [...(input.pullRequests ?? [])],
         changes: [...(input.changes ?? [])],
         evidence: [...(input.evidence ?? [])],
         artifacts: [...(input.artifacts ?? [])],

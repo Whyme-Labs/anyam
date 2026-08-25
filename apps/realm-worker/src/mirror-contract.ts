@@ -99,6 +99,8 @@ function parseProposal(value: unknown): Record<string, unknown> | undefined {
     ...(proposal.sourceSpaceSnapshots === undefined ? {} : { sourceSpaceSnapshots: sourceSnapshots(proposal.sourceSpaceSnapshots, "externalProposal.sourceSpaceSnapshots") }),
     ...(proposal.declaredEffects === undefined ? {} : { declaredEffects: strings(proposal.declaredEffects, "externalProposal.declaredEffects", true) }),
     ...(optional(proposal.status) ? { status: oneOf(proposal.status, "externalProposal.status", ["open", "closed", "merged", "blocked"] as const) } : {}),
+    ...(optional(proposal.title) ? { title: optional(proposal.title) } : {}),
+    ...(proposal.description === undefined ? {} : { description: required(proposal.description, "externalProposal.description") }),
     ...(remoteAuthor ? { remoteAuthor: { name: required(remoteAuthor.name, "externalProposal.remoteAuthor.name"), ...(optional(remoteAuthor.email) ? { email: optional(remoteAuthor.email) } : {}) } } : {}),
   };
 }

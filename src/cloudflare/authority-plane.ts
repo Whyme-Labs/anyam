@@ -20,6 +20,7 @@ import {
   type RepositoryMirror,
   type Project,
   type ProjectRevision,
+  type PullRequest,
   type ProjectView,
   type Release,
   type ReleaseInputSet,
@@ -72,6 +73,13 @@ export type AuthorityCommandName =
   | "intent.comment"
   | "intent.close"
   | "intent.reopen"
+  | "pullRequest.open"
+  | "pullRequest.update"
+  | "pullRequest.review"
+  | "pullRequest.close"
+  | "pullRequest.reopen"
+  | "pullRequest.block"
+  | "pullRequest.merge"
   | "workspace.create"
   | "change.create"
   | "revision.publish"
@@ -135,6 +143,7 @@ export type AuthorityPlaneSnapshot = {
   projectRevisions: Record<string, ProjectRevision>;
   intents: Record<string, Intent>;
   intentComments: Record<string, IntentComment>;
+  pullRequests: Record<string, PullRequest>;
   projectViews: Record<string, ProjectView>;
   workspaces: Record<string, Workspace>;
   changes: Record<string, Change>;
@@ -453,6 +462,7 @@ export function emptyAuthorityPlaneSnapshot(realmId: string): AuthorityPlaneSnap
     projectRevisions: {},
     intents: {},
     intentComments: {},
+    pullRequests: {},
     projectViews: {},
     workspaces: {},
     changes: {},
@@ -504,6 +514,7 @@ export function normalizeAuthorityPlaneSnapshot(snapshot: AuthorityPlaneSnapshot
     ...snapshot,
     intents: snapshot.intents ?? {},
     intentComments: snapshot.intentComments ?? {},
+    pullRequests: snapshot.pullRequests ?? {},
     runnerProfiles: snapshot.runnerProfiles ?? {},
     runnerAttempts: snapshot.runnerAttempts ?? {},
     mirrors: snapshot.mirrors ?? {},
@@ -1183,6 +1194,106 @@ export class AuthorityPlaneCoordinator {
         next.intents[intentId] = updated;
         return success({ intent: updated }, updated.receipt);
       }
+      case "pullRequest.open": {
+        const currentProject = project ?? (() => { throw new AuthorityPlaneError({ code: "not_found", message: `Project ${requiredString(payload.projectId, "projectId")} does not exist.`, recoveryAction: "create or restore the Project before opening a Pull Request", receipt: `project=${payload.projectId ?? "missing"}; pullRequest=not-created` }); })();
+        const changeId = requiredString(payload.changeId, "changeId");
+        const change = next.changes[changeId];
+        if (!change || change.projectId !== currentProject.id) throw new AuthorityPlaneError({ code: "not_found", message: `Change ${changeId} is not available for Project ${currentProject.id}.`, recoveryAction: "create the Pull Request from a Change belonging to the same Project", receipt: `project=${currentProject.id}; change=${changeId}; pullRequest=not-created; discoverable=false` });
+        const id = optionalString(payload.pullRequestId) ?? opaqueId("pull-request");
+        if (next.pullRequests[id]) throw new AuthorityPlaneError({ code: "conflict", message: `Pull Request ${id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Pull Request identity", receipt: `pullRequest=${id}; exists=true; transition=not-applied` });
+        const revisionIds = payload.revisionIds === undefined ? [] : stringArray(payload.revisionIds, "revisionIds", true);
+        for (const revisionId of revisionIds) {
+          if (next.changeRevisions[revisionId]?.changeId !== change.id) throw new AuthorityPlaneError({ code: "conflict", message: `Change Revision ${revisionId} is not part of Change ${change.id}.`, recoveryAction: "bind the Pull Request only to Revisions produced by its Change", receipt: `pullRequest=${id}; revision=${revisionId}; lineage=not-accepted` });
+        }
+        const disclosure = enumString(payload.disclosure, "disclosure", ["public", "project", "restricted"] as const, change.origin?.disclosure ?? "project");
+        const provider = requiredString(payload.provider, "provider");
+        const externalKey = optionalString(payload.externalKey);
+        const remoteRepository = optionalString(payload.remoteRepository);
+        const sourceSpaceId = optionalString(payload.sourceSpaceId);
+        const reviewDigest = optionalString(payload.reviewDigest);
+        const pullRequest: PullRequest = {
+          protocol: CONTRACT_VERSIONS.pullRequest,
+          id,
+          projectId: currentProject.id,
+          changeId: change.id,
+          provider,
+          ...(externalKey ? { externalKey } : {}),
+          ...(remoteRepository ? { remoteRepository } : {}),
+          ...(sourceSpaceId ? { sourceSpaceId } : {}),
+          headRef: requiredString(payload.headRef, "headRef"),
+          baseRef: requiredString(payload.baseRef, "baseRef"),
+          headCommit: requiredString(payload.headCommit, "headCommit"),
+          baseCommit: requiredString(payload.baseCommit, "baseCommit"),
+          title: requiredString(payload.title, "title"),
+          description: optionalString(payload.description) ?? "",
+          status: "open",
+          reviewState: "pending",
+          ...(reviewDigest ? { reviewDigest } : {}),
+          revisionIds,
+          disclosure,
+          createdAt: now(),
+          updatedAt: now(),
+          receipt: `pullRequest=opened; id=${id}; change=${change.id}; provider=${provider}; status=open; canonicalWrite=false`,
+        };
+        next.pullRequests[id] = pullRequest;
+        return success({ pullRequest }, pullRequest.receipt);
+      }
+      case "pullRequest.update": {
+        const pullRequestId = requiredString(payload.pullRequestId, "pullRequestId");
+        const existing = next.pullRequests[pullRequestId];
+        if (!existing) throw new AuthorityPlaneError({ code: "not_found", message: `Pull Request ${pullRequestId} is not available in this Realm.`, recoveryAction: "verify the Pull Request identifier without probing undiscoverable resources", receipt: `pullRequest=${pullRequestId}; operation=pullRequest.update; discoverable=false` });
+        if (projectId !== undefined && existing.projectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Pull Request ${pullRequestId} is not available for Project ${projectId}.`, recoveryAction: "verify the Pull Request identifier within the requested Project", receipt: `pullRequest=${pullRequestId}; project=${projectId}; operation=pullRequest.update; discoverable=false` });
+        const revisionId = optionalString(payload.revisionId);
+        if (revisionId && next.changeRevisions[revisionId]?.changeId !== existing.changeId) throw new AuthorityPlaneError({ code: "conflict", message: `Change Revision ${revisionId} is not part of Change ${existing.changeId}.`, recoveryAction: "bind the Pull Request update only to a Revision produced by its Change", receipt: `pullRequest=${pullRequestId}; revision=${revisionId}; lineage=not-accepted` });
+        const revisionIds = revisionId && !existing.revisionIds.includes(revisionId) ? [...existing.revisionIds, revisionId] : [...existing.revisionIds];
+        const updated: PullRequest = {
+          ...existing,
+          ...(optionalString(payload.headRef) ? { headRef: optionalString(payload.headRef)! } : {}),
+          ...(optionalString(payload.baseRef) ? { baseRef: optionalString(payload.baseRef)! } : {}),
+          ...(optionalString(payload.headCommit) ? { headCommit: optionalString(payload.headCommit)! } : {}),
+          ...(optionalString(payload.baseCommit) ? { baseCommit: optionalString(payload.baseCommit)! } : {}),
+          ...(optionalString(payload.title) ? { title: optionalString(payload.title)! } : {}),
+          ...(payload.description !== undefined ? { description: requiredString(payload.description, "description") } : {}),
+          revisionIds,
+          updatedAt: now(),
+          receipt: `pullRequest=updated; id=${pullRequestId}; head=${optionalString(payload.headCommit) ?? existing.headCommit}; revisions=${revisionIds.length}; canonicalWrite=false`,
+        };
+        next.pullRequests[pullRequestId] = updated;
+        return success({ pullRequest: updated }, updated.receipt);
+      }
+      case "pullRequest.review": {
+        const pullRequestId = requiredString(payload.pullRequestId, "pullRequestId");
+        const existing = next.pullRequests[pullRequestId];
+        if (!existing) throw new AuthorityPlaneError({ code: "not_found", message: `Pull Request ${pullRequestId} is not available in this Realm.`, recoveryAction: "verify the Pull Request identifier without probing undiscoverable resources", receipt: `pullRequest=${pullRequestId}; operation=pullRequest.review; discoverable=false` });
+        const reviewState = enumString(payload.reviewState, "reviewState", ["pending", "changes-requested", "approved"] as const);
+        const reviewDigest = requiredString(payload.reviewDigest, "reviewDigest");
+        const updated: PullRequest = { ...existing, reviewState, reviewDigest, updatedAt: now(), receipt: `pullRequest=review-updated; id=${pullRequestId}; reviewState=${reviewState}; canonicalWrite=false` };
+        next.pullRequests[pullRequestId] = updated;
+        return success({ pullRequest: updated }, updated.receipt);
+      }
+      case "pullRequest.close":
+      case "pullRequest.reopen":
+      case "pullRequest.block":
+      case "pullRequest.merge": {
+        const pullRequestId = requiredString(payload.pullRequestId, "pullRequestId");
+        const existing = next.pullRequests[pullRequestId];
+        if (!existing) throw new AuthorityPlaneError({ code: "not_found", message: `Pull Request ${pullRequestId} is not available in this Realm.`, recoveryAction: "verify the Pull Request identifier without probing undiscoverable resources", receipt: `pullRequest=${pullRequestId}; operation=${command.command}; discoverable=false` });
+        if (projectId !== undefined && existing.projectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Pull Request ${pullRequestId} is not available for Project ${projectId}.`, recoveryAction: "verify the Pull Request identifier within the requested Project", receipt: `pullRequest=${pullRequestId}; project=${projectId}; operation=${command.command}; discoverable=false` });
+        const desired = command.command === "pullRequest.close" ? "closed" : command.command === "pullRequest.reopen" ? "open" : command.command === "pullRequest.block" ? "blocked" : "merged";
+        if (desired === "merged") {
+          const change = next.changes[existing.changeId];
+          if (!change || change.status !== "landed") throw new AuthorityPlaneError({ code: "conflict", message: `Pull Request ${pullRequestId} cannot be marked merged before its Change is Landed.`, recoveryAction: "complete review and Landing for the mapped Change before merging the compatibility projection", receipt: `pullRequest=${pullRequestId}; change=${existing.changeId}; changeStatus=${change?.status ?? "missing"}; merge=not-accepted` });
+        }
+        if (existing.status === desired) return success({ pullRequest: existing }, `pullRequest=${desired}; id=${pullRequestId}; unchanged=true; canonicalWrite=false`);
+        const timestamp = now();
+        const updated: PullRequest = desired === "open"
+          ? (() => { const { closedAt: _closedAt, mergedAt: _mergedAt, ...openPullRequest } = existing; return { ...openPullRequest, status: "open", updatedAt: timestamp, receipt: `pullRequest=reopened; id=${pullRequestId}; canonicalWrite=false` }; })()
+          : desired === "merged"
+            ? { ...existing, status: "merged", mergedAt: timestamp, updatedAt: timestamp, receipt: `pullRequest=merged; id=${pullRequestId}; change=${existing.changeId}; canonicalWrite=false` }
+            : { ...existing, status: desired, ...(desired === "closed" ? { closedAt: timestamp } : {}), updatedAt: timestamp, receipt: `pullRequest=${desired}; id=${pullRequestId}; canonicalWrite=false` };
+        next.pullRequests[pullRequestId] = updated;
+        return success({ pullRequest: updated }, updated.receipt);
+      }
       case "project.create": {
         const id = optionalString(payload.projectId) ?? opaqueId("project");
         if (next.projects[id]) throw new AuthorityPlaneError({ code: "conflict", message: `Project ${id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Project identity", receipt: `project=${id}; exists=true; transition=not-applied` });
@@ -1557,6 +1668,7 @@ export class AuthorityPlaneCoordinator {
         let proposal: ExternalProposal | undefined;
         let proposalChange: Change | undefined;
         let proposalRevision: ChangeRevision | undefined;
+        let pullRequest: PullRequest | undefined;
         let proposalDelivery: MirrorDelivery | undefined;
         const deliveryValue = payload.delivery === undefined ? undefined : safeObject(payload.delivery, "delivery");
         if (deliveryValue) {
@@ -1639,6 +1751,15 @@ export class AuthorityPlaneCoordinator {
             : { protocol: CONTRACT_VERSIONS.externalProposal, id: opaqueId("external-proposal"), ledgerKey: proposalLedgerKey, mirrorId, projectId: mirror.projectId, sourceSpaceId: mirror.sourceSpaceId, provider: proposalProvider, ...(proposalInstallationId ? { installationId: proposalInstallationId } : {}), sourceIdentity: proposalSourceIdentity, remoteRepository: proposalRepository, proposalKind, proposalKey, ...(proposalRemoteRef ? { remoteRef: proposalRemoteRef } : {}), ...(proposalBaseRef ? { baseRef: proposalBaseRef } : {}), ...(proposalBaseCommit ? { baseCommit: proposalBaseCommit } : {}), latestHeadCommit: proposalHead, observedHeadCommits: [proposalHead], changeId: proposalChange!.id, changeRevisionIds: proposalRevision ? [proposalRevision.id] : [], status: proposalStatus, ...(proposalDelivery ? { lastDeliveryId: proposalDelivery.deliveryId } : {}), disclosure: proposalDisclosure, createdAt: nowAt, updatedAt: nowAt, receipt: `proposal=${proposalKey}; change=${proposalChange!.id}; head=${proposalHead}; status=${proposalStatus}; revision=${proposalRevision?.id ?? "none"}; mapping=created; credentialFree=true` };
           proposal = persistedProposal;
           next.externalProposals[proposalLedgerKey] = persistedProposal;
+          if (proposalKind === "pull-request") {
+            const existingPullRequest = Object.values(next.pullRequests).find((candidate) => candidate.provider === proposalProvider && candidate.externalKey === proposalKey && candidate.remoteRepository === proposalRepository);
+            const pullRequestStatus: PullRequest["status"] = proposalStatus === "merged" && proposalChange?.status !== "landed" ? "blocked" : proposalStatus;
+            const pullRequestRevisionIds = proposalRevision && !(existingPullRequest?.revisionIds.includes(proposalRevision.id)) ? [...(existingPullRequest?.revisionIds ?? []), proposalRevision.id] : [...(existingPullRequest?.revisionIds ?? [])];
+            pullRequest = existingPullRequest
+              ? { ...existingPullRequest, headCommit: proposalHead, ...(proposalRemoteRef ? { headRef: proposalRemoteRef } : {}), ...(proposalBaseCommit ? { baseCommit: proposalBaseCommit } : {}), ...(proposalBaseRef ? { baseRef: proposalBaseRef } : {}), status: pullRequestStatus, revisionIds: pullRequestRevisionIds, updatedAt: nowAt, receipt: `pullRequest=mirror-updated; id=${existingPullRequest.id}; proposal=${proposalKey}; head=${proposalHead}; status=${pullRequestStatus}; mapping=stable; credentialFree=true` }
+              : { protocol: CONTRACT_VERSIONS.pullRequest, id: opaqueId("pull-request"), projectId: mirror.projectId, changeId: proposalChange!.id, provider: proposalProvider, externalKey: proposalKey, remoteRepository: proposalRepository, sourceSpaceId: mirror.sourceSpaceId, headRef: proposalRemoteRef ?? "refs/heads/main", baseRef: proposalBaseRef ?? "refs/heads/main", headCommit: proposalHead, baseCommit: proposalBaseCommit ?? canonicalSourceSnapshot ?? "unknown", title: optionalString(proposalValue.title) ?? `Pull Request ${proposalKey}`, description: optionalString(proposalValue.description) ?? "", status: pullRequestStatus, reviewState: "pending", revisionIds: proposalRevision ? [proposalRevision.id] : [], disclosure: proposalDisclosure, createdAt: nowAt, updatedAt: nowAt, receipt: `pullRequest=mirror-created; id=${proposalKey}; change=${proposalChange!.id}; head=${proposalHead}; status=${pullRequestStatus}; mapping=stable; credentialFree=true` };
+            next.pullRequests[pullRequest.id] = pullRequest;
+          }
         }
         if (proposalDelivery) next.mirrorDeliveries[proposalDelivery.deliveryKey] = proposalDelivery;
         const checkpointState = operationState === "succeeded" ? "completed" : operationState === "started" ? "remote-inspected" : "blocked";
@@ -1662,7 +1783,7 @@ export class AuthorityPlaneCoordinator {
         next.mirrorOperations[operation.id] = operation;
         next.mirrorCheckpoints[checkpoint.id] = checkpoint;
         next.mirrors[mirror.id] = updatedMirror;
-        return operationState === "succeeded" ? success({ mirror: updatedMirror, operation, checkpoint, ...(proposal ? { proposal } : {}), ...(proposalChange ? { change: proposalChange } : {}), ...(proposalRevision ? { revision: proposalRevision } : {}), ...(proposalDelivery ? { delivery: proposalDelivery } : {}) }, `mirror=${mirrorId}; operation=${operation.id}; state=succeeded; canonicalWrite=false; credentialFree=true`) : blocked({ mirror: updatedMirror, operation, checkpoint, ...(proposalDelivery ? { delivery: proposalDelivery } : {}) }, `mirror=${mirrorId}; operation=${operation.id}; state=${operationState}; checkpoint=${checkpoint.id}; canonicalWrite=false; credentialFree=true`, operationRecoveryAction);
+        return operationState === "succeeded" ? success({ mirror: updatedMirror, operation, checkpoint, ...(proposal ? { proposal } : {}), ...(pullRequest ? { pullRequest } : {}), ...(proposalChange ? { change: proposalChange } : {}), ...(proposalRevision ? { revision: proposalRevision } : {}), ...(proposalDelivery ? { delivery: proposalDelivery } : {}) }, `mirror=${mirrorId}; operation=${operation.id}; state=succeeded;${pullRequest ? ` pullRequest=${pullRequest.id};` : ""} canonicalWrite=false; credentialFree=true`) : blocked({ mirror: updatedMirror, operation, checkpoint, ...(proposalDelivery ? { delivery: proposalDelivery } : {}) }, `mirror=${mirrorId}; operation=${operation.id}; state=${operationState}; checkpoint=${checkpoint.id}; canonicalWrite=false; credentialFree=true`, operationRecoveryAction);
       }
       case "landing.apply": {
         const changeRevisionId = requiredString(payload.changeRevisionId, "changeRevisionId");
@@ -1856,6 +1977,7 @@ export function authorityStateSummary(snapshot: AuthorityPlaneSnapshot): Record<
       projects: Object.keys(normalized.projects).length,
       intents: Object.keys(normalized.intents).length,
       intentComments: Object.keys(normalized.intentComments).length,
+      pullRequests: Object.keys(normalized.pullRequests).length,
       workspaces: Object.keys(normalized.workspaces).length,
       changes: Object.keys(normalized.changes).length,
       revisions: Object.keys(normalized.changeRevisions).length,

@@ -66,6 +66,7 @@ function projectExport(): ProjectExport {
     projectRevisions: [revision],
     intents: [],
     intentComments: [],
+    pullRequests: [],
     changes: [],
     evidence: [],
     artifacts: [],

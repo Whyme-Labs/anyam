@@ -260,6 +260,7 @@ function projectExport(project: Project, sourceSpace: SourceSpace, baseRevision:
     projectRevisions: [baseRevision],
     intents: [],
     intentComments: [],
+    pullRequests: [],
     changes: [],
     evidence: [],
     artifacts: [],

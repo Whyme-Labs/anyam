@@ -7,6 +7,8 @@ export const CONTRACT_VERSIONS = {
   action: "anyam.action/v1",
   verifier: "anyam.verifier/v1",
   workspace: "anyam.workspace/v1",
+  intent: "anyam.intent/v1",
+  intentComment: "anyam.intent-comment/v1",
   change: "anyam.change/v1",
   conflict: "anyam.conflict/v1",
   landing: "anyam.landing/v1",
@@ -108,6 +110,38 @@ export type SourceSpace = {
   id: string;
   name: string;
   classification: SourceSpaceClassification;
+};
+
+export type IntentStatus = "open" | "closed";
+
+export type Intent = {
+  protocol: typeof CONTRACT_VERSIONS.intent;
+  id: string;
+  projectId: string;
+  title: string;
+  description: string;
+  status: IntentStatus;
+  author: ActorRef;
+  assigneePrincipalIds: readonly string[];
+  labels: readonly string[];
+  disclosure: DisclosureClassification;
+  createdAt: string;
+  updatedAt: string;
+  closedAt?: string;
+  closedBy?: ActorRef;
+  receipt: string;
+};
+
+export type IntentComment = {
+  protocol: typeof CONTRACT_VERSIONS.intentComment;
+  id: string;
+  intentId: string;
+  projectId: string;
+  author: ActorRef;
+  body: string;
+  disclosure: DisclosureClassification;
+  createdAt: string;
+  receipt: string;
 };
 
 export type Action = {
@@ -906,6 +940,8 @@ export type ProjectExport = {
   largeObjects: readonly LargeObjectRef[];
   lineage: readonly ProjectExportLineage[];
   projectRevisions: readonly ProjectRevision[];
+  intents: readonly Intent[];
+  intentComments: readonly IntentComment[];
   changes: readonly Change[];
   evidence: readonly Evidence[];
   artifacts: readonly Artifact[];

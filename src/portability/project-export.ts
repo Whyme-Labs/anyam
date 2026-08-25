@@ -13,6 +13,8 @@ import {
   type ExternalProposal,
   type GovernanceControlEvidence,
   type GovernanceEvaluation,
+  type Intent,
+  type IntentComment,
   type GovernanceProfile,
   type LargeObjectRef,
   type Project,
@@ -74,6 +76,8 @@ export type ProjectExportInput = {
   repositories: readonly ProjectExportRepositoryInput[];
   destination: string;
   projectRevisions?: readonly ProjectRevision[];
+  intents?: readonly Intent[];
+  intentComments?: readonly IntentComment[];
   changes?: readonly Change[];
   evidence?: readonly Evidence[];
   artifacts?: readonly Artifact[];
@@ -273,6 +277,43 @@ function manifestProblems(manifest: ProjectExport): readonly string[] {
       if (!safeRelativePath(".", object.relativePath ?? "")) problems.push(`repository ${repository.sourceSpaceId} LFS path escapes the package`);
     }
   }
+  const intentsValue = (manifest as ProjectExport & { intents?: unknown }).intents;
+  const commentsValue = (manifest as ProjectExport & { intentComments?: unknown }).intentComments;
+  if (!Array.isArray(intentsValue)) problems.push("Intent lifecycle array is missing");
+  if (!Array.isArray(commentsValue)) problems.push("Intent comment lifecycle array is missing");
+  const intents = Array.isArray(intentsValue) ? intentsValue : [];
+  const intentIds = new Set<string>();
+  const disclosureRank = (value: unknown): number => value === "public" ? 0 : value === "project" ? 1 : value === "restricted" ? 2 : -1;
+  for (const intentValue of intents) {
+    if (intentValue === null || typeof intentValue !== "object" || Array.isArray(intentValue)) {
+      problems.push("Intent lifecycle entry is not an object");
+      continue;
+    }
+    const intent = intentValue as Partial<Intent>;
+    if (typeof intent.id !== "string" || intent.id.length === 0) problems.push("Intent lifecycle entry has no identity");
+    else if (intentIds.has(intent.id)) problems.push(`Intent ${intent.id} is duplicated`);
+    else intentIds.add(intent.id);
+    if (intent.projectId !== manifest.project.id) problems.push(`Intent ${intent.id ?? "unknown"} names a different Project`);
+    if (intent.status !== "open" && intent.status !== "closed") problems.push(`Intent ${intent.id ?? "unknown"} has an invalid status`);
+    if (disclosureRank(intent.disclosure) < 0) problems.push(`Intent ${intent.id ?? "unknown"} has an invalid disclosure`);
+  }
+  const comments = Array.isArray(commentsValue) ? commentsValue : [];
+  const commentIds = new Set<string>();
+  for (const commentValue of comments) {
+    if (commentValue === null || typeof commentValue !== "object" || Array.isArray(commentValue)) {
+      problems.push("Intent comment entry is not an object");
+      continue;
+    }
+    const comment = commentValue as Partial<IntentComment>;
+    if (typeof comment.id !== "string" || comment.id.length === 0) problems.push("Intent comment entry has no identity");
+    else if (commentIds.has(comment.id)) problems.push(`Intent comment ${comment.id} is duplicated`);
+    else commentIds.add(comment.id);
+    const parent = typeof comment.intentId === "string" ? intents.find((value) => value !== null && typeof value === "object" && !Array.isArray(value) && (value as { id?: unknown }).id === comment.intentId) as Partial<Intent> | undefined : undefined;
+    if (!parent) problems.push(`Intent comment ${comment.id ?? "unknown"} names an unavailable Intent`);
+    if (comment.projectId !== manifest.project.id) problems.push(`Intent comment ${comment.id ?? "unknown"} names a different Project`);
+    if (disclosureRank(comment.disclosure) < 0) problems.push(`Intent comment ${comment.id ?? "unknown"} has an invalid disclosure`);
+    if (parent && disclosureRank(comment.disclosure) > disclosureRank(parent.disclosure)) problems.push(`Intent comment ${comment.id ?? "unknown"} disclosure exceeds its Intent`);
+  }
   const artifactEntries = manifest.artifactFiles;
   if (manifest.artifacts.length > 0 && !artifactEntries) problems.push("Artifact byte disposition is missing");
   if (artifactEntries) {
@@ -385,6 +426,8 @@ function singleRepositoryProjectExport(input: {
     largeObjects: [...input.repository.lfs.objects],
     lineage: [{ projectRevisionId: projectRevision.id, sourceSpaceSnapshots: { ...projectRevision.sourceSpaceSnapshots } }],
     projectRevisions: [projectRevision],
+    intents: [],
+    intentComments: [],
     changes: [],
     evidence: [],
     artifacts: [],
@@ -664,6 +707,8 @@ export class LocalProjectExporter {
         largeObjects,
         lineage,
         projectRevisions: [...(input.projectRevisions ?? [])],
+        intents: [...(input.intents ?? [])],
+        intentComments: [...(input.intentComments ?? [])],
         changes: [...(input.changes ?? [])],
         evidence: [...(input.evidence ?? [])],
         artifacts: [...(input.artifacts ?? [])],

@@ -116,6 +116,17 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
           authority = new AuthorityPlaneCoordinator(body.snapshot as never);
           return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "recovery-restored", credentialFree: true, canonicalWrite: false, receipt: "authorityRecovery=restored; state=replaced; credentialFree=true; canonicalWrite=false" }), { status: 200, headers: { "content-type": "application/json" } });
         }
+        if (new URL(request.url).pathname === "/authority/intents/internal") {
+          const snapshot = authority.snapshot();
+          const projectId = typeof body.projectId === "string" ? body.projectId : undefined;
+          const intentId = typeof body.intentId === "string" ? body.intentId : undefined;
+          const visible = Object.values(snapshot.intents).filter((intent) => (projectId === undefined || intent.projectId === projectId) && (intentId === undefined || intent.id === intentId));
+          if (intentId !== undefined && visible.length === 0) return new Response(JSON.stringify({ code: "not_found", receipt: "intent=hidden; discoverable=false" }), { status: 404 });
+          const summary = (intent: (typeof snapshot.intents)[string]) => ({ intent, comments: Object.values(snapshot.intentComments).filter((comment) => comment.intentId === intent.id), project: { protocol: snapshot.projects[intent.projectId]?.protocol, id: intent.projectId, name: snapshot.projects[intent.projectId]?.name, referenceType: snapshot.projects[intent.projectId]?.referenceType } });
+          if (intentId !== undefined) return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", ...summary(visible[0]!), receipt: "authority=coordinator; operation=intent.inspect; readOnly=true; credentialFree=true; canonicalWrite=false" }), { status: 200, headers: { "content-type": "application/json" } });
+          const intents = visible.sort((left, right) => left.id.localeCompare(right.id)).map((intent) => ({ ...summary(intent), commentCount: Object.values(snapshot.intentComments).filter((comment) => comment.intentId === intent.id).length }));
+          return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", intents, receipt: `authority=coordinator; operation=intent.list; intentCount=${intents.length}; readOnly=true; credentialFree=true; canonicalWrite=false` }), { status: 200, headers: { "content-type": "application/json" } });
+        }
         if (new URL(request.url).pathname === "/authority/state/internal") return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", authority: authorityStateSummary(authority.snapshot()) }));
         if (new URL(request.url).pathname === "/authority/workspaces/internal") {
           const snapshot = authority.snapshot();
@@ -230,6 +241,28 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
   assert.equal(JSON.stringify(projectBootstrap.value).includes("sourceSpaceSnapshots"), false);
   const project = projectBootstrap.value.project as { id: string };
   const canonicalBefore = (projectBootstrap.value.canonicalRevision as { id: string }).id;
+  const intentCreate = await record("/api/intents", "idem:typed-intent-create", { projectId: project.id, intentId: "intent:typed-authority-test", title: "Add typed Intent lifecycle", description: "Exercise the owner REST surface without leaking credentials.", disclosure: "project", labels: ["qualification"] });
+  assert.equal(intentCreate.response.status, 200, JSON.stringify(intentCreate.value));
+  assert.equal((intentCreate.value.intent as Record<string, unknown>).status, "open");
+  const intentId = (intentCreate.value.intent as Record<string, unknown>).id as string;
+  const intentList = await record(`/api/intents?projectId=${encodeURIComponent(project.id)}`, "unused", {}, "GET");
+  assert.equal(intentList.response.status, 200);
+  assert.deepEqual((intentList.value.intents as Array<Record<string, unknown>>).map((entry) => (entry.intent as Record<string, unknown>).id), [intentId]);
+  const intentQueryRejected = await record("/api/intents?workspaceId=hidden", "unused", {}, "GET");
+  assert.equal(intentQueryRejected.response.status, 400);
+  const intentInspect = await record(`/api/intents/${encodeURIComponent(intentId)}`, "unused", {}, "GET");
+  assert.equal(intentInspect.response.status, 200);
+  assert.equal(((intentInspect.value.intent as Record<string, unknown>).title), "Add typed Intent lifecycle");
+  const intentPathMutationRejected = await record(`/api/intents/${encodeURIComponent(intentId)}`, "idem:typed-intent-invalid", { title: "must-not-create" });
+  assert.equal(intentPathMutationRejected.response.status, 405);
+  const intentAssign = await record(`/api/intents/${encodeURIComponent(intentId)}/assign`, "idem:typed-intent-assign", { assigneePrincipalIds: ["principal:reviewer"] });
+  assert.deepEqual((intentAssign.value.intent as Record<string, unknown>).assigneePrincipalIds, ["principal:reviewer"]);
+  const intentComment = await record(`/api/intents/${encodeURIComponent(intentId)}/comment`, "idem:typed-intent-comment", { commentId: "intent-comment:typed-authority-test", body: "Comment is retained with the Intent.", disclosure: "project" });
+  assert.equal((intentComment.value.comment as Record<string, unknown>).body, "Comment is retained with the Intent.");
+  const intentClosed = await record(`/api/intents/${encodeURIComponent(intentId)}/close`, "idem:typed-intent-close", {});
+  assert.equal((intentClosed.value.intent as Record<string, unknown>).status, "closed");
+  const intentReopened = await record(`/api/intents/${encodeURIComponent(intentId)}/reopen`, "idem:typed-intent-reopen", {});
+  assert.equal((intentReopened.value.intent as Record<string, unknown>).status, "open");
   const workspaceBootstrap = await bootstrap(`/api/projects/${encodeURIComponent(project.id)}/workspaces`, "idem:typed-workspace", { projectRevisionId: canonicalBefore, sourceSpaceIds: ["source:typed-authority-test"], mounts: ["source"] });
   assert.equal(workspaceBootstrap.response.status, 200);
   assert.equal(workspaceBootstrap.value.status, "succeeded");

@@ -81,6 +81,21 @@ test("CLI auth login requires explicit Realm and client identity before opening 
   await assert.rejects(() => main(["auth", "login"], process.cwd()), /auth login requires --realm/);
 });
 
+test("CLI documents the hosted Intent lifecycle without implying local credential storage", async () => {
+  const output: string[] = [];
+  const originalLog = console.log;
+  console.log = (...args: unknown[]) => output.push(args.map((value) => String(value)).join(" "));
+  try {
+    assert.equal(await main(["--help"], process.cwd()), 0);
+  } finally {
+    console.log = originalLog;
+  }
+  const help = output.join("\n");
+  assert.match(help, /intent list\|inspect\|create\|assign\|comment\|close\|reopen/);
+  assert.match(help, /--owner-session or ANYAM_OWNER_SESSION/);
+  assert.match(help, /never stores bearer credentials/);
+});
+
 test("local agent session is bound to one Change Workspace and revocation invalidates credentials", async () => {
   const directory = await projectDirectory();
   let clock = Date.parse("2026-08-03T00:00:00.000Z");

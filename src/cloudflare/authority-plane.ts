@@ -11,6 +11,8 @@ import {
   type DisclosureClassification,
   type ExternalProposal,
   type Evidence,
+  type Intent,
+  type IntentComment,
   type Landing,
   type MirrorCheckpoint,
   type MirrorDelivery,
@@ -65,6 +67,11 @@ export const AUTHORITY_COMMAND_PROTOCOL = "anyam.authority-command/v1" as const;
 
 export type AuthorityCommandName =
   | "project.create"
+  | "intent.create"
+  | "intent.assign"
+  | "intent.comment"
+  | "intent.close"
+  | "intent.reopen"
   | "workspace.create"
   | "change.create"
   | "revision.publish"
@@ -126,6 +133,8 @@ export type AuthorityPlaneSnapshot = {
   projects: Record<string, Project>;
   sourceSpaces: Record<string, SourceSpace>;
   projectRevisions: Record<string, ProjectRevision>;
+  intents: Record<string, Intent>;
+  intentComments: Record<string, IntentComment>;
   projectViews: Record<string, ProjectView>;
   workspaces: Record<string, Workspace>;
   changes: Record<string, Change>;
@@ -442,6 +451,8 @@ export function emptyAuthorityPlaneSnapshot(realmId: string): AuthorityPlaneSnap
     projects: {},
     sourceSpaces: {},
     projectRevisions: {},
+    intents: {},
+    intentComments: {},
     projectViews: {},
     workspaces: {},
     changes: {},
@@ -491,6 +502,8 @@ export function normalizeAuthorityPlaneSnapshot(snapshot: AuthorityPlaneSnapshot
   const targets = Object.fromEntries(Object.entries(snapshot.targets ?? {}).map(([id, target]) => [id, { ...target, deploymentProfile: targetDeploymentProfile(target) }]));
   return {
     ...snapshot,
+    intents: snapshot.intents ?? {},
+    intentComments: snapshot.intentComments ?? {},
     runnerProfiles: snapshot.runnerProfiles ?? {},
     runnerAttempts: snapshot.runnerAttempts ?? {},
     mirrors: snapshot.mirrors ?? {},
@@ -1107,6 +1120,69 @@ export class AuthorityPlaneCoordinator {
     const project = projectId ? next.projects[projectId] : undefined;
 
     switch (command.command) {
+      case "intent.create": {
+        const currentProject = project ?? (() => { throw new AuthorityPlaneError({ code: "not_found", message: `Project ${requiredString(payload.projectId, "projectId")} does not exist.`, recoveryAction: "create or restore the Project before creating an Intent", receipt: `project=${payload.projectId ?? "missing"}; intent=not-created` }); })();
+        const id = optionalString(payload.intentId) ?? opaqueId("intent");
+        if (next.intents[id]) throw new AuthorityPlaneError({ code: "conflict", message: `Intent ${id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Intent identity", receipt: `intent=${id}; exists=true; transition=not-applied` });
+        const disclosure = enumString(payload.disclosure, "disclosure", ["public", "project", "restricted"] as const, "project");
+        const assigneePrincipalIds = payload.assigneePrincipalIds === undefined ? [] : stringArray(payload.assigneePrincipalIds, "assigneePrincipalIds", true);
+        const labels = payload.labels === undefined ? [] : stringArray(payload.labels, "labels", true);
+        const intent: Intent = {
+          protocol: CONTRACT_VERSIONS.intent,
+          id,
+          projectId: currentProject.id,
+          title: requiredString(payload.title, "title"),
+          description: optionalString(payload.description) ?? "",
+          status: "open",
+          author: actor,
+          assigneePrincipalIds,
+          labels,
+          disclosure,
+          createdAt: now(),
+          updatedAt: now(),
+          receipt: `intent=created; project=${currentProject.id}; status=open; disclosure=${disclosure}; canonicalWrite=false`,
+        };
+        next.intents[id] = intent;
+        return success({ intent }, intent.receipt);
+      }
+      case "intent.assign": {
+        const intentId = requiredString(payload.intentId, "intentId");
+        const existing = next.intents[intentId];
+        if (!existing) throw new AuthorityPlaneError({ code: "not_found", message: `Intent ${intentId} is not available in this Realm.`, recoveryAction: "verify the Intent identifier without probing undiscoverable resources", receipt: `intent=${intentId}; operation=intent.assign; discoverable=false` });
+        if (projectId !== undefined && existing.projectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Intent ${intentId} is not available for Project ${projectId}.`, recoveryAction: "verify the Intent identifier within the requested Project", receipt: `intent=${intentId}; project=${projectId}; operation=intent.assign; discoverable=false` });
+        const assigneePrincipalIds = stringArray(payload.assigneePrincipalIds, "assigneePrincipalIds", true);
+        const updated: Intent = { ...existing, assigneePrincipalIds, updatedAt: now(), receipt: `intent=assigned; id=${intentId}; assignees=${assigneePrincipalIds.join(",") || "none"}; canonicalWrite=false` };
+        next.intents[intentId] = updated;
+        return success({ intent: updated }, updated.receipt);
+      }
+      case "intent.comment": {
+        const intentId = requiredString(payload.intentId, "intentId");
+        const existing = next.intents[intentId];
+        if (!existing) throw new AuthorityPlaneError({ code: "not_found", message: `Intent ${intentId} is not available in this Realm.`, recoveryAction: "verify the Intent identifier without probing undiscoverable resources", receipt: `intent=${intentId}; operation=intent.comment; discoverable=false` });
+        const disclosure = enumString(payload.disclosure, "disclosure", ["public", "project", "restricted"] as const, existing.disclosure);
+        if (!disclosureAllows(existing.disclosure, disclosure)) throw new AuthorityPlaneError({ code: "conflict", message: `Intent comment disclosure ${disclosure} exceeds Intent ${intentId} disclosure ${existing.disclosure}.`, recoveryAction: "use a disclosure no broader than the Intent or create a separately governed Intent", receipt: `intent=${intentId}; intentDisclosure=${existing.disclosure}; commentDisclosure=${disclosure}; comment=not-created` });
+        const commentId = optionalString(payload.commentId) ?? opaqueId("intent-comment");
+        if (next.intentComments[commentId]) throw new AuthorityPlaneError({ code: "conflict", message: `Intent comment ${commentId} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new comment identity", receipt: `comment=${commentId}; exists=true; transition=not-applied` });
+        const comment: IntentComment = { protocol: CONTRACT_VERSIONS.intentComment, id: commentId, intentId, projectId: existing.projectId, author: actor, body: requiredString(payload.body, "body"), disclosure, createdAt: now(), receipt: `intent=commented; id=${intentId}; comment=${commentId}; disclosure=${disclosure}; canonicalWrite=false` };
+        next.intentComments[commentId] = comment;
+        const updated: Intent = { ...existing, updatedAt: comment.createdAt, receipt: `${existing.receipt}; comments=updated; lastComment=${commentId}` };
+        next.intents[intentId] = updated;
+        return success({ intent: updated, comment }, comment.receipt);
+      }
+      case "intent.close":
+      case "intent.reopen": {
+        const intentId = requiredString(payload.intentId, "intentId");
+        const existing = next.intents[intentId];
+        if (!existing) throw new AuthorityPlaneError({ code: "not_found", message: `Intent ${intentId} is not available in this Realm.`, recoveryAction: "verify the Intent identifier without probing undiscoverable resources", receipt: `intent=${intentId}; operation=${command.command}; discoverable=false` });
+        const desired = command.command === "intent.close" ? "closed" : "open";
+        if (existing.status === desired) return success({ intent: existing }, `intent=${desired}; id=${intentId}; unchanged=true; canonicalWrite=false`);
+        const timestamp = now();
+        const updated: Intent = desired === "closed"
+          ? { ...existing, status: "closed", closedAt: timestamp, closedBy: actor, updatedAt: timestamp, receipt: `intent=closed; id=${intentId}; canonicalWrite=false` }
+          : (() => { const { closedAt: _closedAt, closedBy: _closedBy, ...openIntent } = existing; return { ...openIntent, status: "open", updatedAt: timestamp, receipt: `intent=reopened; id=${intentId}; canonicalWrite=false` }; })();
+        next.intents[intentId] = updated;
+        return success({ intent: updated }, updated.receipt);
+      }
       case "project.create": {
         const id = optionalString(payload.projectId) ?? opaqueId("project");
         if (next.projects[id]) throw new AuthorityPlaneError({ code: "conflict", message: `Project ${id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Project identity", receipt: `project=${id}; exists=true; transition=not-applied` });
@@ -1159,7 +1235,11 @@ export class AuthorityPlaneCoordinator {
         const workspaceId = optionalString(payload.workspaceId);
         if (workspaceId && (!next.workspaces[workspaceId] || next.workspaces[workspaceId].projectId !== currentProject.id)) throw new AuthorityPlaneError({ code: "not_found", message: `Workspace ${workspaceId} is not available for Project ${currentProject.id}.`, recoveryAction: "create a Workspace for this Project before creating the Change", receipt: `workspace=${workspaceId}; change=not-created` });
         const origin = changeOriginFromPayload(payload.origin);
-        const change: Change = { protocol: CONTRACT_VERSIONS.change, id: optionalString(payload.changeId) ?? opaqueId("change"), projectId: currentProject.id, intentId: requiredString(payload.intentId, "intentId"), baseProjectRevisionId: baseRevisionId, status: "active", latestRevisionId: null, ...(workspaceId ? { workspaceId } : {}), author: actor, ...(origin ? { origin } : {}) };
+        const intentId = requiredString(payload.intentId, "intentId");
+        const existingIntent = next.intents[intentId];
+        if (existingIntent && existingIntent.projectId !== currentProject.id) throw new AuthorityPlaneError({ code: "conflict", message: `Intent ${intentId} belongs to Project ${existingIntent.projectId}, not ${currentProject.id}.`, recoveryAction: "create the Change from an Intent belonging to the same Project", receipt: `intent=${intentId}; intentProject=${existingIntent.projectId}; changeProject=${currentProject.id}; transition=not-applied` });
+        if (!existingIntent) next.intents[intentId] = { protocol: CONTRACT_VERSIONS.intent, id: intentId, projectId: currentProject.id, title: intentId, description: "", status: "open", author: actor, assigneePrincipalIds: [], labels: [], disclosure: "project", createdAt: now(), updatedAt: now(), receipt: `intent=legacy-materialized; id=${intentId}; source=change.create; canonicalWrite=false` };
+        const change: Change = { protocol: CONTRACT_VERSIONS.change, id: optionalString(payload.changeId) ?? opaqueId("change"), projectId: currentProject.id, intentId, baseProjectRevisionId: baseRevisionId, status: "active", latestRevisionId: null, ...(workspaceId ? { workspaceId } : {}), author: actor, ...(origin ? { origin } : {}) };
         if (next.changes[change.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Change ${change.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Change identity", receipt: `change=${change.id}; exists=true; transition=not-applied` });
         next.changes[change.id] = change;
         if (workspaceId) next.workspaces[workspaceId] = { ...next.workspaces[workspaceId]!, changeId: change.id };
@@ -1774,6 +1854,8 @@ export function authorityStateSummary(snapshot: AuthorityPlaneSnapshot): Record<
     canonicalByProject: { ...normalized.canonicalByProject },
     counts: {
       projects: Object.keys(normalized.projects).length,
+      intents: Object.keys(normalized.intents).length,
+      intentComments: Object.keys(normalized.intentComments).length,
       workspaces: Object.keys(normalized.workspaces).length,
       changes: Object.keys(normalized.changes).length,
       revisions: Object.keys(normalized.changeRevisions).length,

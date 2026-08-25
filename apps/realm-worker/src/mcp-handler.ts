@@ -18,6 +18,8 @@ const MCP_WORKSPACE_SCOPE = "workspace.inspect";
 const MCP_WORKSPACE_WRITE_SCOPE = "workspace.write";
 const MCP_CHANGE_SCOPE = "change.inspect";
 const MCP_CHANGE_WRITE_SCOPE = "change.write";
+const MCP_INTENT_SCOPE = "intent.inspect";
+const MCP_INTENT_WRITE_SCOPE = "intent.write";
 const MCP_READ_TOOL = "project.inspect";
 const MCP_LIST_TOOL = "project.list";
 const MCP_WORKSPACE_READ_TOOL = "workspace.inspect";
@@ -28,6 +30,13 @@ const MCP_PROJECT_CREATE_TOOL = "project.create";
 const MCP_WORKSPACE_CREATE_TOOL = "workspace.create";
 const MCP_CHANGE_CREATE_TOOL = "change.create";
 const MCP_CHANGE_REVISION_PUBLISH_TOOL = "change.publish_revision";
+const MCP_INTENT_LIST_TOOL = "intent.list";
+const MCP_INTENT_READ_TOOL = "intent.inspect";
+const MCP_INTENT_CREATE_TOOL = "intent.create";
+const MCP_INTENT_ASSIGN_TOOL = "intent.assign";
+const MCP_INTENT_COMMENT_TOOL = "intent.comment";
+const MCP_INTENT_CLOSE_TOOL = "intent.close";
+const MCP_INTENT_REOPEN_TOOL = "intent.reopen";
 const MCP_RUN_REQUEST_TOOL = "run.request";
 const MCP_RUN_INSPECT_TOOL = "run.inspect";
 const LEGACY_RUN_MUTATION_TOOLS = new Set(["run.record", "evidence.record", "artifact.record"]);
@@ -198,7 +207,7 @@ async function requestMcpCoordinator(env: AnyamRealmMcpEnv, path: string, body: 
 
 function mcpMutationContext(props: AnyamRealmMcpProps, operation: string, payload: Record<string, unknown>, effects: readonly string[] = []): Record<string, unknown> {
   if (!props.kernelSessionId || !props.realmId || !props.agentId || !props.taskId || !props.capabilityGrantId) throw new McpBootstrapError("auth", "The MCP mutation is not bound to a delegated Agent Task and Capability Grant.", "authorize the MCP client through an owner-approved Agent Task, then retry; no transition was accepted", `mcp=${operation}; agent=${props.agentId ? "present" : "missing"}; task=${props.taskId ? "present" : "missing"}; grant=${props.capabilityGrantId ? "present" : "missing"}; transition=not-applied`);
-  const capability: Capability = operation === "workspace.create" ? "workspace.write" : operation === "change.create" || operation === "revision.publish" ? "change.publish_revision" : operation === "run.request" ? "run.invoke" : operation as Capability;
+  const capability: Capability = operation === "workspace.create" ? "workspace.write" : operation === "change.create" || operation === "revision.publish" ? "change.publish_revision" : operation.startsWith("intent.") ? "intent.write" : operation === "run.request" ? "run.invoke" : operation as Capability;
   if (operation === "project.create") throw new McpBootstrapError("auth", "Project creation is an owner operation, not an Agent Task mutation.", "create the Project through the authenticated owner surface before delegating a Workspace Task", "mcp=project.create; agentMutation=not-supported; transition=not-applied");
   const resource: ResourceRef = props.resource ?? {
     realmId: props.realmId,
@@ -300,6 +309,42 @@ async function mcpChangeInspect(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps
     revisions: result.revisions,
     receipt: `${typeof result.receipt === "string" ? result.receipt : "authority=coordinator; operation=change.inspect"}; oauth=audience-validated; mcp=read-only; credentialFree=true; canonicalWrite=false`,
   };
+}
+
+function intentArguments(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new McpBootstrapError("invalid_request", "Intent arguments must be an object.", "send the documented Intent fields; no transition was accepted", "mcp=intent; arguments=object-required; transition=not-applied");
+  return value as Record<string, unknown>;
+}
+
+function intentIdArgument(value: unknown): string {
+  const args = intentArguments(value);
+  const intentId = args.intentId;
+  if (typeof intentId !== "string" || intentId.trim().length === 0) throw new McpBootstrapError("invalid_request", "intentId is required.", "send a non-empty intentId; no transition was accepted", "mcp=intent; intentId=required; transition=not-applied");
+  return intentId.trim();
+}
+
+async function mcpIntentList(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, argumentsValue: unknown): Promise<Record<string, unknown>> {
+  if (!props.kernelSessionId) throw new McpBootstrapError("auth", "The MCP grant is not bound to a Realm session.", "reauthorize the MCP client through the authenticated Realm owner session", "mcp=intent.list; kernelSession=missing; read=not-accepted");
+  const args = argumentsValue === undefined ? {} : intentArguments(argumentsValue);
+  const projectId = typeof args.projectId === "string" && args.projectId.trim().length > 0 ? args.projectId.trim() : undefined;
+  const result = await requestMcpCoordinator(env, "/authority/intents/internal", { sessionId: props.kernelSessionId, ...(projectId ? { projectId } : {}) });
+  return { protocol: ANYAM_MCP_PROTOCOL, status: "ready", intents: result.intents, receipt: `${typeof result.receipt === "string" ? result.receipt : "authority=coordinator; operation=intent.list"}; oauth=audience-validated; mcp=read-only; credentialFree=true; canonicalWrite=false` };
+}
+
+async function mcpIntentInspect(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, argumentsValue: unknown): Promise<Record<string, unknown>> {
+  if (!props.kernelSessionId) throw new McpBootstrapError("auth", "The MCP grant is not bound to a Realm session.", "reauthorize the MCP client through the authenticated Realm owner session", "mcp=intent.inspect; kernelSession=missing; read=not-accepted");
+  const result = await requestMcpCoordinator(env, "/authority/intents/internal", { sessionId: props.kernelSessionId, intentId: intentIdArgument(argumentsValue) });
+  return { protocol: ANYAM_MCP_PROTOCOL, status: "ready", intent: result.intent, comments: result.comments, project: result.project, receipt: `${typeof result.receipt === "string" ? result.receipt : "authority=coordinator; operation=intent.inspect"}; oauth=audience-validated; mcp=read-only; credentialFree=true; canonicalWrite=false` };
+}
+
+async function mcpIntentMutation(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, command: "intent.create" | "intent.assign" | "intent.comment" | "intent.close" | "intent.reopen", argumentsValue: unknown): Promise<Record<string, unknown>> {
+  const args = intentArguments(argumentsValue);
+  const idempotencyKey = args.idempotencyKey;
+  if (typeof idempotencyKey !== "string" || idempotencyKey.trim().length === 0) throw new McpBootstrapError("invalid_request", "idempotencyKey is required.", "send one stable idempotencyKey for this Intent mutation", `mcp=${command}; idempotencyKey=required; transition=not-applied`);
+  if (!props.kernelSessionId) throw new McpBootstrapError("auth", "The MCP grant is not bound to a Realm session.", "reauthorize the MCP client through the authenticated Realm owner session", `mcp=${command}; kernelSession=missing; transition=not-applied`);
+  const { idempotencyKey: _idempotencyKey, ...payload } = args;
+  const result = await requestMcpMutationCoordinator(env, props, { protocol: "anyam.authority-command/v1", command, idempotencyKey: idempotencyKey.trim(), payload }, command);
+  return { ...result, protocol: ANYAM_MCP_PROTOCOL, receipt: `${String(result.receipt)}; oauth=audience-validated; mcp=intent; canonicalWrite=false` };
 }
 
 async function mcpRunInspect(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, runId: string): Promise<Record<string, unknown>> {
@@ -566,6 +611,8 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
   const canWriteProjects = props.scopes.includes(MCP_PROJECT_WRITE_SCOPE);
   const canWriteWorkspaces = props.scopes.includes(MCP_WORKSPACE_WRITE_SCOPE);
   const canWriteChanges = props.scopes.includes(MCP_CHANGE_WRITE_SCOPE);
+  const canReadIntents = props.scopes.includes(MCP_INTENT_SCOPE);
+  const canWriteIntents = props.scopes.includes(MCP_INTENT_WRITE_SCOPE);
   const canRecordRuns = props.scopes.includes(MCP_RUN_SCOPE);
   const hasLiveGrant = typeof props.anyamGrantId === "string" && props.anyamGrantId.trim().length > 0;
   const delegatedAgent = typeof props.agentId === "string" && props.agentId.trim().length > 0;
@@ -579,7 +626,7 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
   const canConfigureTarget = hasHumanDeliveryGrant && props.scopes.includes(MCP_TARGET_SCOPE);
   const canRequestPromotion = hasHumanDeliveryGrant && props.scopes.includes(MCP_PROMOTION_SCOPE);
   const hasDeliveryScope = props.scopes.some((scope) => Object.values(MCP_DELIVERY_SCOPE_BY_TOOL).includes(scope));
-  if (!canReadProjects && !canReadWorkspaces && !canReadChanges && !canCreateProjects && !canWriteWorkspaces && !canWriteChanges && !canRecordRuns && !canRequestLanding && !canCreateRelease && !canConfigureTarget && !canRequestPromotion) return mcpError(null, -32001, "The MCP grant does not include a supported Project, Workspace, Change, Run, Artifact, or live delivery capability.", { code: "mcp.scope_denied", recoveryAction: delegatedAgent && hasDeliveryScope ? "use the owner-created delivery MCP resource; generic delegated agents cannot request Landing, Release, Target, or Promotion in v1" : hasDeliveryScope && !hasLiveGrant ? "reauthorize the MCP client so the live OAuth grant handle is present, then retry" : "authorize a documented read scope, write scope, or live delivery grant and retry", receipt: `oauth=validated; mcp=scope-denied; grant=${hasDeliveryScope ? (hasLiveGrant ? "present" : "missing") : "not-requested"}; delegatedAgent=${delegatedAgent}; required=project.read|project.write|workspace.inspect|workspace.write|change.inspect|change.write|run.invoke|landing.request|release.create|target.configure|promotion.request; canonicalWrite=false` });
+  if (!canReadProjects && !canReadWorkspaces && !canReadChanges && !canReadIntents && !canCreateProjects && !canWriteWorkspaces && !canWriteChanges && !canWriteIntents && !canRecordRuns && !canRequestLanding && !canCreateRelease && !canConfigureTarget && !canRequestPromotion) return mcpError(null, -32001, "The MCP grant does not include a supported Project, Workspace, Change, Intent, Run, Artifact, or live delivery capability.", { code: "mcp.scope_denied", recoveryAction: delegatedAgent && hasDeliveryScope ? "use the owner-created delivery MCP resource; generic delegated agents cannot request Landing, Release, Target, or Promotion in v1" : hasDeliveryScope && !hasLiveGrant ? "reauthorize the MCP client so the live OAuth grant handle is present, then retry" : "authorize a documented read scope, write scope, or live delivery grant and retry", receipt: `oauth=validated; mcp=scope-denied; grant=${hasDeliveryScope ? (hasLiveGrant ? "present" : "missing") : "not-requested"}; delegatedAgent=${delegatedAgent}; required=project.read|project.write|workspace.inspect|workspace.write|change.inspect|change.write|intent.inspect|intent.write|run.invoke|landing.request|release.create|target.configure|promotion.request; canonicalWrite=false` });
   if (request.method !== "POST") return mcpJson({ code: "method_not_allowed", recoveryAction: "Use POST with a JSON-RPC 2.0 request for the Realm MCP surface.", receipt: "mcp=read-only; method=post-required; canonicalWrite=false" }, 405);
 
   let parsed: unknown;
@@ -633,6 +680,21 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
         { name: MCP_CHANGE_REVISION_PUBLISH_TOOL, description: "Publish an immutable Change Revision through the authenticated Coordinator; this never transfers source objects or mutates canonical state.", inputSchema: { type: "object", additionalProperties: false, required: ["idempotencyKey", "projectId", "changeId", "workspaceId", "projectViewId", "projectRevisionId", "sourceSpaceSnapshots", "declaredEffects"], properties: { idempotencyKey: { type: "string", minLength: 1 }, expectedVersion: { type: "integer", minimum: 0 }, projectId: { type: "string", minLength: 1 }, changeId: { type: "string", minLength: 1 }, workspaceId: { type: "string", minLength: 1 }, projectViewId: { type: "string", minLength: 1 }, projectRevisionId: { type: "string", minLength: 1 }, sourceSpaceSnapshots: { type: "object", minProperties: 1, additionalProperties: { type: "string", minLength: 1 } }, declaredEffects: { type: "array", items: { type: "string", minLength: 1 } }, revisionId: { type: "string", minLength: 1 }, kind: { type: "string", enum: ["implementation", "rebase", "conflict-resolution", "handoff", "revert"] }, conflictIds: { type: "array", items: { type: "string", minLength: 1 } }, affectedModuleIds: { type: "array", items: { type: "string", minLength: 1 } }, affectedTargetIds: { type: "array", items: { type: "string", minLength: 1 } } } } },
       );
     }
+    if (canReadIntents) {
+      tools.push(
+        { name: MCP_INTENT_LIST_TOOL, description: "List safe Intent summaries through the authenticated Realm Coordinator.", inputSchema: { type: "object", additionalProperties: false, properties: { projectId: { type: "string", minLength: 1 } } } },
+        { name: MCP_INTENT_READ_TOOL, description: "Inspect one Intent and its disclosure-safe comments through the authenticated Realm Coordinator.", inputSchema: { type: "object", additionalProperties: false, required: ["intentId"], properties: { intentId: { type: "string", minLength: 1 } } } },
+      );
+    }
+    if (canWriteIntents) {
+      tools.push(
+        { name: MCP_INTENT_CREATE_TOOL, description: "Create a first-class Intent with stable identity and explicit disclosure.", inputSchema: { type: "object", additionalProperties: false, required: ["idempotencyKey", "projectId", "title"], properties: { idempotencyKey: { type: "string", minLength: 1 }, projectId: { type: "string", minLength: 1 }, intentId: { type: "string", minLength: 1 }, title: { type: "string", minLength: 1 }, description: { type: "string" }, disclosure: { type: "string", enum: ["public", "project", "restricted"] }, assigneePrincipalIds: { type: "array", items: { type: "string", minLength: 1 } }, labels: { type: "array", items: { type: "string", minLength: 1 } } } } },
+        { name: MCP_INTENT_ASSIGN_TOOL, description: "Assign an Intent to explicit human principals.", inputSchema: { type: "object", additionalProperties: false, required: ["idempotencyKey", "intentId", "assigneePrincipalIds"], properties: { idempotencyKey: { type: "string", minLength: 1 }, intentId: { type: "string", minLength: 1 }, assigneePrincipalIds: { type: "array", items: { type: "string", minLength: 1 } } } } },
+        { name: MCP_INTENT_COMMENT_TOOL, description: "Add a disclosure-bound comment to an Intent.", inputSchema: { type: "object", additionalProperties: false, required: ["idempotencyKey", "intentId", "body"], properties: { idempotencyKey: { type: "string", minLength: 1 }, intentId: { type: "string", minLength: 1 }, commentId: { type: "string", minLength: 1 }, body: { type: "string", minLength: 1 }, disclosure: { type: "string", enum: ["public", "project", "restricted"] } } } },
+        { name: MCP_INTENT_CLOSE_TOOL, description: "Close an Intent without deleting its history.", inputSchema: { type: "object", additionalProperties: false, required: ["idempotencyKey", "intentId"], properties: { idempotencyKey: { type: "string", minLength: 1 }, intentId: { type: "string", minLength: 1 } } } },
+        { name: MCP_INTENT_REOPEN_TOOL, description: "Reopen a closed Intent without changing its identity.", inputSchema: { type: "object", additionalProperties: false, required: ["idempotencyKey", "intentId"], properties: { idempotencyKey: { type: "string", minLength: 1 }, intentId: { type: "string", minLength: 1 } } } },
+      );
+    }
     if (canRecordRuns) {
       tools.push(
         { name: MCP_RUN_REQUEST_TOOL, description: "Request a declared Action Run. This creates a queued Run only; completion is accepted from an enrolled Runner, never from the MCP caller.", inputSchema: { type: "object", additionalProperties: false, required: ["idempotencyKey", "projectId", "actionId", "actionContractDigest", "projectRevisionId", "projectViewId", "inputDigests", "outputDigests", "policyVersion", "authorizationEpoch", "capabilityGrantId"], properties: { idempotencyKey: { type: "string", minLength: 1 }, expectedVersion: { type: "integer", minimum: 0 }, projectId: { type: "string", minLength: 1 }, runId: { type: "string", minLength: 1 }, actionId: { type: "string", minLength: 1 }, actionContractDigest: { type: "string", minLength: 1 }, verifierId: { type: "string", minLength: 1 }, verifierContractDigest: { type: "string", minLength: 1 }, projectRevisionId: { type: "string", minLength: 1 }, projectViewId: { type: "string", minLength: 1 }, changeRevisionId: { type: "string", minLength: 1 }, workspaceId: { type: "string", minLength: 1 }, inputDigests: { type: "array", items: { type: "string" } }, outputDigests: { type: "array", items: { type: "string" } }, policyVersion: { type: "string", minLength: 1 }, authorizationEpoch: { type: "string", minLength: 1 }, capabilityGrantId: { type: "string", minLength: 1 } } } },
@@ -674,18 +736,25 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
     const isWorkspaceTool = name === MCP_WORKSPACE_READ_TOOL || name === MCP_WORKSPACE_LIST_TOOL || isWorkspaceBootstrap;
     const isRevisionPublish = name === MCP_CHANGE_REVISION_PUBLISH_TOOL;
     const isChangeTool = name === MCP_CHANGE_READ_TOOL || name === MCP_CHANGE_LIST_TOOL || isChangeBootstrap || isRevisionPublish;
+    const isIntentRead = name === MCP_INTENT_READ_TOOL || name === MCP_INTENT_LIST_TOOL;
+    const isIntentWrite = name === MCP_INTENT_CREATE_TOOL || name === MCP_INTENT_ASSIGN_TOOL || name === MCP_INTENT_COMMENT_TOOL || name === MCP_INTENT_CLOSE_TOOL || name === MCP_INTENT_REOPEN_TOOL;
+    const isIntentTool = isIntentRead || isIntentWrite;
     const isRunRequest = name === MCP_RUN_REQUEST_TOOL;
     const isRunInspect = name === MCP_RUN_INSPECT_TOOL;
     const isRunTool = isRunRequest || isRunInspect;
     if (LEGACY_RUN_MUTATION_TOOLS.has(name)) return mcpError(id, -32601, `Tool ${name} is no longer a caller-authoritative mutation.`, { code: "mcp.runner_completion_only", recoveryAction: "use run.request and run.inspect; an enrolled Runner must submit the signed completion before Evidence or Artifact acceptance", receipt: `mcp=${name}; completion=runner-only; transition=not-applied; canonicalWrite=false` });
-    if (!isProjectTool && !isWorkspaceTool && !isChangeTool && !isRunTool && !isDeliveryTool) return mcpError(id, -32601, `Tool ${name} is not available.`, { code: "mcp.tool_not_found", recoveryAction: "call tools/list and use a scope-authorized Project, Workspace, Change, Run, or delivery tool", receipt: `mcp=tool-not-found; tool=${name}; canonicalWrite=false` });
-    const requiredScope = isDeliveryTool ? deliveryScope : isProjectBootstrap ? MCP_PROJECT_WRITE_SCOPE : isWorkspaceBootstrap ? MCP_WORKSPACE_WRITE_SCOPE : isChangeBootstrap || isRevisionPublish ? MCP_CHANGE_WRITE_SCOPE : isRunTool ? MCP_RUN_SCOPE : isChangeTool ? MCP_CHANGE_SCOPE : isWorkspaceTool ? MCP_WORKSPACE_SCOPE : MCP_PROJECT_SCOPE;
+    if (!isProjectTool && !isWorkspaceTool && !isChangeTool && !isIntentTool && !isRunTool && !isDeliveryTool) return mcpError(id, -32601, `Tool ${name} is not available.`, { code: "mcp.tool_not_found", recoveryAction: "call tools/list and use a scope-authorized Project, Workspace, Change, Intent, Run, or delivery tool", receipt: `mcp=tool-not-found; tool=${name}; canonicalWrite=false` });
+    const requiredScope = isDeliveryTool ? deliveryScope : isIntentWrite ? MCP_INTENT_WRITE_SCOPE : isIntentRead ? MCP_INTENT_SCOPE : isProjectBootstrap ? MCP_PROJECT_WRITE_SCOPE : isWorkspaceBootstrap ? MCP_WORKSPACE_WRITE_SCOPE : isChangeBootstrap || isRevisionPublish ? MCP_CHANGE_WRITE_SCOPE : isRunTool ? MCP_RUN_SCOPE : isChangeTool ? MCP_CHANGE_SCOPE : isWorkspaceTool ? MCP_WORKSPACE_SCOPE : MCP_PROJECT_SCOPE;
     if (!props.scopes.includes(requiredScope)) return mcpError(id, -32001, `The MCP grant does not include ${requiredScope}.`, { code: "mcp.scope_denied", recoveryAction: `authorize the ${requiredScope} scope and retry`, receipt: `oauth=validated; mcp=scope-denied; required=${requiredScope}; tool=${name}; canonicalWrite=false` });
     try {
       const value = MCP_BOOTSTRAP_TOOLS.has(name)
         ? await mcpBootstrap(env, props, name as BootstrapMutation, params.arguments)
+        : isIntentWrite
+          ? await mcpIntentMutation(env, props, name as "intent.create" | "intent.assign" | "intent.comment" | "intent.close" | "intent.reopen", params.arguments)
+        : isIntentRead
+          ? name === MCP_INTENT_LIST_TOOL ? await mcpIntentList(env, props, params.arguments) : await mcpIntentInspect(env, props, params.arguments)
         : isRevisionPublish
-        ? await mcpRevisionPublish(env, props, params.arguments)
+          ? await mcpRevisionPublish(env, props, params.arguments)
         : isRunRequest
           ? await mcpRunRequest(env, props, params.arguments)
           : isRunInspect
@@ -729,11 +798,12 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
       const errorClass = notFound ? "not_found" : detail.includes("session.") || detail.includes("session_") ? "session_rejected" : "coordinator_rejected";
       const isWorkspace = isWorkspaceTool;
       const isChange = isChangeTool;
+      const isIntent = isIntentTool;
       const isRun = isRunTool;
       const isDelivery = isDeliveryTool;
       const isList = name === MCP_LIST_TOOL || name === MCP_WORKSPACE_LIST_TOOL;
-      const operation = isDelivery ? name : isRun ? (isRunRequest ? RUN_REQUEST_COMMAND : "run.inspect") : isChange ? (name === MCP_CHANGE_LIST_TOOL ? "change.list" : name === MCP_CHANGE_READ_TOOL ? "change.inspect" : "revision.publish") : isWorkspace ? (isList ? "workspace.list" : "workspace.inspect") : (isList ? "project.list" : "project.inspect");
-      const resource = isDelivery ? "Delivery" : isRun ? "Run" : isChange ? "Change" : isWorkspace ? "Workspace" : "Project";
+      const operation = isDelivery ? name : isRun ? (isRunRequest ? RUN_REQUEST_COMMAND : "run.inspect") : isIntent ? name : isChange ? (name === MCP_CHANGE_LIST_TOOL ? "change.list" : name === MCP_CHANGE_READ_TOOL ? "change.inspect" : "revision.publish") : isWorkspace ? (isList ? "workspace.list" : "workspace.inspect") : (isList ? "project.list" : "project.inspect");
+      const resource = isDelivery ? "Delivery" : isRun ? "Run" : isIntent ? "Intent" : isChange ? "Change" : isWorkspace ? "Workspace" : "Project";
       return mcpError(id, notFound ? -32004 : -32602, notFound ? `${resource} is not available in this Realm.` : `${operation} arguments are invalid or the coordinator rejected the read.`, { code: notFound ? `mcp.${resource.toLowerCase()}_not_found` : `mcp.${resource.toLowerCase()}_read_failed`, recoveryAction: notFound ? `verify the ${resource} identifier without probing undiscoverable resources` : "inspect the coordinator receipt and retry the same read", receipt: `mcp=${operation}; errorClass=${errorClass}; credentialFree=true; canonicalWrite=false` });
     }
   }

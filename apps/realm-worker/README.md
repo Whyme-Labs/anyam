@@ -397,6 +397,34 @@ These routes intentionally do not accept `protocol`, `command`, `payload`,
 the internal command protocol and the validated owner session only after the
 typed body and path have passed validation.
 
+The owner-authenticated Intent surface provides the Issue-compatible lifecycle
+without making an opaque `intentId` do double duty:
+
+```http
+POST /api/intents
+Idempotency-Key: intent-create-1
+Content-Type: application/json
+
+{"projectId":"project:atlas","intentId":"intent:atlas-feature","title":"Add invoice export","description":"Export one invoice as a PDF","disclosure":"project"}
+```
+
+```http
+GET /api/intents?projectId=project%3Aatlas
+GET /api/intents/intent%3Aatlas-feature
+POST /api/intents/intent%3Aatlas-feature/assign
+POST /api/intents/intent%3Aatlas-feature/comment
+POST /api/intents/intent%3Aatlas-feature/close
+POST /api/intents/intent%3Aatlas-feature/reopen
+```
+
+Mutation paths require one idempotency key and return the safe Intent value;
+close and reopen retain the same identity and comment history. A Change created
+from an existing Intent is rejected when the Project differs. Legacy Change
+callers that provide an unknown Intent ID receive a same-Project
+`legacy-materialized` Intent so no orphan relationship is created. Public
+disclosure uses a separate audience projection and omits restricted Intents
+entirely.
+
 The owner-authenticated Agent delegation surface accepts an explicit
 Project/Workspace/Change resource, mounted Source Space IDs, agent identity
 metadata, non-promotional capabilities/effects, allowed `realm-api`/`git`/`mcp`

@@ -10,6 +10,8 @@ import {
   type ChangeRevision,
   type DisclosureClassification,
   type EvidenceOutcome,
+  type Intent,
+  type IntentComment,
   type Project,
   type ProjectRevision,
   type SourceSpace,
@@ -84,6 +86,10 @@ function stableJson(value: unknown): string {
 
 function digest(value: unknown): string {
   return `sha256:${createHash("sha256").update(stableJson(value)).digest("hex")}`;
+}
+
+function disclosureRank(value: DisclosureClassification): number {
+  return value === "public" ? 0 : value === "project" ? 1 : 2;
 }
 
 function sortedUnique(values: readonly string[], error: HybridDisclosureErrorCode, message: string): string[] {
@@ -469,6 +475,60 @@ export type AudienceChangeSummary = {
   evidence: readonly AudienceEvidenceProjection[];
   receipt: string;
 };
+
+export type AudienceIntentSummary = {
+  protocol: typeof CONTRACT_VERSIONS.disclosure;
+  version: "v1";
+  audience: DisclosureClassification;
+  projectId: string;
+  intentId: string;
+  title: string;
+  description: string;
+  status: "open" | "closed";
+  labels: readonly string[];
+  comments: readonly { id: string; body: string; disclosure: DisclosureClassification }[];
+  receipt: string;
+};
+
+/**
+ * Produce the Intent surface an audience is allowed to see. A restricted or
+ * project-only Intent is omitted entirely from a public projection; callers
+ * must not turn an omitted value into a redacted placeholder that leaks its
+ * existence or metadata.
+ */
+export function summarizeIntentForAudience(input: {
+  project: Project;
+  intent: Intent;
+  comments?: readonly IntentComment[];
+  audience: DisclosureClassification;
+}): AudienceIntentSummary | undefined {
+  if (input.intent.projectId !== input.project.id) {
+    fail({
+      code: "project-mismatch",
+      message: "The Intent does not belong to the requested Project.",
+      recoveryAction: "derive the Intent summary from the same Project that owns the Intent",
+      receipt: "rule=intent-project-equality",
+    });
+  }
+  if (disclosureRank(input.intent.disclosure) > disclosureRank(input.audience)) return undefined;
+  const comments = (input.comments ?? [])
+    .filter((comment) => comment.intentId === input.intent.id && disclosureRank(comment.disclosure) <= disclosureRank(input.audience))
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+    .map((comment) => ({ id: comment.id, body: comment.body, disclosure: comment.disclosure }));
+  return {
+    protocol: CONTRACT_VERSIONS.disclosure,
+    version: "v1",
+    audience: input.audience,
+    projectId: input.project.id,
+    intentId: input.intent.id,
+    title: input.intent.title,
+    description: input.intent.description,
+    status: input.intent.status,
+    labels: [...input.intent.labels],
+    comments,
+    receipt: `audience=${input.audience}; intent=${input.intent.id}; inaccessible-metadata=omitted; author=omitted; assignees=omitted`,
+  };
+}
 
 export function summarizeChangeForAudience(input: {
   project: Project;

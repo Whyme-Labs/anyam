@@ -32,6 +32,8 @@ export type Capability =
   | "workspace.write"
   | "change.inspect"
   | "change.publish_revision"
+  | "intent.inspect"
+  | "intent.write"
   | "review.submit_finding"
   | "change.approve"
   | "run.invoke"

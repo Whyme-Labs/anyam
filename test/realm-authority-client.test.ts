@@ -27,6 +27,13 @@ test("Realm Authority client sends the owner session as a host cookie and preser
   await client.restoreAuthorityRecovery({ protocol: "anyam.authority-recovery/v1", bundleId: "bundle:qualification", bundleDigest: "sha256:bundle" });
   await client.activateAuthorityRecovery("bundle:qualification", "sha256:bundle");
   await client.command({ command: "release.create", payload: { projectId: "project:qualification" }, idempotencyKey: "qualification:release" });
+  await client.listIntents("project:qualification");
+  await client.inspectIntent("intent:qualification");
+  await client.createIntent({ projectId: "project:qualification", title: "Qualification Intent" }, "qualification:intent:create");
+  await client.assignIntent("intent:qualification", { assigneePrincipalIds: ["principal:reviewer"] }, "qualification:intent:assign");
+  await client.commentIntent("intent:qualification", { body: "Comment" }, "qualification:intent:comment");
+  await client.closeIntent("intent:qualification", "qualification:intent:close");
+  await client.reopenIntent("intent:qualification", "qualification:intent:reopen");
 
   assert.deepEqual(calls.map((call) => [call.method, new URL(call.url).pathname]), [
     ["GET", "/api/projects/project%3Aqualification"],
@@ -41,6 +48,13 @@ test("Realm Authority client sends the owner session as a host cookie and preser
     ["POST", "/api/authority/recovery/restore"],
     ["POST", "/api/authority/recovery/activate"],
     ["POST", "/api/authority/command"],
+    ["GET", "/api/intents"],
+    ["GET", "/api/intents/intent%3Aqualification"],
+    ["POST", "/api/intents"],
+    ["POST", "/api/intents/intent%3Aqualification/assign"],
+    ["POST", "/api/intents/intent%3Aqualification/comment"],
+    ["POST", "/api/intents/intent%3Aqualification/close"],
+    ["POST", "/api/intents/intent%3Aqualification/reopen"],
   ]);
   assert.equal(calls[0]?.cookie, "anyam_owner_session=session%3Aowner-qualification");
   assert.equal(calls[1]?.body?.projectId, "project:qualification");
@@ -52,6 +66,10 @@ test("Realm Authority client sends the owner session as a host cookie and preser
   assert.equal(calls[10]?.body?.bundleId, "bundle:qualification");
   assert.equal(calls[11]?.body?.command, "release.create");
   assert.equal(calls[11]?.body?.idempotencyKey, "qualification:release");
+  assert.equal(new URL(calls[12]!.url).search, "?projectId=project%3Aqualification");
+  assert.equal(calls[14]?.body?.title, "Qualification Intent");
+  assert.equal((calls[15]?.body?.assigneePrincipalIds as string[] | undefined)?.[0], "principal:reviewer");
+  assert.equal(calls[16]?.body?.body, "Comment");
 });
 
 test("Realm Authority client redacts provider response bodies from typed request errors", async () => {

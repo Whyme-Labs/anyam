@@ -3,6 +3,8 @@ import { gitCredentialGet, LocalAgentManager, readGitCredentialContext, runMcpSt
 import { loginAnyam } from "./auth.js";
 import { connectGitHubActions } from "./github-actions-bridge.js";
 import { realmDestroy, realmDoctor, realmExport, realmInstall, realmPlan, realmRestore, realmUpgrade } from "./realm.js";
+import { randomUUID } from "node:crypto";
+import { RealmAuthorityHttpClient } from "./realm-authority-client.js";
 import type { WorkspaceBoundaryMode } from "./workspace-boundary.js";
 import type { Readable } from "node:stream";
 
@@ -32,7 +34,7 @@ function kindFrom(args: readonly string[]): ProjectTemplateKind {
 
 function positionalArgs(args: readonly string[], command: string): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation"]);
+  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label"]);
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -47,7 +49,7 @@ function positionalArgs(args: readonly string[], command: string): readonly stri
 
 function subcommandPositionals(args: readonly string[]): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation"]);
+  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label"]);
   for (let index = 2; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -64,8 +66,26 @@ function printHelp(): void {
   console.log("connect github --method actions  generate a reviewable GitHub Actions Bridge workflow");
   console.log("Bridge options: --realm <url> --project <id> --connection <id> --action-ref <owner/repo@sha> [--workflow-path <path>] [--remote <name>] [--schedule <cron>]");
   console.log("realm plan|install|upgrade|doctor|export|restore|destroy  customer-operated lifecycle");
+  console.log("intent list|inspect|create|assign|comment|close|reopen  hosted Realm Intent lifecycle (--realm, --owner-session or ANYAM_OWNER_SESSION)");
   console.log("workspace start|list|inspect|exec  explicit concurrent local Workspace controls (use --session for selection)");
   console.log(`Anyam local CLI\n\nCommands:\n  init [directory]                 create a local TypeScript Project\n  doctor [directory]               inspect manifest and source metadata locally\n  check [directory]                compatibility alias for doctor\n  change start <title>             start a local Change\n  workspace list                   list all active local Workspaces\n  workspace inspect --session <id> inspect one explicit Workspace session\n  workspace exec --session <id> -- <command>  run in one existing Workspace\n  agent setup <agent>              configure the local MCP broker and instructions\n  agent start [agent]              start or resume an agent session\n  agent exec <agent> -- <command>  launch an agent through the Workspace boundary\n  agent handoff <agent>            revoke one selected session and start another\n  agent status [--session <id>]    inspect one selected or current session\n  agent revoke [--session <id>]    revoke one selected session\n  mcp serve --stdio                serve the semantic MCP tools over stdio\n  auth login --realm <url>         authenticate through OAuth PKCE and the OS keychain\n  auth revoke                      revoke the current local session\n  git-credential-anyam get         issue a context-bound memory-only Workspace Git credential\n\nOptions:\n  --type worker|library             choose the template (default: worker)\n  --name <name>                     choose the Project name\n  --agent codex|claude|cursor|cli   choose the local coding agent\n  --mode enforceable|supervised     choose the Workspace boundary mode\n  --session <id>                    select one explicit local Workspace/session\n  --directory <path>               choose a Project directory\n  --json                            print machine-readable output\n  --dry-run                         print the proposed manifest without writing\n\nThe local broker never stores bearer credentials, writes canonical Git refs, reads secret values, approves Changes, or promotes production.`);
+}
+
+function intentClient(args: readonly string[]): RealmAuthorityHttpClient {
+  const realm = requiredValue(args, "--realm", "intent");
+  const ownerSession = valueAfter(args, "--owner-session") ?? process.env.ANYAM_OWNER_SESSION;
+  if (!ownerSession?.trim()) throw new Error("intent requires --owner-session or ANYAM_OWNER_SESSION; no credential was read from disk");
+  return new RealmAuthorityHttpClient({ baseUrl: realm, ownerSession });
+}
+
+function intentIdentifier(args: readonly string[]): string {
+  const id = valueAfter(args, "--id") ?? subcommandPositionals(args)[0];
+  if (!id?.trim()) throw new Error("intent requires an Intent ID as a positional argument or --id");
+  return id.trim();
+}
+
+function intentIdempotency(args: readonly string[], operation: string, id: string): string {
+  return valueAfter(args, "--idempotency-key") ?? `cli:intent:${operation}:${id}:${randomUUID()}`;
 }
 
 function agentValue(args: readonly string[], fallback?: string): string {
@@ -157,6 +177,30 @@ export async function main(args: readonly string[], cwd = process.cwd(), input: 
                   : (() => { throw new Error("realm requires plan, install, upgrade, doctor, export, restore, or destroy"); })();
     printResult(result, json, `${result.status.toUpperCase()} ${result.operation}: ${result.receipt}\nRecovery: ${result.recoveryAction}`);
     return result.status === "blocked" ? 1 : 0;
+  }
+
+  if (command === "intent") {
+    const client = intentClient(args);
+    const operation = subcommand ?? "";
+    const id = operation === "inspect" || operation === "assign" || operation === "comment" || operation === "close" || operation === "reopen" ? intentIdentifier(args) : "collection";
+    const idempotencyKey = intentIdempotency(args, operation, id);
+    const result = operation === "list"
+      ? await client.listIntents(valueAfter(args, "--project"))
+      : operation === "inspect"
+        ? await client.inspectIntent(id)
+        : operation === "create"
+          ? await client.createIntent({ projectId: requiredValue(args, "--project", "intent create"), title: requiredValue(args, "--title", "intent create"), ...(valueAfter(args, "--id") ? { intentId: valueAfter(args, "--id") } : {}), ...(valueAfter(args, "--description") ? { description: valueAfter(args, "--description") } : {}), ...(valueAfter(args, "--disclosure") ? { disclosure: valueAfter(args, "--disclosure") } : {}), ...(valuesAfter(args, "--assignee").length > 0 ? { assigneePrincipalIds: valuesAfter(args, "--assignee") } : {}), ...(valuesAfter(args, "--label").length > 0 ? { labels: valuesAfter(args, "--label") } : {}) }, idempotencyKey)
+          : operation === "assign"
+            ? await client.assignIntent(id, { assigneePrincipalIds: valuesAfter(args, "--assignee") }, idempotencyKey)
+            : operation === "comment"
+              ? await client.commentIntent(id, { body: requiredValue(args, "--body", "intent comment"), ...(valueAfter(args, "--disclosure") ? { disclosure: valueAfter(args, "--disclosure") } : {}) }, idempotencyKey)
+              : operation === "close"
+                ? await client.closeIntent(id, idempotencyKey)
+                : operation === "reopen"
+                  ? await client.reopenIntent(id, idempotencyKey)
+                  : (() => { throw new Error("intent requires list, inspect, create, assign, comment, close, or reopen"); })();
+    printResult(result, json, `${operation.toUpperCase()} Intent: ${String(result.receipt ?? "receipt=not-returned")}`);
+    return 0;
   }
 
   if (command === "connect" && subcommand === "github") {

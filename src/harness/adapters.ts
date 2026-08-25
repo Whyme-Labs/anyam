@@ -251,6 +251,8 @@ export class InMemoryProjectExporter implements ProjectExporter {
         largeObjects: [],
         lineage: [],
         projectRevisions: [],
+        intents: [],
+        intentComments: [],
         changes: [],
         evidence: [],
         artifacts: [],

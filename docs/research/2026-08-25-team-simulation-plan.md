@@ -19,7 +19,8 @@ for every required scenario:
 3. A hybrid Project View exposes the public Source Space without exposing the
    private Source Space or its metadata.
 4. Three human actors and two coding-agent actors use separate Workspaces.
-5. The run observes an issue-to-Change link, a blocking Review Finding, an
+5. The run observes a first-class Intent create/assign/comment/close/reopen
+   lifecycle linked to a Change, a blocking Review Finding, an
    independent Review Approval, a Landing, and a closed Change.
 6. Divergent Git branches produce a real merge conflict. A rebase resolves the
    conflict and the resulting commit is the revision that proceeds.
@@ -46,7 +47,8 @@ Anyam limits, capacity claims, or production SLOs.
 | `git-conflict-rebase` | two branches editing the same line | Git merge, abort, rebase, Local Change rebase | Conflict is durable, resolution is explicit, and the final revision is new |
 | `team-review-landing` | three human actors and two agent actors | Collaboration Coordinator | Finding blocks, independent approval unblocks, Landing is canonical-only |
 | `github-bidirectional` | scripted remote refs and a remote commit | Mirror Coordinator | Outbound projection is idempotent; inbound commit becomes a Change proposal |
-| `export-restore` | Worker, CLI, and hybrid Project packages | Local Project Exporter and Local Git Driver | Export verifies, import activates, restored refs match, and replay does not duplicate state |
+| `intent-lifecycle` | Authority Intent and IntentComment records | Authority, REST/MCP/CLI surfaces, disclosure, and Project Export | Stable Intent identity survives all transitions, Change linkage, and export/restore |
+| `export-restore` | Worker, CLI, and hybrid Project packages | Local Project Exporter and Local Git Driver | Export verifies, import activates, restored refs and Intent history match, and replay does not duplicate state |
 
 ## Run order
 
@@ -64,9 +66,11 @@ Anyam limits, capacity claims, or production SLOs.
    restricted names, paths, IDs, and content.
 9. Run bidirectional mirror sync, duplicate delivery, and inbound proposal
    reconciliation.
-10. Export the Project, verify the package, import it into a fresh destination,
+10. Create and transition a first-class Intent, link a Change to it, and
+    verify public disclosure omits restricted Intent metadata.
+11. Export the Project, verify the package, import it into a fresh destination,
     replay the same idempotency key, and compare repository refs.
-11. Emit a JSON receipt and a machine-readable finding list.
+12. Emit a JSON receipt and a machine-readable finding list.
 
 ## Failure policy
 
@@ -86,10 +90,10 @@ universal Anyam limits.
 
 ## Expected product gaps to test honestly
 
-The current kernel stores an `intentId` on a Change but does not expose a
-first-class issue or Intent lifecycle. The runner must therefore test and
-report issue open/close behavior as a product capability instead of pretending
-that an identifier string is an issue tracker.
+The Authority, REST, MCP, CLI, disclosure, and export seams now expose a
+first-class Intent lifecycle. The runner must keep the `intent-lifecycle`
+scenario separate from the still-open pull-request compatibility scenario, so
+an Intent pass is not mistaken for a PR pass.
 
 The current CLI exposes Change and Workspace commands but not a complete GitHub
 style pull-request lifecycle. The runner must report that gap if it cannot

@@ -20,6 +20,7 @@ import {
   handleAnyamRealmOwnerRequest,
 } from "./passkey-owner.ts";
 import { handleAnyamRealmMcpRequest } from "./mcp-handler.ts";
+import { anyamBrandLockup, anyamBrandStyleTag } from "../../../src/brand.ts";
 
 export const ANYAM_REALM_OAUTH_PROTOCOL = "anyam.realm-oauth/v1" as const;
 export const ANYAM_REALM_OAUTH_RESOURCE_PATH = "/mcp" as const;
@@ -208,8 +209,18 @@ function singularOAuthResource(resource: AuthRequest["resource"]): string | unde
 function oauthConsentPage(input: { consentId: string; csrfToken: string; clientName: string; requestedScopes: readonly string[]; allowedScopes: readonly string[] }): Response {
   const allowed = new Set(input.allowedScopes);
   const scopeRows = input.requestedScopes.map((scope) => `<li><code>${escapeHtml(scope)}</code>${allowed.has(scope) ? "" : " <em>(not available)</em>"}</li>`).join("");
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize ${escapeHtml(input.clientName)}</title><style>body{font:16px system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1rem;color:#17202a}main{border:1px solid #d6dbe1;border-radius:12px;padding:2rem}code{background:#f4f6f8;padding:.1rem .3rem;border-radius:4px}button{font:inherit;padding:.7rem 1rem;border:0;border-radius:6px;cursor:pointer;margin-right:.5rem}.approve{background:#14532d;color:#fff}.deny{background:#e5e7eb;color:#17202a}li{margin:.5rem 0}em{color:#6b7280}</style></head><body><main><h1>Authorize ${escapeHtml(input.clientName)}</h1><p>This application is requesting access to your Anyam Realm. Review the scopes before continuing.</p><ul>${scopeRows}</ul><form method="post" action="/authorize"><input type="hidden" name="consentId" value="${escapeHtml(input.consentId)}"><input type="hidden" name="csrfToken" value="${escapeHtml(input.csrfToken)}"><button class="approve" name="decision" value="approve" type="submit">Approve access</button><button class="deny" name="decision" value="deny" type="submit">Deny</button></form></main></body></html>`;
-  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'" } });
+  const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize ${escapeHtml(input.clientName)}</title>${anyamBrandStyleTag()}<style>
+.oauth-card{max-width:42rem;margin:2rem auto}
+.oauth-card h1{margin:.7rem 0 .5rem;font-size:clamp(1.7rem,4vw,2.4rem);letter-spacing:-.04em}
+.oauth-card .scope-list{padding-left:1.2rem}
+.oauth-card li{margin:.55rem 0}
+.oauth-card code{border-radius:.35rem;background:var(--anyam-code-bg);padding:.1rem .3rem}
+.oauth-card em{color:var(--anyam-muted)}
+.oauth-card form{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:1.5rem}
+.oauth-card .oauth-deny{border:1px solid var(--anyam-border);border-radius:.65rem;background:transparent;color:var(--anyam-text);cursor:pointer;font:inherit;font-weight:650;padding:.72rem 1rem}
+</style></head><body class="anyam-page"><main class="anyam-card anyam-shell oauth-card"><div>${anyamBrandLockup()}</div><p class="anyam-eyebrow">Realm authorization</p><h1>Authorize ${escapeHtml(input.clientName)}</h1><p class="anyam-muted">This application is requesting access to your Anyam Realm. Review the scopes before continuing.</p><ul class="scope-list">${scopeRows}</ul><form method="post" action="/authorize"><input type="hidden" name="consentId" value="${escapeHtml(input.consentId)}"><input type="hidden" name="csrfToken" value="${escapeHtml(input.csrfToken)}"><button class="anyam-button" name="decision" value="approve" type="submit">Approve access</button><button class="oauth-deny" name="decision" value="deny" type="submit">Deny</button></form></main></body></html>`;
+  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'" } });
 }
 
 function oauthConsentDenied(request: { redirectUri: string; state: string; issuer?: string }): Response {

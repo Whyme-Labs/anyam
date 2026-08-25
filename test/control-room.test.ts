@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { renderCustomerRealmControlRoom } from "../src/cloudflare/control-room.ts";
+import { customerRealmControlRoomResponse, renderCustomerRealmControlRoom } from "../src/cloudflare/control-room.ts";
 import { PRODUCTION_OPERATIONS_REQUIRED_DRILLS, ProductionOperationsLedger } from "../src/operations/production-operations.ts";
 import type { CustomerRealmOperatorStatus } from "../src/cloudflare/realm-operator.ts";
 
@@ -33,6 +33,15 @@ test("control room renders the state-first delivery chain and operations blocker
   for (const heading of ["Change", "Evidence", "Landing", "Release", "Target", "Deployment", "Health", "Production operations"]) assert.match(html, new RegExp(heading));
   assert.match(html, /indeterminate/);
   assert.match(html, /credential-free/);
+  assert.match(html, /anyam-lockup-inverse/);
+  assert.match(html, /--anyam-color-accent-blue/);
+  assert.match(html, /data:image\/png;base64/);
   assert.equal(html.includes("<script"), false);
   assert.equal(html.includes("<token"), false);
+});
+
+test("control room CSP permits only the inline brand mark asset", async () => {
+  const response = customerRealmControlRoomResponse({ status: status(), operations: new ProductionOperationsLedger().evaluate() });
+  assert.match(response.headers.get("content-security-policy") ?? "", /img-src data:/);
+  assert.equal(response.headers.get("cache-control"), "no-store");
 });

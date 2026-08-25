@@ -33,3 +33,4 @@ export * from "./extensions/registry.ts";
 export * from "./governance/profiles.ts";
 export * from "./cloudflare/realm-worker.ts";
 export * from "./cloudflare/customer-realm-persistence.ts";
+export * from "./brand.ts";

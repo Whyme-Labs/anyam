@@ -29,6 +29,14 @@ objects and metadata are not reachable from the public Git graph. Anyam does
 not claim to prove that a selected public composition is functionally complete;
 that remains an owner-declared Project Profile concern.
 
+## Brand system
+
+Anyam's visual system is shared by the kernel documentation, CLI-facing
+surfaces, customer-owned Realm pages, and the future control room. The
+executable tokens and inline mark are in [`src/brand.ts`](src/brand.ts); the
+normative usage rules and supplied assets are in
+[`docs/brand/anyam-brand.md`](docs/brand/anyam-brand.md).
+
 ## Current qualification status
 
 This checkout is a private-alpha implementation and qualification surface, not

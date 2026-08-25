@@ -18,6 +18,7 @@ import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } f
 import { toOAuthSubject } from "../../../src/identity/oauth-subject.ts";
 import { customerRealmOperatorPreflight, inspectCustomerRealmOperatorStatus, type CustomerRealmOperatorIdentityObservation } from "../../../src/cloudflare/realm-operator.ts";
 import { customerRealmControlRoomResponse } from "../../../src/cloudflare/control-room.ts";
+import { anyamBrandLockup, anyamBrandStyleTag } from "../../../src/brand.ts";
 import { parseMcpDeliveryBinding } from "./mcp-delivery-grant.ts";
 
 export const ANYAM_PASSKEY_OWNER_PROTOCOL = "anyam.passkey-owner/v1" as const;
@@ -186,7 +187,7 @@ function ownerPage(mode: "claim" | "login"): Response {
   const heading = claim ? "Claim this Realm" : "Sign in to this Realm";
   const bootstrapField = claim ? `
       <label>One-time bootstrap secret
-        <input id="bootstrap" type="password" autocomplete="off" spellcheck="false" required>
+        <input class="anyam-input" id="bootstrap" type="password" autocomplete="off" spellcheck="false" required>
       </label>
       <p class="hint">The secret is kept in memory for this ceremony only. It is never placed in the URL or stored by this page.</p>` : "";
   const script = String.raw`
@@ -265,13 +266,13 @@ function ownerPage(mode: "claim" | "login"): Response {
   `;
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
-<style>body{font:16px system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1rem;color:#17202a}main{border:1px solid #d6dbe1;border-radius:12px;padding:2rem}label{display:grid;gap:.4rem;margin:1rem 0}input{font:inherit;padding:.65rem;border:1px solid #9aa5b1;border-radius:6px}button{font:inherit;padding:.7rem 1rem;border:0;border-radius:6px;background:#14532d;color:white;cursor:pointer}button:disabled{opacity:.6;cursor:wait}.hint{font-size:.9rem;color:#52606d}pre{white-space:pre-wrap;background:#f4f6f8;padding:1rem;border-radius:6px;min-height:2rem}</style></head>
-<body><main><h1>${heading}</h1><p>Anyam verifies this Realm-bound passkey in the customer-owned Worker.</p>
-${claim ? `<label>Display name<input id="displayName" autocomplete="name" value="Anyam Realm owner"></label>` : ""}${bootstrapField}
-<button id="continue" type="button">${claim ? "Create owner passkey" : "Use passkey"}</button><pre id="result" aria-live="polite"></pre>
+${anyamBrandStyleTag()}<style>.owner-card{max-width:42rem;margin:2rem auto}.owner-card h1{margin:.8rem 0 .5rem;font-size:clamp(1.7rem,4vw,2.4rem);letter-spacing:-.04em}.owner-card label{display:grid;gap:.45rem;margin:1.2rem 0}.owner-card .hint{font-size:.9rem}.owner-card .anyam-code{min-height:2rem}</style></head>
+<body class="anyam-page"><main class="anyam-card anyam-shell owner-card"><div>${anyamBrandLockup()}</div><p class="anyam-eyebrow">Realm access</p><h1>${heading}</h1><p class="anyam-muted">Anyam verifies this Realm-bound passkey in the customer-owned Worker.</p>
+${claim ? "<label>Display name<input class=\"anyam-input\" id=\"displayName\" autocomplete=\"name\" value=\"Anyam Realm owner\"></label>" : ""}${bootstrapField}
+<button class="anyam-button" id="continue" type="button">${claim ? "Create owner passkey" : "Use passkey"}</button><pre class="anyam-code" id="result" aria-live="polite"></pre>
 </main>
   <script>${script.replaceAll("</script>", "<\\/script>")}</script></body></html>`;
-  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'" } });
+  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'" } });
 }
 
 function qualificationPage(): Response {
@@ -391,19 +392,19 @@ function qualificationPage(): Response {
   `;
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Anyam Realm qualification</title>
-<style>body{font:16px system-ui,sans-serif;max-width:54rem;margin:3rem auto;padding:0 1rem;color:#17202a}main{border:1px solid #d6dbe1;border-radius:12px;padding:2rem}button{font:inherit;margin:.25rem;padding:.65rem .8rem;border:0;border-radius:6px;background:#14532d;color:white;cursor:pointer}p{color:#52606d}pre{white-space:pre-wrap;background:#f4f6f8;padding:1rem;border-radius:6px;min-height:8rem}</style></head>
-<body><main><h1>Realm qualification</h1><p>These controls use the current opaque owner session. Credential values are never displayed; recovery remains in memory for this page only.</p>
-<div><button type="button" data-operation="delegate">Delegate agent</button><button type="button" data-operation="credentials">Issue Git + MCP credentials</button><button type="button" data-operation="revoke">Revoke delegated agent</button><button type="button" data-operation="export">Export recovery snapshot</button><button type="button" data-operation="restore">Restore recovery snapshot</button></div>
+${anyamBrandStyleTag()}<style>.qualification-card{max-width:54rem;margin:1rem auto}.qualification-card h1{margin:.8rem 0 .5rem;font-size:clamp(1.7rem,4vw,2.4rem);letter-spacing:-.04em}.qualification-card label{display:grid;gap:.45rem;margin:1rem 0}.qualification-card hr{border:0;border-top:1px solid var(--anyam-border);margin:2rem 0}.qualification-card .anyam-button{margin:.25rem}.qualification-card .anyam-code{min-height:8rem}</style></head>
+<body class="anyam-page"><main class="anyam-card anyam-shell qualification-card"><div>${anyamBrandLockup()}</div><p class="anyam-eyebrow">Operator qualification</p><h1>Realm qualification</h1><p class="anyam-muted">These controls use the current opaque owner session. Credential values are never displayed; recovery remains in memory for this page only.</p>
+<div><button class="anyam-button" type="button" data-operation="delegate">Delegate agent</button><button class="anyam-button" type="button" data-operation="credentials">Issue Git + MCP credentials</button><button class="anyam-button" type="button" data-operation="revoke">Revoke delegated agent</button><button class="anyam-button" type="button" data-operation="export">Export recovery snapshot</button><button class="anyam-button" type="button" data-operation="restore">Restore recovery snapshot</button></div>
 <pre id="result" aria-live="polite"></pre>
 <hr>
 <h2>Customer-provider qualification</h2>
 <p>These owner-only controls exercise the named disposable D1, R2, Queue, Workflow, and Worker adapters. They never return provider credentials or canonical-write authority.</p>
-<label>Surface<select id="providerSurface"><option value="d1">D1</option><option value="r2">R2</option><option value="queue">Queue</option><option value="workflow">Workflow</option><option value="worker">Worker</option></select></label>
-<label>Failure mode<select id="providerFailureMode"><option value="none">none</option><option value="provider-outage">provider-outage</option><option value="authorization-revoked">authorization-revoked</option><option value="timeout">timeout</option><option value="duplicate-delivery">duplicate-delivery</option><option value="partial-mutation">partial-mutation</option></select></label>
-<label>Operation identity<input id="providerOperationId" autocomplete="off" placeholder="Generated when Run operation is clicked"></label>
-<div><button type="button" data-provider-operation="new">New operation identity</button><button type="button" data-provider-operation="run">Run operation</button><button type="button" data-provider-operation="resume">Resume exact operation</button><button type="button" data-provider-operation="cleanup">Cleanup exact operation</button><button type="button" data-provider-operation="export">Export provider recovery</button><button type="button" data-provider-operation="restore">Restore provider recovery</button></div>
+<label>Surface<select class="anyam-select" id="providerSurface"><option value="d1">D1</option><option value="r2">R2</option><option value="queue">Queue</option><option value="workflow">Workflow</option><option value="worker">Worker</option></select></label>
+<label>Failure mode<select class="anyam-select" id="providerFailureMode"><option value="none">none</option><option value="provider-outage">provider-outage</option><option value="authorization-revoked">authorization-revoked</option><option value="timeout">timeout</option><option value="duplicate-delivery">duplicate-delivery</option><option value="partial-mutation">partial-mutation</option></select></label>
+<label>Operation identity<input class="anyam-input" id="providerOperationId" autocomplete="off" placeholder="Generated when Run operation is clicked"></label>
+<div><button class="anyam-button" type="button" data-provider-operation="new">New operation identity</button><button class="anyam-button" type="button" data-provider-operation="run">Run operation</button><button class="anyam-button" type="button" data-provider-operation="resume">Resume exact operation</button><button class="anyam-button" type="button" data-provider-operation="cleanup">Cleanup exact operation</button><button class="anyam-button" type="button" data-provider-operation="export">Export provider recovery</button><button class="anyam-button" type="button" data-provider-operation="restore">Restore provider recovery</button></div>
 <pre id="providerResult" aria-live="polite"></pre></main><script>${script.replaceAll("</script>", "<\\/script>")}</script></body></html>`;
-  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'" } });
+  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'" } });
 }
 
 async function ownerBootstrapTokenMatches(request: Request, env: AnyamRealmOAuthEnv): Promise<boolean> {

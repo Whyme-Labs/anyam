@@ -29,6 +29,8 @@ export const ANYAM_REALM_OAUTH_SCOPES = [
   "workspace.inspect",
   "workspace.write",
   "change.inspect",
+  "intent.inspect",
+  "intent.write",
   "source.read",
   "change.write",
   "run.invoke",

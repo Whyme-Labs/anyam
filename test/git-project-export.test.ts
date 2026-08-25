@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { CONTRACT_VERSIONS, createProject, type Artifact, type ExternalProposal, type MirrorCheckpoint, type MirrorDelivery, type MirrorOperation, type Project, type RepositoryMirror, type SourceSpace } from "../src/kernel/contracts.ts";
+import { CONTRACT_VERSIONS, createProject, type Artifact, type ActorRef, type ExternalProposal, type Intent, type IntentComment, type MirrorCheckpoint, type MirrorDelivery, type MirrorOperation, type Project, type RepositoryMirror, type SourceSpace } from "../src/kernel/contracts.ts";
 import { LocalGitRepositoryDriver } from "../src/portability/local-git.ts";
 import {
   LocalProjectExporter,
@@ -253,6 +253,35 @@ test("Project Export includes Git bundles, lineage, and recovery metadata and re
       updatedAt: "2026-08-03T00:01:00.000Z",
       receipt: "fixture=external-proposal; credentialFree=true",
     };
+    const intentActor: ActorRef = { principalId: "principal:round-trip", actorId: "actor:round-trip", sessionId: "session:round-trip", clientId: "client:round-trip" };
+    const intent: Intent = {
+      protocol: CONTRACT_VERSIONS.intent,
+      id: "intent:round-trip",
+      projectId: project.id,
+      title: "Preserve Intent lifecycle",
+      description: "The exported Project must retain the issue-compatible lifecycle.",
+      status: "closed",
+      author: intentActor,
+      assigneePrincipalIds: ["principal:reviewer"],
+      labels: ["export"],
+      disclosure: "project",
+      createdAt: "2026-08-03T00:00:00.000Z",
+      updatedAt: "2026-08-03T00:02:00.000Z",
+      closedAt: "2026-08-03T00:02:00.000Z",
+      closedBy: intentActor,
+      receipt: "intent=closed; export=fixture; credentialFree=true",
+    };
+    const intentComment: IntentComment = {
+      protocol: CONTRACT_VERSIONS.intentComment,
+      id: "intent-comment:round-trip",
+      intentId: intent.id,
+      projectId: project.id,
+      author: intentActor,
+      body: "The exported history remains inspectable after restore.",
+      disclosure: "project",
+      createdAt: "2026-08-03T00:01:00.000Z",
+      receipt: "intent=commented; export=fixture; credentialFree=true",
+    };
     const mirrorDelivery: MirrorDelivery = {
       protocol: CONTRACT_VERSIONS.mirrorDelivery,
       id: "mirror-delivery:42",
@@ -277,6 +306,8 @@ test("Project Export includes Git bundles, lineage, and recovery metadata and re
       repositories: [{ sourceSpaceId: sourceSpace.id, repository: repository.value }],
       destination,
       projectRevisions: [{ protocol: "anyam.kernel/v1", id: "project-revision:initial", projectId: project.id, sourceSpaceSnapshots: { [sourceSpace.id]: commit.status === "succeeded" ? commit.value.commitId : "unknown" } }],
+      intents: [intent],
+      intentComments: [intentComment],
       policies: ["policy:local"],
       auditEventIds: ["event:exported"],
       mirrors: [mirror],
@@ -294,6 +325,9 @@ test("Project Export includes Git bundles, lineage, and recovery metadata and re
     assert.equal(manifest.repositories.length, 1);
     assert.equal(manifest.repositories[0]?.sourceSpaceId, sourceSpace.id);
     assert.equal(manifest.lineage[0]?.projectRevisionId, "project-revision:initial");
+    assert.equal(manifest.intents[0]?.id, intent.id);
+    assert.equal(manifest.intents[0]?.status, "closed");
+    assert.equal(manifest.intentComments[0]?.intentId, intent.id);
     assert.equal(manifest.recovery.state, "verified");
     assert.equal(manifest.mirrors?.[0]?.id, mirror.id);
     assert.deepEqual(manifest.mirrorOperationIds, ["mirror-operation:one"]);
@@ -308,6 +342,13 @@ test("Project Export includes Git bundles, lineage, and recovery metadata and re
     assert.equal(serialized.includes("providerUrl"), false);
     assert.equal(serialized.includes("token"), false);
     assert.equal((await verifyProjectExportPackage(destination)).status, "succeeded");
+
+    const imported = await new LocalProjectExporter(new LocalGitRepositoryDriver(join(root, "import-driver"))).importProject({ packageDirectory: destination, destination: join(root, "imported-project"), idempotencyKey: "intent-export-import" });
+    assert.equal(imported.status, "succeeded");
+    if (imported.status === "succeeded") {
+      assert.equal(imported.value.manifest.intents[0]?.id, intent.id);
+      assert.equal(imported.value.manifest.intentComments[0]?.body, intentComment.body);
+    }
 
     const restore = await driver.restoreRepository({
       sourceSpaceId: sourceSpace.id,

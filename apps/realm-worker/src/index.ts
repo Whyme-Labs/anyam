@@ -74,6 +74,8 @@ const GENERIC_AGENT_CAPABILITIES: readonly Capability[] = [
   "workspace.write",
   "change.inspect",
   "change.publish_revision",
+  "intent.inspect",
+  "intent.write",
   "review.submit_finding",
   "run.invoke",
   "evidence.read",
@@ -304,6 +306,7 @@ function commandNameForMcp(body: CoordinatorRequestBody): string {
 function capabilityForMcpCommand(command: string): Capability | undefined {
   if (command === "workspace.create") return "workspace.write";
   if (command === "change.create" || command === "revision.publish") return "change.publish_revision";
+  if (["intent.create", "intent.assign", "intent.comment", "intent.close", "intent.reopen"].includes(command)) return "intent.write";
   if (command === "run.request") return "run.invoke";
   if (isMcpDeliveryOperation(command)) return mcpDeliveryScope(command);
   return undefined;
@@ -312,6 +315,11 @@ function capabilityForMcpCommand(command: string): Capability | undefined {
 function capabilityForAuthorityCommand(command: AuthorityCommandName): Capability | undefined {
   switch (command) {
     case "project.create": return "identity.manage";
+    case "intent.create":
+    case "intent.assign":
+    case "intent.comment":
+    case "intent.close":
+    case "intent.reopen": return "intent.write";
     case "workspace.create": return "workspace.write";
     case "change.create":
     case "revision.publish": return "change.publish_revision";
@@ -1002,6 +1010,8 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const projectIds = (value: { projectId?: string } | undefined): boolean => value?.projectId === projectId;
     const counts = {
       workspaces: Object.values(snapshot.workspaces).filter(projectIds).length,
+      intents: Object.values(snapshot.intents).filter(projectIds).length,
+      intentComments: Object.values(snapshot.intentComments).filter((comment) => comment.projectId === projectId).length,
       changes: Object.values(snapshot.changes).filter(projectIds).length,
       revisions: Object.values(snapshot.changeRevisions).filter((revision) => snapshot.changes[revision.changeId]?.projectId === projectId).length,
       runs: Object.values(snapshot.runs).filter((run) => snapshot.projectRevisions[run.projectRevisionId]?.projectId === projectId).length,
@@ -1089,6 +1099,17 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     };
   }
 
+  private authorityIntentSummary(snapshot: AuthorityPlaneSnapshot, intentId: string) {
+    const intent = snapshot.intents[intentId];
+    if (!intent) throw new AuthorityPlaneError({ code: "not_found", message: `Intent ${intentId} is not available in this Realm.`, recoveryAction: "verify the Intent identifier without probing undiscoverable resources", receipt: `intent=${intentId}; operation=intent.inspect; discoverable=false` });
+    const project = snapshot.projects[intent.projectId];
+    if (!project) throw new AuthorityPlaneError({ code: "indeterminate", message: `Intent ${intentId} refers to a Project that is not readable.`, recoveryAction: "reconcile the Authority snapshot before exposing the Intent summary", receipt: `intent=${intentId}; project=missing; operation=intent.inspect` });
+    const comments = Object.values(snapshot.intentComments)
+      .filter((comment) => comment.intentId === intentId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    return { intent, comments, project: { protocol: project.protocol, id: project.id, name: project.name, referenceType: project.referenceType } };
+  }
+
   private async authorityProject(body: CoordinatorRequestBody): Promise<Response> {
     const projectId = coordinatorString(body, "projectId");
     const snapshot = await this.authoritySnapshot();
@@ -1150,6 +1171,29 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       return { change: summary.change, project: summary.project, revisionCount: summary.revisions.length };
     });
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", changes, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=change.list; changeCount=${changes.length}; ordering=change-id-code-unit-ascending;${projectId ? ` project=${projectId};` : ""}${workspaceId ? ` workspace=${workspaceId};` : ""} readOnly=true; credentialFree=true; canonicalWrite=false` });
+  }
+
+  private async authorityIntents(body: CoordinatorRequestBody): Promise<Response> {
+    const session = this.authorityHumanSession(coordinatorString(body, "sessionId"));
+    const projectId = body.projectId === undefined ? undefined : coordinatorString(body, "projectId");
+    const intentId = body.intentId === undefined ? undefined : coordinatorString(body, "intentId");
+    const snapshot = await this.authoritySnapshot();
+    if (projectId !== undefined && !snapshot.projects[projectId]) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${projectId} is not available in this Realm.`, recoveryAction: "verify the Project identifier without probing undiscoverable resources", receipt: `project=${projectId}; operation=intent.list; discoverable=false` });
+    if (intentId !== undefined) {
+      const summary = this.authorityIntentSummary(snapshot, intentId);
+      this.authorityCapabilitySession(session.sessionId, "intent.inspect", { realmId: this.requireIdentity().realm.id, projectId: summary.intent.projectId });
+      if (projectId !== undefined && summary.intent.projectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Intent ${intentId} is not available for Project ${projectId}.`, recoveryAction: "verify the Intent identifier within the requested Project", receipt: `intent=${intentId}; project=${projectId}; operation=intent.inspect; discoverable=false` });
+      return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", ...summary, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=intent.inspect; intent=${intentId}; commentCount=${summary.comments.length}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+    }
+    const intentIds = Object.keys(snapshot.intents).filter((id) => {
+      const intent = snapshot.intents[id];
+      return intent !== undefined && (projectId === undefined || intent.projectId === projectId) && this.requireIdentity().activeCapabilitiesForPrincipal({ principalId: session.principalId, resource: { realmId: this.requireIdentity().realm.id, projectId: intent.projectId } }).includes("intent.inspect");
+    }).sort();
+    const intents = intentIds.map((id) => {
+      const summary = this.authorityIntentSummary(snapshot, id);
+      return { intent: summary.intent, project: summary.project, commentCount: summary.comments.length };
+    });
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", intents, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=intent.list; intentCount=${intents.length}; ordering=intent-id-code-unit-ascending;${projectId ? ` project=${projectId};` : ""} readOnly=true; credentialFree=true; canonicalWrite=false` });
   }
 
   private async authorityRun(body: CoordinatorRequestBody): Promise<Response> {
@@ -1337,7 +1381,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   private async authorityCommand(body: CoordinatorRequestBody): Promise<Response> {
     await this.requireAuthorityActive();
     const command = coordinatorString(body, "command") as AuthorityCommandName;
-    const allowed: readonly AuthorityCommandName[] = ["project.create", "workspace.create", "change.create", "revision.publish", "run.request", "landing.apply", "release.create", "target.configure", "promotion.request", "mirror.configure", "mirror.sync", "mirror.reconcile"];
+    const allowed: readonly AuthorityCommandName[] = ["project.create", "intent.create", "intent.assign", "intent.comment", "intent.close", "intent.reopen", "workspace.create", "change.create", "revision.publish", "run.request", "landing.apply", "release.create", "target.configure", "promotion.request", "mirror.configure", "mirror.sync", "mirror.reconcile"];
     if (!allowed.includes(command)) throw new AuthorityPlaneError({ code: "invalid_request", message: `Authority command ${command} is not supported by this vertical slice.`, recoveryAction: `use one of ${allowed.join(", ")} and retry; no authority transition was accepted`, receipt: `command=${command}; transition=not-applied` });
     const payload = body.payload;
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new AuthorityPlaneError({ code: "invalid_request", message: "Authority command payload must be a JSON object.", recoveryAction: "send the command-specific payload as an object; no authority transition was accepted", receipt: `command=${command}; payload=object-required; transition=not-applied` });
@@ -1651,6 +1695,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/projects/internal") return await this.authorityProjects(body);
       if (url.pathname === "/authority/workspaces/internal") return await this.authorityWorkspaces(body);
       if (url.pathname === "/authority/changes/internal") return await this.authorityChanges(body);
+      if (url.pathname === "/authority/intents/internal") return await this.authorityIntents(body);
       if (url.pathname === "/authority/runs/internal") return await this.authorityRun(body);
       if (url.pathname === "/authority/mirrors/internal") return await this.authorityMirrors(body);
       if (url.pathname === "/authority/promotion/execute/internal") return await this.authorityPromotionExecute(body);

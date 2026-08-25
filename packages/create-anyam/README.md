@@ -60,6 +60,37 @@ anyam init --dry-run --type worker --name demo
 The local workflow uses familiar Git vocabulary. Anyam adds the Project
 manifest, checks, and Change metadata without replacing normal Git editing.
 
+## Use the hosted Intent lifecycle
+
+Issues are represented by a first-class hosted Intent. The Intent identity is
+stable when a Change is created from it, and the lifecycle is idempotent across
+the Realm REST surface, remote MCP, and this CLI:
+
+```bash
+export ANYAM_OWNER_SESSION='<owner session value>'
+anyam intent create \
+  --realm https://source.acme.com \
+  --project project:atlas \
+  --id intent:atlas:invoice-export \
+  --title "Add invoice export" \
+  --description "Export one invoice as a PDF" \
+  --disclosure project \
+  --label billing
+anyam intent assign intent:atlas:invoice-export \
+  --realm https://source.acme.com \
+  --assignee principal:wei
+anyam intent comment intent:atlas:invoice-export \
+  --realm https://source.acme.com \
+  --body "Acceptance criteria are ready for review."
+anyam intent close intent:atlas:invoice-export --realm https://source.acme.com
+anyam intent reopen intent:atlas:invoice-export --realm https://source.acme.com
+```
+
+Pass `--owner-session` instead of `ANYAM_OWNER_SESSION` when the session is
+held outside the environment. The CLI requires an explicit Realm and does not
+persist the session or any bearer credential. Public projections omit
+restricted Intents rather than returning metadata-bearing placeholders.
+
 ## Connect a private GitHub repository without a GitHub App
 
 For a customer-operated Realm, the Actions Bridge is the default GitHub

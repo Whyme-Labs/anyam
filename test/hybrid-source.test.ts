@@ -20,7 +20,10 @@ import {
   revokePublicationChange,
   runSealedVerifier,
   summarizeChangeForAudience,
+  summarizeIntentForAudience,
   type ChangeRevision,
+  type Intent,
+  type IntentComment,
   type Project,
   type ProjectRevision,
   type SourceSpace,
@@ -238,6 +241,40 @@ test("sealed private verification returns approved safe Evidence only", async ()
   const appeal = appealSealedVerification({ result, reason: "Please review the exact Change Revision." });
   assert.equal(appeal.runId, result.runId);
   assert.equal(appeal.projectViewId, publicProjection.projectionRevisionId);
+});
+
+test("restricted Intent metadata is omitted from public projections while public Intent history remains safe", () => {
+  const author = { principalId: "principal:owner", actorId: "actor:owner", sessionId: "session:owner", clientId: "client:test" };
+  const restricted: Intent = {
+    protocol: CONTRACT_VERSIONS.intent,
+    id: "intent:private-codec",
+    projectId: project.id,
+    title: "Replace private codec implementation",
+    description: "Internal codec details must never enter the public projection.",
+    status: "open",
+    author,
+    assigneePrincipalIds: ["principal:maintainer"],
+    labels: ["private"],
+    disclosure: "restricted",
+    createdAt: "2026-08-03T00:00:00.000Z",
+    updatedAt: "2026-08-03T00:00:00.000Z",
+    receipt: "intent=fixture; disclosure=restricted",
+  };
+  const publicIntent: Intent = {
+    ...restricted,
+    id: "intent:public-player",
+    title: "Improve playback controls",
+    description: "Make playback controls easier to use.",
+    labels: ["enhancement"],
+    disclosure: "public",
+  };
+  const comments: IntentComment[] = [{ protocol: CONTRACT_VERSIONS.intentComment, id: "intent-comment:private", intentId: restricted.id, projectId: project.id, author, body: "Private comment that must never be projected.", disclosure: "restricted", createdAt: "2026-08-03T00:01:00.000Z", receipt: "comment=fixture; disclosure=restricted" }];
+  assert.equal(summarizeIntentForAudience({ project, intent: restricted, comments, audience: "public" }), undefined);
+  const safe = summarizeIntentForAudience({ project, intent: publicIntent, comments: [], audience: "public" });
+  assert.equal(safe?.intentId, publicIntent.id);
+  assert.equal(safe?.title, publicIntent.title);
+  assert.equal(JSON.stringify(safe).includes("principal:maintainer"), false);
+  assert.equal(JSON.stringify(safe).includes("Private codec"), false);
 });
 
 test("Publication Change creates independent lineage and revokes only future distribution", () => {

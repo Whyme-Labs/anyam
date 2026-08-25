@@ -9,6 +9,8 @@ type JsonRpcBody = Record<string, unknown>;
 function env(): { env: AnyamRealmMcpEnv; calls: Array<{ path: string; body: Record<string, unknown> }> } {
   const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
   const idempotency = new Map<string, { fingerprint: string; result: Record<string, unknown> }>();
+  const intents = new Map<string, Record<string, unknown>>();
+  const intentComments = new Map<string, Record<string, unknown>>();
   const namespace = {
     idFromName: (name: string): string => name,
     get: (_id: string) => ({
@@ -25,6 +27,16 @@ function env(): { env: AnyamRealmMcpEnv; calls: Array<{ path: string; body: Reco
           if ((body.payload as Record<string, unknown> | undefined)?.projectId === "project:cross") return new Response(JSON.stringify({ code: "oauth.delivery_resource_denied", receipt: "mcpDelivery=project-mismatch; discoverable=false; canonicalWrite=false" }), { status: 404 });
           if (body.grantId === "grant:mcp:denied") return new Response(JSON.stringify({ code: "oauth.delivery_action_denied", receipt: "oauthGrant=action-denied; credentialFree=true; canonicalWrite=false" }), { status: 403 });
           return new Response(JSON.stringify({ protocol: "anyam.realm-coordinator/v1", status: "delivery-grant-valid", credentialFree: true, canonicalWrite: false, providerExecution: "not-performed", receipt: "mcpDelivery=task-grant-live; oauthGrant=resource-bound; sourceSpaces=1; canonicalWrite=false" }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (path === "/authority/intents/internal") {
+          const projectId = typeof body.projectId === "string" ? body.projectId : undefined;
+          const intentId = typeof body.intentId === "string" ? body.intentId : undefined;
+          const matches = [...intents.values()].filter((intent) => (projectId === undefined || intent.projectId === projectId) && (intentId === undefined || intent.id === intentId));
+          if (intentId !== undefined && matches.length === 0) return new Response(JSON.stringify({ code: "not_found", receipt: "intent=hidden; discoverable=false" }), { status: 404 });
+          const summary = (intent: Record<string, unknown>): Record<string, unknown> => ({ intent, comments: [...intentComments.values()].filter((comment) => comment.intentId === intent.id), project: { protocol: "anyam.project/v1", id: intent.projectId, name: "MCP Project", referenceType: "git" } });
+          if (intentId !== undefined) return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", ...summary(matches[0]!), receipt: "authority=coordinator; operation=intent.inspect; readOnly=true; credentialFree=true; canonicalWrite=false" }), { status: 200, headers: { "content-type": "application/json" } });
+          const listed = matches.sort((left, right) => String(left.id).localeCompare(String(right.id))).map((intent) => ({ ...summary(intent), commentCount: [...intentComments.values()].filter((comment) => comment.intentId === intent.id).length }));
+          return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", status: "ready", intents: listed, receipt: `authority=coordinator; operation=intent.list; intentCount=${listed.length}; readOnly=true; credentialFree=true; canonicalWrite=false` }), { status: 200, headers: { "content-type": "application/json" } });
         }
         if (path === "/authority/command/internal" || path === "/authority/mcp-command/internal") {
           if (body.protocol !== "anyam.authority-command/v1" || typeof body.command !== "string" || typeof body.idempotencyKey !== "string" || body.payload === null || typeof body.payload !== "object" || Array.isArray(body.payload)) return new Response(JSON.stringify({ code: "invalid_request", receipt: "command=typed-required; credentialFree=true" }), { status: 422 });
@@ -59,6 +71,29 @@ function env(): { env: AnyamRealmMcpEnv; calls: Array<{ path: string; body: Reco
               revision: { protocol: "anyam.change/v1", id: typeof payload.revisionId === "string" ? payload.revisionId : "change-revision:mcp:1", changeId: String(payload.changeId), projectRevisionId: String(payload.projectRevisionId), projectViewId: String(payload.projectViewId), sequence: 1, parentRevisionId: undefined, baseProjectRevisionId: "project-revision:mcp:1", workspaceId: String(payload.workspaceId), declaredEffects: payload.declaredEffects, sourceSpaceSnapshots: payload.sourceSpaceSnapshots, affectedSourceSpaceIds: Object.keys(payload.sourceSpaceSnapshots as Record<string, unknown>), author: { id: "owner:private" }, kind: payload.kind ?? "implementation" },
                 change: { protocol: "anyam.change/v1", id: String(payload.changeId), projectId: String(payload.projectId), intentId: "intent:mcp", baseProjectRevisionId: "project-revision:mcp:1", status: "submitted", latestRevisionId: typeof payload.revisionId === "string" ? payload.revisionId : "change-revision:mcp:1", workspaceId: String(payload.workspaceId), author: { id: "owner:private" } },
             };
+          } else if (body.command === "intent.create") {
+            const intentId = typeof payload.intentId === "string" ? payload.intentId : `intent:mcp:${intents.size + 1}`;
+            const intent = { protocol: "anyam.intent/v1", id: intentId, projectId: String(payload.projectId), title: String(payload.title), description: typeof payload.description === "string" ? payload.description : "", status: "open", author: { principalId: "principal:agent", actorId: "agent:mcp", sessionId: String(body.sessionId), clientId: "client:mcp" }, assigneePrincipalIds: Array.isArray(payload.assigneePrincipalIds) ? payload.assigneePrincipalIds : [], labels: Array.isArray(payload.labels) ? payload.labels : [], disclosure: typeof payload.disclosure === "string" ? payload.disclosure : "project", createdAt: "2026-08-25T00:00:00.000Z", updatedAt: "2026-08-25T00:00:00.000Z", receipt: "intent=created; credentialFree=true" };
+            intents.set(intentId, intent);
+            value = { intent };
+          } else if (body.command === "intent.assign" || body.command === "intent.comment" || body.command === "intent.close" || body.command === "intent.reopen") {
+            const intentId = String(payload.intentId);
+            const existing = intents.get(intentId);
+            if (!existing) return new Response(JSON.stringify({ code: "not_found", receipt: "intent=hidden; discoverable=false" }), { status: 404 });
+            if (body.command === "intent.assign") {
+              const updated = { ...existing, assigneePrincipalIds: Array.isArray(payload.assigneePrincipalIds) ? payload.assigneePrincipalIds : [], updatedAt: "2026-08-25T00:01:00.000Z", receipt: "intent=assigned; credentialFree=true" };
+              intents.set(intentId, updated);
+              value = { intent: updated };
+            } else if (body.command === "intent.comment") {
+              const commentId = typeof payload.commentId === "string" ? payload.commentId : `intent-comment:mcp:${intentComments.size + 1}`;
+              const comment = { protocol: "anyam.intent-comment/v1", id: commentId, intentId, projectId: String(existing.projectId), author: existing.author, body: String(payload.body), disclosure: typeof payload.disclosure === "string" ? payload.disclosure : existing.disclosure, createdAt: "2026-08-25T00:02:00.000Z", receipt: "intent=commented; credentialFree=true" };
+              intentComments.set(commentId, comment);
+              value = { intent: existing, comment };
+            } else {
+              const updated = { ...existing, status: body.command === "intent.close" ? "closed" : "open", updatedAt: "2026-08-25T00:03:00.000Z", receipt: `intent=${body.command === "intent.close" ? "closed" : "reopened"}; credentialFree=true` };
+              intents.set(intentId, updated);
+              value = { intent: updated };
+            }
           } else if (body.command === "run.request") {
             if (payload.projectId === "project:missing") return new Response(JSON.stringify({ code: "not_found", receipt: "run=hidden; discoverable=false" }), { status: 404 });
             value = {
@@ -280,6 +315,52 @@ test("remote MCP exposes an authenticated read-only project tool through the coo
   assert.equal(JSON.stringify(changeBody).includes("credential:"), false);
   assert.equal(fixture.calls[5]?.path, "/authority/changes/internal");
   assert.deepEqual(fixture.calls[5]?.body, { sessionId: "kernel-session:owner", changeId: "change:video-player" });
+});
+
+test("remote MCP exposes the complete Intent lifecycle with the intent.write capability", async () => {
+  const fixture = env();
+  const props: AnyamRealmMcpProps = {
+    scopes: ["intent.inspect", "intent.write"],
+    realmId: "realm:mcp-test",
+    kernelSessionId: "kernel-session:agent",
+    agentId: "agent:mcp",
+    taskId: "task:mcp-intent",
+    capabilityGrantId: "grant:mcp-intent",
+    resource: { realmId: "realm:mcp-test", projectId: "project:mcp" },
+    sourceSpaceIds: ["source:mcp-public"],
+  };
+  const listed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }), fixture.env, props);
+  const tools = ((await body(listed)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
+  assert.deepEqual(tools.map((tool) => tool.name), ["intent.list", "intent.inspect", "intent.create", "intent.assign", "intent.comment", "intent.close", "intent.reopen"]);
+
+  const create = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "intent.create", arguments: { idempotencyKey: "mcp-intent-create", projectId: "project:mcp", intentId: "intent:mcp-lifecycle", title: "MCP Intent", description: "Exercise every transition.", disclosure: "project", labels: ["qualification"] } } }), fixture.env, props);
+  const createResult = (await body(create)).result as Record<string, unknown>;
+  assert.equal(createResult.isError, false);
+  assert.equal(((createResult.structuredContent as Record<string, unknown>).value as Record<string, unknown>).intent && (((createResult.structuredContent as Record<string, unknown>).value as Record<string, unknown>).intent as Record<string, unknown>).id, "intent:mcp-lifecycle");
+  const createCall = fixture.calls.at(-1)!;
+  assert.equal(createCall.path, "/authority/mcp-command/internal");
+  assert.equal(createCall.body.capability, "intent.write");
+
+  const assigned = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "intent.assign", arguments: { idempotencyKey: "mcp-intent-assign", intentId: "intent:mcp-lifecycle", assigneePrincipalIds: ["principal:reviewer"] } } }), fixture.env, props);
+  const assignedBody = await body(assigned);
+  assert.equal((assignedBody.result as Record<string, unknown>).isError, false);
+  const commented = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "intent.comment", arguments: { idempotencyKey: "mcp-intent-comment", intentId: "intent:mcp-lifecycle", body: "Review this Intent." } } }), fixture.env, props);
+  const commentContent = ((await body(commented)).result as Record<string, unknown>).structuredContent as Record<string, unknown>;
+  assert.equal((commentContent.value as Record<string, unknown>).comment && ((commentContent.value as Record<string, unknown>).comment as Record<string, unknown>).body, "Review this Intent.");
+  const closed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "intent.close", arguments: { idempotencyKey: "mcp-intent-close", intentId: "intent:mcp-lifecycle" } } }), fixture.env, props);
+  const closedContent = ((await body(closed)).result as Record<string, unknown>).structuredContent as Record<string, unknown>;
+  assert.equal(((closedContent.value as Record<string, unknown>).intent as Record<string, unknown>).status, "closed");
+  const reopened = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "intent.reopen", arguments: { idempotencyKey: "mcp-intent-reopen", intentId: "intent:mcp-lifecycle" } } }), fixture.env, props);
+  const reopenedContent = ((await body(reopened)).result as Record<string, unknown>).structuredContent as Record<string, unknown>;
+  assert.equal(((reopenedContent.value as Record<string, unknown>).intent as Record<string, unknown>).status, "open");
+
+  const inspected = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "intent.inspect", arguments: { intentId: "intent:mcp-lifecycle" } } }), fixture.env, props);
+  const inspectedContent = ((await body(inspected)).result as Record<string, unknown>).structuredContent as Record<string, unknown>;
+  assert.equal(((inspectedContent.intent as Record<string, unknown>).id), "intent:mcp-lifecycle");
+  assert.equal((inspectedContent.comments as Array<Record<string, unknown>>).length, 1);
+  const all = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "intent.list", arguments: { projectId: "project:mcp" } } }), fixture.env, props);
+  const allContent = ((await body(all)).result as Record<string, unknown>).structuredContent as Record<string, unknown>;
+  assert.deepEqual((allContent.intents as Array<Record<string, unknown>>).map((entry) => (entry.intent as Record<string, unknown>).id), ["intent:mcp-lifecycle"]);
 });
 
 test("remote MCP exposes scope-filtered typed bootstrap mutations with idempotency and safe projections", async () => {

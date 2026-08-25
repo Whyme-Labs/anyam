@@ -1,5 +1,6 @@
 import type { CustomerRealmOperatorCheck, CustomerRealmOperatorStatus } from "./realm-operator.ts";
 import type { ProductionOperationsReadiness } from "../operations/production-operations.ts";
+import { anyamBrandLockup, anyamBrandStyleTag } from "../brand.ts";
 
 export type CustomerRealmControlRoomInput = {
   readonly status: CustomerRealmOperatorStatus;
@@ -47,7 +48,27 @@ export function renderCustomerRealmControlRoom(input: CustomerRealmControlRoomIn
   const identity = status.installation.installationId ?? "installation not observed";
   const releaseDigest = status.digests.release ?? "release digest not observed";
   const generatedAt = new Date().toISOString();
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Anyam control room</title><style>:root{color-scheme:light dark}body{font:15px system-ui,sans-serif;max-width:68rem;margin:2rem auto;padding:0 1.2rem;background:#0f1419;color:#e5e7eb}header,section,aside{border:1px solid #374151;border-radius:10px;padding:1rem 1.2rem;margin:0 0 .8rem;background:#151c24}header{display:flex;justify-content:space-between;gap:1rem;align-items:flex-start}h1,h2{margin:.1rem 0 .5rem}h1{font-size:1.5rem}h2{font-size:1rem}.muted,.empty{color:#9ca3af}.state-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.state-heading span{border:1px solid #6b7280;border-radius:99px;padding:.2rem .55rem;font-size:.8rem;text-transform:capitalize}.state-healthy{border-color:#166534}.state-blocked{border-color:#991b1b}.state-degraded{border-color:#a16207}.state-indeterminate{border-color:#4b5563}ul{margin:.4rem 0;padding-left:1.2rem}code{color:#c4b5fd;overflow-wrap:anywhere}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(16rem,1fr));gap:.8rem}.receipt{font-family:ui-monospace,monospace;font-size:.78rem;overflow-wrap:anywhere;color:#cbd5e1}</style></head><body><header><div><p class="muted">Anyam state-first control room</p><h1>${escapeHtml(identity)}</h1><p class="muted">Status: <strong>${escapeHtml(stateLabel(status.status))}</strong> · generated ${escapeHtml(generatedAt)}</p></div><div><p class="muted">release</p><code>${escapeHtml(releaseDigest)}</code></div></header><div class="grid">${section({ title: "Change", ...checkDetail(migration, "No Change/migration evidence is currently observed.") })}${section({ title: "Evidence", ...checkDetail(health, "Configuration evidence is not observed.") })}${section({ title: "Landing", ...checkDetail(landing, "No pending-operation receipt is currently observed.") })}${section({ title: "Release", ...checkDetail(release, "Release state is not observed.") })}${section({ title: "Target", ...checkDetail(provider, "Target/provider reconciliation is not observed.") })}${section({ title: "Deployment", ...checkDetail(deployment, "Provider account authorization is not observed.") })}${section({ title: "Health", ...checkDetail(policy, "Domain and residency policy state is not observed.") })}</div><section><div class="state-heading"><h2>Production operations</h2><span>${escapeHtml(stateLabel(operations.status))}</span></div><p>${escapeHtml(operations.receipt)}</p>${list(operationsBlockers, "All required operational drills are verified.")}</section><aside><h2>Next actions</h2>${list(status.nextActions, "No recovery action is currently required.")}<p class="muted">This view is read-only. credential-free=true · canonicalWrite=false · targetPromotion=not-performed</p><p class="receipt">${escapeHtml(status.receipt)}</p></aside></body></html>`;
+  const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Anyam control room</title>${anyamBrandStyleTag()}<style>
+.control-room{padding:1rem 0 3rem}
+.control-room-header,.control-room section,.control-room aside{border:1px solid var(--anyam-border);border-radius:1rem;background:var(--anyam-surface);padding:1.1rem 1.25rem;margin:0 0 .9rem}
+.control-room-header{display:flex;justify-content:space-between;gap:1.5rem;align-items:flex-start}
+.control-room-header h1{margin:.65rem 0 .45rem;font-size:clamp(1.5rem,3vw,2.1rem);letter-spacing:-.04em}
+.control-room-header .release{max-width:24rem}
+.control-room-header .release p{margin:0 0 .35rem}
+.control-room code{color:#8ab4ff;overflow-wrap:anywhere}
+.control-room .state-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}
+.control-room h2{margin:.1rem 0 .5rem;font-size:1rem}
+.control-room .state-heading span{border:1px solid var(--anyam-muted);border-radius:99px;padding:.2rem .55rem;font-size:.8rem;text-transform:capitalize}
+.control-room .state-healthy{border-color:#2f9e62}
+.control-room .state-blocked{border-color:#e05a67}
+.control-room .state-degraded{border-color:#d49a3a}
+.control-room .state-indeterminate,.control-room .state-not-observed{border-color:var(--anyam-muted)}
+.control-room ul{margin:.4rem 0;padding-left:1.2rem}
+.control-room .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(16rem,1fr));gap:.9rem}
+.control-room .receipt{overflow-wrap:anywhere;color:var(--anyam-muted);font-family:var(--anyam-font-mono);font-size:.78rem}
+.control-room .next-actions{margin-top:.9rem}
+</style></head><body class="anyam-page anyam-dark-surface"><main class="anyam-shell control-room"><header class="control-room-header"><div>${anyamBrandLockup("inverse")}<p class="anyam-eyebrow">State-first control room</p><h1>${escapeHtml(identity)}</h1><p class="anyam-muted">Status: <strong>${escapeHtml(stateLabel(status.status))}</strong> · generated ${escapeHtml(generatedAt)}</p></div><div class="release"><p class="anyam-eyebrow">Release digest</p><code>${escapeHtml(releaseDigest)}</code></div></header><div class="grid">${section({ title: "Change", ...checkDetail(migration, "No Change/migration evidence is currently observed.") })}${section({ title: "Evidence", ...checkDetail(health, "Configuration evidence is not observed.") })}${section({ title: "Landing", ...checkDetail(landing, "No pending-operation receipt is currently observed.") })}${section({ title: "Release", ...checkDetail(release, "Release state is not observed.") })}${section({ title: "Target", ...checkDetail(provider, "Target/provider reconciliation is not observed.") })}${section({ title: "Deployment", ...checkDetail(deployment, "Provider account authorization is not observed.") })}${section({ title: "Health", ...checkDetail(policy, "Domain and residency policy state is not observed.") })}</div><section><div class="state-heading"><h2>Production operations</h2><span>${escapeHtml(stateLabel(operations.status))}</span></div><p>${escapeHtml(operations.receipt)}</p>${list(operationsBlockers, "All required operational drills are verified.")}</section><aside class="next-actions"><h2>Next actions</h2>${list(status.nextActions, "No recovery action is currently required.")}<p class="anyam-muted">This view is read-only. credential-free=true · canonicalWrite=false · targetPromotion=not-performed</p><p class="receipt">${escapeHtml(status.receipt)}</p></aside></main></body></html>`;
   return html;
 }
 
@@ -57,7 +78,7 @@ export function customerRealmControlRoomResponse(input: CustomerRealmControlRoom
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
-      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'",
+      "content-security-policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'",
     },
   });
 }

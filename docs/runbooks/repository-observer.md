@@ -62,16 +62,20 @@ returns only the credential-free observation.
    npx wrangler deploy --config apps/repository-driver/wrangler.example.jsonc
    ```
 
-3. Set the observer request budget and its measurement receipt in the observer
-   Wrangler configuration:
+3. Set the observer request-body budget, transport timeout, and measurement
+   receipts in the observer Wrangler configuration:
 
    ```text
    REPOSITORY_OBSERVER_REQUEST_BYTES_LIMIT
    REPOSITORY_OBSERVER_REQUEST_BYTES_RECEIPT
+   REPOSITORY_OBSERVER_TRANSPORT_TIMEOUT_MS
+   REPOSITORY_OBSERVER_TRANSPORT_TIMEOUT_RECEIPT
    ```
 
-   The limit is a qualification tripwire, not a universal Anyam limit. Measure
-   the real request envelope for the customer driver before changing it.
+   These are qualification tripwires, not universal Anyam limits. Measure the
+   real request and response envelopes and driver transport latency for the
+   customer installation before changing them. A new value requires a new
+   receipt.
 4. Bind `REPOSITORY_DRIVER` in
    `apps/repository-observer/wrangler.example.jsonc` to
    `anyam-repository-driver`, then deploy the observer:
@@ -84,7 +88,7 @@ returns only the credential-free observation.
 5. Bind the deployed observer as `ANYAM_REPOSITORY_OBSERVER` in the customer
    Realm Wrangler configuration and redeploy the Realm.
 6. Check `GET /health`. It is ready only when the driver service binding and
-   measured request receipt are present.
+   both measured transport receipts are present.
 
 Provider credentials belong exclusively to the provider synchronizer or its
 credential broker. Never put a token, private key, or bearer value in the
@@ -121,7 +125,10 @@ The driver receives the exact observation request and returns one of:
 
 `blocked` and `unavailable` responses must include a recovery action and a
 credential-free receipt. The observer rejects malformed, forged, mismatched,
-or credential-bearing responses before returning them to the Realm.
+non-2xx success-shaped, or credential-bearing responses before returning them
+to the Realm. Request and response bodies, as well as the driver call itself,
+are bounded by the configured transport timeout; a timeout is
+unavailable/indeterminate evidence.
 
 ## Recovery
 
@@ -129,6 +136,13 @@ or credential-bearing responses before returning them to the Realm.
   mutation was attempted.
 - `repository_driver_response_invalid`: repair the driver response shape and
   retry the same immutable observation.
+- `repository_driver_response_budget_exceeded`: reduce the driver response to
+  the measured observer body budget or remeasure the tripwire.
+- `repository_driver_response_credential_material`: remove credentials from
+  the driver response; the observer never forwards or echoes them.
+- `repository_driver_timeout` and `repository_driver_response_timeout`: retry
+  the same immutable observation after the driver responds within the measured
+  transport timeout.
 - `repository_observation_binding_mismatch`: inspect the exact Workspace and
   provider object; do not widen the request or substitute a different commit.
 - `repository_driver_snapshot_mismatch`: the provider head, tree, base,
@@ -145,6 +159,8 @@ or credential-bearing responses before returning them to the Realm.
   new head in the same Change Revision.
 - `request_budget_exceeded`: measure the real envelope and update the local
   tripwire with a new receipt before retrying.
+- `request_timeout`: retry the same immutable observation within the measured
+  transport timeout or remeasure the tripwire.
 
 The observer performs no provider mutation and has no cleanup resource of its
 own. Destroy the Worker and its driver binding only through the customer Realm
@@ -160,8 +176,9 @@ npm run qualification:repository-observer
 ```
 
 It verifies health, valid delegated observation, forged-observation rejection,
-missing-driver blocking, bounded request handling, credential-free receipts,
-and exact no-mutation cleanup. It is a local adapter qualification and does
+non-2xx success rejection, malformed/oversized/credential-bearing response
+rejection, timeout handling, missing-driver blocking, bounded request handling,
+credential-free receipts, and exact no-mutation cleanup. It is a local adapter qualification and does
 not claim live provider availability, GitHub access, or production capacity.
 
 The RepositoryDriver qualification composes the stock driver and Observer

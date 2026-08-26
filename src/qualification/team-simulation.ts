@@ -159,6 +159,7 @@ type HybridFixture = {
 };
 
 type CollaborationResult = {
+  projectRevisions: readonly ProjectRevision[];
   canonicalRevision: ProjectRevision;
   changes: readonly Change[];
   revisions: readonly ChangeRevision[];
@@ -655,6 +656,7 @@ async function collaborateSingleRepository(input: { fixture: RepositoryFixture; 
   const evidenceA = evidence({ id: `evidence:${fixture.id}:a`, project, revision: baseRevision, changeRevision: revisionA, actor: verifier, targetId: target.id, key: "team-check" });
   const landedA = await collaboration.land({ cohortId: cohortA.id, evidence: [evidenceA], actor: landingActor });
   collaboration.setCanonicalProjectRevision(control.canonicalRevision);
+  const postLandingARevision = control.canonicalRevision;
 
   const staleCohort = await collaboration.createCohort({ members: [{ change: requireValue(control.getChange(changeB.id), changeB.id), revision: revisionB, verifierActors: [verifier] }], actor: landingActor, baseProjectRevisionId: baseRevision.id, id: `cohort:${fixture.id}:stale` });
   const staleDecision = collaboration.evaluateLanding({ cohortId: staleCohort.id, evidence: [evidenceA] });
@@ -674,6 +676,7 @@ async function collaborateSingleRepository(input: { fixture: RepositoryFixture; 
   const release: Release = { protocol: CONTRACT_VERSIONS.release, id: `release:${fixture.id}:team`, projectRevisionId: finalRevision.id, artifactIds: [artifact.id], evidenceIds: [releaseEvidence.id], configurationDigests: [build.configurationDigest], stateAssumptions: ["local provider boundary; no Cloudflare mutation"], policyVersion: "policy:team-simulation:v1", status: "ready", changeRevisionId: resolvedB.id, provenanceDigest: digest(`${project.id}:${finalRevision.id}`), receipt: `release=ready; build=verified; providerMutation=false; project=${project.id}` };
   const sealed = sealVerifiedRelease({ projectId: project.id, release, artifacts: [artifact], evidence: [releaseEvidence], target });
   return {
+    projectRevisions: [baseRevision, postLandingARevision, finalRevision],
     canonicalRevision: finalRevision,
     changes: [requireValue(control.getChange(changeA.id), changeA.id), requireValue(control.getChange(changeB.id), changeB.id)],
     revisions: [revisionA, resolvedB],
@@ -816,7 +819,7 @@ async function runExportRestore(input: { root: string; fixtures: readonly Reposi
     const collaboration = requireValue(input.collaborations[index], `${fixture.id} collaboration`);
     const intentData = input.intentLifecycle?.projectId === fixture.project.id ? { intents: input.intentLifecycle.intents, intentComments: input.intentLifecycle.intentComments } : {};
     const pullRequestData = input.pullRequestLifecycle?.projectId === fixture.project.id ? { pullRequests: input.pullRequestLifecycle.pullRequests } : {};
-    const exported = await new LocalProjectExporter(driver).exportProject({ project: fixture.project, sourceSpaces: [fixture.sourceSpace], repositories: [{ sourceSpaceId: fixture.sourceSpace.id, repository: created.value }], destination, projectRevisions: [collaboration.canonicalRevision], changeRevisions: collaboration.revisions, ...intentData, ...pullRequestData, changes: collaboration.changes, evidence: collaboration.evidence, artifacts: [collaboration.artifact], releases: [collaboration.release], targets: [collaboration.target], idempotencyKey: `team-simulation-export-${fixture.id}` });
+    const exported = await new LocalProjectExporter(driver).exportProject({ project: fixture.project, sourceSpaces: [fixture.sourceSpace], repositories: [{ sourceSpaceId: fixture.sourceSpace.id, repository: created.value }], destination, projectRevisions: collaboration.projectRevisions, changeRevisions: collaboration.revisions, ...intentData, ...pullRequestData, changes: collaboration.changes, evidence: collaboration.evidence, artifacts: [collaboration.artifact], releases: [collaboration.release], targets: [collaboration.target], idempotencyKey: `team-simulation-export-${fixture.id}` });
     if (exported.status !== "succeeded") throw new Error(exported.message);
     const verified = await verifyProjectExportPackage(destination);
     if (verified.status !== "succeeded") throw new Error(verified.message);

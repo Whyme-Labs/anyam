@@ -350,7 +350,7 @@ export async function runPrivateAlphaJourneyQualification(): Promise<PrivateAlph
 
     const authority = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot(realmId));
     authorityExecute(authority, ownerAuthority, "project.create", "private-alpha:authority:project", { projectId: project.id, name: project.name, referenceType: project.referenceType, projectRevisionId: baseProjectRevision.id, sourceSpaces: [{ id: sourceSpace.id, name: sourceSpace.name, classification: "internal", snapshotId: "git:snapshot:" + baseCommit }] });
-    const workspaceValue = authorityExecute(authority, ownerAuthority, "workspace.create", "private-alpha:authority:workspace", { projectId: project.id, projectRevisionId: baseProjectRevision.id, workspaceId: changeMetadata.local.workspaceId, changeId: changeMetadata.id, sourceSpaceIds: [sourceSpace.id], mounts: ["source"] });
+    const workspaceValue = authorityExecute(authority, ownerAuthority, "workspace.create", "private-alpha:authority:workspace", { projectId: project.id, projectRevisionId: baseProjectRevision.id, workspaceId: changeMetadata.local.workspaceId, sourceSpaceIds: [sourceSpace.id], mounts: ["source"] });
     const view = workspaceValue.view as { id: string };
     authorityExecute(authority, ownerAuthority, "change.create", "private-alpha:authority:change", { projectId: project.id, changeId: changeMetadata.id, intentId: changeMetadata.intentId, baseProjectRevisionId: baseProjectRevision.id, workspaceId: changeMetadata.local.workspaceId });
 

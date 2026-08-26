@@ -405,6 +405,12 @@ test("remote MCP exposes scope-filtered typed bootstrap mutations with idempoten
   assert.equal((conflictError.data as Record<string, unknown>).code, "mcp.bootstrap_conflict");
   assert.equal(JSON.stringify(conflictError).includes("Different"), false);
 
+  const beforeSpeculativeWorkspace = fixture.calls.length;
+  const speculativeWorkspace = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 4.5, method: "tools/call", params: { name: "workspace.create", arguments: { idempotencyKey: "mcp-speculative-workspace", projectId: "project:mcp", projectRevisionId: "project-revision:mcp:1", sourceSpaceIds: ["source:mcp-public"], changeId: "change:invented" } } }), fixture.env, writeProps);
+  const speculativeWorkspaceError = (await body(speculativeWorkspace)).error as Record<string, unknown>;
+  assert.equal(speculativeWorkspaceError.code, -32602);
+  assert.equal(fixture.calls.length, beforeSpeculativeWorkspace);
+
   const createdWorkspace = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "workspace.create", arguments: { idempotencyKey: "mcp-workspace-1", projectId: "project:mcp", projectRevisionId: "project-revision:mcp:1", sourceSpaceIds: ["source:mcp-public"], mounts: ["private-codec"] } } }), fixture.env, writeProps);
   const workspaceBody = await body(createdWorkspace);
   const workspaceContent = (workspaceBody.result as Record<string, unknown>).structuredContent as Record<string, unknown>;

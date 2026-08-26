@@ -118,7 +118,7 @@ export function bootstrapCommand(path: BootstrapPath, body: Record<string, unkno
     const referenceType = optionalBootstrapString(body, operation, "referenceType");
     return { command: operation, idempotencyKey, ...(expectedVersion === undefined ? {} : { expectedVersion }), payload: { ...(projectId ? { projectId } : {}), name: requiredBootstrapString(body, operation, "name"), ...(referenceType ? { referenceType } : {}), sourceSpaces: bootstrapSourceSpaces(body, operation), ...(projectRevisionId ? { projectRevisionId } : {}) } };
   }
-  assertBootstrapFields(body, operation, operation === "workspace.create" ? ["workspaceId", "projectRevisionId", "sourceSpaceIds", "mounts", "projectionId", "classification", "changeId", "expectedVersion"] : ["changeId", "intentId", "baseProjectRevisionId", "workspaceId", "expectedVersion"]);
+  assertBootstrapFields(body, operation, operation === "workspace.create" ? ["workspaceId", "projectRevisionId", "sourceSpaceIds", "mounts", "projectionId", "classification", "expectedVersion"] : ["changeId", "intentId", "baseProjectRevisionId", "workspaceId", "expectedVersion"]);
   const projectId = path.projectId;
   if (!projectId) throw bootstrapRequestError(operation, "The Project path is required.", "use /api/projects/{projectId}/workspaces or /api/projects/{projectId}/changes; no transition was accepted", `operation=${operation}; projectId=required; transition=not-applied`);
   if (operation === "workspace.create") {
@@ -127,9 +127,8 @@ export function bootstrapCommand(path: BootstrapPath, body: Record<string, unkno
     const sourceSpaceIds = bootstrapStringList(body, operation, "sourceSpaceIds");
     const mounts = bootstrapStringList(body, operation, "mounts", false);
     const projectionId = safeBodyIdentifier(body, operation, "projectionId");
-    const changeId = safeBodyIdentifier(body, operation, "changeId");
     const classification = optionalBootstrapString(body, operation, "classification");
-    return { command: operation, idempotencyKey, ...(expectedVersion === undefined ? {} : { expectedVersion }), payload: { projectId, ...(workspaceId ? { workspaceId } : {}), projectRevisionId, sourceSpaceIds, ...(mounts ? { mounts } : {}), ...(projectionId ? { projectionId } : {}), ...(classification ? { classification } : {}), ...(changeId ? { changeId } : {}) } };
+    return { command: operation, idempotencyKey, ...(expectedVersion === undefined ? {} : { expectedVersion }), payload: { projectId, ...(workspaceId ? { workspaceId } : {}), projectRevisionId, sourceSpaceIds, ...(mounts ? { mounts } : {}), ...(projectionId ? { projectionId } : {}), ...(classification ? { classification } : {}) } };
   }
   const changeId = safeBodyIdentifier(body, operation, "changeId");
   const intentId = safeBodyIdentifier(body, operation, "intentId", true)!;

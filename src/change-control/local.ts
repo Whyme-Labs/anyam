@@ -44,7 +44,6 @@ export type MaterializeWorkspaceInput = {
   mounts: readonly WorkspaceMountInput[];
   directory: string;
   id?: string;
-  changeId?: string;
   actorId?: string;
 };
 
@@ -380,7 +379,6 @@ export async function materializeWorkspace(input: MaterializeWorkspaceInput): Pr
       projectViewId: input.view.id,
       mounts,
       state: "active",
-      ...(input.changeId ? { changeId: input.changeId } : {}),
       ...(input.actorId ? { actorId: input.actorId } : {}),
     },
   };
@@ -775,29 +773,34 @@ export class LocalChangeCoordinator {
     declaredEffects: readonly string[];
   }): Promise<{ workspace: Workspace; revision: ChangeRevision }> {
     const change = this.requireChange(input.changeId);
+    const previousWorkspace = change.workspaceId ? this.requireWorkspace(change.workspaceId) : undefined;
     const materialized = await this.createWorkspace({
       view: input.view,
       sources: input.sources,
       mounts: input.mounts,
       directory: input.directory,
-      changeId: change.id,
       ...(input.actorId ? { actorId: input.actorId } : {}),
     });
-    const rebasedWorkspace = materialized.workspace;
+    const rebasedWorkspace: Workspace = { ...materialized.workspace, changeId: change.id };
     this.workspaces.set(rebasedWorkspace.id, rebasedWorkspace);
-    this.changes.set(change.id, {
-      ...change,
-      baseProjectRevisionId: rebasedWorkspace.projectRevisionId,
-      workspaceId: rebasedWorkspace.id,
-      status: "active",
-    });
-    const revision = this.publishRevision({
-      changeId: change.id,
-      workspaceId: rebasedWorkspace.id,
-      declaredEffects: input.declaredEffects,
-      kind: "rebase",
-    });
-    return { workspace: cloneWorkspace(rebasedWorkspace), revision };
+    this.changes.set(change.id, { ...change, baseProjectRevisionId: rebasedWorkspace.projectRevisionId, workspaceId: rebasedWorkspace.id, status: "active" });
+    try {
+      const revision = this.publishRevision({
+        changeId: change.id,
+        workspaceId: rebasedWorkspace.id,
+        declaredEffects: input.declaredEffects,
+        kind: "rebase",
+      });
+      if (previousWorkspace && previousWorkspace.id !== rebasedWorkspace.id) {
+        const { changeId: _previousChangeId, ...unboundPreviousWorkspace } = previousWorkspace;
+        this.workspaces.set(previousWorkspace.id, { ...unboundPreviousWorkspace, state: "closed" });
+      }
+      return { workspace: cloneWorkspace(rebasedWorkspace), revision };
+    } catch (error) {
+      this.workspaces.delete(rebasedWorkspace.id);
+      this.changes.set(change.id, change);
+      throw error;
+    }
   }
 
   handoffChange(input: { changeId: string; actorId: string }): Workspace {

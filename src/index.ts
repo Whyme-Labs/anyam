@@ -30,6 +30,7 @@ export * from "./cloudflare/worker-target.ts";
 export * from "./delivery/promotion.ts";
 export * from "./delivery/release-publication.ts";
 export * from "./qualification/stages.ts";
+export * from "./qualification/real-team-gate.ts";
 export * from "./extensions/registry.ts";
 export * from "./governance/profiles.ts";
 export * from "./cloudflare/realm-worker.ts";

@@ -13,6 +13,7 @@
     "qualification:worker-target": "tsx scripts/qualify-worker-target.ts",
     "qualification:authority-sqlite": "tsx scripts/qualify-authority-sqlite.ts",
     "qualification:worker-test-boundary": "node scripts/qualify-worker-test-boundary.mjs",
+    "qualification:real-team-gate": "tsx scripts/qualify-real-team-gate.ts",
     "qualification:cloudflare-golden-path": "tsx scripts/qualify-cloudflare-golden-path.ts",
     "qualification:cloudflare-golden-recovery": "tsx scripts/qualify-cloudflare-golden-recovery.ts",
     "qualification:team-simulation": "tsx scripts/qualify-team-simulation.ts",

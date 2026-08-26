@@ -30,6 +30,10 @@ export type ParsedRepositoryObservationServiceResponse =
   | { valid: true; response: RepositoryObservationServiceResponse }
   | { valid: false; code: string; recoveryAction: string; receipt: string };
 
+export type ParsedRepositoryObservationRequest =
+  | { valid: true; request: RepositoryObservationRequest }
+  | { valid: false; code: string; message: string; recoveryAction: string; receipt: string };
+
 export function repositoryObservationManifest(input: RepositoryObservationClaims): string {
   return JSON.stringify({
     protocol: input.protocol,
@@ -51,6 +55,24 @@ export function repositoryObservationManifest(input: RepositoryObservationClaims
 export async function repositoryObservationDigest(input: RepositoryObservationClaims): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(repositoryObservationManifest(input)));
   return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+export function parseRepositoryObservationRequest(value: unknown): ParsedRepositoryObservationRequest {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return { valid: false, code: "repository_observation_request_malformed", message: "The RepositoryDriver observation request must be a JSON object.", recoveryAction: "send one anyam.repository-observation/v1 request object", receipt: "repositoryObservationRequest=object-required; transition=not-applied" };
+  const body: Record<string, unknown> = Object.fromEntries(Object.entries(value));
+  const protocol = requiredString(body.protocol, "protocol");
+  const operation = body.operation === "observe" ? body.operation : undefined;
+  const repositoryId = requiredString(body.repositoryId, "repositoryId");
+  const sourceSpaceId = requiredString(body.sourceSpaceId, "sourceSpaceId");
+  const workspaceId = requiredString(body.workspaceId, "workspaceId");
+  const projectViewId = requiredString(body.projectViewId, "projectViewId");
+  const expectedCommitOid = requiredString(body.expectedCommitOid, "expectedCommitOid");
+  const expectedTreeOid = body.expectedTreeOid === undefined ? undefined : requiredString(body.expectedTreeOid, "expectedTreeOid");
+  const expectedBaseCommitOid = requiredString(body.expectedBaseCommitOid, "expectedBaseCommitOid");
+  const expectedObjectFormat = body.expectedObjectFormat === undefined ? undefined : body.expectedObjectFormat === "sha1" || body.expectedObjectFormat === "sha256" ? body.expectedObjectFormat : undefined;
+  if (protocol !== REPOSITORY_OBSERVATION_PROTOCOL || operation !== "observe" || !repositoryId || !sourceSpaceId || !workspaceId || !projectViewId || !expectedCommitOid || !expectedBaseCommitOid || (body.expectedTreeOid !== undefined && !expectedTreeOid) || (body.expectedObjectFormat !== undefined && !expectedObjectFormat)) return { valid: false, code: "repository_observation_request_malformed", message: "The RepositoryDriver observation request is incomplete or unsupported.", recoveryAction: "send protocol, operation=observe, identities, expected commit/base, and an optional valid object format", receipt: "repositoryObservationRequest=complete-v1-required; transition=not-applied" };
+  if (expectedObjectFormat && (!validOid(expectedCommitOid, expectedObjectFormat) || !validOid(expectedBaseCommitOid, expectedObjectFormat) || (expectedTreeOid !== undefined && !validOid(expectedTreeOid, expectedObjectFormat)))) return { valid: false, code: "repository_observation_request_oid_invalid", message: "The RepositoryDriver observation request contains an invalid Git object ID for its declared object format.", recoveryAction: "send lowercase hexadecimal Git object IDs with the exact declared object format", receipt: "repositoryObservationRequest=oid-invalid; transition=not-applied" };
+  return { valid: true, request: { protocol, operation, repositoryId, sourceSpaceId, workspaceId, projectViewId, expectedCommitOid, ...(expectedTreeOid ? { expectedTreeOid } : {}), expectedBaseCommitOid, ...(expectedObjectFormat ? { expectedObjectFormat } : {}) } };
 }
 
 function requiredString(value: unknown, field: string): string | undefined {

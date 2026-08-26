@@ -6,5 +6,5 @@
     "skipLibCheck": true
   },
   "exclude": [],
-  "include": ["test/worker-entrypoint.test.ts", "test/pull-request-rest.test.ts", "test/promotion-execution-edge.test.ts", "test/realm-operator.test.ts"]
+  "include": ["test/worker-entrypoint.test.ts", "test/pull-request-rest.test.ts", "test/promotion-execution-edge.test.ts", "test/realm-operator.test.ts", "test/repository-observer.test.ts"]
 }

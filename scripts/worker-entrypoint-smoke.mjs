@@ -19,6 +19,12 @@ const workers = [
     routes: ["/health", "/mcp", "/authorize", "/owner/login", "/api/projects", "/api/projects/", "/api/intents", "/api/pull-requests", "/api/integrations/github-actions/bridge/exchange", "/api/integrations/github-actions/bridge/outbound/bundle", "/api/integrations/github-actions/bridge/outbound/complete"],
   },
   {
+    id: "repository-observer",
+    config: "apps/repository-observer/wrangler.example.jsonc",
+    source: "apps/repository-observer/src/index.ts",
+    routes: ["/health", "/observe", "REPOSITORY_DRIVER", "requestBudget"],
+  },
+  {
     id: "public-gateway",
     config: "apps/public-gateway-worker/wrangler.example.jsonc",
     source: "apps/public-gateway-worker/src/index.ts",

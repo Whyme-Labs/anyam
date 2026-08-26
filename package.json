@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/create-anyam", "apps/realm-worker", "apps/public-gateway-worker", "apps/hosted-saas-qualification", "apps/promotion-executor", "apps/linux-egress-qualification"],
+  "workspaces": ["packages/create-anyam", "apps/realm-worker", "apps/public-gateway-worker", "apps/hosted-saas-qualification", "apps/promotion-executor", "apps/linux-egress-qualification", "apps/repository-observer"],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "tsx --test \"test/**/*.test.ts\"",
@@ -12,6 +12,7 @@
     "qualification:provider-feed": "tsx scripts/qualify-provider-feed.ts",
     "qualification:worker-target": "tsx scripts/qualify-worker-target.ts",
     "qualification:authority-sqlite": "tsx scripts/qualify-authority-sqlite.ts",
+    "qualification:repository-observer": "tsx scripts/qualify-repository-observer.ts",
     "qualification:worker-test-boundary": "node scripts/qualify-worker-test-boundary.mjs",
     "qualification:real-team-gate": "tsx scripts/qualify-real-team-gate.ts",
     "qualification:cloudflare-golden-path": "tsx scripts/qualify-cloudflare-golden-path.ts",
@@ -39,6 +40,8 @@
     "typecheck:hosted-saas": "tsc -p apps/hosted-saas-qualification/tsconfig.json --noEmit",
     "typecheck:promotion-executor": "tsc -p apps/promotion-executor/tsconfig.json --noEmit",
     "typecheck:linux-egress": "tsc -p apps/linux-egress-qualification/tsconfig.json --noEmit",
+    "typecheck:repository-observer": "tsc -p apps/repository-observer/tsconfig.json --noEmit",
+    "typecheck:repository-observer-qualification": "tsc -p tsconfig.repository-observer-qualification.json --noEmit",
     "build:qualification-worker": "npm run typecheck:qualification-worker && wrangler deploy --dry-run --config apps/runner-qualification/wrangler.qualification.jsonc --outdir=dist/qualification-worker",
     "build:hosted-saas": "npm run typecheck:hosted-saas && wrangler deploy --dry-run --config apps/hosted-saas-qualification/wrangler.example.jsonc --outdir=dist/hosted-saas-qualification",
     "build:public-gateway": "npm run build --workspace=@anyam/public-gateway-worker",
@@ -46,13 +49,14 @@
     "build:provider-target": "npm run typecheck:provider-target && wrangler deploy --dry-run --config apps/provider-qualification-target/wrangler.jsonc --outdir=dist/provider-qualification-target",
     "build:promotion-executor": "npm run typecheck:promotion-executor && wrangler deploy --dry-run --config apps/promotion-executor/wrangler.example.jsonc --outdir=dist/promotion-executor",
     "build:linux-egress": "npm run typecheck:linux-egress && wrangler deploy --dry-run --config apps/linux-egress-qualification/wrangler.example.jsonc --outdir=dist/linux-egress-qualification",
+    "build:repository-observer": "npm run typecheck:repository-observer && wrangler deploy --dry-run --config apps/repository-observer/wrangler.example.jsonc --outdir=dist/repository-observer",
     "build": "npm run build --workspace=create-anyam",
     "verify:package": "npm run build && node scripts/package-entrypoint-smoke.mjs",
     "verify:workers": "node scripts/worker-entrypoint-smoke.mjs",
     "build:realm": "npm run build --workspace=@anyam/realm-worker",
     "check:realm": "npm run check && npm run build:realm",
     "typecheck:replay-archive-workload": "tsc -p apps/replay-archive-workload-qualification/tsconfig.json --noEmit",
-    "check": "npm run check:ci-hygiene && npm run check:dependencies && npm run typecheck && npm run typecheck:scripts && npm run typecheck:qualification-worker && npm run typecheck:provider-target && npm run typecheck:hosted-saas && npm run typecheck:replay-archive-workload && npm run typecheck:promotion-executor && npm run typecheck:linux-egress && npm run typecheck:worker-tests && npm run qualification:worker-test-boundary && npm run qualification:authority-sqlite && npm test && npm run verify:package && npm run verify:workers"
+    "check": "npm run check:ci-hygiene && npm run check:dependencies && npm run typecheck && npm run typecheck:scripts && npm run typecheck:qualification-worker && npm run typecheck:provider-target && npm run typecheck:hosted-saas && npm run typecheck:replay-archive-workload && npm run typecheck:promotion-executor && npm run typecheck:linux-egress && npm run typecheck:repository-observer && npm run typecheck:repository-observer-qualification && npm run typecheck:worker-tests && npm run qualification:worker-test-boundary && npm run qualification:authority-sqlite && npm run qualification:repository-observer && npm test && npm run verify:package && npm run verify:workers"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

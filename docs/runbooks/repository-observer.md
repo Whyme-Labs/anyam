@@ -26,10 +26,43 @@ returns only the credential-free observation.
 
 ## Install
 
-1. Deploy the driver adapter and expose its internal `POST /observe` service
-   binding. It must return the existing
-   `anyam.repository-observation/v1` response shape.
-2. Set the observer request budget and its measurement receipt in the observer
+1. Create a customer-owned R2 bucket for RepositoryDriver snapshot manifests.
+   The stock driver is an Anyam-native, provider-neutral adapter: a trusted
+   provider synchronizer writes one manifest per Repository, and the Worker
+   verifies the exact head, tree, base, object format, ref, and ancestry before
+   returning an observation. A manifest is stored at
+   `repositories/<encodeURIComponent(repositoryId)>.json`:
+
+   ```json
+   {
+     "protocol": "anyam.repository-driver-snapshot/v1",
+     "repositoryId": "repo:customer",
+     "sourceSpaceId": "source:customer",
+     "objectFormat": "sha1",
+     "symbolicRef": "refs/heads/main",
+     "commitOid": "…",
+     "treeOid": "…",
+     "baseCommitOid": "…",
+     "ancestorCommitOids": ["…"],
+     "generation": "provider-generation-42",
+     "state": "active",
+     "observedAt": "2026-08-26T00:00:00.000Z",
+     "receipt": "provider=customer; ancestry=verified; credentialMaterialStored=false"
+   }
+   ```
+
+   The synchronizer remains provider-specific and may be a GitHub App,
+   Smart-HTTP, or Anyam-native adapter; it never runs inside the Realm or
+   Observer Worker and never writes provider credentials to a manifest.
+2. Fill in `apps/repository-driver/wrangler.example.jsonc` with the bucket
+   name, then deploy the private driver Worker:
+
+   ```bash
+   npm run build:repository-driver
+   npx wrangler deploy --config apps/repository-driver/wrangler.example.jsonc
+   ```
+
+3. Set the observer request budget and its measurement receipt in the observer
    Wrangler configuration:
 
    ```text
@@ -39,23 +72,24 @@ returns only the credential-free observation.
 
    The limit is a qualification tripwire, not a universal Anyam limit. Measure
    the real request envelope for the customer driver before changing it.
-3. Replace the `REPOSITORY_DRIVER` service binding in
-   `apps/repository-observer/wrangler.example.jsonc` with the customer driver
-   Worker and deploy:
+4. Bind `REPOSITORY_DRIVER` in
+   `apps/repository-observer/wrangler.example.jsonc` to
+   `anyam-repository-driver`, then deploy the observer:
 
    ```bash
    npm run build:repository-observer
    npx wrangler deploy --config apps/repository-observer/wrangler.example.jsonc
    ```
 
-4. Bind the deployed observer as `ANYAM_REPOSITORY_OBSERVER` in the customer
+5. Bind the deployed observer as `ANYAM_REPOSITORY_OBSERVER` in the customer
    Realm Wrangler configuration and redeploy the Realm.
-5. Check `GET /health`. It is ready only when the driver service binding and
+6. Check `GET /health`. It is ready only when the driver service binding and
    measured request receipt are present.
 
-Provider credentials belong exclusively to the driver adapter or its
+Provider credentials belong exclusively to the provider synchronizer or its
 credential broker. Never put a token, private key, or bearer value in the
-observer `vars`, request, response, receipt, export, or Authority state.
+driver `vars`, snapshot manifest, observer `vars`, request, response, receipt,
+export, or Authority state.
 
 ## Driver response contract
 
@@ -97,6 +131,18 @@ or credential-bearing responses before returning them to the Realm.
   retry the same immutable observation.
 - `repository_observation_binding_mismatch`: inspect the exact Workspace and
   provider object; do not widen the request or substitute a different commit.
+- `repository_driver_snapshot_mismatch`: the provider head, tree, base,
+  object-format, or ancestry changed (including a force-push); re-inspect the
+  provider and publish a new immutable snapshot manifest.
+- `repository_driver_installation_revoked`: restore the provider installation
+  before publishing another snapshot.
+- `repository_driver_snapshot_stale`: re-inspect the provider and publish a
+  fresh active snapshot; stale state is never used as a hosted observation.
+- `repository_not_found`: the named Repository snapshot is deleted or has not
+  been synchronized; restore it and retry the same observation.
+- A timeout or lost response is unavailable/indeterminate evidence. Reconcile
+  the exact generation and request identity before retrying; never substitute a
+  new head in the same Change Revision.
 - `request_budget_exceeded`: measure the real envelope and update the local
   tripwire with a new receipt before retrying.
 
@@ -117,3 +163,12 @@ It verifies health, valid delegated observation, forged-observation rejection,
 missing-driver blocking, bounded request handling, credential-free receipts,
 and exact no-mutation cleanup. It is a local adapter qualification and does
 not claim live provider availability, GitHub access, or production capacity.
+
+The RepositoryDriver qualification composes the stock driver and Observer
+against an in-memory R2-compatible fixture. A successful result proves the
+customer-owned service boundary; a live customer receipt additionally requires
+the real R2 bucket, provider synchronizer, and Realm service bindings.
+
+```bash
+npm run qualification:repository-driver
+```

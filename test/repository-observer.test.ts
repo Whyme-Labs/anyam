@@ -82,3 +82,11 @@ test("repository observer exposes missing-driver and request-budget failures exp
   assert.equal(oversized.status, 422);
   assert.equal((await oversized.json() as Record<string, unknown>).code, "request_budget_exceeded");
 });
+
+test("repository observer keeps driver timeout and response loss unavailable", async () => {
+  const response = await observer.fetch(new Request("https://observer.example/observe", { method: "POST", body: JSON.stringify(requestBody()) }), { ...envBase, REPOSITORY_DRIVER: { fetch: async (): Promise<Response> => { throw new Error("driver-timeout"); } } as unknown as Fetcher });
+  assert.equal(response.status, 503);
+  const value = await response.json() as Record<string, unknown>;
+  assert.equal(value.code, "repository_driver_unavailable");
+  assert.match(String(value.receipt), /providerInvocation=indeterminate/u);
+});

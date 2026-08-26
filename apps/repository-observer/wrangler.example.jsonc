@@ -13,7 +13,7 @@
   "services": [
     {
       "binding": "REPOSITORY_DRIVER",
-      "service": "replace-with-customer-repository-driver"
+      "service": "anyam-repository-driver"
     }
   ]
 }

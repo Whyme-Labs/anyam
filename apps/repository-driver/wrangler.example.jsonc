@@ -1,0 +1,20 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-repository-driver",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-27",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "REPOSITORY_DRIVER_MANIFEST_PREFIX": "repositories/",
+    "REPOSITORY_DRIVER_REQUEST_BYTES_LIMIT": "replace-with-measured-driver-request-limit",
+    "REPOSITORY_DRIVER_REQUEST_BYTES_RECEIPT": "receipt:replace-with-driver-request-measurement"
+  },
+  "r2_buckets": [
+    {
+      "binding": "REPOSITORY_STATE",
+      "bucket_name": "replace-with-customer-repository-state"
+    }
+  ]
+}

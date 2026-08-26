@@ -189,6 +189,7 @@ function safeRevision(value: unknown): Record<string, unknown> {
   const conflictIds = revision.conflictIds === undefined ? undefined : valueStringList(revision.conflictIds, "revision.conflictIds");
   const kind = revision.kind === undefined ? undefined : valueString(revision.kind, "revision.kind");
   const sourceSpaceObservationDigests = safeObservationDigests(revision.sourceSpaceObservations);
+  const mirrorRepositoryObservationDigests = safeObservationDigests(revision.mirrorRepositoryObservations);
   return {
     protocol: valueString(revision.protocol, "revision.protocol"),
     id: valueString(revision.id, "revision.id"),
@@ -200,6 +201,7 @@ function safeRevision(value: unknown): Record<string, unknown> {
     ...(baseProjectRevisionId ? { baseProjectRevisionId } : {}),
     ...(workspaceId ? { workspaceId } : {}),
     ...(sourceSpaceObservationDigests ? { sourceSpaceObservationDigests } : {}),
+    ...(mirrorRepositoryObservationDigests ? { mirrorRepositoryObservationDigests } : {}),
     declaredEffects: valueStringList(revision.declaredEffects, "revision.declaredEffects"),
     ...(affectedModuleIds ? { affectedModuleIds } : {}),
     ...(affectedTargetIds ? { affectedTargetIds } : {}),

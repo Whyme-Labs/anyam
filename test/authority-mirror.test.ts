@@ -9,14 +9,16 @@ import {
   type AuthorityCommandName,
   type AuthoritySession,
 } from "../src/cloudflare/authority-plane.ts";
+import { MIRROR_REPOSITORY_OBSERVATION_PROTOCOL, mirrorObservationDigest, type MirrorObservationClaims } from "../src/portability/mirror-observation.ts";
 
 const session: AuthoritySession = {
   realmId: "realm:mirror-authority",
   principalId: "principal:owner",
   actorId: "actor:owner",
   sessionId: "session:owner",
-  clientId: "client:owner",
+  clientId: "anyam-mirror-fixture",
   authorizationEpoch: 1,
+  kind: "mirror",
 };
 
 function command(coordinator: AuthorityPlaneCoordinator, name: AuthorityCommandName, idempotencyKey: string, payload: Record<string, unknown>) {
@@ -90,6 +92,37 @@ test("Authority rejects a provider-authoritative mirror request", () => {
       && error.code === "invalid_request"
       && error.receipt.includes("canonicalAuthority=provider"),
   );
+});
+
+test("human and generic Authority sessions cannot submit provider Mirror ingestion", () => {
+  const coordinator = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot(session.realmId));
+  assert.throws(
+    () => coordinator.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "mirror.sync", idempotencyKey: "mirror:untrusted", payload: { mirrorId: "mirror:unknown" } }, { ...session, clientId: "client:anyam-web", kind: "human" }),
+    (error: unknown) => error instanceof AuthorityPlaneError && error.code === "invalid_request" && error.receipt.includes("mirrorIngestion=internal-only") && error.receipt.includes("providerObservation=required"),
+  );
+  assert.equal(Object.keys(coordinator.snapshot().changes).length, 0);
+  assert.equal(Object.keys(coordinator.snapshot().changeRevisions).length, 0);
+});
+
+test("internal Mirror ingestion stores the exact proposal observation on its Change Revision", () => {
+  const realmId = "realm:mirror-observed";
+  const internal: AuthoritySession = { realmId, principalId: "mirror-provider:github", actorId: "mirror:github", sessionId: "mirror-handoff:one", clientId: "anyam-mirror-coordinator", authorizationEpoch: 1, kind: "mirror" };
+  const coordinator = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot(realmId));
+  const apply = (name: AuthorityCommandName, idempotencyKey: string, payload: Record<string, unknown>) => coordinator.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: name, idempotencyKey, payload }, internal);
+  const baseCommit = "1".repeat(40);
+  const headCommit = "2".repeat(40);
+  assert.equal(apply("project.create", "observed:project", { projectId: "project:observed", name: "Observed Mirror", referenceType: "git", sourceSpaces: [{ id: "source:observed", name: "public", classification: "public", repositoryId: "repository:observed", snapshotId: baseCommit }], projectRevisionId: "project-revision:observed" }).status, "succeeded");
+  const workspace = apply("workspace.create", "observed:workspace", { projectId: "project:observed", projectRevisionId: "project-revision:observed", workspaceId: "workspace:observed", sourceSpaceIds: ["source:observed"], projectionId: "project-view:observed", classification: "public" });
+  assert.equal(workspace.status, "succeeded");
+  const projectViewId = (workspace.value.view as { id: string }).id;
+  assert.equal(apply("mirror.configure", "observed:mirror", { mirrorId: "mirror:observed", projectId: "project:observed", sourceSpaceId: "source:observed", provider: "github", remoteRepository: "acme/observed", refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }], disclosure: "public", canonicalProjectRevisionId: "project-revision:observed", canonicalRefs: [{ name: "refs/heads/main", oid: baseCommit }], remoteGeneration: "remote:g0", remoteRefs: [{ name: "refs/heads/main", oid: baseCommit }], receipt: "fixture=observed-mirror; credentialFree=true" }).status, "succeeded");
+  const claims: MirrorObservationClaims = { protocol: MIRROR_REPOSITORY_OBSERVATION_PROTOCOL, repositoryId: "repository:observed", sourceSpaceId: "source:observed", mirrorId: "mirror:observed", proposalKey: "42", deliveryId: "delivery:42", provider: "github", remoteRepository: "acme/observed", projectViewId, objectFormat: "sha1", symbolicRef: "refs/heads/feature", commitOid: headCommit, treeOid: "3".repeat(40), baseCommitOid: baseCommit, ancestryVerified: true, observedAt: "2026-08-27T00:00:00.000Z", receipt: "provider=github; ancestry=verified; credentialMaterialStored=false" };
+  const observation = { ...claims, manifestDigest: mirrorObservationDigest(claims) };
+  const result = apply("mirror.sync", "observed:sync", { mirrorId: "mirror:observed", canonicalProjectRevisionId: "project-revision:observed", canonicalRefs: [{ name: "refs/heads/main", oid: baseCommit }], expectedRemoteGeneration: "remote:g0", remoteGeneration: "remote:g1", remoteRefs: [{ name: "refs/heads/main", oid: headCommit }], operationId: "mirror-operation:observed", checkpointId: "mirror-checkpoint:observed", operationState: "succeeded", mirrorState: "healthy", receipt: "fixture=observed-sync; credentialFree=true", delivery: { provider: "github", installationId: "installation:observed", sourceIdentity: "installation:observed", remoteRepository: "acme/observed", deliveryId: "delivery:42", eventType: "pull_request.synchronize", proposalKey: "42" }, externalProposal: { provider: "github", installationId: "installation:observed", sourceIdentity: "installation:observed", remoteRepository: "acme/observed", proposalKind: "pull-request", proposalKey: "42", latestHeadCommit: headCommit, baseProjectRevisionId: "project-revision:observed", baseCommit, projectViewId, disclosure: "public", receipt: "fixture=proposal; credentialFree=true" }, mirrorRepositoryObservations: { "source:observed": observation } });
+  assert.equal(result.status, "succeeded");
+  const revision = Object.values(coordinator.snapshot().changeRevisions)[0];
+  assert.equal(revision?.mirrorRepositoryObservations?.["source:observed"]?.manifestDigest, observation.manifestDigest);
+  assert.equal(revision?.mirrorRepositoryObservations?.["source:observed"]?.proposalKey, "42");
 });
 
 function syncPayload(input: { projectViewId: string; head: string; deliveryId: string; remoteGeneration: string; operationId: string; checkpointId: string; expectedRemoteGeneration?: string; operationState?: string }) {

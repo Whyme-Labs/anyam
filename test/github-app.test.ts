@@ -290,7 +290,7 @@ test("GitHub App external proposals enter Authority as one stable Change with su
   assert.equal(observed.status, "succeeded");
   if (observed.status !== "succeeded") return;
 
-  const session: AuthoritySession = { realmId: "realm:github-app-fixture", principalId: "principal:owner", actorId: "actor:owner", sessionId: "session:owner", clientId: "client:qualification", authorizationEpoch: 1 };
+  const session: AuthoritySession = { realmId: "realm:github-app-fixture", principalId: "principal:owner", actorId: "actor:owner", sessionId: "session:owner", clientId: "anyam-mirror-fixture", authorizationEpoch: 1, kind: "mirror" };
   const coordinator = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot(session.realmId));
   const command = (name: "project.create" | "workspace.create" | "mirror.configure" | "mirror.sync", idempotencyKey: string, payload: Record<string, unknown>) => coordinator.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: name, idempotencyKey, payload }, session);
   assert.equal(command("project.create", "github-app:project", { projectId: "project:video-player", name: "Video Player", referenceType: "typescript", sourceSpaces: [{ id: "source:community", name: "Community", classification: "public", snapshotId: "commit:one" }], projectRevisionId: "project-revision:one" }).status, "succeeded");

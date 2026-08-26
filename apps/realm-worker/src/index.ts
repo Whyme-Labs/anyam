@@ -46,6 +46,7 @@ import { authorizeMcpCommandTarget } from "../../../src/cloudflare/mcp-command-t
 import { parseRepositoryObservationServiceResponse, verifyRepositoryObservation, type RepositoryObservationRequest } from "../../../src/portability/repository-observation.ts";
 import { prepareHostedRevisionPublish, type HostedRevisionObservationInput } from "../../../src/cloudflare/hosted-revision-publication.ts";
 import { assertAuthoritySnapshotEquivalent, AuthoritySQLiteStore, type AuthoritySqlHost } from "../../../src/cloudflare/authority-sqlite.ts";
+import { verifyMirrorIngestionHandoff, type MirrorIngestionHandoff } from "../../../src/portability/mirror-observation.ts";
 
 export type Env = AnyamRealmOAuthEnv;
 
@@ -57,6 +58,7 @@ const REALM_OAUTH_GRANT_PREFIX = "anyam/realm-oauth-grant/v1:";
 const REALM_AUTHORITY_SNAPSHOT_KEY = "anyam/realm-authority/snapshot/v1";
 const REALM_AUTHORITY_RECOVERY_STATUS_KEY = "anyam/realm-authority/recovery-status/v1";
 const REALM_AUTHORITY_RECOVERY_RESTORE_PREFIX = "anyam/realm-authority/recovery-restore/v1:";
+const REALM_MIRROR_HANDOFF_NONCE_PREFIX = "anyam/realm-mirror-handoff-nonce/v1:";
 const REALM_GITHUB_ACTIONS_BRIDGE_SNAPSHOT_KEY = "anyam/github-actions-bridge/snapshot/v1";
 const REALM_GITHUB_ACTIONS_BRIDGE_IMPORT_SNAPSHOT_KEY = "anyam/github-actions-bridge/import-snapshot/v1";
 const REALM_GITHUB_ACTIONS_BRIDGE_OUTBOUND_SNAPSHOT_KEY = "anyam/github-actions-bridge/outbound-snapshot/v1";
@@ -1457,10 +1459,44 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     });
   }
 
+  /**
+   * Consume one signed provider Mirror handoff. This is the only hosted path
+   * that may advance mirror.sync or mirror.reconcile. Human, OAuth, MCP, and
+   * generic Authority sessions are intentionally not accepted here.
+   */
+  private async authorityMirrorIngest(body: CoordinatorRequestBody): Promise<Response> {
+    await this.requireAuthorityActive();
+    const keyId = this.env.ANYAM_MIRROR_HANDOFF_KEY_ID?.trim();
+    const secret = this.env.ANYAM_MIRROR_HANDOFF_SECRET?.trim();
+    if (!keyId || !secret) throw new AuthorityPlaneError({ code: "blocked", message: "Mirror ingestion is not configured with an internal handoff key.", recoveryAction: "configure ANYAM_MIRROR_HANDOFF_KEY_ID and the secret ANYAM_MIRROR_HANDOFF_SECRET before binding a provider Mirror adapter", receipt: `mirrorIngestion=key-not-configured; keyId=${keyId ? "present" : "missing"}; secret=${secret ? "present" : "missing"}; transition=not-applied` });
+    const verification = await verifyMirrorIngestionHandoff({ value: body.handoff, keyId, secret });
+    if (!verification.valid) throw new AuthorityPlaneError({ code: "invalid_request", message: "The signed Mirror handoff is invalid.", recoveryAction: verification.recoveryAction, receipt: verification.receipt });
+    const handoff: MirrorIngestionHandoff = verification.handoff;
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      const nonceKey = `${REALM_MIRROR_HANDOFF_NONCE_PREFIX}${handoff.nonce}`;
+      const nowTimestamp = Date.now();
+      for (const [key, value] of await this.ctx.storage.list<{ expiresAt: string }>({ prefix: REALM_MIRROR_HANDOFF_NONCE_PREFIX })) {
+        if (Date.parse(value.expiresAt) <= nowTimestamp) await this.ctx.storage.delete(key);
+      }
+      if (await this.ctx.storage.get<{ expiresAt: string }>(nonceKey)) throw new AuthorityPlaneError({ code: "conflict", message: "The signed Mirror handoff nonce has already been consumed.", recoveryAction: "request a fresh signed handoff for the same provider delivery after reconciling the prior checkpoint", receipt: "mirrorIngestion=handoff-replay; providerInvocation=false; transition=not-applied" });
+      const mirrorId = typeof handoff.command.payload.mirrorId === "string" ? handoff.command.payload.mirrorId : "";
+      const current = await this.authoritySnapshot();
+      const mirror = current.mirrors[mirrorId];
+      if (!mirror) throw new AuthorityPlaneError({ code: "not_found", message: "The signed Mirror handoff names an unavailable Mirror.", recoveryAction: "configure the Mirror in this Realm and request a fresh provider handoff", receipt: `mirror=${mirrorId || "missing"}; mirrorIngestion=not-found; providerInvocation=false` });
+      await this.ctx.storage.put(nonceKey, { expiresAt: handoff.expiresAt });
+      const identitySnapshot = this.requireIdentity().getRecoverySnapshot();
+      const session: AuthoritySession = { realmId: identitySnapshot.realm.id, principalId: `mirror-provider:${mirror.provider}`, actorId: `mirror:${mirror.id}`, sessionId: `mirror-handoff:${handoff.nonce}`, clientId: "anyam-mirror-coordinator", authorizationEpoch: identitySnapshot.realm.authorizationEpoch, kind: "mirror" };
+      const coordinator = new AuthorityPlaneCoordinator(current);
+      const result = coordinator.execute(handoff.command, session);
+      await this.persistAuthoritySnapshot(current, coordinator.snapshot());
+      return coordinatorJson({ ...result, provenance: { mirrorId: mirror.id, provider: mirror.provider, handoffKeyId: handoff.keyId, nonce: handoff.nonce }, credentialFree: true, canonicalWrite: false, receipt: `${result.receipt}; authority=mirror-ingestion; signedHandoff=true; canonicalWrite=false` }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
+    });
+  }
+
   private async authorityCommand(body: CoordinatorRequestBody): Promise<Response> {
     await this.requireAuthorityActive();
     const command = coordinatorString(body, "command") as AuthorityCommandName;
-    const allowed: readonly AuthorityCommandName[] = ["project.create", "intent.create", "intent.assign", "intent.comment", "intent.close", "intent.reopen", "pullRequest.open", "pullRequest.update", "pullRequest.review", "pullRequest.close", "pullRequest.reopen", "pullRequest.block", "pullRequest.merge", "workspace.create", "change.create", "revision.publish", "run.request", "landing.apply", "release.create", "target.configure", "promotion.request", "mirror.configure", "mirror.sync", "mirror.reconcile"];
+    const allowed: readonly AuthorityCommandName[] = ["project.create", "intent.create", "intent.assign", "intent.comment", "intent.close", "intent.reopen", "pullRequest.open", "pullRequest.update", "pullRequest.review", "pullRequest.close", "pullRequest.reopen", "pullRequest.block", "pullRequest.merge", "workspace.create", "change.create", "revision.publish", "run.request", "landing.apply", "release.create", "target.configure", "promotion.request", "mirror.configure"];
     if (!allowed.includes(command)) throw new AuthorityPlaneError({ code: "invalid_request", message: `Authority command ${command} is not supported by this vertical slice.`, recoveryAction: `use one of ${allowed.join(", ")} and retry; no authority transition was accepted`, receipt: `command=${command}; transition=not-applied` });
     const payload = body.payload;
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new AuthorityPlaneError({ code: "invalid_request", message: "Authority command payload must be a JSON object.", recoveryAction: "send the command-specific payload as an object; no authority transition was accepted", receipt: `command=${command}; payload=object-required; transition=not-applied` });
@@ -1841,6 +1877,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/github-actions-bridge/activate/internal") return await this.githubActionsBridgeActivate(body);
       if (url.pathname === "/github-actions-bridge/proposal/internal") return await this.githubActionsBridgeProposal(body);
       if (url.pathname === "/authority/promotion/status/internal") return await this.authorityPromotionStatus(body);
+      if (url.pathname === "/authority/mirror-ingest/internal") return await this.authorityMirrorIngest(body);
       if (url.pathname === "/authority/mcp-command/internal") return await this.authorityMcpCommand(body);
       if (url.pathname === "/authority/runner-profile/internal") return await this.authorityRunnerProfile(body);
       if (url.pathname === "/authority/runner-complete/internal") return await this.authorityRunnerComplete(body);

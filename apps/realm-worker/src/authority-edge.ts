@@ -390,6 +390,7 @@ function mirrorError(status: number, code: string, recoveryAction: string, recei
 }
 
 async function mirrorMutation(request: Request, env: AnyamRealmOAuthEnv, operation: MirrorMutation, mirrorId?: string): Promise<Response> {
+  if (operation !== "configure") return mirrorError(410, "mirror_ingestion_internal_only", "Provider Mirror sync and reconciliation are accepted only through the internal signed Mirror handoff after RepositoryDriver observation; no human or generic Authority command can submit provider claims.", "mirrorIngestion=internal-only; providerObservation=required; transition=not-applied");
   const sessionId = await anyamRealmOwnerSessionId(request, env);
   if (!sessionId) return mirrorError(401, "owner_authentication_required", "Authenticate the Realm owner through /owner/login before mutating a Repository Mirror.", "ownerSession=missing-or-invalid; transition=not-applied");
   if (request.method !== "POST") return mirrorError(405, "method_not_allowed", `Use POST /api/mirrors${mirrorId ? `/${encodeURIComponent(mirrorId)}/${operation}` : ""} with one Idempotency-Key header.`, "method=post-required; transition=not-applied");
@@ -419,6 +420,26 @@ async function mirrorMutation(request: Request, env: AnyamRealmOAuthEnv, operati
     const code = status === 404 ? "mirror_not_found" : status === 403 ? "owner_session_rejected" : status === 422 ? "invalid_request" : status === 409 ? "mirror_conflict" : "authority_coordinator_rejected";
     const recoveryAction = status === 404 ? "Verify the Project, Source Space, Mirror, Project View, and canonical Revision identifiers without probing hidden resources." : status === 409 ? "Read the current Mirror checkpoint, reuse the original idempotent payload, or choose an explicit reconciliation; no provider credential was accepted." : status === 403 ? "Authenticate the Realm owner again and retry the same typed request." : "Inspect the Durable Object receipt and retry only the same idempotent request when safe.";
     return mirrorError(status, code, recoveryAction, `authority=coordinator-rejected; errorClass=${errorClass}; ${coordinatorDetailReceipt(error)}`);
+  }
+}
+
+async function mirrorIngestionMutation(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
+  if (request.method !== "POST") return mirrorError(405, "method_not_allowed", "Use POST /internal/mirrors/ingest with one signed Mirror handoff.", "mirrorIngestion=post-required; transition=not-applied");
+  let body: Record<string, unknown>;
+  try {
+    body = await readBody(request);
+  } catch {
+    return mirrorError(422, "invalid_request", "Send one signed Mirror handoff JSON object.", "mirrorIngestion=handoff-object-required; transition=not-applied");
+  }
+  if (body.handoff === null || typeof body.handoff !== "object" || Array.isArray(body.handoff)) return mirrorError(422, "invalid_request", "Send one signed Mirror handoff under handoff.", "mirrorIngestion=handoff-object-required; transition=not-applied");
+  try {
+    const result = await requestAnyamRealmCoordinator(env, "/authority/mirror-ingest/internal", { handoff: body.handoff }, { allowBlocked: true });
+    const status = result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503;
+    return json(result, status);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    const status = detail.includes("not_found") ? 404 : detail.includes("conflict") || detail.includes("replay") ? 409 : detail.includes("invalid_request") ? 422 : 503;
+    return mirrorError(status, status === 404 ? "mirror_not_found" : status === 409 ? "mirror_conflict" : status === 422 ? "invalid_request" : "authority_coordinator_rejected", status === 404 ? "Configure the named Mirror before sending a provider handoff." : status === 409 ? "Inspect the Mirror checkpoint and request a fresh signed handoff only when safe." : "Inspect the signed Mirror handoff receipt and retry only the same immutable request when safe.", `authority=mirror-ingestion-rejected; errorClass=${status}; signedHandoff=true`);
   }
 }
 
@@ -799,10 +820,11 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   const isTargetRoute = url.pathname === "/api/targets" || url.pathname.startsWith("/api/targets/");
   const isPromotionRoute = url.pathname === "/api/promotions" || url.pathname.startsWith("/api/promotions/");
   const mirrorRoute = mirrorPath(url.pathname);
+  const mirrorIngestionRoute = url.pathname === "/internal/mirrors/ingest";
   const promotionExecutionRoute = promotionExecutionPath(url.pathname);
   const promotionStatusRoute = promotionStatusPath(url.pathname);
   const revisionRoute = revisionPublishPath(url.pathname);
-  if (!url.pathname.startsWith("/api/authority") && !isProjectRoute && !isChangeRoute && !isWorkspaceRoute && !isRunRoute && !isEvidenceRoute && !isArtifactRoute && !isLandingRoute && !isReleaseRoute && !isTargetRoute && !isPromotionRoute && !mirrorRoute.matched && !revisionRoute.matched && !intentRoute.matched && !pullRequestRoute.matched) return undefined;
+  if (!url.pathname.startsWith("/api/authority") && !isProjectRoute && !isChangeRoute && !isWorkspaceRoute && !isRunRoute && !isEvidenceRoute && !isArtifactRoute && !isLandingRoute && !isReleaseRoute && !isTargetRoute && !isPromotionRoute && !mirrorRoute.matched && !mirrorIngestionRoute && !revisionRoute.matched && !intentRoute.matched && !pullRequestRoute.matched) return undefined;
 
   const health = customerRealmWorkerHealth(env);
   if (health.status !== "ready") {
@@ -852,6 +874,8 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
     if (mirrorRoute.mirrorId) return request.method === "GET" ? mirrorRead(request, env, mirrorRoute.mirrorId) : mirrorError(400, "invalid_mirror_path", "Use POST /api/mirrors/{mirrorId}/sync or /reconcile for a Mirror mutation; GET is read-only.", "path=operation-required; transition=not-applied");
     return request.method === "GET" ? mirrorRead(request, env) : mirrorMutation(request, env, "configure");
   }
+
+  if (mirrorIngestionRoute) return mirrorIngestionMutation(request, env);
 
   if (revisionRoute.matched) {
     if (revisionRoute.malformed) return revisionError(400, "invalid_revision_path", "Use POST /api/changes/{changeId}/revisions with one safe URL-encoded Change identifier.", "path=malformed; transition=not-applied");
@@ -903,7 +927,7 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
     return json({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "not_found", recoveryAction: "Use GET /api/authority/state, POST /api/authority/command, or the owner-authenticated Authority recovery endpoints.", receipt: `authorityRoute=${url.pathname}; method=${request.method}; transition=not-started` }, 404);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
-    const status = detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : detail.includes("idempotency_conflict") || detail.includes("stale_state") || detail.includes("conflict") || detail.includes("promotion=blocked") ? 409 : 503;
+    const status = detail.includes("realm_coordinator_invalid_request") ? 422 : detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : detail.includes("idempotency_conflict") || detail.includes("stale_state") || detail.includes("conflict") || detail.includes("promotion=blocked") ? 409 : 503;
     return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "authority_coordinator_rejected", recoveryAction: "Inspect the Durable Object receipt and retry only the same idempotent command when safe.", receipt: `authority=coordinator-rejected; detail=${detail}; credentialFree=true` }, status);
   }
 }

@@ -337,6 +337,8 @@ export type ChangeRevision = {
   sourceSpaceSnapshots?: Readonly<Record<string, string>>;
   /** Server-verified Git observations for hosted publication. */
   sourceSpaceObservations?: Readonly<Record<string, RepositoryObservation>>;
+  /** Server-verified Git observations for an internal Mirror proposal. */
+  mirrorRepositoryObservations?: Readonly<Record<string, MirrorRepositoryObservation>>;
   /** Source Spaces whose content or disclosure policy is affected. */
   affectedSourceSpaceIds?: readonly string[];
   /** Modules whose declared scope is affected by this revision. */
@@ -1050,6 +1052,32 @@ export type RepositoryObservation = {
   repositoryId: string;
   sourceSpaceId: string;
   workspaceId: string;
+  projectViewId: string;
+  objectFormat: GitObjectFormat;
+  symbolicRef: string;
+  commitOid: string;
+  treeOid: string;
+  baseCommitOid: string;
+  ancestryVerified: true;
+  manifestDigest: string;
+  observedAt: string;
+  receipt: string;
+};
+
+/**
+ * A RepositoryDriver observation for an external Mirror proposal. Mirror
+ * ingestion has no Workspace, so it carries an explicit provider proposal
+ * context instead of overloading the Workspace observation contract.
+ */
+export type MirrorRepositoryObservation = {
+  protocol: "anyam.mirror-repository-observation/v1";
+  repositoryId: string;
+  sourceSpaceId: string;
+  mirrorId: string;
+  proposalKey: string;
+  deliveryId: string;
+  provider: string;
+  remoteRepository: string;
   projectViewId: string;
   objectFormat: GitObjectFormat;
   symbolicRef: string;

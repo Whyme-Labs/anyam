@@ -234,6 +234,17 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
     return await response.json() as Record<string, unknown>;
   };
 
+  const genericMirrorIngestion = await handleAuthorityRequest(new Request("https://realm.example/api/authority/command", {
+    method: "POST",
+    headers: { cookie: `anyam_owner_session=${encodeURIComponent(hostSessionId)}`, "content-type": "application/json" },
+    body: JSON.stringify({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "mirror.sync", idempotencyKey: "idem:generic-mirror-ingestion", payload: { mirrorId: "mirror:invented", externalProposal: { latestHeadCommit: "invented" } } }),
+  }), env);
+  assert.ok(genericMirrorIngestion);
+  assert.equal(genericMirrorIngestion.status, 422, await genericMirrorIngestion.clone().text());
+  const genericMirrorBody = await genericMirrorIngestion.json() as Record<string, unknown>;
+  assert.equal(genericMirrorBody.code, "authority_coordinator_rejected");
+  assert.match(String(genericMirrorBody.receipt), /mirrorIngestion=internal-only/);
+
   const projectBootstrap = await bootstrap("/api/projects", "idem:typed-project", { projectId: "project:typed-authority-test", name: "Typed Authority Test", referenceType: "git", sourceSpaces: [{ id: "source:typed-authority-test", name: "public", classification: "public", snapshotId: "git:base" }] });
   assert.equal(projectBootstrap.response.status, 200);
   assert.equal(projectBootstrap.value.status, "succeeded");

@@ -28,7 +28,13 @@ The validator now requires:
 - every receipt owner, including provider and operations owners, to be one of
   the named human participants; and
 - exactly `cloudflare-workers` as the provider identity for the required Worker
-  Release/Target receipt.
+  Release/Target receipt;
+- a digest- and signature-bound Authority export containing the named terminal
+  Changes, matching terminal audit events, Change Revisions, Landings, and
+  provider Promotion identities; and
+- an independently signed external security attestation bound to the cohort,
+  Realm, report digest, and signing time. Missing trusted keys are explicitly
+  `manual-review-only`, never `ready`.
 
 Missing, malformed, duplicate, future, out-of-window, unrelated, and
 credential-bearing evidence remains a blocker with an actionable key and next

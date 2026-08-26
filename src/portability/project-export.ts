@@ -25,6 +25,7 @@ import {
   type ProjectExportLineage,
   type ProjectRevision,
   type PullRequest,
+  type PullRequestReview,
   type RepositoryExport,
   type RepositoryMirror,
   type MirrorCheckpoint,
@@ -346,6 +347,17 @@ function manifestProblems(manifest: ProjectExport): readonly string[] {
     if (!["open", "closed", "merged", "blocked"].includes(String(pullRequest.status))) problems.push(`Pull Request ${pullRequest.id ?? "unknown"} has an invalid status`);
     if (!["pending", "changes-requested", "approved"].includes(String(pullRequest.reviewState))) problems.push(`Pull Request ${pullRequest.id ?? "unknown"} has an invalid review state`);
     if (pullRequest.disclosure !== "public" && pullRequest.disclosure !== "project" && pullRequest.disclosure !== "restricted") problems.push(`Pull Request ${pullRequest.id ?? "unknown"} has an invalid disclosure`);
+    const reviewsValue = (pullRequest as Partial<PullRequest> & { reviews?: unknown }).reviews;
+    if (reviewsValue !== undefined && !Array.isArray(reviewsValue)) problems.push(`Pull Request ${pullRequest.id ?? "unknown"} has malformed review history`);
+    for (const reviewValue of Array.isArray(reviewsValue) ? reviewsValue : []) {
+      if (reviewValue === null || typeof reviewValue !== "object" || Array.isArray(reviewValue)) {
+        problems.push(`Pull Request ${pullRequest.id ?? "unknown"} has a malformed review record`);
+        continue;
+      }
+      const review = reviewValue as Partial<PullRequestReview>;
+      if (typeof review.id !== "string" || review.id.length === 0 || review.pullRequestId !== pullRequest.id || typeof review.headCommit !== "string" || typeof review.baseCommit !== "string" || typeof review.revisionSetDigest !== "string" || typeof review.reviewDigest !== "string" || typeof review.reviewedAt !== "string" || typeof review.receipt !== "string") problems.push(`Pull Request ${pullRequest.id ?? "unknown"} has an incomplete review record`);
+      if (!["pending", "changes-requested", "approved"].includes(String(review.state))) problems.push(`Pull Request ${pullRequest.id ?? "unknown"} has a review record with an invalid state`);
+    }
   }
   const artifactEntries = manifest.artifactFiles;
   if (manifest.artifacts.length > 0 && !artifactEntries) problems.push("Artifact byte disposition is missing");

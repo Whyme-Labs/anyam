@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   CONTRACT_VERSIONS,
   createProject,
@@ -21,6 +22,7 @@ import {
   type Project,
   type ProjectRevision,
   type PullRequest,
+  type PullRequestReview,
   type ProjectView,
   type Release,
   type ReleaseInputSet,
@@ -344,6 +346,29 @@ function stableJson(value: unknown): string {
   return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
 }
 
+function pullRequestRevisionSetDigest(revisionIds: readonly string[]): string {
+  return `sha256:${createHash("sha256").update(stableJson([...revisionIds])).digest("hex")}`;
+}
+
+function pullRequestApprovalIsCurrent(pullRequest: PullRequest): boolean {
+  return pullRequest.reviewState === "approved"
+    && pullRequest.reviewDigest !== undefined
+    && pullRequest.reviewHeadCommit === pullRequest.headCommit
+    && pullRequest.reviewBaseCommit === pullRequest.baseCommit
+    && pullRequest.reviewRevisionSetDigest === pullRequestRevisionSetDigest(pullRequest.revisionIds);
+}
+
+function invalidatePullRequestReview(pullRequest: PullRequest, timestamp: string, reason: string): PullRequest {
+  const { reviewDigest: _reviewDigest, reviewHeadCommit: _reviewHeadCommit, reviewBaseCommit: _reviewBaseCommit, reviewRevisionSetDigest: _reviewRevisionSetDigest, ...withoutApproval } = pullRequest;
+  return {
+    ...withoutApproval,
+    reviewState: "pending",
+    reviewInvalidatedAt: timestamp,
+    updatedAt: timestamp,
+    receipt: `pullRequest=review-invalidated; id=${pullRequest.id}; reason=${reason}; approval=stale; canonicalWrite=false`,
+  };
+}
+
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
@@ -524,17 +549,18 @@ export function normalizeAuthorityPlaneSnapshot(snapshot: AuthorityPlaneSnapshot
   }
   const mirrorDeliveries = Object.fromEntries(mirrorDeliveryEntries);
   const targets = Object.fromEntries(Object.entries(snapshot.targets ?? {}).map(([id, target]) => [id, { ...target, deploymentProfile: targetDeploymentProfile(target) }]));
+  const pullRequests = Object.fromEntries(Object.entries(snapshot.pullRequests ?? {}).map(([id, pullRequest]) => [id, { ...pullRequest, reviews: pullRequest.reviews ?? [] }]));
   return {
     ...snapshot,
     intents: snapshot.intents ?? {},
     intentComments: snapshot.intentComments ?? {},
-    pullRequests: snapshot.pullRequests ?? {},
     runnerProfiles: snapshot.runnerProfiles ?? {},
     runnerAttempts: snapshot.runnerAttempts ?? {},
     mirrors: snapshot.mirrors ?? {},
     mirrorOperations: snapshot.mirrorOperations ?? {},
     mirrorCheckpoints: snapshot.mirrorCheckpoints ?? {},
     targets,
+    pullRequests,
     externalProposals,
     mirrorDeliveries,
   };
@@ -1224,7 +1250,7 @@ export class AuthorityPlaneCoordinator {
         const externalKey = optionalString(payload.externalKey);
         const remoteRepository = optionalString(payload.remoteRepository);
         const sourceSpaceId = optionalString(payload.sourceSpaceId);
-        const reviewDigest = optionalString(payload.reviewDigest);
+        if (payload.reviewDigest !== undefined) throw new AuthorityPlaneError({ code: "invalid_request", message: "Pull Request approval cannot be attached while opening a Pull Request.", recoveryAction: "open the Pull Request first, then submit a separate review bound to its exact head and Revision set", receipt: `pullRequest=${id}; review=separate-transition-required; transition=not-applied` });
         const pullRequest: PullRequest = {
           protocol: CONTRACT_VERSIONS.pullRequest,
           id,
@@ -1242,7 +1268,7 @@ export class AuthorityPlaneCoordinator {
           description: optionalString(payload.description) ?? "",
           status: "open",
           reviewState: "pending",
-          ...(reviewDigest ? { reviewDigest } : {}),
+          reviews: [],
           revisionIds,
           disclosure,
           createdAt: now(),
@@ -1257,21 +1283,28 @@ export class AuthorityPlaneCoordinator {
         const existing = next.pullRequests[pullRequestId];
         if (!existing) throw new AuthorityPlaneError({ code: "not_found", message: `Pull Request ${pullRequestId} is not available in this Realm.`, recoveryAction: "verify the Pull Request identifier without probing undiscoverable resources", receipt: `pullRequest=${pullRequestId}; operation=pullRequest.update; discoverable=false` });
         if (projectId !== undefined && existing.projectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Pull Request ${pullRequestId} is not available for Project ${projectId}.`, recoveryAction: "verify the Pull Request identifier within the requested Project", receipt: `pullRequest=${pullRequestId}; project=${projectId}; operation=pullRequest.update; discoverable=false` });
+        if (existing.status === "merged") throw new AuthorityPlaneError({ code: "conflict", message: `Pull Request ${pullRequestId} is merged and terminal.`, recoveryAction: "create a new Pull Request or a follow-up Change; merged Pull Requests cannot be updated", receipt: `pullRequest=${pullRequestId}; terminal=true; operation=pullRequest.update; transition=not-applied` });
         const revisionId = optionalString(payload.revisionId);
         if (revisionId && next.changeRevisions[revisionId]?.changeId !== existing.changeId) throw new AuthorityPlaneError({ code: "conflict", message: `Change Revision ${revisionId} is not part of Change ${existing.changeId}.`, recoveryAction: "bind the Pull Request update only to a Revision produced by its Change", receipt: `pullRequest=${pullRequestId}; revision=${revisionId}; lineage=not-accepted` });
         const revisionIds = revisionId && !existing.revisionIds.includes(revisionId) ? [...existing.revisionIds, revisionId] : [...existing.revisionIds];
-        const updated: PullRequest = {
+        const nextHeadRef = optionalString(payload.headRef) ?? existing.headRef;
+        const nextBaseRef = optionalString(payload.baseRef) ?? existing.baseRef;
+        const nextHeadCommit = optionalString(payload.headCommit) ?? existing.headCommit;
+        const nextBaseCommit = optionalString(payload.baseCommit) ?? existing.baseCommit;
+        const reviewContextChanged = nextHeadRef !== existing.headRef || nextBaseRef !== existing.baseRef || nextHeadCommit !== existing.headCommit || nextBaseCommit !== existing.baseCommit || !sameStrings(revisionIds, existing.revisionIds);
+        const candidate: PullRequest = {
           ...existing,
-          ...(optionalString(payload.headRef) ? { headRef: optionalString(payload.headRef)! } : {}),
-          ...(optionalString(payload.baseRef) ? { baseRef: optionalString(payload.baseRef)! } : {}),
-          ...(optionalString(payload.headCommit) ? { headCommit: optionalString(payload.headCommit)! } : {}),
-          ...(optionalString(payload.baseCommit) ? { baseCommit: optionalString(payload.baseCommit)! } : {}),
+          headRef: nextHeadRef,
+          baseRef: nextBaseRef,
+          headCommit: nextHeadCommit,
+          baseCommit: nextBaseCommit,
           ...(optionalString(payload.title) ? { title: optionalString(payload.title)! } : {}),
           ...(payload.description !== undefined ? { description: requiredString(payload.description, "description") } : {}),
           revisionIds,
           updatedAt: now(),
           receipt: `pullRequest=updated; id=${pullRequestId}; head=${optionalString(payload.headCommit) ?? existing.headCommit}; revisions=${revisionIds.length}; canonicalWrite=false`,
         };
+        const updated = reviewContextChanged ? invalidatePullRequestReview(candidate, candidate.updatedAt, "head-base-or-revision-change") : candidate;
         next.pullRequests[pullRequestId] = updated;
         return success({ pullRequest: updated }, updated.receipt);
       }
@@ -1279,9 +1312,14 @@ export class AuthorityPlaneCoordinator {
         const pullRequestId = requiredString(payload.pullRequestId, "pullRequestId");
         const existing = next.pullRequests[pullRequestId];
         if (!existing) throw new AuthorityPlaneError({ code: "not_found", message: `Pull Request ${pullRequestId} is not available in this Realm.`, recoveryAction: "verify the Pull Request identifier without probing undiscoverable resources", receipt: `pullRequest=${pullRequestId}; operation=pullRequest.review; discoverable=false` });
+        if (existing.status === "merged") throw new AuthorityPlaneError({ code: "conflict", message: `Pull Request ${pullRequestId} is merged and terminal.`, recoveryAction: "create a new Pull Request or follow-up Change; merged Pull Requests cannot receive reviews", receipt: `pullRequest=${pullRequestId}; terminal=true; operation=pullRequest.review; transition=not-applied` });
         const reviewState = enumString(payload.reviewState, "reviewState", ["pending", "changes-requested", "approved"] as const);
         const reviewDigest = requiredString(payload.reviewDigest, "reviewDigest");
-        const updated: PullRequest = { ...existing, reviewState, reviewDigest, updatedAt: now(), receipt: `pullRequest=review-updated; id=${pullRequestId}; reviewState=${reviewState}; canonicalWrite=false` };
+        const reviewedAt = now();
+        const revisionSetDigest = pullRequestRevisionSetDigest(existing.revisionIds);
+        const review: PullRequestReview = { protocol: CONTRACT_VERSIONS.pullRequestReview, id: optionalString(payload.reviewId) ?? opaqueId("pull-request-review"), pullRequestId, reviewer: actor, state: reviewState, headCommit: existing.headCommit, baseCommit: existing.baseCommit, revisionSetDigest, reviewDigest, reviewedAt, receipt: `pullRequest=review-recorded; id=${pullRequestId}; reviewState=${reviewState}; head=${existing.headCommit}; revisions=${existing.revisionIds.length}; canonicalWrite=false` };
+        const { reviewInvalidatedAt: _reviewInvalidatedAt, ...reviewable } = existing;
+        const updated: PullRequest = { ...reviewable, reviewState, reviewDigest, reviewHeadCommit: existing.headCommit, reviewBaseCommit: existing.baseCommit, reviewRevisionSetDigest: revisionSetDigest, reviews: [...(existing.reviews ?? []), review], updatedAt: reviewedAt, receipt: `pullRequest=review-updated; id=${pullRequestId}; reviewState=${reviewState}; head=${existing.headCommit}; revisionSetDigest=${revisionSetDigest}; canonicalWrite=false` };
         next.pullRequests[pullRequestId] = updated;
         return success({ pullRequest: updated }, updated.receipt);
       }
@@ -1293,10 +1331,12 @@ export class AuthorityPlaneCoordinator {
         const existing = next.pullRequests[pullRequestId];
         if (!existing) throw new AuthorityPlaneError({ code: "not_found", message: `Pull Request ${pullRequestId} is not available in this Realm.`, recoveryAction: "verify the Pull Request identifier without probing undiscoverable resources", receipt: `pullRequest=${pullRequestId}; operation=${command.command}; discoverable=false` });
         if (projectId !== undefined && existing.projectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Pull Request ${pullRequestId} is not available for Project ${projectId}.`, recoveryAction: "verify the Pull Request identifier within the requested Project", receipt: `pullRequest=${pullRequestId}; project=${projectId}; operation=${command.command}; discoverable=false` });
+        if (existing.status === "merged") throw new AuthorityPlaneError({ code: "conflict", message: `Pull Request ${pullRequestId} is merged and terminal.`, recoveryAction: "create a new Pull Request or follow-up Change; merged Pull Requests cannot transition again", receipt: `pullRequest=${pullRequestId}; terminal=true; operation=${command.command}; transition=not-applied` });
         const desired = command.command === "pullRequest.close" ? "closed" : command.command === "pullRequest.reopen" ? "open" : command.command === "pullRequest.block" ? "blocked" : "merged";
         if (desired === "merged") {
           const change = next.changes[existing.changeId];
           if (!change || change.status !== "landed") throw new AuthorityPlaneError({ code: "conflict", message: `Pull Request ${pullRequestId} cannot be marked merged before its Change is Landed.`, recoveryAction: "complete review and Landing for the mapped Change before merging the compatibility projection", receipt: `pullRequest=${pullRequestId}; change=${existing.changeId}; changeStatus=${change?.status ?? "missing"}; merge=not-accepted` });
+          if (!pullRequestApprovalIsCurrent(existing)) throw new AuthorityPlaneError({ code: "conflict", message: `Pull Request ${pullRequestId} has no current approval for its exact head, base, and Revision set.`, recoveryAction: "request a fresh approval for the current Pull Request head after completing Landing", receipt: `pullRequest=${pullRequestId}; approval=required; head=${existing.headCommit}; revisions=${existing.revisionIds.length}; merge=not-accepted` });
         }
         if (existing.status === desired) return success({ pullRequest: existing }, `pullRequest=${desired}; id=${pullRequestId}; unchanged=true; canonicalWrite=false`);
         const timestamp = now();
@@ -1782,9 +1822,13 @@ export class AuthorityPlaneCoordinator {
             const existingPullRequest = Object.values(next.pullRequests).find((candidate) => candidate.provider === proposalProvider && candidate.externalKey === proposalKey && candidate.remoteRepository === proposalRepository);
             const pullRequestStatus: PullRequest["status"] = proposalStatus === "merged" && proposalChange?.status !== "landed" ? "blocked" : proposalStatus;
             const pullRequestRevisionIds = proposalRevision && !(existingPullRequest?.revisionIds.includes(proposalRevision.id)) ? [...(existingPullRequest?.revisionIds ?? []), proposalRevision.id] : [...(existingPullRequest?.revisionIds ?? [])];
+            const mirrorReviewContextChanged = existingPullRequest !== undefined && (existingPullRequest.headCommit !== proposalHead || (proposalRemoteRef !== undefined && existingPullRequest.headRef !== proposalRemoteRef) || (proposalBaseCommit !== undefined && existingPullRequest.baseCommit !== proposalBaseCommit) || (proposalBaseRef !== undefined && existingPullRequest.baseRef !== proposalBaseRef) || !sameStrings(existingPullRequest.revisionIds, pullRequestRevisionIds));
             pullRequest = existingPullRequest
               ? { ...existingPullRequest, headCommit: proposalHead, ...(proposalRemoteRef ? { headRef: proposalRemoteRef } : {}), ...(proposalBaseCommit ? { baseCommit: proposalBaseCommit } : {}), ...(proposalBaseRef ? { baseRef: proposalBaseRef } : {}), status: pullRequestStatus, revisionIds: pullRequestRevisionIds, updatedAt: nowAt, receipt: `pullRequest=mirror-updated; id=${existingPullRequest.id}; proposal=${proposalKey}; head=${proposalHead}; status=${pullRequestStatus}; mapping=stable; credentialFree=true` }
               : { protocol: CONTRACT_VERSIONS.pullRequest, id: opaqueId("pull-request"), projectId: mirror.projectId, changeId: proposalChange!.id, provider: proposalProvider, externalKey: proposalKey, remoteRepository: proposalRepository, sourceSpaceId: mirror.sourceSpaceId, headRef: proposalRemoteRef ?? "refs/heads/main", baseRef: proposalBaseRef ?? "refs/heads/main", headCommit: proposalHead, baseCommit: proposalBaseCommit ?? canonicalSourceSnapshot ?? "unknown", title: optionalString(proposalValue.title) ?? `Pull Request ${proposalKey}`, description: optionalString(proposalValue.description) ?? "", status: pullRequestStatus, reviewState: "pending", revisionIds: proposalRevision ? [proposalRevision.id] : [], disclosure: proposalDisclosure, createdAt: nowAt, updatedAt: nowAt, receipt: `pullRequest=mirror-created; id=${proposalKey}; change=${proposalChange!.id}; head=${proposalHead}; status=${pullRequestStatus}; mapping=stable; credentialFree=true` };
+            if (pullRequest && !existingPullRequest) pullRequest = { ...pullRequest, reviews: [] };
+            if (existingPullRequest?.status === "merged") pullRequest = existingPullRequest;
+            else if (mirrorReviewContextChanged && pullRequest) pullRequest = invalidatePullRequestReview(pullRequest, nowAt, "mirror-head-base-or-revision-change");
             next.pullRequests[pullRequest.id] = pullRequest;
           }
         }

@@ -65,3 +65,49 @@ test("Pull Request compatibility rejects cross-Change revisions and preserves a 
   assert.equal(project.status, "succeeded");
   assert.throws(() => command(coordinator, "pullRequest.open", "pull-request:missing-change", { projectId: "project:pull-request-blocked", pullRequestId: "pr:missing-change", changeId: "change:missing", provider: "local", headRef: "refs/heads/feature", baseRef: "refs/heads/main", headCommit: "commit:head", baseCommit: "commit:base", title: "Missing Change", disclosure: "public" }), (error: unknown) => error instanceof AuthorityPlaneError && error.code === "not_found" && error.receipt.includes("pullRequest=not-created"));
 });
+
+test("Pull Request approvals are bound to the exact head and merged Pull Requests are terminal", () => {
+  const coordinator = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot(session.realmId));
+  assert.equal(command(coordinator, "project.create", "integrity:project", { projectId: "project:integrity", name: "Review integrity", referenceType: "git", sourceSpaces: [{ id: "source:integrity", name: "source", classification: "public", snapshotId: "commit:base" }], projectRevisionId: "revision:integrity:base" }).status, "succeeded");
+  const workspace = command(coordinator, "workspace.create", "integrity:workspace", { projectId: "project:integrity", workspaceId: "workspace:integrity", projectRevisionId: "revision:integrity:base", sourceSpaceIds: ["source:integrity"], mounts: ["source"] });
+  assert.equal(workspace.status, "succeeded");
+  if (workspace.status !== "succeeded") return;
+  const projectViewId = (workspace.value.view as { id: string }).id;
+  assert.equal(command(coordinator, "change.create", "integrity:change", { projectId: "project:integrity", changeId: "change:integrity", intentId: "intent:integrity", baseProjectRevisionId: "revision:integrity:base", workspaceId: "workspace:integrity" }).status, "succeeded");
+  const revision = command(coordinator, "revision.publish", "integrity:revision", { projectId: "project:integrity", changeId: "change:integrity", workspaceId: "workspace:integrity", projectViewId, projectRevisionId: "revision:integrity:candidate", sourceSpaceSnapshots: { "source:integrity": "commit:head-one" }, declaredEffects: ["source.modify"] });
+  assert.equal(revision.status, "succeeded");
+  if (revision.status !== "succeeded") return;
+  const revisionId = (revision.value.revision as { id: string }).id;
+  assert.equal(command(coordinator, "pullRequest.open", "integrity:open", { projectId: "project:integrity", pullRequestId: "pr:integrity", changeId: "change:integrity", provider: "local", headRef: "refs/heads/feature", baseRef: "refs/heads/main", headCommit: "commit:head-one", baseCommit: "commit:base", title: "Integrity", disclosure: "public", revisionIds: [revisionId] }).status, "succeeded");
+  const approved = command(coordinator, "pullRequest.review", "integrity:approve-one", { projectId: "project:integrity", pullRequestId: "pr:integrity", reviewState: "approved", reviewDigest: "sha256:review-one" });
+  assert.equal(approved.status, "succeeded");
+  if (approved.status !== "succeeded") return;
+  const approvedPullRequest = approved.value.pullRequest as Record<string, unknown>;
+  assert.equal(approvedPullRequest.reviewState, "approved");
+  assert.equal(Array.isArray(approvedPullRequest.reviews), true);
+  const reviews = approvedPullRequest.reviews as Array<Record<string, unknown>>;
+  assert.equal(reviews.length, 1);
+  assert.equal(reviews[0]?.headCommit, "commit:head-one");
+  assert.equal(typeof reviews[0]?.revisionSetDigest, "string");
+  const updated = command(coordinator, "pullRequest.update", "integrity:update-head", { projectId: "project:integrity", pullRequestId: "pr:integrity", headCommit: "commit:head-two" });
+  assert.equal(updated.status, "succeeded");
+  if (updated.status !== "succeeded") return;
+  const stalePullRequest = updated.value.pullRequest as Record<string, unknown>;
+  assert.equal(stalePullRequest.reviewState, "pending");
+  assert.equal(stalePullRequest.reviewDigest, undefined);
+  assert.equal((stalePullRequest.reviews as Array<Record<string, unknown>>).length, 1);
+  assert.equal(command(coordinator, "landing.apply", "integrity:landing", { projectId: "project:integrity", changeId: "change:integrity", changeRevisionId: revisionId, expectedCanonicalProjectRevisionId: "revision:integrity:base", projectRevisionId: "revision:integrity:landed" }).status, "succeeded");
+  assert.throws(() => command(coordinator, "pullRequest.merge", "integrity:merge-stale", { projectId: "project:integrity", pullRequestId: "pr:integrity" }), (error: unknown) => error instanceof AuthorityPlaneError && error.code === "conflict" && error.receipt.includes("approval"));
+  assert.equal(command(coordinator, "pullRequest.review", "integrity:approve-two", { projectId: "project:integrity", pullRequestId: "pr:integrity", reviewState: "approved", reviewDigest: "sha256:review-two" }).status, "succeeded");
+  assert.equal(command(coordinator, "pullRequest.merge", "integrity:merge", { projectId: "project:integrity", pullRequestId: "pr:integrity" }).status, "succeeded");
+  for (const [operation, key, payload] of [
+    ["pullRequest.update", "integrity:terminal-update", { headCommit: "commit:head-three" }],
+    ["pullRequest.review", "integrity:terminal-review", { reviewState: "changes-requested", reviewDigest: "sha256:review-three" }],
+    ["pullRequest.close", "integrity:terminal-close", {}],
+    ["pullRequest.reopen", "integrity:terminal-reopen", {}],
+    ["pullRequest.block", "integrity:terminal-block", {}],
+    ["pullRequest.merge", "integrity:terminal-merge", {}],
+  ] as const) {
+    assert.throws(() => command(coordinator, operation, key, { projectId: "project:integrity", pullRequestId: "pr:integrity", ...payload }), (error: unknown) => error instanceof AuthorityPlaneError && error.code === "conflict" && error.receipt.includes("terminal"));
+  }
+});

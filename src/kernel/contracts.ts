@@ -10,6 +10,7 @@ export const CONTRACT_VERSIONS = {
   intent: "anyam.intent/v1",
   intentComment: "anyam.intent-comment/v1",
   pullRequest: "anyam.pull-request/v1",
+  pullRequestReview: "anyam.pull-request-review/v1",
   change: "anyam.change/v1",
   conflict: "anyam.conflict/v1",
   landing: "anyam.landing/v1",
@@ -149,6 +150,19 @@ export type IntentComment = {
 
 export type PullRequestStatus = "open" | "closed" | "merged" | "blocked";
 export type PullRequestReviewState = "pending" | "changes-requested" | "approved";
+export type PullRequestReview = {
+  protocol: typeof CONTRACT_VERSIONS.pullRequestReview;
+  id: string;
+  pullRequestId: string;
+  reviewer: ActorRef;
+  state: PullRequestReviewState;
+  headCommit: string;
+  baseCommit: string;
+  revisionSetDigest: string;
+  reviewDigest: string;
+  reviewedAt: string;
+  receipt: string;
+};
 
 /**
  * Git-compatible Pull Request projection. Anyam owns the stable Change and
@@ -173,6 +187,11 @@ export type PullRequest = {
   status: PullRequestStatus;
   reviewState: PullRequestReviewState;
   reviewDigest?: string;
+  reviewHeadCommit?: string;
+  reviewBaseCommit?: string;
+  reviewRevisionSetDigest?: string;
+  reviewInvalidatedAt?: string;
+  reviews?: readonly PullRequestReview[];
   revisionIds: readonly string[];
   disclosure: DisclosureClassification;
   createdAt: string;

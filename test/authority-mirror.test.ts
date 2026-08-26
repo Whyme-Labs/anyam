@@ -147,8 +147,17 @@ test("Realm Authority persists mirror operations, maps one external proposal to 
   assert.match(duplicate.receipt, /duplicate=true/);
   assert.equal(Object.keys(coordinator.snapshot().changeRevisions).length, 1);
 
+  const mirroredPullRequest = Object.values(coordinator.snapshot().pullRequests)[0];
+  assert.ok(mirroredPullRequest);
+  const mirroredApproval = command(coordinator, "pullRequest.review", "mirror:approve", { projectId: "project:video-player", pullRequestId: mirroredPullRequest.id, reviewState: "approved", reviewDigest: "sha256:mirror-review" });
+  assert.equal(mirroredApproval.status, "succeeded");
+
   const second = command(coordinator, "mirror.sync", "delivery:two", syncPayload({ projectViewId, head: "commit:two", deliveryId: "delivery:two", remoteGeneration: "remote:g1", expectedRemoteGeneration: "remote:g1", operationId: "mirror-operation:two", checkpointId: "mirror-checkpoint:two" }));
   assert.equal(second.status, "succeeded");
+  const mirroredAfterHeadMove = coordinator.snapshot().pullRequests[mirroredPullRequest.id];
+  assert.equal(mirroredAfterHeadMove?.reviewState, "pending");
+  assert.equal(mirroredAfterHeadMove?.reviewDigest, undefined);
+  assert.equal(mirroredAfterHeadMove?.reviews?.length, 1);
   const closed = command(coordinator, "mirror.sync", "delivery:closed", {
     ...syncPayload({ projectViewId, head: "commit:two", deliveryId: "delivery:closed", remoteGeneration: "remote:g1", expectedRemoteGeneration: "remote:g1", operationId: "mirror-operation:closed", checkpointId: "mirror-checkpoint:closed" }),
     externalProposal: { ...syncPayload({ projectViewId, head: "commit:two", deliveryId: "delivery:closed", remoteGeneration: "remote:g1", expectedRemoteGeneration: "remote:g1", operationId: "mirror-operation:closed", checkpointId: "mirror-checkpoint:closed" }).externalProposal, status: "closed" },

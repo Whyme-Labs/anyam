@@ -4,5 +4,6 @@
     "noEmit": true,
     "types": ["node"]
   },
+  "exclude": ["scripts/qualify-repository-observer.ts"],
   "include": ["scripts/**/*.ts"]
 }

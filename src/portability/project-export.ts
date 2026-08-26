@@ -6,6 +6,7 @@ import {
   opaqueId,
   type Artifact,
   type Change,
+  type ChangeRevision,
   type Evidence,
   type ExtensionEvent,
   type ExtensionInstallation,
@@ -77,6 +78,7 @@ export type ProjectExportInput = {
   repositories: readonly ProjectExportRepositoryInput[];
   destination: string;
   projectRevisions?: readonly ProjectRevision[];
+  changeRevisions?: readonly ChangeRevision[];
   intents?: readonly Intent[];
   intentComments?: readonly IntentComment[];
   pullRequests?: readonly PullRequest[];
@@ -267,6 +269,16 @@ function manifestProblems(manifest: ProjectExport): readonly string[] {
   const problems: string[] = [];
   if (!manifest.project.id || manifest.project.sourceSpaceIds.length === 0) problems.push("project identity or Source Space list is empty");
   if (new Set(manifest.project.sourceSpaceIds).size !== manifest.project.sourceSpaceIds.length) problems.push("Project Source Space IDs are duplicated");
+  if (!Array.isArray(manifest.changeRevisions)) problems.push("Change Revision lifecycle array is missing");
+  for (const revision of Array.isArray(manifest.changeRevisions) ? manifest.changeRevisions : []) {
+    if (!revision.id || !revision.changeId || !revision.projectViewId) problems.push("Change Revision lifecycle entry has incomplete identity");
+    if (revision.sourceSpaceObservations) {
+      for (const [sourceSpaceId, observation] of Object.entries(revision.sourceSpaceObservations)) {
+        const manifestDigest = observation !== null && typeof observation === "object" ? Object.fromEntries(Object.entries(observation)).manifestDigest : undefined;
+        if (typeof manifestDigest !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(manifestDigest)) problems.push("Change Revision " + revision.id + " observation " + sourceSpaceId + " has an invalid manifest digest");
+      }
+    }
+  }
   const declaredSpaces = new Set(manifest.project.sourceSpaceIds);
   const repositorySpaces = new Set<string>();
   for (const repository of manifest.repositories) {
@@ -447,6 +459,7 @@ function singleRepositoryProjectExport(input: {
     largeObjects: [...input.repository.lfs.objects],
     lineage: [{ projectRevisionId: projectRevision.id, sourceSpaceSnapshots: { ...projectRevision.sourceSpaceSnapshots } }],
     projectRevisions: [projectRevision],
+    changeRevisions: [],
     intents: [],
     intentComments: [],
     pullRequests: [],
@@ -729,6 +742,7 @@ export class LocalProjectExporter {
         largeObjects,
         lineage,
         projectRevisions: [...(input.projectRevisions ?? [])],
+        changeRevisions: [...(input.changeRevisions ?? [])],
         intents: [...(input.intents ?? [])],
         intentComments: [...(input.intentComments ?? [])],
         pullRequests: [...(input.pullRequests ?? [])],

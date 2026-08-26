@@ -111,6 +111,8 @@ export type SourceSpace = {
   id: string;
   name: string;
   classification: SourceSpaceClassification;
+  /** Realm-issued Repository identity when this Source Space is Git-backed. */
+  repositoryId?: string;
 };
 
 export type IntentStatus = "open" | "closed";
@@ -314,6 +316,8 @@ export type ChangeRevision = {
   workspaceId?: string;
   /** Source Space snapshots changed by this revision. */
   sourceSpaceSnapshots?: Readonly<Record<string, string>>;
+  /** Server-verified Git observations for hosted publication. */
+  sourceSpaceObservations?: Readonly<Record<string, RepositoryObservation>>;
   /** Source Spaces whose content or disclosure policy is affected. */
   affectedSourceSpaceIds?: readonly string[];
   /** Modules whose declared scope is affected by this revision. */
@@ -978,6 +982,7 @@ export type ProjectExport = {
   largeObjects: readonly LargeObjectRef[];
   lineage: readonly ProjectExportLineage[];
   projectRevisions: readonly ProjectRevision[];
+  changeRevisions: readonly ChangeRevision[];
   intents: readonly Intent[];
   intentComments: readonly IntentComment[];
   pullRequests: readonly PullRequest[];
@@ -1020,6 +1025,23 @@ export type ProjectExportArtifactFile = {
 };
 
 export type GitObjectFormat = "sha1" | "sha256";
+
+export type RepositoryObservation = {
+  protocol: "anyam.repository-observation/v1";
+  repositoryId: string;
+  sourceSpaceId: string;
+  workspaceId: string;
+  projectViewId: string;
+  objectFormat: GitObjectFormat;
+  symbolicRef: string;
+  commitOid: string;
+  treeOid: string;
+  baseCommitOid: string;
+  ancestryVerified: true;
+  manifestDigest: string;
+  observedAt: string;
+  receipt: string;
+};
 
 export type GitRef = {
   name: string;

@@ -3,7 +3,7 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 
-import { opaqueId, type GitObjectFormat, type GitRef, type LargeObjectRef, type RepositoryExport } from "../kernel/contracts.ts";
+import { opaqueId, type GitObjectFormat, type GitRef, type LargeObjectRef, type RepositoryExport, type RepositoryObservation } from "../kernel/contracts.ts";
 import type {
   RepositoryDriver,
   RepositoryDriverCapabilities,
@@ -18,6 +18,7 @@ import type {
   RepositoryRestoreReceipt,
   RepositoryState,
 } from "./repository-driver.ts";
+import { REPOSITORY_OBSERVATION_PROTOCOL, repositoryObservationManifest, type RepositoryObservationClaims } from "./repository-observation.ts";
 
 type LocalRepository = {
   handle: RepositoryHandle;
@@ -392,6 +393,49 @@ export class LocalGitRepositoryDriver implements RepositoryDriver {
       };
     } catch {
       return { status: "failed", ...failure("repository.inspect_failed", "inspect", input.repository.repositoryId, true, "verify the repository and retry inspection") };
+    }
+  }
+
+  async observeRepository(input: {
+    repository: RepositoryHandle;
+    workspaceId: string;
+    projectViewId: string;
+    expectedCommitOid: string;
+    expectedTreeOid?: string;
+    expectedBaseCommitOid: string;
+    expectedObjectFormat?: GitObjectFormat;
+  }): Promise<RepositoryDriverResult<RepositoryObservation>> {
+    const directory = this.directoryFor(input.repository);
+    if (!directory) return { status: "failed", ...failure("repository.unknown", "observe", input.repository.repositoryId, false, "restore or register the repository before observing its exact Git state") };
+    try {
+      const state = await this.inspectRepository({ repository: input.repository });
+      if (state.status !== "succeeded") return state;
+      const commitOid = (await runGit(directory, ["rev-parse", "HEAD^{commit}"])).stdout.trim();
+      const treeOid = (await runGit(directory, ["rev-parse", `${commitOid}^{tree}`])).stdout.trim();
+      const symbolicRef = (await runGit(directory, ["symbolic-ref", "--quiet", "--short", "HEAD"])).stdout.trim() || "HEAD";
+      if (input.expectedObjectFormat !== undefined && state.value.objectFormat !== input.expectedObjectFormat) return { status: "failed", ...failure("repository.observation_object_format_mismatch", "observe", input.repository.repositoryId, false, "use the RepositoryDriver object format observed for the exact Workspace") };
+      if (commitOid !== input.expectedCommitOid) return { status: "failed", ...failure("repository.observation_commit_mismatch", "observe", input.repository.repositoryId, false, "refresh the Workspace head and publish the exact observed commit") };
+      if (input.expectedTreeOid !== undefined && treeOid !== input.expectedTreeOid) return { status: "failed", ...failure("repository.observation_tree_mismatch", "observe", input.repository.repositoryId, false, "refresh the Workspace tree and publish the exact observed tree") };
+      if (!(await commandSucceeds(directory, ["merge-base", "--is-ancestor", input.expectedBaseCommitOid, commitOid]))) return { status: "failed", ...failure("repository.observation_ancestry_mismatch", "observe", input.repository.repositoryId, false, "rebase the Workspace on the exact base Project Revision before publishing") };
+      const claims = {
+        protocol: REPOSITORY_OBSERVATION_PROTOCOL,
+        repositoryId: input.repository.repositoryId,
+        sourceSpaceId: input.repository.sourceSpaceId,
+        workspaceId: input.workspaceId,
+        projectViewId: input.projectViewId,
+        objectFormat: state.value.objectFormat,
+        symbolicRef,
+        commitOid,
+        treeOid,
+        baseCommitOid: input.expectedBaseCommitOid,
+        ancestryVerified: true,
+        observedAt: new Date().toISOString(),
+        receipt: `provider=local-git; repository=${input.repository.repositoryId}; sourceSpace=${input.repository.sourceSpaceId}; workspace=${input.workspaceId}; commit=${commitOid}; tree=${treeOid}; ancestry=verified; credentialMaterialStored=false`,
+      } satisfies RepositoryObservationClaims;
+      const manifestDigest = `sha256:${createHash("sha256").update(repositoryObservationManifest(claims)).digest("hex")}`;
+      return { status: "succeeded", value: { ...claims, manifestDigest } };
+    } catch {
+      return { status: "failed", ...failure("repository.observation_failed", "observe", input.repository.repositoryId, true, "inspect the exact Workspace Git state and retry the same observation") };
     }
   }
 

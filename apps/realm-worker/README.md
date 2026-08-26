@@ -48,7 +48,7 @@ transport convenience only; it does not weaken the deployed HTTPS contract.
 
 1. Create or choose the customer's Cloudflare resources for the Realm's
    coordinator, OAuth KV, metadata read model, Project Export/recovery objects,
-   event queue, and Workflow.
+   event queue, Workflow, and a customer-owned RepositoryDriver observer.
 2. Copy `wrangler.example.jsonc` to `wrangler.jsonc`.
 3. Replace every `replace-with-customer-*` value and the installation/build
    variables with customer-owned values. Do not put API tokens, passkeys,
@@ -528,6 +528,7 @@ run and independently observed.
 | `ANYAM_EXPORTS` | Customer-owned Project Export and recovery object store | Anyam export manifest and digests |
 | `ANYAM_EVENTS` | At-least-once event transport | Anyam authoritative event/state transition |
 | `ANYAM_WORKFLOW` | Durable orchestration adapter boundary | Anyam Run/Release/Promotion state |
+| `ANYAM_REPOSITORY_OBSERVER` | Customer-owned RepositoryDriver observation boundary for hosted Git revisions | Repository object, ref, tree, and ancestry verification |
 | `ANYAM_HOSTING_MODE` | Must be `customer-operated` | Realm policy |
 | `ANYAM_INSTALLATION_ID` | Non-secret installation identity | Installation state |
 | `ANYAM_PROTOCOL_VERSION` | Must match the Worker protocol | Contract compatibility |

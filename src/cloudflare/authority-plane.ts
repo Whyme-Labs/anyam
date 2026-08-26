@@ -30,10 +30,12 @@ import {
   type RunnerJob,
   type RunnerOutputReference,
   type SourceSpace,
+  type RepositoryObservation,
   type Target,
   type Workspace,
   type WorkspaceMount,
 } from "../kernel/contracts.ts";
+import { parseRepositoryObservation } from "../portability/repository-observation.ts";
 import type { PromotionReconciliationCheckpoint, PromotionRecord } from "../delivery/promotion.ts";
 import {
   assertTargetCanPromote,
@@ -268,6 +270,18 @@ function record<T>(value: unknown, field: string): Record<string, T> {
     });
   }
   return value as Record<string, T>;
+}
+
+function repositoryObservationRecord(value: unknown, field: string): Record<string, RepositoryObservation> {
+  const entries = Object.entries(record<unknown>(value, field));
+  const observations: Record<string, RepositoryObservation> = {};
+  for (const [sourceSpaceId, candidate] of entries) {
+    const parsed = parseRepositoryObservation(candidate);
+    if (!parsed.valid) throw new AuthorityPlaneError({ code: "invalid_request", message: "A hosted Change Revision contains a malformed RepositoryDriver observation.", recoveryAction: "publish only the exact credential-free observation returned by the configured RepositoryDriver boundary", receipt: parsed.receipt });
+    observations[sourceSpaceId] = parsed.observation;
+  }
+  if (entries.length === 0) throw new AuthorityPlaneError({ code: "invalid_request", message: field + " must contain at least one Source Space observation.", recoveryAction: "publish an observation for every disclosed Source Space; no authority transition was accepted", receipt: field + "=non-empty-required; transition=not-applied" });
+  return observations;
 }
 
 function enumString<T extends string>(value: unknown, field: string, allowed: readonly T[], fallback?: T): T {
@@ -1305,7 +1319,8 @@ export class AuthorityPlaneCoordinator {
           const sourceId = requiredString(source.id, `sourceSpaces[${index}].id`);
           const classification = requiredString(source.classification, `sourceSpaces[${index}].classification`) as SourceSpace["classification"];
           if (!["public", "internal", "restricted", "result-only"].includes(classification)) throw new AuthorityPlaneError({ code: "invalid_request", message: `Source Space ${sourceId} has an unsupported classification.`, recoveryAction: "choose public, internal, restricted, or result-only", receipt: `sourceSpace=${sourceId}; classification=${classification}; transition=not-applied` });
-          const sourceSpace: SourceSpace = { protocol: CONTRACT_VERSIONS.sourceSpace, id: sourceId, name: requiredString(source.name, `sourceSpaces[${index}].name`), classification };
+          const repositoryId = optionalString(source.repositoryId);
+          const sourceSpace: SourceSpace = { protocol: CONTRACT_VERSIONS.sourceSpace, id: sourceId, name: requiredString(source.name, `sourceSpaces[${index}].name`), classification, ...(repositoryId ? { repositoryId } : {}) };
           if (next.sourceSpaces[sourceId]) throw new AuthorityPlaneError({ code: "conflict", message: `Source Space ${sourceId} already exists.`, recoveryAction: "use a new Source Space identity", receipt: `sourceSpace=${sourceId}; exists=true; transition=not-applied` });
           next.sourceSpaces[sourceId] = sourceSpace;
           return sourceSpace;
@@ -1373,10 +1388,22 @@ export class AuthorityPlaneCoordinator {
         if (!project) throw new AuthorityPlaneError({ code: "indeterminate", message: `Change ${changeId} refers to a Project that is not readable.`, recoveryAction: "reconcile the Authority snapshot before publishing a Revision", receipt: `change=${changeId}; project=${change.projectId}; revision=not-created` });
         const unknownSourceSpaceId = Object.keys(sourceSnapshots).find((sourceSpaceId) => !project.sourceSpaceIds.includes(sourceSpaceId));
         if (unknownSourceSpaceId) throw new AuthorityPlaneError({ code: "conflict", message: `Source Space ${unknownSourceSpaceId} is not part of Project ${project.id}.`, recoveryAction: "publish only snapshots belonging to the Change Project View", receipt: `project=${project.id}; sourceSpace=${unknownSourceSpaceId}; revision=not-created` });
+        const sourceSpaceObservations = payload.sourceSpaceObservations === undefined ? undefined : repositoryObservationRecord(payload.sourceSpaceObservations, "sourceSpaceObservations");
+        if (sourceSpaceObservations) {
+          const observationIds = Object.keys(sourceSpaceObservations);
+          if (observationIds.length !== Object.keys(sourceSnapshots).length || observationIds.some((sourceSpaceId) => sourceSnapshots[sourceSpaceId] === undefined)) throw new AuthorityPlaneError({ code: "conflict", message: "RepositoryDriver observations must cover exactly the Source Space snapshot set.", recoveryAction: "publish one verified observation for every Source Space disclosed by the Project View", receipt: "project=" + project.id + "; observationSet=source-snapshot-mismatch; revision=not-created" });
+          for (const [sourceSpaceId, observation] of Object.entries(sourceSpaceObservations)) {
+            const sourceSpace = next.sourceSpaces[sourceSpaceId];
+            const baseSnapshot = next.projectRevisions[change.baseProjectRevisionId]?.sourceSpaceSnapshots[sourceSpaceId];
+            if (!sourceSpace?.repositoryId) throw new AuthorityPlaneError({ code: "blocked", message: "Source Space " + sourceSpaceId + " has no authoritative Repository identity.", recoveryAction: "bind the Source Space to a Realm-issued Repository identity before hosted revision publication", receipt: "sourceSpace=" + sourceSpaceId + "; repositoryIdentity=missing; revision=not-created" });
+            if (observation.repositoryId !== sourceSpace.repositoryId || observation.sourceSpaceId !== sourceSpaceId || observation.workspaceId !== workspaceId || observation.projectViewId !== projectViewId || observation.commitOid !== sourceSnapshots[sourceSpaceId] || observation.baseCommitOid !== baseSnapshot || observation.ancestryVerified !== true) throw new AuthorityPlaneError({ code: "conflict", message: "RepositoryDriver observation for Source Space " + sourceSpaceId + " is not bound to the requested hosted revision.", recoveryAction: "reinspect the exact Workspace and publish a fresh observation bound to this Change, Workspace, Project View, and base revision", receipt: "sourceSpace=" + sourceSpaceId + "; observation=binding-mismatch; revision=not-created" });
+          }
+        }
         const sequence = Object.values(next.changeRevisions).filter((revision) => revision.changeId === changeId).length + 1;
         const projectRevisionId = optionalString(payload.projectRevisionId) ?? opaqueId("candidate-revision");
         const revisionKind = optionalString(payload.kind) as ChangeRevision["kind"] | undefined;
         const revision: ChangeRevision = { protocol: CONTRACT_VERSIONS.change, id: optionalString(payload.revisionId) ?? opaqueId("change-revision"), changeId, projectRevisionId, projectViewId, sequence, parentRevisionId: change.latestRevisionId ?? undefined, declaredEffects: stringArray(payload.declaredEffects ?? [], "declaredEffects", true), baseProjectRevisionId: change.baseProjectRevisionId, ...(workspaceId ? { workspaceId } : {}), sourceSpaceSnapshots: { ...sourceSnapshots }, affectedSourceSpaceIds: Object.keys(sourceSnapshots), author: actor, ...(revisionKind ? { kind: revisionKind } : {}) };
+        if (sourceSpaceObservations) revision.sourceSpaceObservations = { ...sourceSpaceObservations };
         if (next.changeRevisions[revision.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Change Revision ${revision.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Revision identity", receipt: `revision=${revision.id}; exists=true; transition=not-applied` });
         next.changeRevisions[revision.id] = revision;
         next.changes[changeId] = { ...change, latestRevisionId: revision.id, status: "submitted" };

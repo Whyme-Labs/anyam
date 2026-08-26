@@ -28,7 +28,7 @@ import {
   type CustomerProviderRecoveryBundle,
 } from "../../../src/cloudflare/customer-provider-operation.ts";
 import { CREDENTIAL_AUDIENCES, RealmIdentityError, RealmIdentityPolicy, type Capability, type CredentialClass, type RealmRecoverySnapshot } from "../../../src/identity/realm.ts";
-import type { ResourceRef } from "../../../src/kernel/contracts.ts";
+import type { ResourceRef, RepositoryObservation } from "../../../src/kernel/contracts.ts";
 import { oauthConsentBindingMatches } from "../../../src/identity/oauth-consent.ts";
 import { createAnyamRealmOAuthProvider, type AnyamRealmOAuthEnv } from "./oauth-provider.ts";
 import { handleAnyamRealmOwnerRequest, requestAnyamRealmCoordinator } from "./passkey-owner.ts";
@@ -43,6 +43,7 @@ import { GitHubActionsBridgeOutboundCoordinator, MemoryGitHubActionsBridgeOutbou
 import { encodeGitHubActionsBridgeHistory, encodeGitHubActionsBridgeOutboundBundle, encodeGitHubActionsBridgeSourcePackage, parseGitHubActionsBridgeHistory, parseGitHubActionsBridgeMode, parseGitHubActionsBridgeOutboundBundle, parseGitHubActionsBridgeOutboundPlan, parseGitHubActionsBridgeOutboundProvider, parseGitHubActionsBridgeOutboundRun, parseGitHubActionsBridgePlan, parseGitHubActionsBridgeSourcePackage } from "./github-actions-bridge-contract.ts";
 import { handleGitHubActionsBridgeRequest } from "./github-actions-bridge-route.ts";
 import { authorizeMcpCommandTarget } from "../../../src/cloudflare/mcp-command-target.ts";
+import { parseRepositoryObservationServiceResponse, verifyRepositoryObservation, type RepositoryObservationRequest } from "../../../src/portability/repository-observation.ts";
 
 export type Env = AnyamRealmOAuthEnv;
 
@@ -1502,6 +1503,39 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     });
   }
 
+  private async observeHostedRepository(input: {
+    readonly current: AuthorityPlaneSnapshot;
+    readonly sourceSpaceId: string;
+    readonly workspaceId: string;
+    readonly projectViewId: string;
+    readonly expectedCommitOid: string;
+    readonly expectedBaseCommitOid: string;
+  }): Promise<RepositoryObservation> {
+    const sourceSpace = input.current.sourceSpaces[input.sourceSpaceId];
+    const repositoryId = sourceSpace?.repositoryId;
+    if (!sourceSpace || !repositoryId) throw new AuthorityPlaneError({ code: "blocked", message: "The hosted Source Space has no authoritative Repository identity.", recoveryAction: "bind the Source Space to a customer-owned RepositoryDriver identity before publishing a hosted Change Revision", receipt: "repositoryObservation=repository-identity-missing; transition=not-applied" });
+    const binding = this.env.ANYAM_REPOSITORY_OBSERVER;
+    if (!binding) throw new AuthorityPlaneError({ code: "blocked", message: "Hosted Change Revision publication is unavailable because the RepositoryDriver observer is not configured.", recoveryAction: "bind the qualified customer-owned RepositoryDriver observer service before publishing hosted revisions", receipt: "repositoryObservation=observer-unconfigured; transition=not-applied; credentialMaterialStored=false" });
+    const request: RepositoryObservationRequest = {
+      protocol: "anyam.repository-observation/v1",
+      operation: "observe",
+      repositoryId,
+      sourceSpaceId: input.sourceSpaceId,
+      workspaceId: input.workspaceId,
+      projectViewId: input.projectViewId,
+      expectedCommitOid: input.expectedCommitOid,
+      expectedBaseCommitOid: input.expectedBaseCommitOid,
+    };
+    const response = await binding.fetch(new Request("https://anyam-repository-observer/observe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request) }));
+    const value: unknown = await response.json().catch(() => undefined);
+    const parsed = parseRepositoryObservationServiceResponse(value);
+    if (!parsed.valid) throw new AuthorityPlaneError({ code: "indeterminate", message: "The RepositoryDriver observer returned an invalid response.", recoveryAction: "repair the customer-owned RepositoryDriver observer and retry the same idempotent revision publication", receipt: parsed.receipt });
+    if (parsed.response.status !== "succeeded" || !parsed.response.observation) throw new AuthorityPlaneError({ code: parsed.response.status === "blocked" ? "blocked" : "indeterminate", message: "The RepositoryDriver observer did not verify the hosted Workspace.", recoveryAction: parsed.response.recoveryAction ?? "inspect the RepositoryDriver observer receipt and retry only the same immutable publication", receipt: parsed.response.receipt });
+    const verified = await verifyRepositoryObservation({ observation: parsed.response.observation, repositoryId, sourceSpaceId: input.sourceSpaceId, workspaceId: input.workspaceId, projectViewId: input.projectViewId, expectedCommitOid: input.expectedCommitOid, expectedBaseCommitOid: input.expectedBaseCommitOid });
+    if (!verified.valid) throw new AuthorityPlaneError({ code: "conflict", message: verified.message, recoveryAction: verified.recoveryAction, receipt: verified.receipt });
+    return verified.observation;
+  }
+
   private async authorityMcpCommand(body: CoordinatorRequestBody): Promise<Response> {
     await this.requireAuthorityActive();
     if (coordinatorString(body, "surface") !== "mcp") throw new AuthorityPlaneError({ code: "invalid_request", message: "The MCP Authority boundary requires surface=mcp.", recoveryAction: "send the mutation through the remote MCP handler; no transition was accepted", receipt: "authority=mcp; surface=mismatch; transition=not-applied" });
@@ -1544,8 +1578,35 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     if (!grant) throw new RealmIdentityError({ code: "mcp.delivery_task_grant_invalid", message: "The MCP Agent Task/Grant disappeared during validation.", recoveryAction: "reauthorize the MCP client with a fresh delegated Agent Task and Capability Grant", receipt: "authority=mcp; grant=missing-after-validation; transition=not-applied" });
     const result = await this.ctx.blockConcurrencyWhile(async () => {
       const current = await this.authoritySnapshot();
-      const target = authorizeMcpCommandTarget({ snapshot: current, command, grantId: capabilityGrantId, grantResource: grant.resource, grantSourceSpaceIds: grant.sourceSpaceIds });
+      let target = authorizeMcpCommandTarget({ snapshot: current, command, grantId: capabilityGrantId, grantResource: grant.resource, grantSourceSpaceIds: grant.sourceSpaceIds });
       if (!target.allowed) throw new AuthorityPlaneError({ code: target.code, message: target.message, recoveryAction: target.recoveryAction, receipt: target.receipt });
+      if (commandName === "revision.publish") {
+        const snapshotValue = target.command.payload.sourceSpaceSnapshots;
+        if (snapshotValue === null || typeof snapshotValue !== "object" || Array.isArray(snapshotValue)) throw new AuthorityPlaneError({ code: "invalid_request", message: "Hosted revision publication requires a Source Space snapshot object.", recoveryAction: "publish one snapshot identifier for every Source Space disclosed by the Project View", receipt: "repositoryObservation=snapshot-object-required; transition=not-applied" });
+        const sourceSnapshots: Record<string, string> = {};
+        for (const [sourceSpaceId, snapshotValueForSource] of Object.entries(snapshotValue)) {
+          if (typeof snapshotValueForSource !== "string" || snapshotValueForSource.trim().length === 0) throw new AuthorityPlaneError({ code: "invalid_request", message: "Hosted revision publication contains an invalid Source Space snapshot.", recoveryAction: "publish non-empty Git commit object IDs for every disclosed Source Space", receipt: "repositoryObservation=snapshot-invalid; transition=not-applied" });
+          sourceSnapshots[sourceSpaceId] = snapshotValueForSource;
+        }
+        const workspaceId = target.resource.workspaceId;
+        const changeId = target.resource.changeId;
+        const projectViewId = typeof target.command.payload.projectViewId === "string" ? target.command.payload.projectViewId : undefined;
+        const change = changeId ? current.changes[changeId] : undefined;
+        const baseRevision = change ? current.projectRevisions[change.baseProjectRevisionId] : undefined;
+        if (!workspaceId || !changeId || !projectViewId || !change || !baseRevision) throw new AuthorityPlaneError({ code: "conflict", message: "Hosted revision publication is missing its authoritative Workspace, Change, Project View, or base Project Revision.", recoveryAction: "publish through the exact delegated Workspace and Change context", receipt: "repositoryObservation=revision-context-incomplete; transition=not-applied" });
+        const observations: Record<string, RepositoryObservation> = {};
+        for (const sourceSpaceId of target.sourceSpaceIds) {
+          const expectedCommitOid = sourceSnapshots[sourceSpaceId];
+          const expectedBaseCommitOid = baseRevision.sourceSpaceSnapshots[sourceSpaceId];
+          if (!expectedCommitOid || !expectedBaseCommitOid) throw new AuthorityPlaneError({ code: "conflict", message: "Hosted revision publication does not contain the complete Git base and candidate snapshot set.", recoveryAction: "refresh the Workspace from the exact Project View and publish every Source Space snapshot", receipt: "repositoryObservation=base-or-candidate-snapshot-missing; transition=not-applied" });
+          observations[sourceSpaceId] = await this.observeHostedRepository({ current, sourceSpaceId, workspaceId, projectViewId, expectedCommitOid, expectedBaseCommitOid });
+        }
+        const verifiedSnapshots = Object.fromEntries(Object.entries(observations).map(([sourceSpaceId, observation]) => [sourceSpaceId, observation.commitOid]));
+        const verifiedCommand: AuthorityCommand = { ...target.command, payload: { ...target.command.payload, sourceSpaceSnapshots: verifiedSnapshots, sourceSpaceObservations: observations } };
+        const rebound = authorizeMcpCommandTarget({ snapshot: current, command: verifiedCommand, grantId: capabilityGrantId, grantResource: grant.resource, grantSourceSpaceIds: grant.sourceSpaceIds });
+        if (!rebound.allowed) throw new AuthorityPlaneError({ code: rebound.code, message: rebound.message, recoveryAction: rebound.recoveryAction, receipt: rebound.receipt });
+        target = rebound;
+      }
       for (const sourceSpaceId of target.sourceSpaceIds) identity.authorize({ operation: commandNameForMcp(body), capability, principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, taskId, grantId: capabilityGrantId, resource: target.resource, sourceSpaceId, ...(modelProvider ? { modelProvider } : {}), ...(Array.isArray(body.effects) && typeof body.effects[0] === "string" ? { effect: body.effects[0] } : {}) });
       const coordinator = new AuthorityPlaneCoordinator(current);
       const delegatedBySessionId = typeof body.delegatedBySessionId === "string" && body.delegatedBySessionId.length > 0 ? body.delegatedBySessionId : undefined;

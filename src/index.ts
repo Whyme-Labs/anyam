@@ -3,6 +3,7 @@ export * from "./kernel/evidence.ts";
 export * from "./fixtures/reference.ts";
 export * from "./harness/k0.ts";
 export * from "./portability/repository-driver.ts";
+export * from "./portability/repository-observation.ts";
 export * from "./portability/local-git.ts";
 export * from "./portability/smart-http.ts";
 export * from "./portability/smart-http-driver.ts";

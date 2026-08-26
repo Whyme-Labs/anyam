@@ -130,6 +130,10 @@ export class InMemoryRepositoryDriver implements RepositoryDriver {
       : snapshot;
   }
 
+  async observeRepository(input: Parameters<RepositoryDriver["observeRepository"]>[0]): Promise<RepositoryDriverResult<import("../kernel/contracts.ts").RepositoryObservation>> {
+    return this.unsupported("observe", `${input.repository.repositoryId}:${input.workspaceId}`);
+  }
+
   async deleteRepository(input: { repository: RepositoryHandle }): Promise<RepositoryDriverResult<RepositoryOperationReceipt>> {
     return this.unsupported("delete", input.repository.repositoryId);
   }
@@ -251,6 +255,7 @@ export class InMemoryProjectExporter implements ProjectExporter {
         largeObjects: [],
         lineage: [],
         projectRevisions: [],
+        changeRevisions: [],
         intents: [],
         intentComments: [],
         pullRequests: [],

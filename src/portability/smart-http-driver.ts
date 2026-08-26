@@ -207,6 +207,10 @@ export class SmartHttpRepositoryDriver implements RepositoryDriver {
     return this.local.inspectRepository(input);
   }
 
+  async observeRepository(input: Parameters<RepositoryDriver["observeRepository"]>[0]): Promise<RepositoryDriverResult<import("../kernel/contracts.ts").RepositoryObservation>> {
+    return this.local.observeRepository(input);
+  }
+
   async deleteRepository(input: { repository: RepositoryHandle; expectedGeneration?: string; idempotencyKey?: string }): Promise<RepositoryDriverResult<RepositoryOperationReceipt>> {
     const binding = this.binding(input.repository);
     if (!binding) return failure({ errorCode: "repository.unknown", operation: "delete", affectedObject: input.repository.repositoryId, retryable: false, recoveryAction: "restore or register the Smart HTTP checkout before deleting it", idempotencyKey: input.idempotencyKey });

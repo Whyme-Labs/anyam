@@ -89,7 +89,7 @@ function bootstrapExpectedVersion(body: Record<string, unknown>, operation: Boot
 function bootstrapSourceSpaces(body: Record<string, unknown>, operation: BootstrapMutation): Array<Record<string, string>> {
   const value = body.sourceSpaces;
   if (!Array.isArray(value) || value.length === 0) throw bootstrapRequestError(operation, "sourceSpaces must contain at least one Source Space.", "declare each Source Space with id, name, classification, and snapshotId; no transition was accepted", `operation=${operation}; sourceSpaces=non-empty-required; transition=not-applied`);
-  const allowed = ["id", "name", "classification", "snapshotId"] as const;
+  const allowed = ["id", "name", "classification", "snapshotId", "repositoryId"] as const;
   return value.map((entry, index) => {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)) throw bootstrapRequestError(operation, `sourceSpaces[${index}] must be an object.`, "declare Source Space objects with id, name, classification, and snapshotId; no transition was accepted", `operation=${operation}; sourceSpaces[${index}]=object-required; transition=not-applied`);
     const source = entry as Record<string, unknown>;
@@ -99,8 +99,9 @@ function bootstrapSourceSpaces(body: Record<string, unknown>, operation: Bootstr
     const name = typeof source.name === "string" && source.name.trim().length > 0 ? source.name.trim() : undefined;
     const classification = typeof source.classification === "string" ? source.classification.trim() : "";
     const snapshotId = typeof source.snapshotId === "string" && source.snapshotId.trim().length > 0 ? source.snapshotId.trim() : undefined;
+    const repositoryId = source.repositoryId === undefined ? undefined : typeof source.repositoryId === "string" && source.repositoryId.trim().length > 0 ? source.repositoryId.trim() : undefined;
     if (!id || !name || !snapshotId || !["public", "internal", "restricted", "result-only"].includes(classification)) throw bootstrapRequestError(operation, `sourceSpaces[${index}] is incomplete or has an unsupported classification.`, "provide id, name, snapshotId, and one of public, internal, restricted, or result-only; no transition was accepted", `operation=${operation}; sourceSpaces[${index}]=invalid; transition=not-applied`);
-    return { id, name, classification, snapshotId };
+    return { id, name, classification, snapshotId, ...(repositoryId ? { repositoryId } : {}) };
   });
 }
 
@@ -171,7 +172,8 @@ function safeSourceSpaces(value: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(value)) throw new Error("coordinator_sourceSpaces_malformed");
   return value.map((entry) => {
     const source = recordValue(entry, "sourceSpace");
-    return { protocol: requiredValueString(source.protocol, "sourceSpace.protocol"), id: requiredValueString(source.id, "sourceSpace.id"), name: requiredValueString(source.name, "sourceSpace.name"), classification: requiredValueString(source.classification, "sourceSpace.classification") };
+    const repositoryId = optionalValueString(source.repositoryId, "sourceSpace.repositoryId");
+    return { protocol: requiredValueString(source.protocol, "sourceSpace.protocol"), id: requiredValueString(source.id, "sourceSpace.id"), name: requiredValueString(source.name, "sourceSpace.name"), classification: requiredValueString(source.classification, "sourceSpace.classification"), ...(repositoryId ? { repositoryId } : {}) };
   });
 }
 

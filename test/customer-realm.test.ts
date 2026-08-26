@@ -64,6 +64,7 @@ function projectExport(): ProjectExport {
     largeObjects: [],
     lineage: [{ projectRevisionId: revision.id, sourceSpaceSnapshots: revision.sourceSpaceSnapshots }],
     projectRevisions: [revision],
+    changeRevisions: [],
     intents: [],
     intentComments: [],
     pullRequests: [],

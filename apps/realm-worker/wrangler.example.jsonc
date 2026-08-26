@@ -76,6 +76,10 @@
     {
       "binding": "ANYAM_PROMOTION_EXECUTOR",
       "service": "anyam-promotion-executor"
+    },
+    {
+      "binding": "ANYAM_REPOSITORY_OBSERVER",
+      "service": "anyam-repository-observer"
     }
   ]
 }

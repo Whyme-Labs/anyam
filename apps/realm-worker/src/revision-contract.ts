@@ -166,6 +166,19 @@ function valueStringList(value: unknown, field: string): string[] {
   return [...(value as string[])];
 }
 
+function safeObservationDigests(value: unknown): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("coordinator_revision.sourceSpaceObservations_malformed");
+  const result: Record<string, string> = {};
+  for (const [sourceSpaceId, candidate] of Object.entries(value)) {
+    if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) throw new Error("coordinator_revision.sourceSpaceObservation_malformed");
+    const manifestDigest = Object.fromEntries(Object.entries(candidate)).manifestDigest;
+    if (typeof manifestDigest !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(manifestDigest)) throw new Error("coordinator_revision.sourceSpaceObservation_digest_malformed");
+    result[sourceSpaceId] = manifestDigest;
+  }
+  return result;
+}
+
 function safeRevision(value: unknown): Record<string, unknown> {
   const revision = recordValue(value, "revision");
   const parentRevisionId = revision.parentRevisionId === undefined ? undefined : valueString(revision.parentRevisionId, "revision.parentRevisionId");
@@ -175,6 +188,7 @@ function safeRevision(value: unknown): Record<string, unknown> {
   const affectedTargetIds = revision.affectedTargetIds === undefined ? undefined : valueStringList(revision.affectedTargetIds, "revision.affectedTargetIds");
   const conflictIds = revision.conflictIds === undefined ? undefined : valueStringList(revision.conflictIds, "revision.conflictIds");
   const kind = revision.kind === undefined ? undefined : valueString(revision.kind, "revision.kind");
+  const sourceSpaceObservationDigests = safeObservationDigests(revision.sourceSpaceObservations);
   return {
     protocol: valueString(revision.protocol, "revision.protocol"),
     id: valueString(revision.id, "revision.id"),
@@ -185,6 +199,7 @@ function safeRevision(value: unknown): Record<string, unknown> {
     ...(parentRevisionId ? { parentRevisionId } : {}),
     ...(baseProjectRevisionId ? { baseProjectRevisionId } : {}),
     ...(workspaceId ? { workspaceId } : {}),
+    ...(sourceSpaceObservationDigests ? { sourceSpaceObservationDigests } : {}),
     declaredEffects: valueStringList(revision.declaredEffects, "revision.declaredEffects"),
     ...(affectedModuleIds ? { affectedModuleIds } : {}),
     ...(affectedTargetIds ? { affectedTargetIds } : {}),

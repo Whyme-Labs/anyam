@@ -1,6 +1,7 @@
 import type {
   GitObjectFormat,
   GitRef,
+  RepositoryObservation,
   RepositoryExport,
 } from "../kernel/contracts.ts";
 
@@ -135,6 +136,15 @@ export type RepositoryDriver = {
     idempotencyKey?: string;
   }): Promise<RepositoryDriverResult<RepositoryHandle>>;
   inspectRepository(input: { repository: RepositoryHandle }): Promise<RepositoryDriverResult<RepositoryState>>;
+  observeRepository(input: {
+    repository: RepositoryHandle;
+    workspaceId: string;
+    projectViewId: string;
+    expectedCommitOid: string;
+    expectedTreeOid?: string;
+    expectedBaseCommitOid: string;
+    expectedObjectFormat?: GitObjectFormat;
+  }): Promise<RepositoryDriverResult<RepositoryObservation>>;
   deleteRepository(input: {
     repository: RepositoryHandle;
     expectedGeneration?: string;

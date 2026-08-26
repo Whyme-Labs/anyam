@@ -55,7 +55,7 @@ async function run(): Promise<void> {
   const healthValue = await responseObject(health);
   if (health.status !== 200 || healthValue.status !== "ready") throw new Error(`driver health failed: ${JSON.stringify(healthValue)}`);
   const binding = { fetch: (requestValue: Request) => driver.fetch(requestValue, driverEnv) } as unknown as Fetcher;
-  const observerEnv: RepositoryObserverEnv = { REPOSITORY_DRIVER: binding, REPOSITORY_OBSERVER_REQUEST_BYTES_LIMIT: "65536", REPOSITORY_OBSERVER_REQUEST_BYTES_RECEIPT: "receipt=repository-observer-qualification-measurement" };
+  const observerEnv: RepositoryObserverEnv = { REPOSITORY_DRIVER: binding, REPOSITORY_OBSERVER_REQUEST_BYTES_LIMIT: "65536", REPOSITORY_OBSERVER_REQUEST_BYTES_RECEIPT: "receipt=repository-observer-qualification-measurement", REPOSITORY_OBSERVER_TRANSPORT_TIMEOUT_MS: "1000", REPOSITORY_OBSERVER_TRANSPORT_TIMEOUT_RECEIPT: "receipt=repository-observer-qualification-timeout-measurement" };
   const observed = await observer.fetch(new Request("https://observer.example/observe", { method: "POST", body: JSON.stringify({ protocol: REPOSITORY_OBSERVATION_PROTOCOL, operation: "observe", repositoryId, sourceSpaceId, workspaceId: "workspace:driver-qualification", projectViewId: "view:driver-qualification", expectedCommitOid: headCommit, expectedTreeOid: treeCommit, expectedBaseCommitOid: baseCommit, expectedObjectFormat: "sha1" }) }), observerEnv);
   const observedValue = await responseObject(observed);
   if (observed.status !== 200 || observedValue.status !== "succeeded" || !parseRepositoryObservationServiceResponse(observedValue).valid) throw new Error(`observer composition failed: ${JSON.stringify(observedValue)}`);

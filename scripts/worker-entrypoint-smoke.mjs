@@ -22,7 +22,7 @@ const workers = [
     id: "repository-observer",
     config: "apps/repository-observer/wrangler.example.jsonc",
     source: "apps/repository-observer/src/index.ts",
-    routes: ["/health", "/observe", "REPOSITORY_DRIVER", "requestBudget"],
+    routes: ["/health", "/observe", "REPOSITORY_DRIVER", "requestBudget", "transportTimeoutMs", "timeoutSizingReceipt", "repository_driver_response_credential_material"],
   },
   {
     id: "repository-driver",

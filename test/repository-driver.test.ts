@@ -45,7 +45,7 @@ test("customer RepositoryDriver and Observer compose an exact R2-backed observat
   bucket.put("repositories/repo%3Adriver.json", JSON.stringify(manifest()));
   const driverEnv = env(bucket);
   const binding = { fetch: (requestValue: Request) => driver.fetch(requestValue, driverEnv) } as unknown as Fetcher;
-  const observerEnv: RepositoryObserverEnv = { REPOSITORY_DRIVER: binding, REPOSITORY_OBSERVER_REQUEST_BYTES_LIMIT: "65536", REPOSITORY_OBSERVER_REQUEST_BYTES_RECEIPT: "receipt=repository-observer-test-measurement" };
+  const observerEnv: RepositoryObserverEnv = { REPOSITORY_DRIVER: binding, REPOSITORY_OBSERVER_REQUEST_BYTES_LIMIT: "65536", REPOSITORY_OBSERVER_REQUEST_BYTES_RECEIPT: "receipt=repository-observer-test-measurement", REPOSITORY_OBSERVER_TRANSPORT_TIMEOUT_MS: "1000", REPOSITORY_OBSERVER_TRANSPORT_TIMEOUT_RECEIPT: "receipt=repository-observer-test-timeout-measurement" };
   const response = await observer.fetch(new Request("https://observer.example/observe", { method: "POST", body: JSON.stringify({ protocol: REPOSITORY_OBSERVATION_PROTOCOL, operation: "observe", repositoryId, sourceSpaceId, workspaceId: "workspace:driver", projectViewId: "view:driver", expectedCommitOid: headCommit, expectedTreeOid: treeCommit, expectedBaseCommitOid: baseCommit, expectedObjectFormat: "sha1" }) }), observerEnv);
   assert.equal(response.status, 200);
   const value = await response.json();

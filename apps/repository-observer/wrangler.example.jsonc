@@ -8,7 +8,9 @@
   "preview_urls": false,
   "vars": {
     "REPOSITORY_OBSERVER_REQUEST_BYTES_LIMIT": "replace-with-measured-observer-request-limit",
-    "REPOSITORY_OBSERVER_REQUEST_BYTES_RECEIPT": "receipt:replace-with-observer-request-measurement"
+    "REPOSITORY_OBSERVER_REQUEST_BYTES_RECEIPT": "receipt:replace-with-observer-request-measurement",
+    "REPOSITORY_OBSERVER_TRANSPORT_TIMEOUT_MS": "replace-with-measured-observer-transport-timeout",
+    "REPOSITORY_OBSERVER_TRANSPORT_TIMEOUT_RECEIPT": "receipt:replace-with-observer-transport-timeout-measurement"
   },
   "services": [
     {

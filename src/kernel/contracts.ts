@@ -928,6 +928,7 @@ export type ResourceRef = {
   sourceSpaceId?: string;
   workspaceId?: string;
   changeId?: string;
+  pullRequestId?: string;
   runId?: string;
   releaseId?: string;
   targetId?: string;

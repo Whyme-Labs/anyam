@@ -554,7 +554,7 @@ function randomToken(): string {
 
 function resourceMatches(scope: ResourceRef, resource: ResourceRef): boolean {
   if (scope.realmId !== resource.realmId) return false;
-  for (const key of ["organizationId", "projectId", "sourceSpaceId", "workspaceId", "changeId", "runId", "releaseId", "targetId"] as const) {
+  for (const key of ["organizationId", "projectId", "sourceSpaceId", "workspaceId", "changeId", "pullRequestId", "runId", "releaseId", "targetId"] as const) {
     const expected = scope[key];
     if (expected !== undefined && resource[key] !== expected) return false;
   }

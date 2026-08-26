@@ -42,6 +42,7 @@ import { GitHubActionsBridgeImportCoordinator, MemoryGitHubActionsBridgeImportLe
 import { GitHubActionsBridgeOutboundCoordinator, MemoryGitHubActionsBridgeOutboundReplayLedger, type GitHubActionsBridgeOutboundSnapshot } from "../../../src/portability/github-actions-bridge-outbound.ts";
 import { encodeGitHubActionsBridgeHistory, encodeGitHubActionsBridgeOutboundBundle, encodeGitHubActionsBridgeSourcePackage, parseGitHubActionsBridgeHistory, parseGitHubActionsBridgeMode, parseGitHubActionsBridgeOutboundBundle, parseGitHubActionsBridgeOutboundPlan, parseGitHubActionsBridgeOutboundProvider, parseGitHubActionsBridgeOutboundRun, parseGitHubActionsBridgePlan, parseGitHubActionsBridgeSourcePackage } from "./github-actions-bridge-contract.ts";
 import { handleGitHubActionsBridgeRequest } from "./github-actions-bridge-route.ts";
+import { authorizeMcpCommandTarget } from "../../../src/cloudflare/mcp-command-target.ts";
 
 export type Env = AnyamRealmOAuthEnv;
 
@@ -1512,7 +1513,10 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const capability = coordinatorString(body, "capability") as Capability;
     const expectedCapability = capabilityForMcpCommand(commandName);
     if (!expectedCapability || capability !== expectedCapability) throw new AuthorityPlaneError({ code: "invalid_request", message: "The MCP command and capability do not match the declared mutation boundary.", recoveryAction: "use the documented Agent capability for this MCP command; no transition was accepted", receipt: `authority=mcp; command=${commandName}; capability=${capability}; expected=${expectedCapability ?? "unsupported"}; transition=not-applied` });
-    const sourceSpaceIds = coordinatorStringArray(body, "sourceSpaceIds");
+    const payload = body.payload;
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new AuthorityPlaneError({ code: "invalid_request", message: "Authority command payload must be a JSON object.", recoveryAction: "send the typed command payload as an object; no transition was accepted", receipt: "authority=mcp; payload=object-required; transition=not-applied" });
+    const command: AuthorityCommand = { protocol: body.protocol === undefined ? AUTHORITY_COMMAND_PROTOCOL : coordinatorString(body, "protocol") as typeof AUTHORITY_COMMAND_PROTOCOL, command: commandName as AuthorityCommandName, idempotencyKey: coordinatorString(body, "idempotencyKey"), ...(typeof body.expectedVersion === "number" ? { expectedVersion: body.expectedVersion } : {}), payload: payload as Record<string, unknown> };
+    const envelopeSourceSpaceIds = coordinatorStringArray(body, "sourceSpaceIds");
     const resourceValue = body.resource;
     if (resourceValue === null || typeof resourceValue !== "object" || Array.isArray(resourceValue)) throw new AuthorityPlaneError({ code: "invalid_request", message: "MCP mutation resource must be an object.", recoveryAction: "send the exact delegated Project, Workspace, Change, and Source Space resource; no transition was accepted", receipt: "authority=mcp; resource=object-required; transition=not-applied" });
     const resourceBody = resourceValue as Record<string, unknown>;
@@ -1533,23 +1537,25 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const identitySnapshot = identity.getRecoverySnapshot();
     const actor = identitySnapshot.actors[session.actorId];
     if (!actor || actor.kind !== "agent" || actor.agentId !== agentId) throw new RealmIdentityError({ code: "mcp.agent_identity_invalid", message: "The MCP mutation session is not the delegated Agent Actor named by the grant.", recoveryAction: "reauthorize the MCP client with the exact delegated Agent Session, Task, and Grant", receipt: "authority=mcp; agent-session=invalid; transition=not-applied" });
-    const validation = identity.validateTaskGrant({ principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, taskId, grantId: capabilityGrantId, resource, sourceSpaceIds, action: capability, effects: Array.isArray(body.effects) ? body.effects.filter((value): value is string => typeof value === "string") : [] });
+    const validation = identity.validateTaskGrant({ principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, taskId, grantId: capabilityGrantId, resource, sourceSpaceIds: envelopeSourceSpaceIds, action: capability, effects: Array.isArray(body.effects) ? body.effects.filter((value): value is string => typeof value === "string") : [] });
     if (!validation.valid) throw new RealmIdentityError({ code: validation.code, message: "The MCP Agent Task/Grant is not live for this mutation.", recoveryAction: validation.recoveryAction, receipt: `${validation.receipt}; authority=mcp; transition=not-applied` });
     const modelProvider = identitySnapshot.agents[agentId]?.modelProvider;
-    for (const sourceSpaceId of sourceSpaceIds) identity.authorize({ operation: commandNameForMcp(body), capability, principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, taskId, grantId: capabilityGrantId, resource, sourceSpaceId, ...(modelProvider ? { modelProvider } : {}), ...(Array.isArray(body.effects) && typeof body.effects[0] === "string" ? { effect: body.effects[0] } : {}) });
-    const payload = body.payload;
-    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new AuthorityPlaneError({ code: "invalid_request", message: "Authority command payload must be a JSON object.", recoveryAction: "send the typed command payload as an object; no transition was accepted", receipt: "authority=mcp; payload=object-required; transition=not-applied" });
-    const command: AuthorityCommand = { protocol: body.protocol === undefined ? AUTHORITY_COMMAND_PROTOCOL : coordinatorString(body, "protocol") as typeof AUTHORITY_COMMAND_PROTOCOL, command: commandName as AuthorityCommandName, idempotencyKey: coordinatorString(body, "idempotencyKey"), ...(typeof body.expectedVersion === "number" ? { expectedVersion: body.expectedVersion } : {}), payload: payload as Record<string, unknown> };
+    const grant = identity.getGrant(capabilityGrantId);
+    if (!grant) throw new RealmIdentityError({ code: "mcp.delivery_task_grant_invalid", message: "The MCP Agent Task/Grant disappeared during validation.", recoveryAction: "reauthorize the MCP client with a fresh delegated Agent Task and Capability Grant", receipt: "authority=mcp; grant=missing-after-validation; transition=not-applied" });
     const result = await this.ctx.blockConcurrencyWhile(async () => {
       const current = await this.authoritySnapshot();
+      const target = authorizeMcpCommandTarget({ snapshot: current, command, grantId: capabilityGrantId, grantResource: grant.resource, grantSourceSpaceIds: grant.sourceSpaceIds });
+      if (!target.allowed) throw new AuthorityPlaneError({ code: target.code, message: target.message, recoveryAction: target.recoveryAction, receipt: target.receipt });
+      for (const sourceSpaceId of target.sourceSpaceIds) identity.authorize({ operation: commandNameForMcp(body), capability, principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, taskId, grantId: capabilityGrantId, resource: target.resource, sourceSpaceId, ...(modelProvider ? { modelProvider } : {}), ...(Array.isArray(body.effects) && typeof body.effects[0] === "string" ? { effect: body.effects[0] } : {}) });
       const coordinator = new AuthorityPlaneCoordinator(current);
       const delegatedBySessionId = typeof body.delegatedBySessionId === "string" && body.delegatedBySessionId.length > 0 ? body.delegatedBySessionId : undefined;
       const authoritySession: AuthoritySession = { realmId: session.realmId, principalId: session.principalId, actorId: session.actorId, sessionId: session.id, clientId: session.clientId, authorizationEpoch: validation.authorizationEpoch, taskId, capabilityGrantId, ...(delegatedBySessionId ? { delegatedBySessionId } : {}), ...(modelProvider ? { modelProvider } : {}) };
-      const accepted = coordinator.execute(command, authoritySession);
+      const accepted = coordinator.execute(target.command, authoritySession);
       await this.ctx.storage.put(REALM_AUTHORITY_SNAPSHOT_KEY, coordinator.snapshot());
-      return accepted;
+      return { accepted, targetReceipt: target.receipt };
     });
-    return coordinatorJson({ ...result, provenance: { principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, agentId, taskId, capabilityGrantId, authorizationEpoch: validation.authorizationEpoch }, credentialFree: true, canonicalWrite: false, receipt: `${result.receipt}; authority=mcp; taskGrant=validated; agent=${agentId}; task=${taskId}; grant=${capabilityGrantId}; canonicalWrite=false` }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
+    const accepted = result.accepted;
+    return coordinatorJson({ ...accepted, provenance: { principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, agentId, taskId, capabilityGrantId, authorizationEpoch: validation.authorizationEpoch }, credentialFree: true, canonicalWrite: false, receipt: `${accepted.receipt}; ${result.targetReceipt}; authority=mcp; taskGrant=validated; agent=${agentId}; task=${taskId}; grant=${capabilityGrantId}; canonicalWrite=false` }, accepted.status === "succeeded" ? 200 : accepted.status === "blocked" ? 409 : 503);
   }
 
   private providerInput(body: CoordinatorRequestBody, authorization: CustomerProviderOwnerAuthorization): {

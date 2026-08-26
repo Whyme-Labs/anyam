@@ -63,13 +63,12 @@ export async function prepareHostedRevisionPublish(input: {
   const projectViewId = nonEmptyString(payload.projectViewId) ?? workspace.projectViewId;
   const projectView = input.snapshot.projectViews[projectViewId];
   if (!projectView || projectView.projectId !== project.id || projectView.id !== workspace.projectViewId) throw new AuthorityPlaneError({ code: "conflict", message: "Hosted revision publication requires the Project View mounted by the active Workspace.", recoveryAction: "publish with the Project View bound to the assigned Workspace", receipt: "repositoryObservation=project-view-binding-required; transition=not-applied" });
+  const baseRevision = input.snapshot.projectRevisions[change.baseProjectRevisionId];
+  if (!baseRevision || baseRevision.projectId !== project.id || workspace.projectRevisionId !== change.baseProjectRevisionId || projectView.projectRevisionId !== change.baseProjectRevisionId) throw new AuthorityPlaneError({ code: "conflict", message: "Hosted revision publication requires the Workspace and Project View to share the Change base Project Revision.", recoveryAction: "rebase the Change onto a fresh Workspace and Project View derived from its declared base", receipt: `change=${change.id}; changeBase=${change.baseProjectRevisionId}; workspaceBase=${workspace.projectRevisionId}; viewBase=${projectView.projectRevisionId}; repositoryObservation=lineage-mismatch; transition=not-applied` });
 
   const snapshots = sourceSnapshots(payload.sourceSpaceSnapshots);
   const visibleSourceSpaceIds = [...projectView.visibleSourceSpaceIds];
   if (visibleSourceSpaceIds.length === 0 || !sameSet(Object.keys(snapshots), visibleSourceSpaceIds)) throw new AuthorityPlaneError({ code: "conflict", message: "Hosted revision publication must cover exactly the Source Spaces disclosed by the Project View.", recoveryAction: "publish one candidate snapshot for every Source Space in the exact Project View and no others", receipt: `project=${project.id}; projectView=${projectView.id}; repositoryObservation=source-space-set-mismatch; transition=not-applied` });
-
-  const baseRevision = input.snapshot.projectRevisions[change.baseProjectRevisionId];
-  if (!baseRevision || baseRevision.projectId !== project.id) throw new AuthorityPlaneError({ code: "indeterminate", message: "The Change base Project Revision is not available for hosted observation.", recoveryAction: "reconcile the authoritative Change base before publishing a hosted revision", receipt: `change=${change.id}; baseProjectRevision=${change.baseProjectRevisionId}; repositoryObservation=base-missing; transition=not-applied` });
 
   const observations: Record<string, RepositoryObservation> = {};
   for (const sourceSpaceId of visibleSourceSpaceIds) {

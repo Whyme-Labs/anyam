@@ -247,6 +247,10 @@ test("keeps one stable Change identity through revisions, conflict resolution, h
     assert.equal(rebased.revision.kind, "rebase");
     assert.equal(control.getChange(change.id)?.latestRevisionId, rebased.revision.id);
     assert.equal(control.getRevision(first.id)?.id, first.id);
+    assert.equal(rebased.workspace.changeId, change.id);
+    assert.equal(rebased.workspace.projectRevisionId, rebased.revision.baseProjectRevisionId);
+    assert.equal(control.getWorkspace(firstWorkspace.workspace.id)?.state, "closed");
+    assert.equal(control.getWorkspace(firstWorkspace.workspace.id)?.changeId, undefined);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

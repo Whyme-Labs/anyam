@@ -271,8 +271,20 @@ function manifestProblems(manifest: ProjectExport): readonly string[] {
   if (!manifest.project.id || manifest.project.sourceSpaceIds.length === 0) problems.push("project identity or Source Space list is empty");
   if (new Set(manifest.project.sourceSpaceIds).size !== manifest.project.sourceSpaceIds.length) problems.push("Project Source Space IDs are duplicated");
   if (!Array.isArray(manifest.changeRevisions)) problems.push("Change Revision lifecycle array is missing");
+  const projectRevisions = new Map((Array.isArray(manifest.projectRevisions) ? manifest.projectRevisions : []).map((revision) => [revision.id, revision]));
+  const changes = new Map((Array.isArray(manifest.changes) ? manifest.changes : []).map((change) => [change.id, change]));
+  for (const change of changes.values()) {
+    const base = projectRevisions.get(change.baseProjectRevisionId);
+    if (!base || base.projectId !== change.projectId) problems.push(`Change ${change.id} has a base Project Revision outside its Project`);
+  }
   for (const revision of Array.isArray(manifest.changeRevisions) ? manifest.changeRevisions : []) {
     if (!revision.id || !revision.changeId || !revision.projectViewId) problems.push("Change Revision lifecycle entry has incomplete identity");
+    const change = changes.get(revision.changeId);
+    if (!change) problems.push(`Change Revision ${revision.id} refers to a missing Change`);
+    else {
+      if (revision.baseProjectRevisionId !== change.baseProjectRevisionId) problems.push(`Change Revision ${revision.id} disagrees with Change ${change.id} about the base Project Revision`);
+      if ((revision.workspaceId ?? undefined) !== (change.workspaceId ?? undefined)) problems.push(`Change Revision ${revision.id} disagrees with Change ${change.id} about the Workspace binding`);
+    }
     if (revision.sourceSpaceObservations) {
       for (const [sourceSpaceId, observation] of Object.entries(revision.sourceSpaceObservations)) {
         const manifestDigest = observation !== null && typeof observation === "object" ? Object.fromEntries(Object.entries(observation)).manifestDigest : undefined;

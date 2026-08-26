@@ -572,7 +572,7 @@ export function normalizeAuthorityPlaneSnapshot(snapshot: AuthorityPlaneSnapshot
   const mirrorDeliveries = Object.fromEntries(mirrorDeliveryEntries);
   const targets = Object.fromEntries(Object.entries(snapshot.targets ?? {}).map(([id, target]) => [id, { ...target, deploymentProfile: targetDeploymentProfile(target) }]));
   const pullRequests = Object.fromEntries(Object.entries(snapshot.pullRequests ?? {}).map(([id, pullRequest]) => [id, { ...pullRequest, reviews: pullRequest.reviews ?? [] }]));
-  return {
+  const normalized: AuthorityPlaneSnapshot = {
     ...snapshot,
     intents: snapshot.intents ?? {},
     intentComments: snapshot.intentComments ?? {},
@@ -586,6 +586,38 @@ export function normalizeAuthorityPlaneSnapshot(snapshot: AuthorityPlaneSnapshot
     externalProposals,
     mirrorDeliveries,
   };
+  assertAuthorityWorkspaceChangeLineage(normalized);
+  return normalized;
+}
+
+function assertAuthorityWorkspaceChangeLineage(snapshot: AuthorityPlaneSnapshot): void {
+  const fail = (message: string, receipt: string): never => {
+    throw new AuthorityPlaneError({ code: "indeterminate", message, recoveryAction: "quarantine the Authority snapshot, repair the Workspace/View/Change lineage, and restore it through the recovery ceremony", receipt: `${receipt}; restore=blocked; transition=not-applied` });
+  };
+  for (const workspace of Object.values(snapshot.workspaces ?? {})) {
+    const project = snapshot.projects[workspace.projectId];
+    const revision = snapshot.projectRevisions[workspace.projectRevisionId];
+    const view = snapshot.projectViews[workspace.projectViewId];
+    if (!project || !revision || revision.projectId !== workspace.projectId || !view || view.projectId !== workspace.projectId || view.projectRevisionId !== workspace.projectRevisionId) fail(`Workspace ${workspace.id} has incomplete Project, Revision, or View lineage.`, `workspace=${workspace.id}; project=${workspace.projectId}; projectRevision=${workspace.projectRevisionId}; projectView=${workspace.projectViewId}; lineage=incomplete`);
+    if (workspace.changeId) {
+      const existingChange = snapshot.changes[workspace.changeId];
+      if (!existingChange) {
+        fail(`Workspace ${workspace.id} refers to a missing Change ${workspace.changeId}.`, `workspace=${workspace.id}; change=${workspace.changeId}; lineage=incomplete`);
+        continue;
+      }
+      const change = existingChange;
+      if (change.projectId !== workspace.projectId || change.workspaceId !== workspace.id || change.baseProjectRevisionId !== workspace.projectRevisionId) fail(`Workspace ${workspace.id} and Change ${workspace.changeId} disagree about their base or binding.`, `workspace=${workspace.id}; change=${workspace.changeId}; workspaceBase=${workspace.projectRevisionId}; changeBase=${change.baseProjectRevisionId}; lineage=mismatch`);
+      if (workspace.state === "closed" && change.status !== "landed" && change.status !== "abandoned") fail(`Workspace ${workspace.id} is closed while its Change ${workspace.changeId} remains non-terminal.`, `workspace=${workspace.id}; change=${workspace.changeId}; workspaceState=closed; changeStatus=${change.status}; lineage=mismatch`);
+    }
+  }
+  for (const change of Object.values(snapshot.changes ?? {})) {
+    const baseRevision = snapshot.projectRevisions[change.baseProjectRevisionId];
+    if (!baseRevision || baseRevision.projectId !== change.projectId) fail(`Change ${change.id} has no Project Revision base belonging to its Project.`, `change=${change.id}; project=${change.projectId}; baseProjectRevision=${change.baseProjectRevisionId}; lineage=incomplete`);
+    if (change.workspaceId) {
+      const workspace = snapshot.workspaces[change.workspaceId];
+      if (!workspace || workspace.projectId !== change.projectId || workspace.changeId !== change.id || workspace.projectRevisionId !== change.baseProjectRevisionId) fail(`Change ${change.id} and Workspace ${change.workspaceId} disagree about their base or binding.`, `change=${change.id}; workspace=${change.workspaceId}; changeBase=${change.baseProjectRevisionId}; workspaceBase=${workspace?.projectRevisionId ?? "missing"}; lineage=mismatch`);
+    }
+  }
 }
 
 export class AuthorityPlaneCoordinator {
@@ -1429,6 +1461,7 @@ export class AuthorityPlaneCoordinator {
       }
       case "workspace.create": {
         const currentProject = project ?? (() => { throw new AuthorityPlaneError({ code: "not_found", message: `Project ${requiredString(payload.projectId, "projectId")} does not exist.`, recoveryAction: "create or import the Project before creating a Workspace", receipt: `project=${payload.projectId ?? "missing"}; workspace=not-created` }); })();
+        if (payload.changeId !== undefined) throw new AuthorityPlaneError({ code: "invalid_request", message: "Workspace creation cannot pre-assign a Change.", recoveryAction: "create the active Workspace first, then let change.create atomically claim it", receipt: `project=${currentProject.id}; workspaceBinding=change-create-only; transition=not-applied` });
         const revisionId = requiredString(payload.projectRevisionId, "projectRevisionId");
         const revision = next.projectRevisions[revisionId];
         if (!revision || revision.projectId !== currentProject.id) throw new AuthorityPlaneError({ code: "not_found", message: `Project Revision ${revisionId} is not available for Project ${currentProject.id}.`, recoveryAction: "read the current canonical Project Revision and retry", receipt: `project=${currentProject.id}; revision=${revisionId}; workspace=not-created` });
@@ -1440,8 +1473,7 @@ export class AuthorityPlaneCoordinator {
         const mounts: WorkspaceMount[] = mountsValue === undefined
           ? sourceIds.map((sourceSpaceId) => ({ sourceSpaceId, snapshotId: revision.sourceSpaceSnapshots[sourceSpaceId]!, mountPath: sourceSpaceId.replaceAll(":", "-") }))
           : stringArray(mountsValue, "mounts").map((mountPath, index) => ({ sourceSpaceId: sourceIds[index]!, snapshotId: revision.sourceSpaceSnapshots[sourceIds[index]!]!, mountPath }));
-        const requestedWorkspaceChangeId = optionalString(payload.changeId);
-        const workspace: Workspace = { protocol: CONTRACT_VERSIONS.workspace, id: optionalString(payload.workspaceId) ?? opaqueId("workspace"), projectId: currentProject.id, projectRevisionId: revision.id, projectViewId: view.id, mounts, state: "active", ...(requestedWorkspaceChangeId ? { changeId: requestedWorkspaceChangeId } : {}), actorId: session.actorId };
+        const workspace: Workspace = { protocol: CONTRACT_VERSIONS.workspace, id: optionalString(payload.workspaceId) ?? opaqueId("workspace"), projectId: currentProject.id, projectRevisionId: revision.id, projectViewId: view.id, mounts, state: "active", actorId: session.actorId };
         if (next.workspaces[workspace.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Workspace ${workspace.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Workspace identity", receipt: `workspace=${workspace.id}; exists=true; transition=not-applied` });
         next.projectViews[view.id] = view;
         next.workspaces[workspace.id] = workspace;
@@ -1450,9 +1482,17 @@ export class AuthorityPlaneCoordinator {
       case "change.create": {
         const currentProject = project ?? (() => { throw new AuthorityPlaneError({ code: "not_found", message: `Project ${requiredString(payload.projectId, "projectId")} does not exist.`, recoveryAction: "create the Project before creating a Change", receipt: `project=${payload.projectId ?? "missing"}; change=not-created` }); })();
         const baseRevisionId = optionalString(payload.baseProjectRevisionId) ?? next.canonicalByProject[currentProject.id];
-        if (!baseRevisionId || !next.projectRevisions[baseRevisionId]) throw new AuthorityPlaneError({ code: "not_found", message: "The Change base Project Revision is unavailable.", recoveryAction: "read the canonical Project Revision and retry the Change creation", receipt: `project=${currentProject.id}; baseRevision=missing; change=not-created` });
+        if (!baseRevisionId) throw new AuthorityPlaneError({ code: "not_found", message: "The Change base Project Revision is unavailable.", recoveryAction: "read the canonical Project Revision and retry the Change creation", receipt: `project=${currentProject.id}; baseRevision=missing; change=not-created` });
+        const baseRevision = next.projectRevisions[baseRevisionId];
+        if (!baseRevision || baseRevision.projectId !== currentProject.id) throw new AuthorityPlaneError({ code: "not_found", message: "The Change base Project Revision is unavailable for this Project.", recoveryAction: "read a Project Revision belonging to this Project and retry the Change creation", receipt: `project=${currentProject.id}; baseRevision=${baseRevisionId}; change=not-created` });
         const workspaceId = optionalString(payload.workspaceId);
-        if (workspaceId && (!next.workspaces[workspaceId] || next.workspaces[workspaceId].projectId !== currentProject.id)) throw new AuthorityPlaneError({ code: "not_found", message: `Workspace ${workspaceId} is not available for Project ${currentProject.id}.`, recoveryAction: "create a Workspace for this Project before creating the Change", receipt: `workspace=${workspaceId}; change=not-created` });
+        const workspace = workspaceId ? next.workspaces[workspaceId] : undefined;
+        if (workspaceId && (!workspace || workspace.projectId !== currentProject.id)) throw new AuthorityPlaneError({ code: "not_found", message: `Workspace ${workspaceId} is not available for Project ${currentProject.id}.`, recoveryAction: "create a Workspace for this Project before creating the Change", receipt: `workspace=${workspaceId}; change=not-created` });
+        if (workspaceId && workspace && (workspace.state !== "active" || workspace.changeId !== undefined || workspace.projectRevisionId !== baseRevisionId)) throw new AuthorityPlaneError({ code: "conflict", message: `Workspace ${workspaceId} cannot be claimed by Change creation because its state or base does not match the requested Change.`, recoveryAction: "create a fresh active Workspace from the requested base Project Revision", receipt: `workspace=${workspaceId}; workspaceState=${workspace.state}; workspaceChange=${workspace.changeId ?? "none"}; workspaceBase=${workspace.projectRevisionId}; changeBase=${baseRevisionId}; change=not-created` });
+        if (workspaceId && workspace) {
+          const workspaceView = next.projectViews[workspace.projectViewId];
+          if (!workspaceView || workspaceView.projectId !== currentProject.id || workspaceView.projectRevisionId !== baseRevisionId) throw new AuthorityPlaneError({ code: "conflict", message: `Workspace ${workspaceId} has a Project View that is not derived from the requested Change base.`, recoveryAction: "derive a fresh Project View and Workspace from the requested base Project Revision", receipt: `workspace=${workspaceId}; projectView=${workspace.projectViewId}; viewBase=${workspaceView?.projectRevisionId ?? "missing"}; changeBase=${baseRevisionId}; change=not-created` });
+        }
         const origin = changeOriginFromPayload(payload.origin);
         const intentId = requiredString(payload.intentId, "intentId");
         const existingIntent = next.intents[intentId];
@@ -1473,9 +1513,14 @@ export class AuthorityPlaneCoordinator {
         if (change.status === "landed" || change.status === "abandoned") throw new AuthorityPlaneError({ code: "conflict", message: `Change ${changeId} is ${change.status} and cannot publish another Revision.`, recoveryAction: "create a new Change from the current canonical Project Revision", receipt: `change=${changeId}; status=${change.status}; revision=not-created` });
         const workspaceId = optionalString(payload.workspaceId) ?? change.workspaceId;
         const workspace = workspaceId ? next.workspaces[workspaceId] : undefined;
-        if (workspaceId && (!workspace || workspace.changeId !== changeId || workspace.projectId !== change.projectId)) throw new AuthorityPlaneError({ code: "conflict", message: `Workspace ${workspaceId} is not assigned to Change ${changeId}.`, recoveryAction: "publish from the assigned Change Workspace in the same Project", receipt: `change=${changeId}; workspace=${workspaceId}; revision=not-created` });
+        if (workspaceId && (!workspace || workspace.changeId !== changeId || workspace.projectId !== change.projectId || workspace.state !== "active")) throw new AuthorityPlaneError({ code: "conflict", message: `Workspace ${workspaceId} is not an active Workspace assigned to Change ${changeId}.`, recoveryAction: "publish from the active Change Workspace in the same Project", receipt: `change=${changeId}; workspace=${workspaceId}; workspaceState=${workspace?.state ?? "missing"}; revision=not-created` });
         const projectViewId = requiredString(payload.projectViewId ?? workspace?.projectViewId, "projectViewId");
         if (workspace && workspace.projectViewId !== projectViewId) throw new AuthorityPlaneError({ code: "conflict", message: `Project View ${projectViewId} is not the View mounted by Workspace ${workspace.id}.`, recoveryAction: "publish with the Project View bound to the assigned Workspace", receipt: `workspace=${workspace.id}; projectView=${projectViewId}; revision=not-created` });
+        if (workspace) {
+          const baseRevision = next.projectRevisions[change.baseProjectRevisionId];
+          const projectView = next.projectViews[projectViewId];
+          if (!baseRevision || baseRevision.projectId !== change.projectId || workspace.projectRevisionId !== change.baseProjectRevisionId || !projectView || projectView.projectId !== change.projectId || projectView.projectRevisionId !== change.baseProjectRevisionId) throw new AuthorityPlaneError({ code: "conflict", message: `Workspace ${workspace.id}, Project View ${projectViewId}, and Change ${changeId} do not share one Project Revision base.`, recoveryAction: "rebase the Change onto a fresh Workspace and Project View derived from its declared base", receipt: `change=${changeId}; changeBase=${change.baseProjectRevisionId}; workspaceBase=${workspace.projectRevisionId}; viewBase=${projectView?.projectRevisionId ?? "missing"}; revision=not-created` });
+        }
         const sourceSnapshots = record<string>(payload.sourceSpaceSnapshots ?? next.projectRevisions[change.baseProjectRevisionId]?.sourceSpaceSnapshots, "sourceSpaceSnapshots");
         const project = next.projects[change.projectId];
         if (!project) throw new AuthorityPlaneError({ code: "indeterminate", message: `Change ${changeId} refers to a Project that is not readable.`, recoveryAction: "reconcile the Authority snapshot before publishing a Revision", receipt: `change=${changeId}; project=${change.projectId}; revision=not-created` });
@@ -1933,6 +1978,11 @@ export class AuthorityPlaneCoordinator {
         const change = next.changes[revision.changeId];
         if (!change) throw new AuthorityPlaneError({ code: "not_found", message: `Change ${revision.changeId} does not exist for Change Revision ${changeRevisionId}.`, recoveryAction: "restore the stable Change record before Landing", receipt: `changeRevision=${changeRevisionId}; landing=not-created` });
         const projectId = change.projectId;
+        if (change.workspaceId) {
+          const workspace = next.workspaces[change.workspaceId];
+          const projectView = workspace ? next.projectViews[workspace.projectViewId] : undefined;
+          if (!workspace || workspace.changeId !== change.id || workspace.projectId !== projectId || workspace.projectRevisionId !== change.baseProjectRevisionId || !projectView || projectView.projectId !== projectId || projectView.projectRevisionId !== change.baseProjectRevisionId || revision.workspaceId !== workspace.id || revision.projectViewId !== projectView.id || revision.baseProjectRevisionId !== change.baseProjectRevisionId) throw new AuthorityPlaneError({ code: "conflict", message: `Change ${change.id}, Workspace, Project View, and Change Revision do not share one lineage before Landing.`, recoveryAction: "publish a fresh Revision from a Workspace and View derived from the Change base before Landing", receipt: `change=${change.id}; workspace=${change.workspaceId}; changeBase=${change.baseProjectRevisionId}; workspaceBase=${workspace?.projectRevisionId ?? "missing"}; revisionBase=${revision.baseProjectRevisionId ?? "missing"}; landing=not-created` });
+        }
         const requestedProjectId = optionalString(payload.projectId);
         if (requestedProjectId && requestedProjectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Change Revision ${changeRevisionId} is not available for Project ${requestedProjectId}.`, recoveryAction: "verify the Project and Change Revision identifiers without probing hidden resources", receipt: `project=${requestedProjectId}; changeRevision=${changeRevisionId}; landing=not-created; discoverable=false` });
         const requestedChangeId = optionalString(payload.changeId);

@@ -1,0 +1,3 @@
+# Workspace, View, and Change base lineage
+
+Anyam treats a Workspace, its mounted Project View, and its Change base Project Revision as one inseparable lineage. `workspace.create` creates only an unbound active Workspace; `change.create` is the single atomic claim that binds one matching Workspace to a Change. A local rebase materializes a new Workspace/View, transfers the stable Change to it, and closes the previous Workspace, while export and Authority restore reject incomplete or contradictory lineage instead of repairing it implicitly. This preserves deterministic ancestry across retries, handoffs, rebase, Landing, and recovery.

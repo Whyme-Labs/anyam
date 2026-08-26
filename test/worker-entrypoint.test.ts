@@ -274,6 +274,10 @@ test("Realm Worker Authority Plane runs an authenticated Project-to-Promotion co
   assert.equal((intentClosed.value.intent as Record<string, unknown>).status, "closed");
   const intentReopened = await record(`/api/intents/${encodeURIComponent(intentId)}/reopen`, "idem:typed-intent-reopen", {});
   assert.equal((intentReopened.value.intent as Record<string, unknown>).status, "open");
+  const speculativeWorkspace = await bootstrap(`/api/projects/${encodeURIComponent(project.id)}/workspaces`, "idem:typed-speculative-workspace", { projectRevisionId: canonicalBefore, sourceSpaceIds: ["source:typed-authority-test"], mounts: ["source"], changeId: "change:invented" });
+  assert.equal(speculativeWorkspace.response.status, 422);
+  assert.equal(speculativeWorkspace.value.code, "invalid_request");
+  assert.match(String(speculativeWorkspace.value.receipt), /transition=not-applied/);
   const workspaceBootstrap = await bootstrap(`/api/projects/${encodeURIComponent(project.id)}/workspaces`, "idem:typed-workspace", { projectRevisionId: canonicalBefore, sourceSpaceIds: ["source:typed-authority-test"], mounts: ["source"] });
   assert.equal(workspaceBootstrap.response.status, 200);
   assert.equal(workspaceBootstrap.value.status, "succeeded");

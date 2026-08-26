@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -108,7 +108,7 @@ test("Authority stores only observations bound to the Project, Workspace, View, 
   const authority = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot(session.realmId));
   const command = (name: "project.create" | "workspace.create" | "change.create" | "revision.publish" | "landing.apply", idempotencyKey: string, payload: Record<string, unknown>) => authority.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: name, idempotencyKey, payload }, session);
   command("project.create", "project:create", { projectId: "project:app", name: "App", referenceType: "git", sourceSpaces: [{ id: "source:app", name: "App source", classification: "restricted", repositoryId: "repo:app", snapshotId: "0".repeat(40) }], projectRevisionId: "revision:base" });
-  const workspace = command("workspace.create", "workspace:create", { projectId: "project:app", workspaceId: "workspace:app", projectRevisionId: "revision:base", sourceSpaceIds: ["source:app"], mounts: ["source"], changeId: "change:app" });
+  const workspace = command("workspace.create", "workspace:create", { projectId: "project:app", workspaceId: "workspace:app", projectRevisionId: "revision:base", sourceSpaceIds: ["source:app"], mounts: ["source"] });
   assert.equal(workspace.status, "succeeded");
   if (workspace.status !== "succeeded") return;
   command("change.create", "change:create", { projectId: "project:app", changeId: "change:app", intentId: "intent:app", baseProjectRevisionId: "revision:base", workspaceId: "workspace:app" });
@@ -137,7 +137,7 @@ test("hosted revision publication derives and verifies observations outside the 
   const session: AuthoritySession = { realmId: "realm:hosted-revision-boundary", principalId: "principal:owner", actorId: "actor:owner", sessionId: "session:owner", clientId: "client:test", authorizationEpoch: 1 };
   const authority = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot(session.realmId));
   authority.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "project.create", idempotencyKey: "boundary:project", payload: { projectId: "project:boundary", name: "Boundary", referenceType: "git", sourceSpaces: [{ id: "source:boundary", name: "Boundary source", classification: "restricted", repositoryId: "repo:boundary", snapshotId: "0".repeat(40) }], projectRevisionId: "revision:boundary:base" } }, session);
-  const workspaceResult = authority.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "workspace.create", idempotencyKey: "boundary:workspace", payload: { projectId: "project:boundary", workspaceId: "workspace:boundary", projectRevisionId: "revision:boundary:base", sourceSpaceIds: ["source:boundary"], mounts: ["source"], changeId: "change:boundary" } }, session);
+  const workspaceResult = authority.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "workspace.create", idempotencyKey: "boundary:workspace", payload: { projectId: "project:boundary", workspaceId: "workspace:boundary", projectRevisionId: "revision:boundary:base", sourceSpaceIds: ["source:boundary"], mounts: ["source"] } }, session);
   assert.equal(workspaceResult.status, "succeeded");
   authority.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "change.create", idempotencyKey: "boundary:change", payload: { projectId: "project:boundary", changeId: "change:boundary", intentId: "intent:boundary", baseProjectRevisionId: "revision:boundary:base", workspaceId: "workspace:boundary" } }, session);
   const workspaceValue = workspaceResult.value.workspace;
@@ -175,13 +175,20 @@ test("Project Export carries the Change Revision observation digest through reco
     const claims = { protocol: "anyam.repository-observation/v1" as const, repositoryId: "repo:export", sourceSpaceId: "source:export", workspaceId: "workspace:export", projectViewId: "view:export", objectFormat: "sha1" as const, symbolicRef: "main", commitOid: "4".repeat(40), treeOid: "5".repeat(40), baseCommitOid: "6".repeat(40), ancestryVerified: true as const, observedAt: new Date().toISOString(), receipt: "provider=test; ancestry=verified" };
     const observation = { ...claims, manifestDigest: await repositoryObservationDigest(claims) };
     const changeRevision = { protocol: "anyam.change/v1" as const, id: "change-revision:export", changeId: "change:export", projectRevisionId: "revision:export", projectViewId: "view:export", sequence: 1, parentRevisionId: undefined, declaredEffects: ["source.modify"], baseProjectRevisionId: "revision:base", workspaceId: "workspace:export", sourceSpaceSnapshots: { "source:export": claims.commitOid }, sourceSpaceObservations: { "source:export": observation }, affectedSourceSpaceIds: ["source:export"] };
-    const exported = await new LocalProjectExporter(new InMemoryRepositoryDriver()).exportProject({ project, sourceSpaces: [sourceSpace], repositories: [], destination: root, changeRevisions: [changeRevision] });
+    const exported = await new LocalProjectExporter(new InMemoryRepositoryDriver()).exportProject({ project, sourceSpaces: [sourceSpace], repositories: [], destination: root, projectRevisions: [{ protocol: "anyam.kernel/v1", id: "revision:base", projectId: project.id, sourceSpaceSnapshots: { "source:export": claims.baseCommitOid } }, { protocol: "anyam.kernel/v1", id: "revision:export", projectId: project.id, sourceSpaceSnapshots: { "source:export": claims.commitOid } }], changes: [{ protocol: "anyam.change/v1", id: "change:export", projectId: project.id, intentId: "intent:export", baseProjectRevisionId: "revision:base", status: "submitted", latestRevisionId: changeRevision.id, workspaceId: "workspace:export" }], changeRevisions: [changeRevision] });
     assert.equal(exported.status, "succeeded");
     if (exported.status !== "succeeded") return;
     const verified = await verifyProjectExportPackage(root);
     assert.equal(verified.status, "succeeded");
     if (verified.status !== "succeeded") return;
     assert.equal(verified.value.changeRevisions[0]?.sourceSpaceObservations?.["source:export"]?.manifestDigest, observation.manifestDigest);
+    const forgedManifest = JSON.parse(await readFile(join(root, "export.json"), "utf8")) as Record<string, unknown>;
+    const forgedRevisions = forgedManifest.changeRevisions as Array<Record<string, unknown>>;
+    forgedRevisions[0]!.baseProjectRevisionId = "revision:other";
+    await writeFile(join(root, "export.json"), JSON.stringify(forgedManifest));
+    const rejected = await verifyProjectExportPackage(root);
+    assert.equal(rejected.status, "failed");
+    if (rejected.status === "failed") assert.equal(rejected.errorCode, "export.shape_invalid");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

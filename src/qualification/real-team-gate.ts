@@ -103,7 +103,21 @@ function strings(value: unknown): readonly string[] | undefined {
   return Array.isArray(value) && value.every((entry) => string(entry) !== undefined) ? value.map((entry) => string(entry) as string) : undefined;
 }
 
-function receipt(value: unknown, key: string, blockers: RealTeamGateBlocker[]): RealTeamReceipt | undefined {
+function utcTimestamp(value: unknown, key: string, blockers: RealTeamGateBlocker[]): number | undefined {
+  const normalized = string(value);
+  if (!normalized || !normalized.endsWith("Z")) {
+    blockers.push({ key, message: `${key} must be a valid UTC ISO timestamp ending in Z.`, nextAction: `record ${key} as a valid UTC ISO-8601 timestamp` });
+    return undefined;
+  }
+  const parsed = Date.parse(normalized);
+  if (!Number.isFinite(parsed)) {
+    blockers.push({ key, message: `${key} is not a parseable UTC timestamp.`, nextAction: `replace ${key} with a parseable UTC ISO-8601 timestamp` });
+    return undefined;
+  }
+  return parsed;
+}
+
+function receipt(value: unknown, key: string, blockers: RealTeamGateBlocker[], allowedOwners?: ReadonlySet<string>): RealTeamReceipt | undefined {
   const record = object(value);
   if (!record) {
     blockers.push({ key, message: `${key} must be a receipt object.`, nextAction: `record ${key} with status, receipt, observedAt, owner, and nextAction` });
@@ -119,6 +133,7 @@ function receipt(value: unknown, key: string, blockers: RealTeamGateBlocker[]): 
     return undefined;
   }
   if (/(?:token|secret|password|private[_-]?key|bearer\s+)/iu.test(receiptValue)) blockers.push({ key, message: `${key} receipt contains credential-like material.`, nextAction: `replace ${key} with a digest-only credential-free receipt` });
+  if (allowedOwners && !allowedOwners.has(owner)) blockers.push({ key: `${key}.owner`, message: `${key} owner ${owner} is not one of the named cohort participants.`, nextAction: `bind ${key}.owner to a named humanParticipantId in the cohort` });
   if (status !== "verified") blockers.push({ key, message: `${key} is ${status}, not verified.`, nextAction });
   return { status, receipt: receiptValue, observedAt, owner, nextAction };
 }
@@ -149,34 +164,63 @@ export function validateRealTeamGate(value: unknown): RealTeamGateResult {
   const endedAt = string(cohort?.endedAt);
   if (!cohortId || !realmId || cohort?.hostingMode !== "customer-operated" || cohort?.canonicalAuthority !== "anyam") push(blockers, "cohort.identity", "The gate requires a named customer-operated Realm with Anyam as canonical authority.", "record the customer Realm identity and canonical-authority receipt");
   if (!humans || humans.length < 3 || humans.length > 10) push(blockers, "cohort.humanParticipantIds", `The named cohort must contain 3–10 human participants; observed ${humans?.length ?? 0}.`, "name 3–10 human participants and retain their consent/usage receipts");
+  if (humans && new Set(humans).size !== humans.length) push(blockers, "cohort.humanParticipantIds.unique", "The named cohort contains duplicate human participant identities.", "record each human participant exactly once with a stable identity");
   if (!agents || new Set(agents).size < 2) push(blockers, "cohort.agentProducts", `The cohort must use at least two coding-agent products; observed ${agents?.length ?? 0}.`, "record two distinct coding-agent products used on the canonical Anyam path");
+  const allowedOwners = humans && humans.length > 0 ? new Set(humans) : undefined;
+  const startedTimestamp = startedAt ? utcTimestamp(startedAt, "cohort.startedAt", blockers) : undefined;
+  const endedTimestamp = endedAt ? utcTimestamp(endedAt, "cohort.endedAt", blockers) : undefined;
   const trialCalendarDays = startedAt && endedAt ? calendarDays(startedAt, endedAt) : undefined;
   if (trialCalendarDays === undefined || trialCalendarDays < 30) push(blockers, "cohort.trialWindow", `The trial must span at least 30 calendar days; observed ${trialCalendarDays ?? "unknown"}.`, "run the named cohort for 30 calendar days and record start/end timestamps");
+  const now = Date.now();
+  if (startedTimestamp !== undefined && startedTimestamp > now) push(blockers, "cohort.startedAt.future", "The trial start is in the future.", "record the actual UTC trial start time after the trial begins");
+  if (endedTimestamp !== undefined && endedTimestamp > now) push(blockers, "cohort.endedAt.future", "The trial end is in the future, so the adoption gate cannot be complete.", "run the trial to completion and record an endedAt timestamp no later than the current time");
 
   const changes = object(root?.changes);
   const terminalCount = typeof changes?.terminalCount === "number" && Number.isSafeInteger(changes.terminalCount) ? changes.terminalCount : undefined;
   const changeIds = strings(changes?.changeIds);
   if (terminalCount === undefined || terminalCount < 25 || !changeIds || changeIds.length < 25) push(blockers, "changes.terminalCount", `The trial requires at least 25 terminal Changes; observed ${terminalCount ?? "unknown"}.`, "record every terminal Change identity and reach at least 25 real Changes");
+  if (changeIds && new Set(changeIds).size !== changeIds.length) push(blockers, "changes.changeIds.unique", "The terminal Change list contains duplicate identities.", "record each terminal Change ID exactly once");
+  if (terminalCount !== undefined && changeIds && terminalCount !== changeIds.length) push(blockers, "changes.terminalCount.consistency", `terminalCount=${terminalCount} does not equal the number of named Change IDs=${changeIds.length}.`, "make terminalCount equal the exact number of unique named terminal Change IDs");
 
   const scenarios = object(root?.scenarios);
   let verifiedScenarioCount = 0;
   for (const key of SCENARIO_KEYS) {
-    const record = receipt(scenarios?.[key], `scenarios.${key}`, blockers);
-    if (record?.status === "verified") verifiedScenarioCount += 1;
+    const scenarioReceipt = receipt(scenarios?.[key], `scenarios.${key}`, blockers, allowedOwners);
+    if (scenarioReceipt?.status === "verified") verifiedScenarioCount += 1;
+    if (scenarioReceipt && startedTimestamp !== undefined && endedTimestamp !== undefined) {
+      const observedAt = utcTimestamp(scenarioReceipt.observedAt, `scenarios.${key}.observedAt`, blockers);
+      if (observedAt !== undefined && (observedAt < startedTimestamp || observedAt > endedTimestamp)) push(blockers, `scenarios.${key}.observedAt.window`, `${key} was observed outside the completed trial window.`, `record ${key}.observedAt between cohort.startedAt and cohort.endedAt`);
+    }
   }
   const provider = object(root?.provider);
-  const providerReceipt = receipt(provider?.workerReleaseTarget, "provider.workerReleaseTarget", blockers);
-  if (providerReceipt && !string(object(provider?.workerReleaseTarget)?.provider)) push(blockers, "provider.workerReleaseTarget.provider", "The Worker Release/Target receipt must name its provider.", "record the customer-owned Cloudflare provider identity without credential material");
+  const providerRecord = object(provider?.workerReleaseTarget);
+  const providerReceipt = receipt(providerRecord, "provider.workerReleaseTarget", blockers, allowedOwners);
+  const providerName = string(providerRecord?.provider);
+  if (providerReceipt && providerName !== "cloudflare-workers") push(blockers, "provider.workerReleaseTarget.provider", `The Worker Release/Target receipt provider must be cloudflare-workers; observed ${providerName ?? "missing"}.`, "record the customer-operated Cloudflare Worker provider receipt without credential material");
+  if (providerReceipt && startedTimestamp !== undefined && endedTimestamp !== undefined) {
+    const observedAt = utcTimestamp(providerReceipt.observedAt, "provider.workerReleaseTarget.observedAt", blockers);
+    if (observedAt !== undefined && (observedAt < startedTimestamp || observedAt > endedTimestamp)) push(blockers, "provider.workerReleaseTarget.observedAt.window", "The Worker Release/Target receipt was observed outside the completed trial window.", "record the provider observation inside the named trial window");
+  }
 
   const operations = object(root?.operations);
   let verifiedOperationsCount = 0;
   for (const key of OPERATION_KEYS) {
-    const record = receipt(operations?.[key], `operations.${key}`, blockers);
-    if (record?.status === "verified") verifiedOperationsCount += 1;
+    const operationReceipt = receipt(operations?.[key], `operations.${key}`, blockers, allowedOwners);
+    if (operationReceipt?.status === "verified") verifiedOperationsCount += 1;
+    if (operationReceipt && startedTimestamp !== undefined && endedTimestamp !== undefined) {
+      const observedAt = utcTimestamp(operationReceipt.observedAt, `operations.${key}.observedAt`, blockers);
+      if (observedAt !== undefined && (observedAt < startedTimestamp || observedAt > endedTimestamp)) push(blockers, `operations.${key}.observedAt.window`, `${key} was observed outside the completed trial window.`, `record ${key}.observedAt between cohort.startedAt and cohort.endedAt`);
+    }
   }
   const retention = object(root?.retentionDecision);
   const retentionDecision = retention?.decision === "continue" ? "continue" as const : retention?.decision === "conditional" ? "conditional" as const : retention?.decision === "stop" ? "stop" as const : undefined;
   if (!retentionDecision || !string(retention?.recordedAt) || !string(retention?.owner) || !string(retention?.receipt) || !string(retention?.nextAction)) push(blockers, "retentionDecision", "The team retention decision is missing or incomplete.", "record the named team's continue, conditional, or stop decision with owner, timestamp, receipt, and next action");
+  const retentionOwner = string(retention?.owner);
+  if (allowedOwners && retentionOwner && !allowedOwners.has(retentionOwner)) push(blockers, "retentionDecision.owner", `The retention decision owner ${retentionOwner} is not a named cohort participant.`, "bind retentionDecision.owner to a named humanParticipantId in the cohort");
+  const retentionRecordedAt = retention?.recordedAt ? utcTimestamp(retention.recordedAt, "retentionDecision.recordedAt", blockers) : undefined;
+  if (retentionRecordedAt !== undefined && endedTimestamp !== undefined && retentionRecordedAt < endedTimestamp) push(blockers, "retentionDecision.recordedAt.window", "The retention decision was recorded before the trial ended.", "record the retention decision after the completed trial window");
+  if (retentionRecordedAt !== undefined && retentionRecordedAt > now) push(blockers, "retentionDecision.recordedAt.future", "The retention decision is in the future.", "record the retention decision at or before the current UTC time");
+  if (/(?:token|secret|password|private[_-]?key|bearer\s+)/iu.test(string(retention?.receipt) ?? "")) push(blockers, "retentionDecision.receipt", "The retention receipt contains credential-like material.", "replace the retention receipt with a credential-free digest-only receipt");
   if (retentionDecision !== "continue") push(blockers, "retentionDecision.decision", `The team retention decision is ${retentionDecision ?? "missing"}; the adoption gate is not ready.`, "obtain an explicit continue decision from the named cohort");
 
   const summary = { ...(cohortId ? { cohortId } : {}), ...(humans ? { humanParticipantCount: humans.length } : {}), ...(agents ? { agentProductCount: new Set(agents).size } : {}), ...(trialCalendarDays === undefined ? {} : { trialCalendarDays }), ...(terminalCount === undefined ? {} : { terminalChangeCount: terminalCount }), verifiedScenarioCount, requiredScenarioCount: SCENARIO_KEYS.length, providerReceipt: providerReceipt?.status ?? "indeterminate" as const, verifiedOperationsCount, requiredOperationsCount: OPERATION_KEYS.length, ...(retentionDecision ? { retentionDecision } : {}) };

@@ -44,6 +44,7 @@ import { encodeGitHubActionsBridgeHistory, encodeGitHubActionsBridgeOutboundBund
 import { handleGitHubActionsBridgeRequest } from "./github-actions-bridge-route.ts";
 import { authorizeMcpCommandTarget } from "../../../src/cloudflare/mcp-command-target.ts";
 import { parseRepositoryObservationServiceResponse, verifyRepositoryObservation, type RepositoryObservationRequest } from "../../../src/portability/repository-observation.ts";
+import { AuthoritySQLiteStore, type AuthoritySqlHost } from "../../../src/cloudflare/authority-sqlite.ts";
 
 export type Env = AnyamRealmOAuthEnv;
 
@@ -883,8 +884,34 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   }
 
   private async authoritySnapshot(): Promise<AuthorityPlaneSnapshot> {
-    const stored = await this.ctx.storage.get<AuthorityPlaneSnapshot>(REALM_AUTHORITY_SNAPSHOT_KEY);
-    return stored ? normalizeAuthorityPlaneSnapshot(stored) : emptyAuthorityPlaneSnapshot(this.requireIdentity().realm.id);
+    const realmId = this.requireIdentity().realm.id;
+    const store = this.authoritySqliteStore();
+    const storedSql = store.load(realmId);
+    if (storedSql) return storedSql;
+    const legacy = await this.ctx.storage.get<AuthorityPlaneSnapshot>(REALM_AUTHORITY_SNAPSHOT_KEY);
+    if (legacy) {
+      const migrated = normalizeAuthorityPlaneSnapshot(legacy);
+      store.replace(migrated);
+      await this.ctx.storage.delete(REALM_AUTHORITY_SNAPSHOT_KEY);
+      return migrated;
+    }
+    const empty = emptyAuthorityPlaneSnapshot(realmId);
+    store.replace(empty);
+    return empty;
+  }
+
+  private authoritySqliteStore(): AuthoritySQLiteStore {
+    return new AuthoritySQLiteStore(this.ctx.storage as unknown as AuthoritySqlHost, { empty: emptyAuthorityPlaneSnapshot, normalize: normalizeAuthorityPlaneSnapshot });
+  }
+
+  private async persistAuthoritySnapshot(previous: AuthorityPlaneSnapshot, next: AuthorityPlaneSnapshot): Promise<void> {
+    this.authoritySqliteStore().commit(previous, next);
+    await this.ctx.storage.delete(REALM_AUTHORITY_SNAPSHOT_KEY);
+  }
+
+  private async replaceAuthoritySnapshot(snapshot: AuthorityPlaneSnapshot): Promise<void> {
+    this.authoritySqliteStore().replace(snapshot);
+    await this.ctx.storage.delete(REALM_AUTHORITY_SNAPSHOT_KEY);
   }
 
   private async authorityRecoveryStatus(): Promise<AuthorityRecoveryStatus> {
@@ -951,7 +978,8 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const session = this.authorityOwnerSession(humanSessionId);
     const snapshot = await this.authoritySnapshot();
     const recoveryStatus = await this.authorityRecoveryStatus();
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: recoveryStatus === "active" ? "ready" : "quarantined", authority: authorityStateSummary(snapshot), recoveryStatus, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; persistence=durable-object-storage; version=${snapshot.version}; recoveryStatus=${recoveryStatus}; credentialFree=true; canonicalWrite=landing-only` });
+    const storage = this.authoritySqliteStore().receipt();
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: recoveryStatus === "active" ? "ready" : "quarantined", authority: authorityStateSummary(snapshot), recoveryStatus, storage, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; persistence=sqlite-row-storage; version=${snapshot.version}; recoveryStatus=${recoveryStatus}; storage=${storage.receipt}; credentialFree=true; canonicalWrite=landing-only` });
   }
 
   private async authorityRecoveryExport(humanSessionId: string): Promise<Response> {
@@ -986,7 +1014,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     if (current.version !== bundle.expectedVersion) throw new AuthorityPlaneError({ code: "stale_state", message: "Authority recovery bundle is stale for the current Authority version.", recoveryAction: "export a fresh bundle from the current Authority and retry; no snapshot was replaced", receipt: `authorityRecovery=stale; expectedVersion=${bundle.expectedVersion}; currentVersion=${current.version}; restore=not-applied` });
     const snapshot = authorityRecoverySnapshot({ snapshot: bundle.snapshot }, this.requireIdentity().realm.id);
     await this.ctx.blockConcurrencyWhile(async () => {
-      await this.ctx.storage.put(REALM_AUTHORITY_SNAPSHOT_KEY, snapshot);
+      await this.replaceAuthoritySnapshot(snapshot);
       await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_STATUS_KEY, "quarantined" satisfies AuthorityRecoveryStatus);
       await this.ctx.storage.put(restoreKey, { protocol: AUTHORITY_RECOVERY_PROTOCOL, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: snapshot.version, restoredAt: new Date().toISOString() } satisfies StoredAuthorityRecoveryRestore);
     });
@@ -1330,7 +1358,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         },
       };
       const result = await coordinator.executePromotion({ promotionId, executionIdempotencyKey, ...(expectedVersion === undefined ? {} : { expectedVersion }), executor, session });
-      await this.ctx.storage.put(REALM_AUTHORITY_SNAPSHOT_KEY, coordinator.snapshot());
+      await this.persistAuthoritySnapshot(current, coordinator.snapshot());
       return coordinatorJson({ ...result, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, credentialFree: true, canonicalWrite: false }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
     });
   }
@@ -1373,7 +1401,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         },
       };
       const result = await coordinator.reconcilePromotion({ promotionId, reconciliationIdempotencyKey, ...(expectedVersion === undefined ? {} : { expectedVersion }), executor, session } satisfies PromotionReconciliationRequest);
-      await this.ctx.storage.put(REALM_AUTHORITY_SNAPSHOT_KEY, coordinator.snapshot());
+      await this.persistAuthoritySnapshot(current, coordinator.snapshot());
       return coordinatorJson({ ...result, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, credentialFree: true, canonicalWrite: false }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
     });
   }
@@ -1456,7 +1484,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       const current = await this.authoritySnapshot();
       const coordinator = new AuthorityPlaneCoordinator(current);
       const result = coordinator.execute(envelope, session);
-      await this.ctx.storage.put(REALM_AUTHORITY_SNAPSHOT_KEY, coordinator.snapshot());
+      await this.persistAuthoritySnapshot(current, coordinator.snapshot());
       return coordinatorJson({ ...result, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, credentialFree: true, canonicalWrite: "landing-only" }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
     });
   }
@@ -1475,7 +1503,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       const coordinator = new AuthorityPlaneCoordinator(current);
       const identitySnapshot = this.requireIdentity().getRecoverySnapshot();
       coordinator.registerRunnerProfile(profile, { realmId: identitySnapshot.realm.id, principalId: `runner-service:${profile.id}`, actorId: profile.id, sessionId: `runner-service:${profile.id}`, clientId: "anyam-runner-coordinator", authorizationEpoch: identitySnapshot.realm.authorizationEpoch, kind: "runner" });
-      await this.ctx.storage.put(REALM_AUTHORITY_SNAPSHOT_KEY, coordinator.snapshot());
+      await this.persistAuthoritySnapshot(current, coordinator.snapshot());
       return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "succeeded", runner: { id: profile.id, profileDigest: profile.profileDigest, status: profile.status }, credentialFree: true, canonicalWrite: false, receipt: `runner=${profile.id}; enrollment=synchronized; profileDigest=${profile.profileDigest}; credentialMaterialStored=false; canonicalWrite=false` });
     });
   }
@@ -1496,9 +1524,10 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const payload: Record<string, unknown> = { completion: completionValue };
     const command: AuthorityCommand = { protocol: body.protocol === undefined ? AUTHORITY_COMMAND_PROTOCOL : coordinatorString(body, "protocol") as typeof AUTHORITY_COMMAND_PROTOCOL, command: "runner.complete", idempotencyKey: coordinatorString(body, "idempotencyKey"), ...(typeof body.expectedVersion === "number" ? { expectedVersion: body.expectedVersion } : {}), payload };
     return await this.ctx.blockConcurrencyWhile(async () => {
-      const coordinator = new AuthorityPlaneCoordinator(await this.authoritySnapshot());
+      const current = await this.authoritySnapshot();
+      const coordinator = new AuthorityPlaneCoordinator(current);
       const result = await coordinator.completeRunner(command, session);
-      await this.ctx.storage.put(REALM_AUTHORITY_SNAPSHOT_KEY, coordinator.snapshot());
+      await this.persistAuthoritySnapshot(current, coordinator.snapshot());
       return coordinatorJson({ ...result, provenance: { runnerId, clientId: session.clientId, sessionId: session.sessionId, authorizationEpoch: session.authorizationEpoch }, credentialFree: true, canonicalWrite: false, receipt: `${result.receipt}; authority=runner-completion; runner=${runnerId}; canonicalWrite=false` }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
     });
   }
@@ -1612,7 +1641,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       const delegatedBySessionId = typeof body.delegatedBySessionId === "string" && body.delegatedBySessionId.length > 0 ? body.delegatedBySessionId : undefined;
       const authoritySession: AuthoritySession = { realmId: session.realmId, principalId: session.principalId, actorId: session.actorId, sessionId: session.id, clientId: session.clientId, authorizationEpoch: validation.authorizationEpoch, taskId, capabilityGrantId, ...(delegatedBySessionId ? { delegatedBySessionId } : {}), ...(modelProvider ? { modelProvider } : {}) };
       const accepted = coordinator.execute(target.command, authoritySession);
-      await this.ctx.storage.put(REALM_AUTHORITY_SNAPSHOT_KEY, coordinator.snapshot());
+      await this.persistAuthoritySnapshot(current, coordinator.snapshot());
       return { accepted, targetReceipt: target.receipt };
     });
     const accepted = result.accepted;
@@ -1792,7 +1821,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
           status: "ready",
           identity: identitySummary(this.requireIdentity()),
           recoveryStatus: this.recoveryStatus,
-          receipt: "authority=realm-coordinator; persistence=durable-object-storage; credentialFree=true",
+          receipt: "authority=realm-coordinator; persistence=sqlite-row-storage; credentialFree=true",
         });
       }
       if (request.method !== "POST") return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, code: "method_not_allowed", recoveryAction: "use GET for identity status or POST for a bounded identity transition", receipt: "coordinator=method-not-allowed" }, 405);

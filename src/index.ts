@@ -35,4 +35,5 @@ export * from "./governance/profiles.ts";
 export * from "./cloudflare/realm-worker.ts";
 export * from "./cloudflare/customer-realm-persistence.ts";
 export * from "./cloudflare/mcp-command-target.ts";
+export * from "./cloudflare/authority-sqlite.ts";
 export * from "./brand.ts";

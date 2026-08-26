@@ -44,7 +44,7 @@ import { encodeGitHubActionsBridgeHistory, encodeGitHubActionsBridgeOutboundBund
 import { handleGitHubActionsBridgeRequest } from "./github-actions-bridge-route.ts";
 import { authorizeMcpCommandTarget } from "../../../src/cloudflare/mcp-command-target.ts";
 import { parseRepositoryObservationServiceResponse, verifyRepositoryObservation, type RepositoryObservationRequest } from "../../../src/portability/repository-observation.ts";
-import { AuthoritySQLiteStore, type AuthoritySqlHost } from "../../../src/cloudflare/authority-sqlite.ts";
+import { assertAuthoritySnapshotEquivalent, AuthoritySQLiteStore, type AuthoritySqlHost } from "../../../src/cloudflare/authority-sqlite.ts";
 
 export type Env = AnyamRealmOAuthEnv;
 
@@ -905,6 +905,10 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   }
 
   private async persistAuthoritySnapshot(previous: AuthorityPlaneSnapshot, next: AuthorityPlaneSnapshot): Promise<void> {
+    if (next.version === previous.version) {
+      assertAuthoritySnapshotEquivalent(previous, next);
+      return;
+    }
     this.authoritySqliteStore().commit(previous, next);
     await this.ctx.storage.delete(REALM_AUTHORITY_SNAPSHOT_KEY);
   }

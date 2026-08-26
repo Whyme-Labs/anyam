@@ -917,6 +917,32 @@ export class AuthorityPlaneCoordinator {
           receipt: `executionIdempotencyKey=${executionIdempotencyKey}; conflict=true; stateVersion=${this.state.version}; overwritten=false`,
         });
       }
+      if (existing.result.version === this.state.version) return clone(existing.result);
+      const currentPromotion = this.state.promotions[input.promotionId];
+      if (currentPromotion?.executionIdempotencyKey === executionIdempotencyKey) {
+        const currentTarget = this.state.targets[currentPromotion.targetId];
+        const currentRelease = this.state.releases[currentPromotion.releaseId];
+        const status = currentPromotion.state === "healthy" || currentPromotion.state === "rolled-back"
+          ? "succeeded"
+          : currentPromotion.state === "blocked"
+            ? "blocked"
+            : currentPromotion.state === "failed" || currentPromotion.state === "degraded"
+              ? "indeterminate"
+              : existing.result.status;
+        return {
+          ...clone(existing.result),
+          status,
+          version: this.state.version,
+          value: {
+            promotion: clone(currentPromotion),
+            ...(currentTarget ? { target: clone(currentTarget) } : {}),
+            ...(currentRelease ? { release: clone(currentRelease) } : {}),
+            ...(currentPromotion.reconciliationCheckpoint ? { checkpoint: clone(currentPromotion.reconciliationCheckpoint) } : {}),
+          },
+          receipt: `promotion=${currentPromotion.id}; execution=replay; state=${currentPromotion.state}; providerInvocation=false; credentialFree=true; canonicalWrite=false`,
+          ...(currentPromotion.recoveryAction ? { recoveryAction: currentPromotion.recoveryAction } : {}),
+        };
+      }
       return clone(existing.result);
     }
     if (input.expectedVersion !== undefined && input.expectedVersion !== this.state.version) {
@@ -1126,10 +1152,6 @@ export class AuthorityPlaneCoordinator {
       ...(normalized.recoveryAction ? { recoveryAction: normalized.recoveryAction } : {}),
     };
     next.idempotency[input.authorityIdempotencyKey] = { fingerprint: input.requestFingerprint, result: clone(result) };
-    const originalExecutionKey = `promotion.execute:${input.executionIdempotencyKey}`;
-    if (input.authorityIdempotencyKey !== originalExecutionKey && next.idempotency[originalExecutionKey]) {
-      next.idempotency[originalExecutionKey] = { ...next.idempotency[originalExecutionKey], result: clone(result) };
-    }
     next.audit.push({ id: opaqueId("authority-audit"), command: input.operation, idempotencyKey: input.authorityIdempotencyKey, actor: actorRef(input.session), outcome: normalized.status, stateVersion: next.version, occurredAt: now(), receipt: result.receipt });
     this.state = next;
     return clone(result);

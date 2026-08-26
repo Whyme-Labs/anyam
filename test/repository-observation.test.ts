@@ -9,7 +9,8 @@ import test from "node:test";
 import { LocalGitRepositoryDriver } from "../src/portability/local-git.ts";
 import { LocalProjectExporter, verifyProjectExportPackage } from "../src/portability/project-export.ts";
 import { InMemoryRepositoryDriver } from "../src/harness/adapters.ts";
-import { AUTHORITY_COMMAND_PROTOCOL, AuthorityPlaneCoordinator, emptyAuthorityPlaneSnapshot, type AuthoritySession } from "../src/cloudflare/authority-plane.ts";
+import { AUTHORITY_COMMAND_PROTOCOL, AuthorityPlaneCoordinator, emptyAuthorityPlaneSnapshot, type AuthorityCommand, type AuthoritySession } from "../src/cloudflare/authority-plane.ts";
+import { prepareHostedRevisionPublish } from "../src/cloudflare/hosted-revision-publication.ts";
 import { parseRepositoryObservation, repositoryObservationDigest, verifyRepositoryObservation } from "../src/portability/repository-observation.ts";
 
 const execFile = promisify(execFileCallback);
@@ -130,6 +131,40 @@ test("Authority stores only observations bound to the Project, Workspace, View, 
   assert.equal(landed.status, "succeeded");
   assert.equal(authority.snapshot().changeRevisions["change-revision:app"]?.sourceSpaceObservations?.["source:app"]?.manifestDigest, observation.manifestDigest);
   assert.throws(() => command("revision.publish", "revision:forged", { projectId: "project:app", changeId: "change:app", workspaceId: "workspace:app", projectViewId: viewId, projectRevisionId: "revision:forged", sourceSpaceSnapshots: { "source:app": claims.commitOid }, sourceSpaceObservations: { "source:app": { ...observation, repositoryId: "repo:other" } }, declaredEffects: ["source.modify"] }));
+});
+
+test("hosted revision publication derives and verifies observations outside the MCP path", async () => {
+  const session: AuthoritySession = { realmId: "realm:hosted-revision-boundary", principalId: "principal:owner", actorId: "actor:owner", sessionId: "session:owner", clientId: "client:test", authorizationEpoch: 1 };
+  const authority = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot(session.realmId));
+  authority.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "project.create", idempotencyKey: "boundary:project", payload: { projectId: "project:boundary", name: "Boundary", referenceType: "git", sourceSpaces: [{ id: "source:boundary", name: "Boundary source", classification: "restricted", repositoryId: "repo:boundary", snapshotId: "0".repeat(40) }], projectRevisionId: "revision:boundary:base" } }, session);
+  const workspaceResult = authority.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "workspace.create", idempotencyKey: "boundary:workspace", payload: { projectId: "project:boundary", workspaceId: "workspace:boundary", projectRevisionId: "revision:boundary:base", sourceSpaceIds: ["source:boundary"], mounts: ["source"], changeId: "change:boundary" } }, session);
+  assert.equal(workspaceResult.status, "succeeded");
+  authority.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "change.create", idempotencyKey: "boundary:change", payload: { projectId: "project:boundary", changeId: "change:boundary", intentId: "intent:boundary", baseProjectRevisionId: "revision:boundary:base", workspaceId: "workspace:boundary" } }, session);
+  const workspaceValue = workspaceResult.value.workspace;
+  const viewId = workspaceValue && typeof workspaceValue === "object" && "projectViewId" in workspaceValue && typeof workspaceValue.projectViewId === "string" ? workspaceValue.projectViewId : "";
+  assert.ok(viewId);
+  const claims = { protocol: "anyam.repository-observation/v1" as const, repositoryId: "repo:boundary", sourceSpaceId: "source:boundary", workspaceId: "workspace:boundary", projectViewId: viewId, objectFormat: "sha1" as const, symbolicRef: "refs/heads/main", commitOid: "1".repeat(40), treeOid: "2".repeat(40), baseCommitOid: "0".repeat(40), ancestryVerified: true as const, observedAt: new Date().toISOString(), receipt: "provider=boundary-fixture; ancestry=verified" };
+  const observation = { ...claims, manifestDigest: await repositoryObservationDigest(claims) };
+  const command: AuthorityCommand = { protocol: AUTHORITY_COMMAND_PROTOCOL, command: "revision.publish", idempotencyKey: "boundary:revision", payload: { projectId: "project:boundary", changeId: "change:boundary", workspaceId: "workspace:boundary", projectViewId: viewId, projectRevisionId: "revision:boundary:candidate", sourceSpaceSnapshots: { "source:boundary": claims.commitOid }, sourceSpaceObservations: { "source:boundary": { ...observation, repositoryId: "repo:forged-client-claim" } }, declaredEffects: ["source.modify"] } };
+  const observerCalls: string[] = [];
+  const prepared = await prepareHostedRevisionPublish({ snapshot: authority.snapshot(), command, observe: async (input) => { observerCalls.push(`${input.repositoryId}:${input.sourceSpaceId}:${input.expectedCommitOid}`); return observation; } });
+  assert.deepEqual(observerCalls, [`repo:boundary:source:boundary:${claims.commitOid}`]);
+  const preparedObservations = prepared.payload.sourceSpaceObservations;
+  assert.ok(preparedObservations && typeof preparedObservations === "object" && !Array.isArray(preparedObservations));
+  const preparedObservation = Object.entries(preparedObservations).find(([sourceSpaceId]) => sourceSpaceId === "source:boundary")?.[1];
+  assert.ok(preparedObservation && typeof preparedObservation === "object" && !Array.isArray(preparedObservation));
+  assert.ok("repositoryId" in preparedObservation && preparedObservation.repositoryId === "repo:boundary");
+  const accepted = authority.execute(prepared, session);
+  assert.equal(accepted.status, "succeeded");
+
+  await assert.rejects(
+    prepareHostedRevisionPublish({ snapshot: authority.snapshot(), command: { ...command, idempotencyKey: "boundary:missing-source", payload: { ...command.payload, sourceSpaceSnapshots: {} } }, observe: async () => observation }),
+    /cover exactly the Source Spaces/u,
+  );
+  await assert.rejects(
+    prepareHostedRevisionPublish({ snapshot: authority.snapshot(), command: { ...command, idempotencyKey: "boundary:forged-observation" }, observe: async () => ({ ...observation, repositoryId: "repo:other" }) }),
+    (error: unknown) => error instanceof Error && error.message.includes("does not match"),
+  );
 });
 
 test("Project Export carries the Change Revision observation digest through recovery", async () => {

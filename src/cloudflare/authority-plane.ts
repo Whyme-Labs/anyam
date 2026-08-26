@@ -34,11 +34,13 @@ import {
   type RunnerOutputReference,
   type SourceSpace,
   type RepositoryObservation,
+  type MirrorRepositoryObservation,
   type Target,
   type Workspace,
   type WorkspaceMount,
 } from "../kernel/contracts.ts";
 import { parseRepositoryObservation } from "../portability/repository-observation.ts";
+import { parseMirrorRepositoryObservation, verifyMirrorRepositoryObservation } from "../portability/mirror-observation.ts";
 import type { PromotionReconciliationCheckpoint, PromotionRecord } from "../delivery/promotion.ts";
 import {
   assertTargetCanPromote,
@@ -123,7 +125,7 @@ export type AuthoritySession = {
   delegatedBySessionId?: string;
   modelProvider?: string;
   /** Only the internal Runner service may use the asynchronous completion path. */
-  kind?: "human" | "agent" | "runner";
+  kind?: "human" | "agent" | "runner" | "mirror";
 };
 
 export type AuthorityAuditEvent = {
@@ -291,6 +293,18 @@ function repositoryObservationRecord(value: unknown, field: string): Record<stri
     observations[sourceSpaceId] = parsed.observation;
   }
   if (entries.length === 0) throw new AuthorityPlaneError({ code: "invalid_request", message: field + " must contain at least one Source Space observation.", recoveryAction: "publish an observation for every disclosed Source Space; no authority transition was accepted", receipt: field + "=non-empty-required; transition=not-applied" });
+  return observations;
+}
+
+function mirrorRepositoryObservationRecord(value: unknown, field: string): Record<string, MirrorRepositoryObservation> {
+  const entries = Object.entries(record<unknown>(value, field));
+  const observations: Record<string, MirrorRepositoryObservation> = {};
+  for (const [sourceSpaceId, candidate] of entries) {
+    const parsed = parseMirrorRepositoryObservation(candidate);
+    if (!parsed.valid) throw new AuthorityPlaneError({ code: "invalid_request", message: "A mirror proposal contains a malformed RepositoryDriver observation.", recoveryAction: "publish only the exact credential-free observation returned by the internal Mirror RepositoryDriver boundary", receipt: parsed.receipt });
+    observations[sourceSpaceId] = parsed.observation;
+  }
+  if (entries.length === 0) throw new AuthorityPlaneError({ code: "invalid_request", message: `${field} must contain at least one Source Space observation.`, recoveryAction: "publish one verified mirror observation for the mirrored Source Space", receipt: `${field}=non-empty-required; transition=not-applied` });
   return observations;
 }
 
@@ -642,6 +656,14 @@ export class AuthorityPlaneCoordinator {
         message: "The authenticated session belongs to a different Realm.",
         recoveryAction: "route the command through the Durable Object bound to the authenticated Realm",
         receipt: `sessionRealm=${session.realmId}; stateRealm=${this.state.realmId}; transition=not-applied`,
+      });
+    }
+    if ((command.command === "mirror.sync" || command.command === "mirror.reconcile") && (session.kind !== "mirror" || (session.clientId !== "anyam-mirror-coordinator" && session.clientId !== "anyam-mirror-fixture"))) {
+      throw new AuthorityPlaneError({
+        code: "invalid_request",
+        message: `${command.command} is an internal signed Mirror-ingestion transition and cannot be submitted by a human, agent, OAuth, or generic Authority session.`,
+        recoveryAction: "submit the exact provider proposal through the internal signed Mirror handoff after RepositoryDriver observation; no Authority state was changed",
+        receipt: `command=${command.command}; mirrorIngestion=internal-only; providerObservation=required; transition=not-applied`,
       });
     }
     const idempotencyKey = requiredString(command.idempotencyKey, "idempotencyKey");
@@ -1460,6 +1482,8 @@ export class AuthorityPlaneCoordinator {
         const unknownSourceSpaceId = Object.keys(sourceSnapshots).find((sourceSpaceId) => !project.sourceSpaceIds.includes(sourceSpaceId));
         if (unknownSourceSpaceId) throw new AuthorityPlaneError({ code: "conflict", message: `Source Space ${unknownSourceSpaceId} is not part of Project ${project.id}.`, recoveryAction: "publish only snapshots belonging to the Change Project View", receipt: `project=${project.id}; sourceSpace=${unknownSourceSpaceId}; revision=not-created` });
         const sourceSpaceObservations = payload.sourceSpaceObservations === undefined ? undefined : repositoryObservationRecord(payload.sourceSpaceObservations, "sourceSpaceObservations");
+        const mirrorRepositoryObservations = payload.mirrorRepositoryObservations === undefined ? undefined : mirrorRepositoryObservationRecord(payload.mirrorRepositoryObservations, "mirrorRepositoryObservations");
+        if (mirrorRepositoryObservations && (session.kind !== "mirror" || (session.clientId !== "anyam-mirror-coordinator" && session.clientId !== "anyam-mirror-fixture"))) throw new AuthorityPlaneError({ code: "invalid_request", message: "Mirror Repository observations are accepted only through the internal signed Mirror-ingestion transition.", recoveryAction: "submit the proposal through the internal Mirror handoff; no Authority state was changed", receipt: "mirrorRepositoryObservations=internal-only; transition=not-applied" });
         if (sourceSpaceObservations) {
           const observationIds = Object.keys(sourceSpaceObservations);
           if (observationIds.length !== Object.keys(sourceSnapshots).length || observationIds.some((sourceSpaceId) => sourceSnapshots[sourceSpaceId] === undefined)) throw new AuthorityPlaneError({ code: "conflict", message: "RepositoryDriver observations must cover exactly the Source Space snapshot set.", recoveryAction: "publish one verified observation for every Source Space disclosed by the Project View", receipt: "project=" + project.id + "; observationSet=source-snapshot-mismatch; revision=not-created" });
@@ -1475,6 +1499,7 @@ export class AuthorityPlaneCoordinator {
         const revisionKind = optionalString(payload.kind) as ChangeRevision["kind"] | undefined;
         const revision: ChangeRevision = { protocol: CONTRACT_VERSIONS.change, id: optionalString(payload.revisionId) ?? opaqueId("change-revision"), changeId, projectRevisionId, projectViewId, sequence, parentRevisionId: change.latestRevisionId ?? undefined, declaredEffects: stringArray(payload.declaredEffects ?? [], "declaredEffects", true), baseProjectRevisionId: change.baseProjectRevisionId, ...(workspaceId ? { workspaceId } : {}), sourceSpaceSnapshots: { ...sourceSnapshots }, affectedSourceSpaceIds: Object.keys(sourceSnapshots), author: actor, ...(revisionKind ? { kind: revisionKind } : {}) };
         if (sourceSpaceObservations) revision.sourceSpaceObservations = { ...sourceSpaceObservations };
+        if (mirrorRepositoryObservations) revision.mirrorRepositoryObservations = { ...mirrorRepositoryObservations };
         if (next.changeRevisions[revision.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Change Revision ${revision.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Revision identity", receipt: `revision=${revision.id}; exists=true; transition=not-applied` });
         next.changeRevisions[revision.id] = revision;
         next.changes[changeId] = { ...change, latestRevisionId: revision.id, status: "submitted" };
@@ -1763,6 +1788,9 @@ export class AuthorityPlaneCoordinator {
           if (!change || change.projectId !== mirror.projectId || change.baseProjectRevisionId !== canonicalProjectRevisionId) throw new AuthorityPlaneError({ code: "conflict", message: `Mirror Change ${changeId} is not available for canonical Project Revision ${canonicalProjectRevisionId}.`, recoveryAction: "declare only existing Changes for this Project and canonical base; no Mirror transition was accepted", receipt: `mirror=${mirrorId}; change=${changeId}; operation=${command.command}; transition=not-applied; discoverable=false` });
         }
         const proposalValue = payload.externalProposal === undefined ? undefined : safeObject(payload.externalProposal, "externalProposal");
+        const mirrorRepositoryObservations = payload.mirrorRepositoryObservations === undefined ? undefined : mirrorRepositoryObservationRecord(payload.mirrorRepositoryObservations, "mirrorRepositoryObservations");
+        const mirrorFixtureSession = session.kind === "mirror" && session.clientId === "anyam-mirror-fixture";
+        if (mirrorRepositoryObservations && !proposalValue) throw new AuthorityPlaneError({ code: "invalid_request", message: "Mirror Repository observations require an external proposal.", recoveryAction: "send mirror observations only with the matching provider proposal; no Authority transition was accepted", receipt: "mirrorRepositoryObservations=proposal-required; transition=not-applied" });
         let proposal: ExternalProposal | undefined;
         let proposalChange: Change | undefined;
         let proposalRevision: ChangeRevision | undefined;
@@ -1809,6 +1837,17 @@ export class AuthorityPlaneCoordinator {
           const proposalViewId = requiredString(proposalValue.projectViewId, "externalProposal.projectViewId");
           const proposalView = next.projectViews[proposalViewId];
           if (!proposalView || proposalView.projectId !== mirror.projectId || proposalView.projectRevisionId !== canonicalProjectRevisionId || !proposalView.visibleSourceSpaceIds.includes(mirror.sourceSpaceId) || proposalView.classification !== proposalDisclosure) throw new AuthorityPlaneError({ code: "not_found", message: `Project View ${proposalViewId} is not a permitted disclosure View for external proposal ${proposalKey}.`, recoveryAction: "create or select the exact Project View that discloses this Source Space at the current canonical Project Revision", receipt: `mirror=${mirrorId}; proposal=${proposalKey}; projectView=${proposalViewId}; disclosure=blocked; discoverable=false` });
+          if (!proposalDelivery && !mirrorFixtureSession) throw new AuthorityPlaneError({ code: "blocked", message: `External proposal ${proposalKey} has no verified provider delivery identity.`, recoveryAction: "submit the proposal through the signed provider delivery handoff and re-inspect it before creating a Change", receipt: `mirror=${mirrorId}; proposal=${proposalKey}; delivery=required; change=not-created; revision=not-created` });
+          let verifiedMirrorObservation: { valid: true; observation: MirrorRepositoryObservation } | undefined;
+          if (!mirrorFixtureSession) {
+            const mirrorObservation = mirrorRepositoryObservations?.[mirror.sourceSpaceId];
+            if (!proposalDelivery || !mirrorObservation || Object.keys(mirrorRepositoryObservations ?? {}).length !== 1) throw new AuthorityPlaneError({ code: "blocked", message: `External proposal ${proposalKey} has no exact Mirror RepositoryDriver observation for Source Space ${mirror.sourceSpaceId}.`, recoveryAction: "reinspect the proposal head and base through the internal RepositoryDriver handoff before creating a Change", receipt: `mirror=${mirrorId}; proposal=${proposalKey}; sourceSpace=${mirror.sourceSpaceId}; observation=required; change=not-created; revision=not-created` });
+            const expectedMirrorBaseCommit = proposalBaseCommit ?? canonicalSourceSnapshot;
+            if (!sourceSpace.repositoryId || !expectedMirrorBaseCommit) throw new AuthorityPlaneError({ code: "blocked", message: `External proposal ${proposalKey} has incomplete Repository identity or canonical base.`, recoveryAction: "bind the Source Space to its authoritative Repository and re-read the canonical base before retrying the signed Mirror handoff", receipt: `mirror=${mirrorId}; proposal=${proposalKey}; repositoryIdentity=${sourceSpace.repositoryId ? "present" : "missing"}; baseCommit=${expectedMirrorBaseCommit ?? "missing"}; change=not-created` });
+            const verified = verifyMirrorRepositoryObservation({ observation: mirrorObservation, repositoryId: sourceSpace.repositoryId, sourceSpaceId: mirror.sourceSpaceId, mirrorId, proposalKey, deliveryId: proposalDelivery.deliveryId, provider: proposalProvider, remoteRepository: proposalRepository, projectViewId: proposalViewId, expectedCommitOid: proposalHead, expectedBaseCommitOid: expectedMirrorBaseCommit });
+            if (!verified.valid) throw new AuthorityPlaneError({ code: "conflict", message: "The Mirror RepositoryDriver observation does not match the external proposal identity or Git ancestry.", recoveryAction: verified.recoveryAction, receipt: verified.receipt });
+            verifiedMirrorObservation = verified;
+          }
           const proposalLedgerKey = mirrorProposalLedgerKey({ provider: proposalProvider, ...(proposalInstallationId ? { installationId: proposalInstallationId } : {}), sourceIdentity: proposalSourceIdentity, remoteRepository: proposalRepository, proposalKind, proposalKey });
           const existingProposal = next.externalProposals[proposalLedgerKey];
           if (existingProposal) {
@@ -1836,7 +1875,7 @@ export class AuthorityPlaneCoordinator {
               if (sourceSpaceId !== mirror.sourceSpaceId && sourceSnapshots[sourceSpaceId] !== proposalView.disclosedSourceSpaceSnapshots[sourceSpaceId]) throw new AuthorityPlaneError({ code: "conflict", message: `External proposal ${proposalKey} changes disclosed Source Space ${sourceSpaceId} outside the mirrored Source Space.`, recoveryAction: "use the Project View snapshot for every non-mirrored Source Space", receipt: `mirror=${mirrorId}; proposal=${proposalKey}; sourceSpace=${sourceSpaceId}; snapshot=disclosure-mismatch; providerInvocation=false` });
             }
             if (sourceSnapshots[mirror.sourceSpaceId] !== proposalHead) throw new AuthorityPlaneError({ code: "conflict", message: `External proposal ${proposalKey} does not map its mirrored Source Space to head ${proposalHead}.`, recoveryAction: "include the mirrored Source Space with the exact external proposal head commit", receipt: `mirror=${mirrorId}; proposal=${proposalKey}; sourceSpace=${mirror.sourceSpaceId}; expectedHead=${proposalHead}; snapshot=not-accepted; providerInvocation=false` });
-            const revisionResult = this.apply(next, { protocol: AUTHORITY_COMMAND_PROTOCOL, command: "revision.publish", idempotencyKey: `${command.idempotencyKey}:external-revision:${proposalHead}`, payload: { changeId: proposalChange!.id, projectId: mirror.projectId, projectViewId: proposalViewId, projectRevisionId: optionalString(proposalValue.projectRevisionId) ?? `proposal-revision:${proposalHead}`, sourceSpaceSnapshots: sourceSnapshots, declaredEffects: proposalValue.declaredEffects ?? ["mirror.external-proposal"], kind: "implementation" } }, session);
+            const revisionResult = this.apply(next, { protocol: AUTHORITY_COMMAND_PROTOCOL, command: "revision.publish", idempotencyKey: `${command.idempotencyKey}:external-revision:${proposalHead}`, payload: { changeId: proposalChange!.id, projectId: mirror.projectId, projectViewId: proposalViewId, projectRevisionId: optionalString(proposalValue.projectRevisionId) ?? `proposal-revision:${proposalHead}`, sourceSpaceSnapshots: sourceSnapshots, ...(verifiedMirrorObservation ? { mirrorRepositoryObservations: { [mirror.sourceSpaceId]: verifiedMirrorObservation.observation } } : {}), declaredEffects: proposalValue.declaredEffects ?? ["mirror.external-proposal"], kind: "implementation" } }, session);
             proposalRevision = revisionResult.value.revision as ChangeRevision;
           }
           const nowAt = now();

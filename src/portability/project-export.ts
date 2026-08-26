@@ -279,6 +279,12 @@ function manifestProblems(manifest: ProjectExport): readonly string[] {
         if (typeof manifestDigest !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(manifestDigest)) problems.push("Change Revision " + revision.id + " observation " + sourceSpaceId + " has an invalid manifest digest");
       }
     }
+    if (revision.mirrorRepositoryObservations) {
+      for (const [sourceSpaceId, observation] of Object.entries(revision.mirrorRepositoryObservations)) {
+        const manifestDigest = observation !== null && typeof observation === "object" ? Object.fromEntries(Object.entries(observation)).manifestDigest : undefined;
+        if (typeof manifestDigest !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(manifestDigest)) problems.push("Change Revision " + revision.id + " mirror observation " + sourceSpaceId + " has an invalid manifest digest");
+      }
+    }
   }
   const declaredSpaces = new Set(manifest.project.sourceSpaceIds);
   const repositorySpaces = new Set<string>();

@@ -16,7 +16,8 @@
     "ANYAM_MIGRATION_DIGEST": "replace-with-migration-digest",
     "ANYAM_CONFIGURATION_DIGEST": "replace-with-configuration-digest",
     "ANYAM_AUTHORITY_RECOVERY_KEY_ID": "replace-with-customer-authority-recovery-key-id",
-    "ANYAM_PROMOTION_HANDOFF_KEY_ID": "replace-with-customer-promotion-handoff-key-id"
+    "ANYAM_PROMOTION_HANDOFF_KEY_ID": "replace-with-customer-promotion-handoff-key-id",
+    "ANYAM_MIRROR_HANDOFF_KEY_ID": "replace-with-customer-mirror-handoff-key-id"
   },
   "kv_namespaces": [
     {

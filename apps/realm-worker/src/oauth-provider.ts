@@ -81,6 +81,10 @@ export type AnyamRealmOAuthEnv = CustomerRealmWorkerEnv & {
   ANYAM_AUTHORITY_RECOVERY_KEY_ID?: string;
   /** Shared only with the bound Public Gateway service; never a user credential. */
   ANYAM_PUBLIC_GATEWAY_SERVICE_SECRET?: string;
+  /** Active key ID used by the internal Mirror provider handoff. */
+  ANYAM_MIRROR_HANDOFF_KEY_ID?: string;
+  /** Secret shared only with the internal Mirror provider adapter. */
+  ANYAM_MIRROR_HANDOFF_SECRET?: string;
   /** Customer-owned verifier for GitHub Actions OIDC assertions. The token is
    * forwarded only to this binding and never stored in Realm state. */
   ANYAM_GITHUB_OIDC_VERIFIER?: Fetcher;

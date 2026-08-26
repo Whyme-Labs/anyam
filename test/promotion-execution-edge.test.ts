@@ -214,11 +214,11 @@ test("owner Mirror configuration preserves the coordinator receipt when the Dura
   }), env);
 
   if (!blockedResponse) throw new Error("mirror authority edge did not return the blocked response");
-  assert.equal(blockedResponse.status, 409);
+  assert.equal(blockedResponse.status, 410);
   const blockedValue = await blockedResponse.json() as Record<string, unknown>;
   assert.equal(blockedValue.status, "blocked");
-  assert.ok(blockedValue.value, JSON.stringify(blockedValue));
-  assert.equal((blockedValue.value as { mirror: { state: string } }).mirror.state, "blocked");
+  assert.equal(blockedValue.code, "mirror_ingestion_internal_only");
+  assert.match(String(blockedValue.receipt), /providerObservation=required/);
 });
 
 test("owner Promotion status is a read-only credential-free surface", async () => {

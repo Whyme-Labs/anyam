@@ -451,7 +451,10 @@ The projection retains one Pull Request ID across branch updates and rebases.
 Merge is rejected until the mapped Change is Landed. Provider mirror proposals
 of kind `pull-request` update the same projection, but cannot advance the
 canonical Project Revision. Public projections omit provider repository
-identity and private Change IDs.
+identity and private Change IDs. Provider sync and reconciliation are not
+accepted through the generic Authority or human REST command surface; the
+adapter must use the signed internal Mirror handoff after RepositoryDriver
+observation.
 
 The owner-authenticated Agent delegation surface accepts an explicit
 Project/Workspace/Change resource, mounted Source Space IDs, agent identity

@@ -4,6 +4,8 @@ import test from "node:test";
 
 import { AuthorityPlaneCoordinator, AUTHORITY_COMMAND_PROTOCOL, emptyAuthorityPlaneSnapshot, normalizeAuthorityPlaneSnapshot, type AuthorityPlaneSnapshot, type AuthoritySession } from "../src/cloudflare/authority-plane.ts";
 import { AUTHORITY_LEGACY_JSON_VALUE_TRIPWIRE_BYTES, AuthoritySQLiteStore, authorityCommandLatencyReceipt, authoritySnapshotJsonBytes, type AuthoritySqlHost, type AuthoritySqlStorage } from "../src/cloudflare/authority-sqlite.ts";
+import { PROMOTION_EXECUTION_PROTOCOL, type PromotionExecutionContext, type PromotionExecutionResult } from "../src/cloudflare/promotion-execution.ts";
+import { CONTRACT_VERSIONS } from "../src/kernel/contracts.ts";
 
 class NodeSqlStorage implements AuthoritySqlStorage {
   constructor(private readonly database: DatabaseSync) {}
@@ -73,6 +75,7 @@ test("AuthoritySQLiteStore round-trips normalized entity, audit, and idempotency
     const replayed = command(replay, "project:create", { projectId: "project:sqlite", name: "SQLite", referenceType: "git", sourceSpaces: [{ id: "source:sqlite", name: "SQLite source", classification: "internal", snapshotId: "snapshot:base" }], projectRevisionId: "revision:base" });
     assert.equal(replayed.version, 1);
     assert.equal(replay.snapshot().audit.length, 1);
+    assert.doesNotThrow(() => persistence.commit(restored, replay.snapshot()), "a same-fingerprint replay must be a persisted no-op");
     assert.throws(() => persistence.commit({ ...restored, version: 0 }, restored));
     const receipt = persistence.receipt();
     assert.equal(receipt.schemaVersion, 1);
@@ -80,6 +83,80 @@ test("AuthoritySQLiteStore round-trips normalized entity, audit, and idempotency
     assert.equal(receipt.auditRows, 1);
     assert.equal(receipt.idempotencyRows, 1);
     assert.ok((receipt.databaseBytes ?? 0) > 0);
+  } finally {
+    database.close();
+  }
+});
+
+function promotionFixture(): { snapshot: AuthorityPlaneSnapshot; promotionId: string; executionIdempotencyKey: string; session: AuthoritySession } {
+  const promotionSession: AuthoritySession = { realmId: "realm:authority-sqlite-promotion", principalId: "principal:owner", actorId: "actor:owner", sessionId: "session:owner", clientId: "client:test", authorizationEpoch: 1 };
+  const snapshot = emptyAuthorityPlaneSnapshot(promotionSession.realmId);
+  const projectId = "project:authority-sqlite-promotion";
+  const sourceSpaceId = "source:authority-sqlite-promotion";
+  const projectRevisionId = "project-revision:authority-sqlite-promotion";
+  const artifactId = "artifact:authority-sqlite-promotion";
+  const releaseId = "release:authority-sqlite-promotion";
+  const targetId = "target:authority-sqlite-promotion";
+  const promotionId = "promotion:authority-sqlite-promotion";
+  const executionIdempotencyKey = "execute:authority-sqlite-promotion";
+  snapshot.projects[projectId] = { protocol: CONTRACT_VERSIONS.project, id: projectId, name: "SQLite Promotion", referenceType: "git", sourceSpaceIds: [sourceSpaceId] };
+  snapshot.sourceSpaces[sourceSpaceId] = { protocol: CONTRACT_VERSIONS.sourceSpace, id: sourceSpaceId, name: "SQLite promotion source", classification: "internal" };
+  snapshot.projectRevisions[projectRevisionId] = { protocol: CONTRACT_VERSIONS.kernel, id: projectRevisionId, projectId, sourceSpaceSnapshots: { [sourceSpaceId]: "git:authority-sqlite-promotion" } };
+  snapshot.canonicalByProject[projectId] = projectRevisionId;
+  snapshot.artifacts[artifactId] = { protocol: CONTRACT_VERSIONS.artifact, id: artifactId, type: "cli.archive", digest: "sha256:authority-sqlite-artifact", projectRevisionId };
+  snapshot.releases[releaseId] = { protocol: CONTRACT_VERSIONS.release, id: releaseId, projectRevisionId, artifactIds: [artifactId], evidenceIds: [], configurationDigests: ["sha256:authority-sqlite-configuration"], stateAssumptions: [], policyVersion: "policy:authority-sqlite", status: "ready" };
+  snapshot.targets[targetId] = { protocol: CONTRACT_VERSIONS.target, id: targetId, projectId, name: "SQLite promotion target", adapterId: "adapter:authority-sqlite", acceptedArtifactTypes: ["cli.archive"], requiredEvidenceKeys: [], state: "configured", currentReleaseId: null, releaseHistory: [] };
+  snapshot.promotions[promotionId] = { protocol: CONTRACT_VERSIONS.promotion, id: promotionId, projectId, targetId, releaseId, releaseDigest: "declared:authority-sqlite", previousReleaseId: null, expectedCurrentReleaseId: null, state: "blocked", attempt: 0, kind: "promotion", idempotencyKey: "request:authority-sqlite", actor: { principalId: promotionSession.principalId, actorId: promotionSession.actorId, sessionId: promotionSession.sessionId, clientId: promotionSession.clientId }, createdAt: "2026-08-26T00:00:00.000Z", updatedAt: "2026-08-26T00:00:00.000Z", receipt: "promotion=blocked" };
+  return { snapshot, promotionId, executionIdempotencyKey, session: promotionSession };
+}
+
+function healthyPromotionExecutor(): { execute(context: Readonly<PromotionExecutionContext>): Promise<PromotionExecutionResult> } {
+  return {
+    async execute(context) {
+      return {
+        protocol: PROMOTION_EXECUTION_PROTOCOL,
+        status: "succeeded",
+        adapterId: context.target.adapterId,
+        executionDigest: context.executionDigest,
+        promotion: { ...context.promotion, state: "healthy", attempt: context.promotion.attempt + 1, providerOperationId: "provider-operation:authority-sqlite", receipt: "provider=qualification; operation=healthy; release-bound=true" },
+        target: { id: context.target.id, projectId: context.project.id, state: "healthy", currentReleaseId: context.release.id, releaseHistory: [...(context.target.releaseHistory ?? []), context.release.id] },
+        checkpoint: { idempotencyKey: context.executionIdempotencyKey, attempt: context.promotion.attempt + 1, stage: "complete", providerOperationIds: ["provider-operation:authority-sqlite"], receipt: "checkpoint=provider-complete" },
+        receipt: "provider=qualification; release-bound=true",
+      };
+    },
+  };
+}
+
+test("SQLite preserves immutable Promotion execution results through reconciliation and replay", async () => {
+  const database = new DatabaseSync(":memory:");
+  try {
+    const persistence = store(database);
+    const { snapshot, promotionId, executionIdempotencyKey, session } = promotionFixture();
+    persistence.replace(snapshot);
+    const firstCoordinator = new AuthorityPlaneCoordinator(snapshot);
+    const first = await firstCoordinator.executePromotion({ promotionId, executionIdempotencyKey, executor: { execute: async () => { throw new Error("transport timeout after provider apply"); } }, session });
+    assert.equal(first.status, "indeterminate");
+    const afterFirst = firstCoordinator.snapshot();
+    persistence.commit(snapshot, afterFirst);
+    const originalKey = `promotion.execute:${executionIdempotencyKey}`;
+    const originalExecutionResult = afterFirst.idempotency[originalKey];
+    assert.ok(originalExecutionResult);
+
+    const restarted = new AuthorityPlaneCoordinator(persistence.load(session.realmId)!);
+    const reconciled = await restarted.reconcilePromotion({ promotionId, reconciliationIdempotencyKey: "reconcile:authority-sqlite", executor: healthyPromotionExecutor(), session });
+    assert.equal(reconciled.status, "succeeded");
+    const afterReconciliation = restarted.snapshot();
+    assert.deepEqual(afterReconciliation.idempotency[originalKey], originalExecutionResult, "reconciliation must not rewrite the original execution result");
+    assert.ok(afterReconciliation.idempotency["promotion.reconcile:reconcile:authority-sqlite"]);
+    assert.doesNotThrow(() => persistence.commit(afterFirst, afterReconciliation));
+
+    const restored = persistence.load(session.realmId)!;
+    const replayCoordinator = new AuthorityPlaneCoordinator(restored);
+    const replayed = await replayCoordinator.reconcilePromotion({ promotionId, reconciliationIdempotencyKey: "reconcile:authority-sqlite", executor: { execute: async () => { throw new Error("replay must not invoke provider"); } }, session });
+    assert.equal(replayed.status, "succeeded");
+    assert.equal(replayed.version, restored.version);
+    assert.doesNotThrow(() => persistence.commit(restored, replayCoordinator.snapshot()), "reconciliation replay must be a persisted no-op");
+    assert.deepEqual(persistence.load(session.realmId)?.idempotency[originalKey], originalExecutionResult);
   } finally {
     database.close();
   }

@@ -113,6 +113,18 @@ function json(value: unknown): string {
   return encoded;
 }
 
+function stableJson(value: unknown): string {
+  if (value === undefined) return "undefined";
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
+}
+
+export function assertAuthoritySnapshotEquivalent(previous: AuthorityPlaneSnapshot, next: AuthorityPlaneSnapshot): void {
+  if (previous.realmId !== next.realmId || stableJson(previous) !== stableJson(next)) throw new Error("authority_sqlite_noop_snapshot_mismatch");
+}
+
 function parsed<T>(value: string, field: string): T {
   try {
     return JSON.parse(value) as T;
@@ -218,6 +230,10 @@ export class AuthoritySQLiteStore {
 
   commit(previous: AuthorityPlaneSnapshot, next: AuthorityPlaneSnapshot): void {
     if (previous.realmId !== next.realmId) throw new Error("authority_sqlite_realm_mismatch");
+    if (next.version === previous.version) {
+      assertAuthoritySnapshotEquivalent(previous, next);
+      return;
+    }
     if (next.version !== previous.version + 1) throw new Error("authority_sqlite_version_transition_invalid");
     this.host.transactionSync(() => {
       createSchema(this.host.sql);

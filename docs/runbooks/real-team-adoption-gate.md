@@ -54,6 +54,33 @@ the `anyam.real-team-adoption-gate/v1` contract:
 Each receipt needs an owner, observation timestamp, next action, and
 credential-free receipt text. `not-verified` and `indeterminate` are blockers.
 
+The gate also requires a signed Authority export and external attestation
+keyring. Keep the keyring files outside the repository; they contain public
+keys only and use this shape:
+
+```json
+{
+  "authority:key:v1": "-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----"
+}
+```
+
+Set the paths before evaluation:
+
+```bash
+export ANYAM_REAL_TEAM_AUTHORITY_KEY_FILE=/secure/real-team/authority-keys.json
+export ANYAM_REAL_TEAM_ATTESTATION_KEYS_FILE=/secure/real-team/attestation-keys.json
+```
+
+The evidence bundle must include `authorityExport`, `terminalChanges`, and
+`externalAttestations`. `authorityExport` signs the complete credential-free
+Authority snapshot and names its `cohortId`, `realmId`, `exportDigest`,
+`signingKeyId`, and `exportedAt`. Each terminal Change entry names its
+`changeId`, `terminalState`, `auditEventId`, and latest `revisionId`. Each
+external attestation names its `attestationId`, reviewer identity, report
+digest, signing key, cohort, Realm, and `signedAt`; its reviewer must not be a
+trial participant. The independent-security-review receipt must repeat the
+attestation ID, reviewer ID, and report digest.
+
 For bidirectional GitHub projection, provider sync and reconciliation must use
 the internal signed Mirror handoff after RepositoryDriver observation. The
 human REST and generic Authority routes intentionally reject provider claims;
@@ -65,10 +92,14 @@ the local team simulation's fixture-only mirror seam is not adoption evidence.
 npm run qualification:real-team-gate -- ./real-team-evidence.json
 ```
 
-The command prints a disclosure-safe blocker list. It returns success only
-after the trial spans 30 calendar days, at least 25 terminal Changes exist,
-all scenarios and operations are verified, the provider receipt is verified,
-and the team records an explicit `continue` decision.
+The command prints a disclosure-safe blocker list and a `summary.verification`
+mode. It returns success only after the trial spans 30 calendar days, at least
+25 terminal Changes exist, the signed Authority export and external
+attestations verify with the configured public keys, all scenarios and
+operations are verified, the provider receipt is bound to the signed
+Promotion, and the team records an explicit `continue` decision. Without
+trusted keys the result is explicitly `manual-review-only` and remains
+blocked.
 
 Until that command returns `status=ready`, Anyam remains an internal/private
 alpha for production-readiness claims.

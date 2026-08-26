@@ -14,18 +14,22 @@ replaceable and customer-owned.
 ## Decision
 
 Ship `apps/repository-observer` as a small, service-binding-only verifier
-Worker. It delegates exact repository reads to a customer-owned
-`REPOSITORY_DRIVER` service binding using the existing
+Worker, paired with the deployable `apps/repository-driver` R2 snapshot
+adapter. The driver accepts only private Observer service-binding requests and
+reads provider-synchronized, credential-free snapshot manifests. It delegates
+provider-specific synchronization to a replaceable GitHub App, Smart-HTTP, or
+Anyam-native adapter. The observer and driver use the existing
 `anyam.repository-observation/v1` request/response contract. The observer
 validates request shape, bounds request and response bodies using a measured
 tripwire, rejects credential-bearing receipts, verifies every returned
 observation against the authoritative request, and emits only credential-free
 responses.
 
-The first reference adapter is deliberately provider-neutral. Customers can
-bind an Anyam-native Git, GitHub App, Smart HTTP, or other qualified driver
-without changing the Realm or observer contract. The observer has no public
-Workers dev or preview route in its example configuration.
+The first reference adapter is deliberately provider-neutral and snapshot
+backed. Customers can replace its synchronizer with an Anyam-native Git,
+GitHub App, Smart HTTP, or other qualified provider without changing the Realm
+or observer contract. Both Workers have no public Workers dev or preview route
+in their example configurations.
 
 ## Consequences
 
@@ -39,7 +43,9 @@ Workers dev or preview route in its example configuration.
 ## Receipt
 
 - Worker typecheck and Wrangler dry-run pass.
-- Local qualification verifies healthy, valid, forged, missing-driver, and
-  bounded-request paths with `providerMutation=false`.
-- Worker smoke includes `/health`, `/observe`, the service binding, and request
-  budget configuration.
+- RepositoryDriver qualification verifies the R2 snapshot driver and Observer
+  composition, valid and non-ancestor heads, revoked and deleted state, the
+  private service-binding header, bounded bodies, and credential-free receipts
+  with `providerMutation=false`.
+- Worker smoke includes `/health`, `/observe`, the service bindings, and request
+  budget configuration for both Workers.

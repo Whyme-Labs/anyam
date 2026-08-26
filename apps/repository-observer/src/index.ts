@@ -94,7 +94,12 @@ async function observe(request: Request, env: Env, config: { limit: number; rece
   if (!parsedRequest.valid) return requestFailure(parsedRequest.code, parsedRequest.message, parsedRequest.recoveryAction, parsedRequest.receipt);
   const driver = env.REPOSITORY_DRIVER;
   if (!driver || typeof driver.fetch !== "function") return failure({ status: "unavailable", code: "repository_driver_unconfigured", recoveryAction: "bind the customer-owned RepositoryDriver service before enabling hosted Change Revision publication", receipt: "repositoryObserver=driver-unconfigured; providerInvocation=false; credentialMaterialStored=false" }, 503);
-  const driverResponse = await driver.fetch(new Request("https://anyam-repository-driver/observe", { method: "POST", headers: { "content-type": "application/json", "x-anyam-repository-observer-protocol": REPOSITORY_OBSERVER_PROTOCOL }, body: JSON.stringify(body) }));
+  let driverResponse: Response;
+  try {
+    driverResponse = await driver.fetch(new Request("https://anyam-repository-driver/observe", { method: "POST", headers: { "content-type": "application/json", "x-anyam-repository-observer-protocol": REPOSITORY_OBSERVER_PROTOCOL }, body: JSON.stringify(body) }));
+  } catch (error) {
+    return failure({ status: "unavailable", code: "repository_driver_unavailable", recoveryAction: "retry the same immutable observation after the customer RepositoryDriver service is reachable", receipt: `repositoryObserver=driver-unavailable; providerInvocation=indeterminate; error=${error instanceof Error ? error.message : "transport-error"}; credentialMaterialStored=false` }, 503);
+  }
   let driverBody: unknown;
   try {
     driverBody = JSON.parse(await readBoundedText(driverResponse, config.limit)) as unknown;

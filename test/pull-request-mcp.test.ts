@@ -34,6 +34,7 @@ test("remote MCP exposes Pull Request compatibility tools with stable Change lin
           const command = String(requestBody.command);
           const id = typeof payload.pullRequestId === "string" ? payload.pullRequestId : "pr:mcp";
           const existing = pullRequests.get(id);
+          if (command === "pullRequest.merge" && existing && existing.status !== "open") return new Response(JSON.stringify({ protocol: "anyam.authority-plane/v1", code: "conflict", message: `Pull Request ${id} cannot transition from ${existing.status} to merged.`, recoveryAction: "reopen the Pull Request explicitly before merging", receipt: `pullRequest=${id}; status=${existing.status}; desired=merged; transition=not-applied` }), { status: 409 });
           const next = command === "pullRequest.open"
             ? { protocol: "anyam.pull-request/v1", id, projectId: String(payload.projectId), changeId: String(payload.changeId), provider: String(payload.provider), headRef: String(payload.headRef), baseRef: String(payload.baseRef), headCommit: String(payload.headCommit), baseCommit: String(payload.baseCommit), title: String(payload.title), description: "", status: "open", reviewState: "pending", revisionIds: ["revision:mcp-pr"], disclosure: "project" }
             : command === "pullRequest.update" && existing
@@ -71,6 +72,17 @@ test("remote MCP exposes Pull Request compatibility tools with stable Change lin
   const review = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "pullRequest.review", arguments: { idempotencyKey: "mcp-pr-review", pullRequestId: "pr:mcp", reviewState: "approved", reviewDigest: "sha256:review" } } }), env, props);
   const reviewContent = ((await body(review)).result as Record<string, unknown>).structuredContent as Record<string, unknown>;
   assert.equal(((reviewContent.value as Record<string, unknown>).pullRequest as Record<string, unknown>).reviewState, "approved");
+  const blocked = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "pullRequest.block", arguments: { idempotencyKey: "mcp-pr-block", pullRequestId: "pr:mcp" } } }), env, props);
+  assert.equal(((await body(blocked)).result as Record<string, unknown>).isError, false);
+  const blockedMerge = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "pullRequest.merge", arguments: { idempotencyKey: "mcp-pr-blocked-merge", pullRequestId: "pr:mcp" } } }), env, props);
+  const blockedMergeBody = await body(blockedMerge);
+  assert.ok(blockedMergeBody.error);
+  assert.match(decodeURIComponent(JSON.stringify(blockedMergeBody)), /status=blocked/);
+  const reopened = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "pullRequest.reopen", arguments: { idempotencyKey: "mcp-pr-reopen", pullRequestId: "pr:mcp" } } }), env, props);
+  assert.equal(((await body(reopened)).result as Record<string, unknown>).isError, false);
+  const merged = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "pullRequest.merge", arguments: { idempotencyKey: "mcp-pr-merge", pullRequestId: "pr:mcp" } } }), env, props);
+  const mergedContent = ((await body(merged)).result as Record<string, unknown>).structuredContent as Record<string, unknown>;
+  assert.equal(((mergedContent.value as Record<string, unknown>).pullRequest as Record<string, unknown>).status, "merged");
   const inspected = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "pullRequest.inspect", arguments: { pullRequestId: "pr:mcp" } } }), env, props);
   const inspectedContent = ((await body(inspected)).result as Record<string, unknown>).structuredContent as Record<string, unknown>;
   assert.equal((inspectedContent.pullRequest as Record<string, unknown>).id, "pr:mcp");

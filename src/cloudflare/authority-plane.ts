@@ -22,6 +22,7 @@ import {
   type Project,
   type ProjectRevision,
   type PullRequest,
+  type PullRequestStatus,
   type PullRequestReview,
   type ProjectView,
   type Release,
@@ -69,6 +70,13 @@ import type { RunnerResult } from "../execution/runner.ts";
 
 export const AUTHORITY_PLANE_PROTOCOL = "anyam.authority-plane/v1" as const;
 export const AUTHORITY_COMMAND_PROTOCOL = "anyam.authority-command/v1" as const;
+
+const PULL_REQUEST_TRANSITIONS: { readonly [status in PullRequestStatus]: readonly PullRequestStatus[] } = {
+  open: ["closed", "blocked", "merged"],
+  closed: ["open"],
+  blocked: ["open"],
+  merged: [],
+};
 
 export type AuthorityCommandName =
   | "project.create"
@@ -1355,6 +1363,7 @@ export class AuthorityPlaneCoordinator {
         if (projectId !== undefined && existing.projectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Pull Request ${pullRequestId} is not available for Project ${projectId}.`, recoveryAction: "verify the Pull Request identifier within the requested Project", receipt: `pullRequest=${pullRequestId}; project=${projectId}; operation=${command.command}; discoverable=false` });
         if (existing.status === "merged") throw new AuthorityPlaneError({ code: "conflict", message: `Pull Request ${pullRequestId} is merged and terminal.`, recoveryAction: "create a new Pull Request or follow-up Change; merged Pull Requests cannot transition again", receipt: `pullRequest=${pullRequestId}; terminal=true; operation=${command.command}; transition=not-applied` });
         const desired = command.command === "pullRequest.close" ? "closed" : command.command === "pullRequest.reopen" ? "open" : command.command === "pullRequest.block" ? "blocked" : "merged";
+        if (existing.status !== desired && !PULL_REQUEST_TRANSITIONS[existing.status].includes(desired)) throw new AuthorityPlaneError({ code: "conflict", message: `Pull Request ${pullRequestId} cannot transition from ${existing.status} to ${desired}.`, recoveryAction: existing.status === "closed" || existing.status === "blocked" ? "reopen the Pull Request explicitly before requesting another transition" : "use only the transitions allowed by the current Pull Request state", receipt: `pullRequest=${pullRequestId}; status=${existing.status}; desired=${desired}; allowed=${PULL_REQUEST_TRANSITIONS[existing.status].join(",") || "none"}; transition=not-applied` });
         if (desired === "merged") {
           const change = next.changes[existing.changeId];
           if (!change || change.status !== "landed") throw new AuthorityPlaneError({ code: "conflict", message: `Pull Request ${pullRequestId} cannot be marked merged before its Change is Landed.`, recoveryAction: "complete review and Landing for the mapped Change before merging the compatibility projection", receipt: `pullRequest=${pullRequestId}; change=${existing.changeId}; changeStatus=${change?.status ?? "missing"}; merge=not-accepted` });

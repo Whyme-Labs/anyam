@@ -122,6 +122,14 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
   });
 }
 
+function coordinatorDetailReceipt(error: unknown): string {
+  const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+  const redacted = detail
+    .replace(/(Bearer\s+)[^\s;]+/giu, "$1<redacted>")
+    .replace(/((?:token|secret|credential|password|privateKey)\s*[=:]\s*)[^\s;,]+/giu, "$1<redacted>");
+  return `coordinatorDetail=${encodeURIComponent(redacted)}`;
+}
+
 function mcpJson(body: unknown, status = 200): Response {
   return jsonResponse(body, status, { "mcp-session-id": "not-issued" });
 }
@@ -877,7 +885,7 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
       const isList = name === MCP_LIST_TOOL || name === MCP_WORKSPACE_LIST_TOOL;
       const operation = isDelivery ? name : isRun ? (isRunRequest ? RUN_REQUEST_COMMAND : "run.inspect") : isPullRequest ? name : isIntent ? name : isChange ? (name === MCP_CHANGE_LIST_TOOL ? "change.list" : name === MCP_CHANGE_READ_TOOL ? "change.inspect" : "revision.publish") : isWorkspace ? (isList ? "workspace.list" : "workspace.inspect") : (isList ? "project.list" : "project.inspect");
       const resource = isDelivery ? "Delivery" : isRun ? "Run" : isPullRequest ? "Pull Request" : isIntent ? "Intent" : isChange ? "Change" : isWorkspace ? "Workspace" : "Project";
-      return mcpError(id, notFound ? -32004 : -32602, notFound ? `${resource} is not available in this Realm.` : `${operation} arguments are invalid or the coordinator rejected the read.`, { code: notFound ? `mcp.${resource.toLowerCase()}_not_found` : `mcp.${resource.toLowerCase()}_read_failed`, recoveryAction: notFound ? `verify the ${resource} identifier without probing undiscoverable resources` : "inspect the coordinator receipt and retry the same read", receipt: `mcp=${operation}; errorClass=${errorClass}; credentialFree=true; canonicalWrite=false` });
+      return mcpError(id, notFound ? -32004 : -32602, notFound ? `${resource} is not available in this Realm.` : `${operation} arguments are invalid or the coordinator rejected the read.`, { code: notFound ? `mcp.${resource.toLowerCase()}_not_found` : `mcp.${resource.toLowerCase()}_read_failed`, recoveryAction: notFound ? `verify the ${resource} identifier without probing undiscoverable resources` : "inspect the coordinator receipt and retry the same read", receipt: `mcp=${operation}; errorClass=${errorClass}; credentialFree=true; canonicalWrite=false; ${coordinatorDetailReceipt(error)}` });
     }
   }
   return mcpError(id, -32601, `Method ${rpc.method} is not available.`, { code: "mcp.method_not_found", recoveryAction: "use initialize, tools/list, or tools/call", receipt: `mcp=method-not-found; method=${rpc.method}; canonicalWrite=false` });

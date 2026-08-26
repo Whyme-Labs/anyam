@@ -175,6 +175,11 @@ test("Realm Authority persists mirror operations, maps one external proposal to 
   assert.equal(pullRequest?.status, "closed");
   assert.equal(pullRequest?.revisionIds.length, 2);
   assert.equal(pullRequest?.externalKey, proposal.proposalKey);
+  const latestRevisionId = proposal.changeRevisionIds.at(-1);
+  assert.ok(latestRevisionId);
+  assert.equal(command(coordinator, "pullRequest.review", "mirror:closed-review", { projectId: "project:video-player", pullRequestId: pullRequest!.id, reviewState: "approved", reviewDigest: "sha256:closed-review" }).status, "succeeded");
+  assert.equal(command(coordinator, "landing.apply", "mirror:closed-landing", { projectId: "project:video-player", changeId: proposal.changeId, changeRevisionId: latestRevisionId, expectedCanonicalProjectRevisionId: "project-revision:initial", projectRevisionId: "project-revision:mirror-landed" }).status, "succeeded");
+  assert.throws(() => command(coordinator, "pullRequest.merge", "mirror:closed-merge", { projectId: "project:video-player", pullRequestId: pullRequest!.id }), (error: unknown) => error instanceof AuthorityPlaneError && error.code === "conflict" && error.receipt.includes("status=closed") && error.receipt.includes("transition=not-applied"));
   assert.equal(persisted.mirrors["mirror:github"]?.canonicalProjectRevisionId, "project-revision:initial");
 });
 

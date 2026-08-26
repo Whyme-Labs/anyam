@@ -85,8 +85,15 @@ test("owner REST exposes a disclosure-safe Pull Request projection over stable C
   assert.equal((inspected.value.pullRequest as Record<string, unknown>).changeId, "change:pull-request-rest");
   const reviewed = await request("/api/pull-requests/pr%3Arest/review", "POST", { reviewState: "approved", reviewDigest: "sha256:review" }, "rest:review");
   assert.equal((reviewed.value.pullRequest as Record<string, unknown>).reviewState, "approved");
+  assert.equal(authorityCommand("landing.apply", "rest:landing", { projectId: "project:pull-request-rest", changeId: "change:pull-request-rest", changeRevisionId: revisionId, expectedCanonicalProjectRevisionId: "project-revision:base", projectRevisionId: "project-revision:landed" }).status, "succeeded");
   const closed = await request("/api/pull-requests/pr%3Arest/close", "POST", {}, "rest:close");
   assert.equal((closed.value.pullRequest as Record<string, unknown>).status, "closed");
+  const closedMerge = await request("/api/pull-requests/pr%3Arest/merge", "POST", {}, "rest:closed-merge");
+  assert.equal(closedMerge.response.status, 409);
+  assert.match(decodeURIComponent(String(closedMerge.value.receipt)), /status=closed/);
   const reopened = await request("/api/pull-requests/pr%3Arest/reopen", "POST", {}, "rest:reopen");
   assert.equal((reopened.value.pullRequest as Record<string, unknown>).status, "open");
+  const merged = await request("/api/pull-requests/pr%3Arest/merge", "POST", {}, "rest:merge");
+  assert.equal(merged.response.status, 200);
+  assert.equal((merged.value.pullRequest as Record<string, unknown>).status, "merged");
 });

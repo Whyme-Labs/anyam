@@ -59,6 +59,34 @@ test("Pull Request compatibility preserves identity through branch updates, revi
   assert.match(snapshot.pullRequests["pr:pull-request"]?.receipt ?? "", /canonicalWrite=false/);
 });
 
+function readyPullRequestForTransitionTest(): AuthorityPlaneCoordinator {
+  const coordinator = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot(session.realmId));
+  assert.equal(command(coordinator, "project.create", "transition:project", { projectId: "project:transition", name: "Transition Test", referenceType: "git", sourceSpaces: [{ id: "source:transition", name: "source", classification: "public", snapshotId: "commit:base" }], projectRevisionId: "project-revision:transition:base" }).status, "succeeded");
+  const workspace = command(coordinator, "workspace.create", "transition:workspace", { projectId: "project:transition", workspaceId: "workspace:transition", projectRevisionId: "project-revision:transition:base", sourceSpaceIds: ["source:transition"], mounts: ["source"] });
+  assert.equal(workspace.status, "succeeded");
+  const projectViewId = (workspace.value.view as { id: string }).id;
+  assert.equal(command(coordinator, "change.create", "transition:change", { projectId: "project:transition", changeId: "change:transition", intentId: "intent:transition", baseProjectRevisionId: "project-revision:transition:base", workspaceId: "workspace:transition" }).status, "succeeded");
+  const revision = command(coordinator, "revision.publish", "transition:revision", { projectId: "project:transition", changeId: "change:transition", workspaceId: "workspace:transition", projectViewId, projectRevisionId: "project-revision:transition:candidate", sourceSpaceSnapshots: { "source:transition": "commit:feature" }, declaredEffects: ["source.modify"] });
+  assert.equal(revision.status, "succeeded");
+  const revisionId = (revision.value.revision as { id: string }).id;
+  assert.equal(command(coordinator, "pullRequest.open", "transition:open", { projectId: "project:transition", pullRequestId: "pr:transition", changeId: "change:transition", provider: "local", headRef: "refs/heads/feature", baseRef: "refs/heads/main", headCommit: "commit:feature", baseCommit: "commit:base", title: "Transition", disclosure: "public", revisionIds: [revisionId] }).status, "succeeded");
+  assert.equal(command(coordinator, "pullRequest.review", "transition:review", { projectId: "project:transition", pullRequestId: "pr:transition", reviewState: "approved", reviewDigest: "sha256:transition" }).status, "succeeded");
+  assert.equal(command(coordinator, "landing.apply", "transition:landing", { projectId: "project:transition", changeId: "change:transition", changeRevisionId: revisionId, expectedCanonicalProjectRevisionId: "project-revision:transition:base", projectRevisionId: "project-revision:transition:landed" }).status, "succeeded");
+  return coordinator;
+}
+
+test("Pull Request transition table rejects direct merge from closed and blocked states", () => {
+  const blocked = readyPullRequestForTransitionTest();
+  assert.equal(command(blocked, "pullRequest.block", "transition:blocked", { projectId: "project:transition", pullRequestId: "pr:transition" }).status, "succeeded");
+  assert.throws(() => command(blocked, "pullRequest.merge", "transition:blocked-merge", { projectId: "project:transition", pullRequestId: "pr:transition" }), (error: unknown) => error instanceof AuthorityPlaneError && error.code === "conflict" && error.receipt.includes("status=blocked") && error.receipt.includes("transition=not-applied"));
+  assert.equal(blocked.snapshot().pullRequests["pr:transition"]?.status, "blocked");
+
+  const closed = readyPullRequestForTransitionTest();
+  assert.equal(command(closed, "pullRequest.close", "transition:closed", { projectId: "project:transition", pullRequestId: "pr:transition" }).status, "succeeded");
+  assert.throws(() => command(closed, "pullRequest.merge", "transition:closed-merge", { projectId: "project:transition", pullRequestId: "pr:transition" }), (error: unknown) => error instanceof AuthorityPlaneError && error.code === "conflict" && error.receipt.includes("status=closed") && error.receipt.includes("transition=not-applied"));
+  assert.equal(closed.snapshot().pullRequests["pr:transition"]?.status, "closed");
+});
+
 test("Pull Request compatibility rejects cross-Change revisions and preserves a blocked status", () => {
   const coordinator = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot(session.realmId));
   const project = command(coordinator, "project.create", "project:create:blocked", { projectId: "project:pull-request-blocked", name: "Blocked PR", referenceType: "git", sourceSpaces: [{ id: "source:blocked", name: "source", classification: "public", snapshotId: "commit:base" }], projectRevisionId: "project-revision:blocked" });

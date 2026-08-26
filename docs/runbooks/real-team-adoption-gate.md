@@ -54,6 +54,11 @@ the `anyam.real-team-adoption-gate/v1` contract:
 Each receipt needs an owner, observation timestamp, next action, and
 credential-free receipt text. `not-verified` and `indeterminate` are blockers.
 
+For bidirectional GitHub projection, provider sync and reconciliation must use
+the internal signed Mirror handoff after RepositoryDriver observation. The
+human REST and generic Authority routes intentionally reject provider claims;
+the local team simulation's fixture-only mirror seam is not adoption evidence.
+
 ## 5. Evaluate the gate
 
 ```bash

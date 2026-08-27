@@ -12,7 +12,8 @@
     "ANYAM_PROTOCOL_VERSION": "anyam.customer-realm-worker/v1",
     "ANYAM_REALM_RP_ID": "anyam-p3-24-live-20260810.swmengappdev.workers.dev",
     "ANYAM_BUILD_REVISION": "6a0e2186e716c5cc4723186de70c84a3d0c5cb19",
-    "ANYAM_PROVIDER_WORKER_URL": "https://anyam-p3-24-target-20260810.swmengappdev.workers.dev"
+    "ANYAM_PROVIDER_WORKER_URL": "https://anyam-p3-24-target-20260810.swmengappdev.workers.dev",
+    "ANYAM_MIRROR_HANDOFF_KEY_ID": "mirror-handoff-v1"
   },
   "kv_namespaces": [
     {

@@ -53,22 +53,25 @@ ANYAM_GITHUB_APP_PR_REVISION_POLL_MS
 3. Set `ANYAM_GITHUB_APP_REPOSITORY` and
    `ANYAM_GITHUB_APP_DISPOSABLE_REPOSITORY` to that same `owner/name`. The
    qualification refuses a different cleanup target.
-4. Open the deployed customer Realm's `/owner/login`, authenticate with the
-   enrolled passkey, and place only the opaque `anyam_owner_session` value in
-   a local owner-session file. Do not copy the `Cookie:` header or any other
-   browser data. Set `ANYAM_GITHUB_APP_AUTHORITY_BASE_URL` to the deployed
-   Realm URL and point `ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION_FILE` at that
-   file.
+4. Set `ANYAM_GITHUB_APP_AUTHORITY_BASE_URL` to the deployed Realm URL. The
+   current qualifier's REST client accepts an existing opaque owner-session
+   file only as a temporary compatibility path. The Realm no longer exports
+   raw owner sessions, and operators must not copy an HttpOnly browser cookie.
+   If you do not already have an unexpired session file, the live Authority
+   path is currently blocked pending
+   [#330](https://github.com/Whyme-Labs/anyam/issues/330), which adds the
+   supported OAuth/capability exchange.
 5. Run the qualification from the same terminal that contains the non-secret
    IDs, sizing receipts, and file paths. A successful receipt must show both
    provider and Authority cleanup success; otherwise the named disposable
    resources remain an operator-owned recovery task.
 
 To extend the provider qualification into the customer-operated Authority
-boundary, set the following additional inputs. The owner session may be
-provided directly for a one-off run or through a file so it is not placed in
-shell history; it is sent only as the host cookie to the configured Realm and
-is never printed.
+boundary, set the following additional inputs. The owner session fields below
+are temporary compatibility inputs for an already-issued opaque session; they
+are not a supported way to mint a new credential. The Realm no longer exports
+raw owner sessions. Do not copy an HttpOnly browser cookie; use #330 for the
+supported OAuth/capability path.
 
 ```text
 ANYAM_GITHUB_APP_AUTHORITY_BASE_URL=https://customer-realm.example
@@ -160,4 +163,5 @@ Authority boundary only. Without those inputs, a provider-only receipt proves
 only the selected GitHub App and qualification repository adapter boundary. It
 does not claim GitHub Enterprise support, general repository mirroring, or
 production readiness. #321 remains open until the owner captures a live producer
-receipt; #193 (the adapter implementation ticket) is closed.
+receipt through a supported owner credential path; #330 tracks that OAuth/
+capability exchange. #193 (the adapter implementation ticket) is closed.

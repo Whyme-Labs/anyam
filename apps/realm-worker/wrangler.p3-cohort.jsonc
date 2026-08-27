@@ -8,7 +8,8 @@
     "ANYAM_HOSTING_MODE": "customer-operated",
     "ANYAM_INSTALLATION_ID": "anyam-p3-cohort-20260803",
     "ANYAM_PROTOCOL_VERSION": "anyam.customer-realm-worker/v1",
-    "ANYAM_BUILD_REVISION": "6e9bca5119b3e6f80f3c8085ebc5a686adb42af2"
+    "ANYAM_BUILD_REVISION": "6e9bca5119b3e6f80f3c8085ebc5a686adb42af2",
+    "ANYAM_MIRROR_HANDOFF_KEY_ID": "mirror-handoff-v1"
   },
   "durable_objects": {
     "bindings": [

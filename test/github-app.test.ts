@@ -5,6 +5,8 @@ import test from "node:test";
 import {
   GITHUB_APP_ADAPTER_PROTOCOL,
   GitHubAppProjectionAdapter,
+  GitHubMirrorProducer,
+  createGitHubMirrorIngestionHttpTransport,
   cleanupGitHubAppDisposable,
   GitHubAppAdapterError,
   type GitHubAppInstallation,
@@ -21,8 +23,9 @@ import {
   gitPushArguments,
   gitTransportFailure,
 } from "../src/portability/github-app.ts";
-import { AUTHORITY_COMMAND_PROTOCOL, AuthorityPlaneCoordinator, emptyAuthorityPlaneSnapshot, type AuthoritySession } from "../src/cloudflare/authority-plane.ts";
-import type { GitRef } from "../src/kernel/contracts.ts";
+import { AUTHORITY_COMMAND_PROTOCOL, AuthorityPlaneCoordinator, emptyAuthorityPlaneSnapshot, type AuthorityCommand, type AuthoritySession } from "../src/cloudflare/authority-plane.ts";
+import { verifyMirrorIngestionHandoff } from "../src/portability/mirror-observation.ts";
+import type { GitRef, RepositoryMirror } from "../src/kernel/contracts.ts";
 
 const installation: GitHubAppInstallation = {
   installationId: "installation:github-app",
@@ -35,6 +38,11 @@ const installation: GitHubAppInstallation = {
 };
 
 const refs = (entries: readonly [string, string][]): GitRef[] => entries.map(([name, oid]) => ({ name, oid }));
+
+const PRODUCER_COMMIT_ONE = "1111111111111111111111111111111111111111";
+const PRODUCER_COMMIT_TWO = "2222222222222222222222222222222222222222";
+const PRODUCER_COMMIT_REWRITTEN = "4444444444444444444444444444444444444444";
+const PRODUCER_TREE_TWO = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 function fixtureDeliveryLedger() {
   return { recordIfAbsent: (_task: GitHubReconciliationTask) => "accepted" as const, listPending: (): readonly GitHubReconciliationTask[] => [], markProcessed: (_deliveryId: string) => undefined };
@@ -93,7 +101,7 @@ class FakeGit implements GitHubSmartHttpTransport {
 }
 
 class FakeApi implements GitHubRestClient {
-  readonly commits: GitHubCommitObservation = { oid: "commit:two", author: { name: "Contributor", email: "contributor@example.test" } };
+  readonly commits: GitHubCommitObservation = { oid: "commit:two", treeOid: "tree:two", author: { name: "Contributor", email: "contributor@example.test" } };
   readonly pullRequest: GitHubPullRequestObservation = {
     number: 42,
     repository: "acme/video-player",
@@ -137,6 +145,46 @@ function adapter(input: { git?: FakeGit; api?: FakeApi; issuer?: FakeTokenIssuer
   const api = input.api ?? new FakeApi();
   const value = new GitHubAppProjectionAdapter({ installation, issuer, git, api, queue: { maxPending: 2, sizingReceipt: "fixture=queue-capacity-measured", deliveryLedger: fixtureDeliveryLedger() } });
   return { value, issuer, git, api };
+}
+
+function producerMirror(overrides: Partial<RepositoryMirror> = {}): RepositoryMirror {
+  return {
+    protocol: "anyam.mirror/v1",
+    id: "mirror:github-producer",
+    projectId: "project:producer",
+    sourceSpaceId: "source:producer",
+    provider: "github",
+    remoteRepository: "acme/video-player",
+    direction: "bidirectional",
+    canonicalAuthority: "anyam",
+    refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }],
+    disclosure: "public",
+    state: "healthy",
+    canonicalProjectRevisionId: "project-revision:producer:one",
+    canonicalRefs: refs([["refs/heads/main", PRODUCER_COMMIT_ONE]]),
+    remoteGeneration: "remote:g1",
+    remoteRefs: refs([["refs/heads/main", PRODUCER_COMMIT_ONE]]),
+    pendingInboundChangeIds: [],
+    createdAt: "2026-08-27T00:00:00.000Z",
+    updatedAt: "2026-08-27T00:00:00.000Z",
+    receipt: "fixture=producer-mirror; credentialFree=true",
+    ...overrides,
+  };
+}
+
+function producerAdapter() {
+  const git = new FakeGit();
+  git.refs = { generation: "remote:g2", refs: refs([["refs/heads/main", PRODUCER_COMMIT_TWO]]), receipt: "git-smart-http=inspected; provider=github" };
+  const api = new FakeApi();
+  api.commits.oid = PRODUCER_COMMIT_TWO;
+  api.commits.treeOid = PRODUCER_TREE_TWO;
+  api.pullRequest.headCommit = PRODUCER_COMMIT_TWO;
+  api.pullRequest.baseCommit = PRODUCER_COMMIT_ONE;
+  return { ...adapter({ git, api }), git, api };
+}
+
+function signed(body: string, secret: string): string {
+  return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
 }
 
 test("GitHub App adapter uses selected-installation credentials for Smart HTTP refs and REST provenance", async () => {
@@ -354,6 +402,128 @@ test("signed GitHub webhook is a wake-up hint, dedupes deliveries, ignores unmap
   const drained = await value.drainReconciliation({ limit: 2, reinspect: async (task) => ({ status: "succeeded", receipt: `reinspected=${task.deliveryId}; remoteState=authoritative` }) });
   assert.equal(drained.status, "succeeded");
   if (drained.status === "succeeded" && drained.value) assert.equal(drained.value.processedDeliveryIds.length, 2);
+});
+
+test("GitHub Mirror producer re-inspects a push, signs the exact handoff, and deduplicates delivery replay", async () => {
+  const { value } = producerAdapter();
+  const authority = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot("realm:github-producer"));
+  const ownerSession: AuthoritySession = { realmId: "realm:github-producer", principalId: "principal:owner", actorId: "actor:owner", sessionId: "session:owner", clientId: "anyam-producer-fixture", authorizationEpoch: 1 };
+  const mirrorSession: AuthoritySession = { realmId: "realm:github-producer", principalId: "mirror-provider:github", actorId: "mirror:github-producer", sessionId: "session:mirror", clientId: "anyam-mirror-coordinator", authorizationEpoch: 1, kind: "mirror" };
+  const execute = (command: AuthorityCommand, session: AuthoritySession): ReturnType<AuthorityPlaneCoordinator["execute"]> => authority.execute(command, session);
+  assert.equal(execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "project.create", idempotencyKey: "producer:project", payload: { projectId: "project:producer", name: "Producer", referenceType: "git", sourceSpaces: [{ id: "source:producer", name: "Public", classification: "public", snapshotId: PRODUCER_COMMIT_ONE, repositoryId: "repository:producer" }], projectRevisionId: "project-revision:producer:one" } }, ownerSession).status, "succeeded");
+  const workspace = execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "workspace.create", idempotencyKey: "producer:workspace", payload: { projectId: "project:producer", projectRevisionId: "project-revision:producer:one", workspaceId: "workspace:producer", sourceSpaceIds: ["source:producer"], projectionId: "projection:producer", classification: "public" } }, ownerSession);
+  assert.equal(workspace.status, "succeeded");
+  if (workspace.status !== "succeeded") return;
+  const projectViewId = String((workspace.value as { view: { id: string } }).view.id);
+  assert.equal(execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "mirror.configure", idempotencyKey: "producer:mirror", payload: { ...producerMirror(), mirrorId: "mirror:github-producer", projectId: "project:producer", sourceSpaceId: "source:producer", canonicalRefs: refs([["refs/heads/main", PRODUCER_COMMIT_ONE]]), remoteRefs: refs([["refs/heads/main", PRODUCER_COMMIT_ONE]]) } }, ownerSession).status, "succeeded");
+  let captured: Awaited<ReturnType<typeof verifyMirrorIngestionHandoff>> | undefined;
+  let handoffCount = 0;
+  const producer = new GitHubMirrorProducer({
+    adapter: value,
+    mirror: producerMirror(),
+    repositoryId: "repository:producer",
+    projectViewId,
+    canonicalProjectRevisionId: "project-revision:producer:one",
+    canonicalRefs: refs([["refs/heads/main", PRODUCER_COMMIT_ONE]]),
+    installationId: "installation:github-app",
+    handoffKeyId: "mirror-key-v1",
+    handoffSecret: "fixture-mirror-secret",
+    ingest: async (handoff) => {
+      handoffCount += 1;
+      captured = await verifyMirrorIngestionHandoff({ value: handoff, keyId: "mirror-key-v1", secret: "fixture-mirror-secret", now: Date.parse("2026-08-27T01:00:00.000Z") });
+      if (!captured.valid) return { status: "blocked", receipt: captured.receipt, recoveryAction: captured.recoveryAction };
+      const authorityResult = execute(captured.handoff.command, mirrorSession);
+      return { status: authorityResult.status === "succeeded" ? "succeeded" : "blocked", receipt: authorityResult.receipt, ...(authorityResult.recoveryAction ? { recoveryAction: authorityResult.recoveryAction } : {}) };
+    },
+    nowMilliseconds: () => Date.parse("2026-08-27T01:00:00.000Z"),
+  });
+  const body = JSON.stringify({ ref: "refs/heads/main", before: PRODUCER_COMMIT_ONE, after: PRODUCER_COMMIT_TWO, forced: false, deleted: false, repository: { full_name: "acme/video-player" }, installation: { id: "installation:github-app" } });
+  const input = { body, event: "push", deliveryId: "delivery:producer-push", signature: signed(body, "fixture-webhook-secret"), secret: "fixture-webhook-secret", mirrorId: "mirror:github-producer", mappedRemoteRefs: ["refs/heads/main"] } as const;
+  const result = await producer.processWebhook(input);
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.webhook.status, "accepted");
+  assert.equal(handoffCount, 1);
+  assert.equal(captured?.valid, true);
+  if (captured?.valid) {
+    assert.equal(captured.handoff.command.command, "mirror.sync");
+    assert.equal(captured.handoff.command.payload.mirrorId, "mirror:github-producer");
+    assert.equal((captured.handoff.command.payload.externalProposal as Record<string, unknown>).latestHeadCommit, PRODUCER_COMMIT_TWO);
+    assert.equal((captured.handoff.command.payload.mirrorRepositoryObservations as Record<string, unknown>)["source:producer"] !== undefined, true);
+    assert.equal(JSON.stringify(captured.handoff).includes("installation-token-must-not"), false);
+  }
+  const authoritySnapshot = authority.snapshot();
+  const proposal = Object.values(authoritySnapshot.externalProposals)[0];
+  assert.equal(proposal?.mirrorId, "mirror:github-producer");
+  assert.equal(proposal?.changeRevisionIds.length, 1);
+  assert.equal(authoritySnapshot.mirrors["mirror:github-producer"]?.remoteGeneration, "remote:g2");
+  const duplicate = await producer.processWebhook(input);
+  assert.equal(duplicate.status, "succeeded");
+  assert.equal(duplicate.webhook.status, "duplicate");
+  assert.equal(handoffCount, 1);
+});
+
+test("GitHub Mirror producer maps pull-request deliveries and keeps failed ingestion pending", async () => {
+  const { value, git } = producerAdapter();
+  let attempts = 0;
+  const producer = new GitHubMirrorProducer({
+    adapter: value,
+    mirror: producerMirror(),
+    repositoryId: "repository:producer",
+    projectViewId: "project-view:producer",
+    canonicalProjectRevisionId: "project-revision:producer:one",
+    canonicalRefs: refs([["refs/heads/main", PRODUCER_COMMIT_ONE]]),
+    installationId: "installation:github-app",
+    handoffKeyId: "mirror-key-v1",
+    handoffSecret: "fixture-mirror-secret",
+    ingest: async () => {
+      attempts += 1;
+      return attempts === 1 ? { status: "blocked", receipt: "authority=fixture; state=temporarily-unavailable; credentialMaterialStored=false", recoveryAction: "retry the same signed handoff" } : { status: "succeeded", receipt: "authority=fixture; mirror-handoff=accepted; credentialMaterialStored=false" };
+    },
+    nowMilliseconds: () => Date.parse("2026-08-27T01:00:00.000Z"),
+  });
+  const body = JSON.stringify({ action: "opened", pull_request: { number: 42, base: { ref: "main" } }, repository: { full_name: "acme/video-player" }, installation: { id: "installation:github-app" } });
+  const input = { body, event: "pull_request", deliveryId: "delivery:producer-pr", signature: signed(body, "fixture-webhook-secret"), secret: "fixture-webhook-secret", mirrorId: "mirror:github-producer", mappedRemoteRefs: ["refs/heads/main"] } as const;
+  const first = await producer.processWebhook(input);
+  assert.equal(first.status, "blocked");
+  assert.equal(attempts, 1);
+  const second = await producer.processWebhook(input);
+  assert.equal(second.status, "succeeded");
+  assert.equal(second.webhook.status, "duplicate");
+  assert.equal(attempts, 2);
+  assert.equal(git.refs.refs[0]?.oid, PRODUCER_COMMIT_TWO);
+});
+
+test("GitHub Mirror producer refuses force-push/deletion without signed ingestion", async () => {
+  const { value, git, api } = producerAdapter();
+  git.refs = { generation: "remote:rewritten", refs: refs([["refs/heads/main", PRODUCER_COMMIT_REWRITTEN]]), receipt: "git-smart-http=rewritten; provider=github" };
+  api.commits.oid = PRODUCER_COMMIT_REWRITTEN;
+  api.compareStatus = "diverged";
+  let ingested = false;
+  const producer = new GitHubMirrorProducer({ adapter: value, mirror: producerMirror(), repositoryId: "repository:producer", projectViewId: "project-view:producer", canonicalProjectRevisionId: "project-revision:producer:one", canonicalRefs: refs([["refs/heads/main", PRODUCER_COMMIT_ONE]]), installationId: "installation:github-app", handoffKeyId: "mirror-key-v1", handoffSecret: "fixture-mirror-secret", ingest: async () => { ingested = true; return { status: "succeeded", receipt: "unexpected" }; } });
+  const body = JSON.stringify({ ref: "refs/heads/main", before: PRODUCER_COMMIT_ONE, after: PRODUCER_COMMIT_REWRITTEN, forced: true, deleted: false, repository: { full_name: "acme/video-player" }, installation: { id: "installation:github-app" } });
+  const result = await producer.processWebhook({ body, event: "push", deliveryId: "delivery:producer-force", signature: signed(body, "fixture-webhook-secret"), secret: "fixture-webhook-secret", mirrorId: "mirror:github-producer", mappedRemoteRefs: ["refs/heads/main"] });
+  assert.equal(result.status, "blocked");
+  assert.equal(result.webhook.status, "accepted");
+  assert.equal(ingested, false);
+  assert.match(result.recoveryAction ?? "", /re-inspect|reconcil/iu);
+});
+
+test("GitHub Mirror ingestion HTTP transport accepts only a successful internal response", async () => {
+  let requestBody = "";
+  const transport = createGitHubMirrorIngestionHttpTransport({
+    baseUrl: "https://realm.example/",
+    fetchImpl: async (_input, init) => {
+      requestBody = String(init?.body ?? "");
+      return new Response(JSON.stringify({ status: "succeeded" }), { status: 200 });
+    },
+  });
+  const handoff = { protocol: "anyam.mirror-ingestion/v1", keyId: "mirror-key-v1", nonce: "nonce:test", expiresAt: "2026-08-27T01:05:00.000Z", command: { protocol: "anyam.authority-command/v1", command: "mirror.sync", idempotencyKey: "idempotency:test", payload: {} }, signature: "opaque" } as const;
+  const result = await transport(handoff);
+  assert.equal(result.status, "succeeded");
+  assert.match(requestBody, /anyam\.mirror-ingestion\/v1/u);
+  const rejected = createGitHubMirrorIngestionHttpTransport({ baseUrl: "https://realm.example", fetchImpl: async () => new Response(JSON.stringify({ status: "blocked" }), { status: 409 }) });
+  const rejectedResult = await rejected(handoff);
+  assert.equal(rejectedResult.status, "blocked");
 });
 
 test("persisted delivery identity survives adapter restart and PR action normalization ignores unrelated actions", () => {

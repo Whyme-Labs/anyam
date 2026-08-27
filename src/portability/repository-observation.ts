@@ -11,6 +11,7 @@ export type RepositoryObservationRequest = {
   sourceSpaceId: string;
   workspaceId: string;
   projectViewId: string;
+  expectedSymbolicRef?: string;
   expectedCommitOid: string;
   expectedTreeOid?: string;
   expectedBaseCommitOid: string;
@@ -66,13 +67,14 @@ export function parseRepositoryObservationRequest(value: unknown): ParsedReposit
   const sourceSpaceId = requiredString(body.sourceSpaceId, "sourceSpaceId");
   const workspaceId = requiredString(body.workspaceId, "workspaceId");
   const projectViewId = requiredString(body.projectViewId, "projectViewId");
+  const expectedSymbolicRef = body.expectedSymbolicRef === undefined ? undefined : requiredString(body.expectedSymbolicRef, "expectedSymbolicRef");
   const expectedCommitOid = requiredString(body.expectedCommitOid, "expectedCommitOid");
   const expectedTreeOid = body.expectedTreeOid === undefined ? undefined : requiredString(body.expectedTreeOid, "expectedTreeOid");
   const expectedBaseCommitOid = requiredString(body.expectedBaseCommitOid, "expectedBaseCommitOid");
   const expectedObjectFormat = body.expectedObjectFormat === undefined ? undefined : body.expectedObjectFormat === "sha1" || body.expectedObjectFormat === "sha256" ? body.expectedObjectFormat : undefined;
-  if (protocol !== REPOSITORY_OBSERVATION_PROTOCOL || operation !== "observe" || !repositoryId || !sourceSpaceId || !workspaceId || !projectViewId || !expectedCommitOid || !expectedBaseCommitOid || (body.expectedTreeOid !== undefined && !expectedTreeOid) || (body.expectedObjectFormat !== undefined && !expectedObjectFormat)) return { valid: false, code: "repository_observation_request_malformed", message: "The RepositoryDriver observation request is incomplete or unsupported.", recoveryAction: "send protocol, operation=observe, identities, expected commit/base, and an optional valid object format", receipt: "repositoryObservationRequest=complete-v1-required; transition=not-applied" };
+  if (protocol !== REPOSITORY_OBSERVATION_PROTOCOL || operation !== "observe" || !repositoryId || !sourceSpaceId || !workspaceId || !projectViewId || (body.expectedSymbolicRef !== undefined && !expectedSymbolicRef) || !expectedCommitOid || !expectedBaseCommitOid || (body.expectedTreeOid !== undefined && !expectedTreeOid) || (body.expectedObjectFormat !== undefined && !expectedObjectFormat)) return { valid: false, code: "repository_observation_request_malformed", message: "The RepositoryDriver observation request is incomplete or unsupported.", recoveryAction: "send protocol, operation=observe, identities, expected commit/base, and optional expected ref/object format", receipt: "repositoryObservationRequest=complete-v1-required; transition=not-applied" };
   if (expectedObjectFormat && (!validOid(expectedCommitOid, expectedObjectFormat) || !validOid(expectedBaseCommitOid, expectedObjectFormat) || (expectedTreeOid !== undefined && !validOid(expectedTreeOid, expectedObjectFormat)))) return { valid: false, code: "repository_observation_request_oid_invalid", message: "The RepositoryDriver observation request contains an invalid Git object ID for its declared object format.", recoveryAction: "send lowercase hexadecimal Git object IDs with the exact declared object format", receipt: "repositoryObservationRequest=oid-invalid; transition=not-applied" };
-  return { valid: true, request: { protocol, operation, repositoryId, sourceSpaceId, workspaceId, projectViewId, expectedCommitOid, ...(expectedTreeOid ? { expectedTreeOid } : {}), expectedBaseCommitOid, ...(expectedObjectFormat ? { expectedObjectFormat } : {}) } };
+  return { valid: true, request: { protocol, operation, repositoryId, sourceSpaceId, workspaceId, projectViewId, ...(expectedSymbolicRef ? { expectedSymbolicRef } : {}), expectedCommitOid, ...(expectedTreeOid ? { expectedTreeOid } : {}), expectedBaseCommitOid, ...(expectedObjectFormat ? { expectedObjectFormat } : {}) } };
 }
 
 function requiredString(value: unknown, field: string): string | undefined {
@@ -112,6 +114,7 @@ export type RepositoryObservationBinding = {
   readonly sourceSpaceId: string;
   readonly workspaceId: string;
   readonly projectViewId: string;
+  readonly expectedSymbolicRef?: string;
   readonly expectedCommitOid: string;
   readonly expectedTreeOid?: string;
   readonly expectedBaseCommitOid: string;
@@ -131,6 +134,7 @@ export async function verifyRepositoryObservation(input: RepositoryObservationBi
   if (observation.sourceSpaceId !== input.sourceSpaceId) mismatches.push("sourceSpaceId");
   if (observation.workspaceId !== input.workspaceId) mismatches.push("workspaceId");
   if (observation.projectViewId !== input.projectViewId) mismatches.push("projectViewId");
+  if (input.expectedSymbolicRef !== undefined && observation.symbolicRef !== input.expectedSymbolicRef) mismatches.push("symbolicRef");
   if (observation.commitOid !== input.expectedCommitOid) mismatches.push("commitOid");
   if (input.expectedTreeOid !== undefined && observation.treeOid !== input.expectedTreeOid) mismatches.push("treeOid");
   if (observation.baseCommitOid !== input.expectedBaseCommitOid) mismatches.push("baseCommitOid");

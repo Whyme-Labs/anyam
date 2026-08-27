@@ -140,6 +140,7 @@ export type RepositoryDriver = {
     repository: RepositoryHandle;
     workspaceId: string;
     projectViewId: string;
+    expectedSymbolicRef?: string;
     expectedCommitOid: string;
     expectedTreeOid?: string;
     expectedBaseCommitOid: string;

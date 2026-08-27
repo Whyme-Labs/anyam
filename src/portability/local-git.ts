@@ -400,6 +400,7 @@ export class LocalGitRepositoryDriver implements RepositoryDriver {
     repository: RepositoryHandle;
     workspaceId: string;
     projectViewId: string;
+    expectedSymbolicRef?: string;
     expectedCommitOid: string;
     expectedTreeOid?: string;
     expectedBaseCommitOid: string;
@@ -414,6 +415,7 @@ export class LocalGitRepositoryDriver implements RepositoryDriver {
       const treeOid = (await runGit(directory, ["rev-parse", `${commitOid}^{tree}`])).stdout.trim();
       const symbolicRef = (await runGit(directory, ["symbolic-ref", "--quiet", "--short", "HEAD"])).stdout.trim() || "HEAD";
       if (input.expectedObjectFormat !== undefined && state.value.objectFormat !== input.expectedObjectFormat) return { status: "failed", ...failure("repository.observation_object_format_mismatch", "observe", input.repository.repositoryId, false, "use the RepositoryDriver object format observed for the exact Workspace") };
+      if (input.expectedSymbolicRef !== undefined && symbolicRef !== input.expectedSymbolicRef) return { status: "failed", ...failure("repository.observation_ref_mismatch", "observe", input.repository.repositoryId, false, "refresh the Workspace symbolic ref and publish the exact observed ref") };
       if (commitOid !== input.expectedCommitOid) return { status: "failed", ...failure("repository.observation_commit_mismatch", "observe", input.repository.repositoryId, false, "refresh the Workspace head and publish the exact observed commit") };
       if (input.expectedTreeOid !== undefined && treeOid !== input.expectedTreeOid) return { status: "failed", ...failure("repository.observation_tree_mismatch", "observe", input.repository.repositoryId, false, "refresh the Workspace tree and publish the exact observed tree") };
       if (!(await commandSucceeds(directory, ["merge-base", "--is-ancestor", input.expectedBaseCommitOid, commitOid]))) return { status: "failed", ...failure("repository.observation_ancestry_mismatch", "observe", input.repository.repositoryId, false, "rebase the Workspace on the exact base Project Revision before publishing") };

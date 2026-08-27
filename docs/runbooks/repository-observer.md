@@ -21,36 +21,76 @@ The observer Worker does not own provider credentials and does not decide
 which Repository to inspect. The Realm supplies an authoritative
 `anyam.repository-observation/v1` request. The observer forwards that exact
 request to the customer-owned driver, verifies the returned commit, tree, ref,
-object format, base ancestry, Repository identity, and manifest digest, then
-returns only the credential-free observation.
+object format, base ancestry, Repository identity, context, expiry, and
+manifest digest, then returns only the credential-free observation.
 
 ## Install
 
 1. Create a customer-owned R2 bucket for RepositoryDriver snapshot manifests.
    The stock driver is an Anyam-native, provider-neutral adapter: a trusted
-   provider synchronizer writes one manifest per Repository, and the Worker
-   verifies the exact head, tree, base, object format, ref, and ancestry before
-   returning an observation. A manifest is stored at
-   `repositories/<encodeURIComponent(repositoryId)>.json`:
+   provider synchronizer writes one context-specific immutable generation per
+   Repository/Workspace (or Mirror), and the Worker verifies the exact head,
+   tree, base, object format, ref, ancestry, expiry, and generation index before
+   returning an observation. Workspace snapshots are stored below
+   `repositories/<encodeURIComponent(repositoryId)>/workspace/<workspaceId>/<projectViewId>/`;
+   the index points to an immutable generation object:
 
    ```json
    {
-     "protocol": "anyam.repository-driver-snapshot/v1",
+     "protocol": "anyam.repository-driver-snapshot/v2",
      "repositoryId": "repo:customer",
      "sourceSpaceId": "source:customer",
+     "context": {
+       "kind": "workspace",
+       "workspaceId": "workspace:change",
+       "projectViewId": "view:change",
+       "workspaceRef": "refs/heads/feature/refund"
+     },
      "objectFormat": "sha1",
-     "symbolicRef": "refs/heads/main",
+     "symbolicRef": "refs/heads/feature/refund",
      "commitOid": "…",
      "treeOid": "…",
      "baseCommitOid": "…",
      "ancestorCommitOids": ["…"],
-     "generation": "provider-generation-42",
+     "generation": 42,
      "state": "active",
      "observedAt": "2026-08-26T00:00:00.000Z",
+     "expiresAt": "2026-08-26T01:00:00.000Z",
      "receipt": "provider=customer; ancestry=verified; credentialMaterialStored=false"
    }
    ```
 
+   The corresponding `index.json` uses protocol
+   `anyam.repository-driver-snapshot-index/v1` and contains the same context,
+   `latestGeneration`, `previousGeneration`, the exact immutable generation
+   key, its `latestManifestDigest`, and an `updatedAt` timestamp. Generation
+   objects must be write-once and retained; the synchronizer advances the index
+   with an R2 conditional write. A lower or repeated generation is never
+   accepted as the active snapshot. For example:
+
+   ```json
+   {
+     "protocol": "anyam.repository-driver-snapshot-index/v1",
+     "repositoryId": "repo:customer",
+     "sourceSpaceId": "source:customer",
+     "context": {
+       "kind": "workspace",
+       "workspaceId": "workspace:change",
+       "projectViewId": "view:change",
+       "workspaceRef": "refs/heads/feature/refund"
+     },
+     "latestGeneration": 42,
+     "previousGeneration": 41,
+     "latestManifestKey": "repositories/repo%3Acustomer/workspace/workspace%3Achange/view%3Achange/generations/42.json",
+     "latestManifestDigest": "sha256:…",
+     "updatedAt": "2026-08-26T00:00:30.000Z",
+     "receipt": "provider=customer; index=monotonic; credentialMaterialStored=false"
+   }
+   ```
+
+   Mirror contexts use the same manifest protocol with
+   `context.kind="mirror"`, `mirrorId`, `proposalKey`, and `deliveryId`; the
+   generic Workspace observation route does not reinterpret a Mirror context.
    The synchronizer remains provider-specific and may be a GitHub App,
    Smart-HTTP, or Anyam-native adapter; it never runs inside the Realm or
    Observer Worker and never writes provider credentials to a manifest.
@@ -97,7 +137,8 @@ export, or Authority state.
 
 ## Driver response contract
 
-The driver receives the exact observation request and returns one of:
+The driver receives the sanitized observation request (including the optional
+`expectedSymbolicRef`) and returns one of:
 
 ```json
 {
@@ -143,6 +184,21 @@ unavailable/indeterminate evidence.
 - `repository_driver_timeout` and `repository_driver_response_timeout`: retry
   the same immutable observation after the driver responds within the measured
   transport timeout.
+- `repository_driver_snapshot_index_missing`: publish the context-specific
+  `index.json` before observing a Workspace; a legacy repository-only manifest
+  is not sufficient.
+- `repository_driver_snapshot_index_invalid` and
+  `repository_driver_snapshot_index_mismatch`: repair the index's context,
+  monotonic generation, immutable key, and manifest digest.
+- `repository_driver_context_mismatch`: do not reuse a snapshot from another
+  Workspace, Project View, or Mirror context.
+- `repository_driver_snapshot_future`: republish using the provider's actual
+  observation time, not a future timestamp.
+- `repository_driver_snapshot_expired`: re-inspect the provider and publish a
+  fresh generation with a future `expiresAt`.
+- `repository_driver_snapshot_digest_mismatch`: rebuild the index from the
+  exact immutable generation object; no observation is returned until the
+  digest agrees.
 - `repository_observation_binding_mismatch`: inspect the exact Workspace and
   provider object; do not widen the request or substitute a different commit.
 - `repository_driver_snapshot_mismatch`: the provider head, tree, base,
@@ -152,8 +208,9 @@ unavailable/indeterminate evidence.
   before publishing another snapshot.
 - `repository_driver_snapshot_stale`: re-inspect the provider and publish a
   fresh active snapshot; stale state is never used as a hosted observation.
-- `repository_not_found`: the named Repository snapshot is deleted or has not
-  been synchronized; restore it and retry the same observation.
+- `repository_driver_snapshot_missing`: the indexed immutable Repository
+  snapshot is deleted or has not been synchronized; restore that exact
+  generation object and retry the same observation.
 - A timeout or lost response is unavailable/indeterminate evidence. Reconcile
   the exact generation and request identity before retrying; never substitute a
   new head in the same Change Revision.

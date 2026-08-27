@@ -10,7 +10,16 @@ import type {
   MirrorProviderFailure,
   MirrorProviderResult,
 } from "./mirror.ts";
-import type { GitRef, RepositoryMirror } from "../kernel/contracts.ts";
+import type { GitRef, MirrorRepositoryObservation, RepositoryMirror } from "../kernel/contracts.ts";
+import {
+  MIRROR_HANDOFF_SIZING_RECEIPT,
+  MIRROR_HANDOFF_TTL_MS,
+  mirrorObservationDigest,
+  signMirrorIngestionHandoff,
+  verifyMirrorRepositoryObservation,
+  type MirrorIngestionHandoff,
+  type MirrorIngestionCommand,
+} from "./mirror-observation.ts";
 
 export const GITHUB_APP_ADAPTER_PROTOCOL = "anyam.github-app-adapter/v1" as const;
 const execFile = promisify(execFileCallback);
@@ -82,6 +91,7 @@ export function gitTransportFailure(error: unknown, operation: "inspect" | "push
 export type GitHubCommitObservation = {
   oid: string;
   author: { name: string; email?: string };
+  treeOid?: string;
 };
 
 export type GitHubPullRequestObservation = {
@@ -459,6 +469,62 @@ export class GitHubAppProjectionAdapter implements MirrorRemoteAdapter {
     }
   }
 
+  /**
+   * Re-inspect one exact remote commit through the selected GitHub
+   * installation. This is the provider-side observation used by the signed
+   * Mirror producer; it never creates an Anyam Change by itself.
+   */
+  async observeMirrorRepository(input: {
+    mirror: RepositoryMirror;
+    repositoryId: string;
+    sourceSpaceId: string;
+    projectViewId: string;
+    proposalKey: string;
+    deliveryId: string;
+    symbolicRef: string;
+    commitOid: string;
+    baseCommitOid: string;
+  }): Promise<MirrorProviderResult<MirrorRepositoryObservation>> {
+    try {
+      this.assertMirror(input.mirror);
+      const repositoryId = required(input.repositoryId, "repositoryId");
+      const sourceSpaceId = required(input.sourceSpaceId, "sourceSpaceId");
+      const projectViewId = required(input.projectViewId, "projectViewId");
+      const proposalKey = required(input.proposalKey, "proposalKey");
+      const deliveryId = required(input.deliveryId, "deliveryId");
+      const symbolicRef = required(input.symbolicRef, "symbolicRef");
+      const commitOid = required(input.commitOid, "commitOid");
+      const baseCommitOid = required(input.baseCommitOid, "baseCommitOid");
+      const token = await this.token("read");
+      const commit = await this.api.getCommit({ repository: this.installation.repository, oid: commitOid, ref: symbolicRef, token: token.token });
+      if (commit.oid !== commitOid || !commit.treeOid) throw new GitHubAppAdapterError({ errorCode: "github_app.commit_observation_invalid", message: "GitHub did not return the exact commit tree required for Mirror provenance.", retryable: false, recoveryAction: "re-inspect the selected repository commit and return its exact tree identity", receipt: `provider=github-app; operation=observe-mirror-repository; commit=${commitOid}; tree=${commit.treeOid ?? "missing"}; credentialMaterialStored=false` });
+      const comparison = await this.api.compare({ repository: this.installation.repository, baseOid: baseCommitOid, headOid: commitOid, token: token.token });
+      if (comparison.status !== "ahead" && comparison.status !== "identical") throw new GitHubAppAdapterError({ errorCode: "github_app.commit_ancestry_invalid", message: "The GitHub commit is not a descendant of the canonical Mirror base.", retryable: false, recoveryAction: "rebase or explicitly reconcile the remote proposal against the current canonical base before ingestion", receipt: `provider=github-app; operation=observe-mirror-repository; base=${baseCommitOid}; head=${commitOid}; comparison=${comparison.status}; credentialMaterialStored=false` });
+      const claims = {
+        protocol: "anyam.mirror-repository-observation/v1" as const,
+        repositoryId,
+        sourceSpaceId,
+        mirrorId: input.mirror.id,
+        proposalKey,
+        deliveryId,
+        provider: "github",
+        remoteRepository: this.installation.repository,
+        projectViewId,
+        objectFormat: "sha1" as const,
+        symbolicRef,
+        commitOid,
+        treeOid: commit.treeOid,
+        baseCommitOid,
+        ancestryVerified: true as const,
+        observedAt: new Date().toISOString(),
+        receipt: `provider=github-app; operation=observe-mirror-repository; installation=${this.installation.installationId}; repository=${this.installation.repository}; comparison=${comparison.status}; compareReceipt=${safeReceipt(comparison.receipt, "compare.receipt")}; expiresAt=${token.expiresAt}; credentialMaterialStored=false`,
+      };
+      return { status: "succeeded", value: { ...claims, manifestDigest: mirrorObservationDigest(claims) } };
+    } catch (error) {
+      return providerFailure(input.mirror, error, "observe-mirror-repository");
+    }
+  }
+
   externalProposal(observation: GitHubPullRequestObservation, input: { projectViewId: string; baseProjectRevisionId: string; disclosure: "public"; deliveryId: string; sourceSpaceSnapshots: Readonly<Record<string, string>> }): Record<string, unknown> {
     if (observation.repository !== this.installation.repository) throw new GitHubAppAdapterError({ errorCode: "github_app.pull_request_lineage_invalid", message: "The pull request is not bound to the selected repository.", retryable: false, recoveryAction: "observe the PR through the selected GitHub App installation", receipt: `proposal=${observation.number}; repository-mismatch; credentialMaterialStored=false` });
     return {
@@ -520,6 +586,167 @@ export class GitHubAppProjectionAdapter implements MirrorRemoteAdapter {
     return this.queue.drain(input);
   }
 
+}
+
+export type GitHubMirrorIngestionResult = {
+  status: "succeeded" | "blocked";
+  receipt: string;
+  recoveryAction?: string;
+};
+
+export type GitHubMirrorProducerOptions = {
+  adapter: GitHubAppProjectionAdapter;
+  mirror: RepositoryMirror;
+  repositoryId: string;
+  projectViewId: string;
+  canonicalProjectRevisionId: string;
+  canonicalRefs: readonly GitRef[];
+  installationId: string;
+  handoffKeyId: string;
+  handoffSecret: string;
+  ingest: (handoff: MirrorIngestionHandoff) => Promise<GitHubMirrorIngestionResult>;
+  nowMilliseconds?: () => number;
+};
+
+export type GitHubMirrorProducerResult = {
+  status: "succeeded" | "blocked";
+  webhook: GitHubWebhookReceipt;
+  drained?: { processedDeliveryIds: readonly string[]; receipts: readonly string[] };
+  receipt: string;
+  recoveryAction?: string;
+};
+
+function installationSourceIdentity(installationId: string): string {
+  return installationId.startsWith("installation:") ? installationId : `installation:${installationId}`;
+}
+
+function producerReceipt(input: { mirrorId: string; deliveryId: string; detail: string }): string {
+  return `provider=github-app; producer=mirror-ingestion; mirror=${input.mirrorId}; delivery=${input.deliveryId}; ${input.detail}; credentialMaterialStored=false`;
+}
+
+/**
+ * Compose GitHub webhook hints, provider reinspection, Mirror observations,
+ * and the internal signed handoff. The producer owns provider credentials only
+ * through the adapter; the Realm receives a signed command and never a token.
+ */
+export class GitHubMirrorProducer {
+  private readonly adapter: GitHubAppProjectionAdapter;
+  private readonly mirror: RepositoryMirror;
+  private readonly repositoryId: string;
+  private readonly projectViewId: string;
+  private readonly canonicalProjectRevisionId: string;
+  private readonly canonicalRefs: readonly GitRef[];
+  private readonly installationId: string;
+  private readonly handoffKeyId: string;
+  private readonly handoffSecret: string;
+  private readonly ingest: (handoff: MirrorIngestionHandoff) => Promise<GitHubMirrorIngestionResult>;
+  private readonly nowMilliseconds: () => number;
+
+  constructor(input: GitHubMirrorProducerOptions) {
+    this.adapter = input.adapter;
+    this.mirror = { ...input.mirror, refMappings: input.mirror.refMappings.map((mapping) => ({ ...mapping })), canonicalRefs: input.mirror.canonicalRefs.map((ref) => ({ ...ref })), remoteRefs: input.mirror.remoteRefs.map((ref) => ({ ...ref })) };
+    this.repositoryId = required(input.repositoryId, "repositoryId");
+    this.projectViewId = required(input.projectViewId, "projectViewId");
+    this.canonicalProjectRevisionId = required(input.canonicalProjectRevisionId, "canonicalProjectRevisionId");
+    this.canonicalRefs = input.canonicalRefs.map((ref) => ({ ...ref }));
+    this.installationId = required(input.installationId, "installationId");
+    this.handoffKeyId = required(input.handoffKeyId, "handoffKeyId");
+    this.handoffSecret = required(input.handoffSecret, "handoffSecret");
+    this.ingest = input.ingest;
+    this.nowMilliseconds = input.nowMilliseconds ?? (() => Date.now());
+    if (this.mirror.canonicalAuthority !== "anyam" || this.mirror.provider !== "github") throw new GitHubAppAdapterError({ errorCode: "github_app.producer_mirror_invalid", message: "The GitHub Mirror producer requires an Anyam-canonical GitHub Mirror.", retryable: false, recoveryAction: "configure a GitHub projection Mirror with Anyam as canonical authority", receipt: "producer=mirror-invalid; canonicalAuthority=anyam-required; provider=github-required; credentialMaterialStored=false" });
+    if (this.canonicalProjectRevisionId !== this.mirror.canonicalProjectRevisionId || !refsEqual(this.canonicalRefs, this.mirror.canonicalRefs)) throw new GitHubAppAdapterError({ errorCode: "github_app.producer_canonical_stale", message: "The producer canonical state is stale relative to the configured Mirror.", retryable: false, recoveryAction: "read the current Anyam canonical Project Revision and recreate the producer with that exact ref set", receipt: `producer=canonical-stale; mirror=${this.mirror.id}; credentialMaterialStored=false` });
+  }
+
+  async processWebhook(input: Parameters<GitHubAppProjectionAdapter["acceptWebhook"]>[0]): Promise<GitHubMirrorProducerResult> {
+    const webhook = this.adapter.acceptWebhook(input);
+    if (webhook.status === "blocked") return { status: "blocked", webhook, receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: webhook.deliveryId, detail: "webhook=blocked" }), ...(webhook.recoveryAction ? { recoveryAction: webhook.recoveryAction } : {}) };
+    if (webhook.status === "ignored") return { status: "succeeded", webhook, receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: webhook.deliveryId, detail: "webhook=ignored; providerReinspection=false" }) };
+    const drained = await this.adapter.drainReconciliation({ limit: 1, reinspect: (task) => this.reinspect(task) });
+    if (drained.status === "blocked") return { status: "blocked", webhook, ...(drained.value ? { drained: drained.value } : {}), receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: webhook.deliveryId, detail: `webhook=${webhook.status}; queue=blocked` }), ...(drained.recoveryAction ? { recoveryAction: drained.recoveryAction } : {}) };
+    return { status: "succeeded", webhook, ...(drained.value ? { drained: drained.value } : {}), receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: webhook.deliveryId, detail: `webhook=${webhook.status}; queue=drained` }) };
+  }
+
+  private async reinspect(task: GitHubReconciliationTask): Promise<{ status: "succeeded" | "blocked"; receipt: string; recoveryAction?: string }> {
+    if (task.mirrorId !== this.mirror.id || task.repository !== this.mirror.remoteRepository || task.installationId !== this.installationId) return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: "task=identity-mismatch; handoff=not-created" }), recoveryAction: "retain the signed delivery but configure the producer with the exact Mirror, installation, and repository identities" };
+    const inspected = await this.adapter.inspect({ mirror: this.mirror, knownRefs: this.mirror.remoteRefs, knownGeneration: this.mirror.remoteGeneration });
+    if (inspected.status !== "succeeded") return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `reinspection=failed; error=${inspected.errorCode}` }), recoveryAction: inspected.recoveryAction };
+    const remoteState = inspected.value;
+    let externalProposal: Record<string, unknown> | undefined;
+    let mirrorObservation: MirrorRepositoryObservation | undefined;
+    if (task.eventType === "pull_request") {
+      const proposalKey = task.proposalKey;
+      const number = proposalKey ? Number(proposalKey) : NaN;
+      if (!proposalKey || !Number.isSafeInteger(number) || number < 1) return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: "proposal=invalid; handoff=not-created" }), recoveryAction: "replay the signed pull_request delivery with its positive proposal number" };
+      const observedPullRequest = await this.adapter.observePullRequest({ number });
+      if (observedPullRequest.status !== "succeeded") return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `proposal=reinspection-failed; error=${observedPullRequest.errorCode}` }), recoveryAction: observedPullRequest.recoveryAction };
+      const proposal = this.adapter.externalProposal(observedPullRequest.value, { projectViewId: this.projectViewId, baseProjectRevisionId: this.canonicalProjectRevisionId, disclosure: "public", deliveryId: task.deliveryId, sourceSpaceSnapshots: { [this.mirror.sourceSpaceId]: observedPullRequest.value.headCommit } });
+      externalProposal = proposal;
+      const observed = await this.adapter.observeMirrorRepository({ mirror: this.mirror, repositoryId: this.repositoryId, sourceSpaceId: this.mirror.sourceSpaceId, projectViewId: this.projectViewId, proposalKey, deliveryId: task.deliveryId, symbolicRef: String(proposal.remoteRef), commitOid: observedPullRequest.value.headCommit, baseCommitOid: observedPullRequest.value.baseCommit });
+      if (observed.status !== "succeeded") return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `proposal=observation-failed; error=${observed.errorCode}` }), recoveryAction: observed.recoveryAction };
+      mirrorObservation = observed.value;
+    } else {
+      const remoteRef = task.ref;
+      const update = remoteRef ? remoteState.updates.find((candidate) => candidate.remoteRef === remoteRef) : undefined;
+      if (!remoteRef || !update) return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: "ref=not-observed; handoff=not-created" }), recoveryAction: "reinspect the signed push delivery and return the exact mapped ref update" };
+      if (update.kind === "force-push" || update.kind === "deleted") return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `ref=${remoteRef}; update=${update.kind}; reconciliation=required` }), recoveryAction: "inspect the force-push or deletion and resume with an explicit Mirror reconciliation choice" };
+      const remoteRefValue = remoteState.refs.find((ref) => ref.name === remoteRef);
+      const commit = remoteState.commits.find((candidate) => candidate.ref === remoteRef && candidate.oid === remoteRefValue?.oid);
+      const mapping = this.mirror.refMappings.find((candidate) => candidate.remoteRef === remoteRef);
+      const canonicalRef = mapping ? this.canonicalRefs.find((ref) => ref.name === mapping.localRef) : undefined;
+      if (!remoteRefValue || !commit || !mapping || !canonicalRef) return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `ref=${remoteRef}; provenance=incomplete; handoff=not-created` }), recoveryAction: "reinspect the exact mapped ref, commit author, and canonical base before creating a provider handoff" };
+      const proposalKey = task.proposalKey ?? `ref:${remoteRef}`;
+      const observed = await this.adapter.observeMirrorRepository({ mirror: this.mirror, repositoryId: this.repositoryId, sourceSpaceId: this.mirror.sourceSpaceId, projectViewId: this.projectViewId, proposalKey, deliveryId: task.deliveryId, symbolicRef: remoteRef, commitOid: remoteRefValue.oid, baseCommitOid: canonicalRef.oid });
+      if (observed.status !== "succeeded") return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `ref=${remoteRef}; observation=failed; error=${observed.errorCode}` }), recoveryAction: observed.recoveryAction };
+      mirrorObservation = observed.value;
+      externalProposal = { provider: "github", installationId: this.installationId, sourceIdentity: installationSourceIdentity(this.installationId), remoteRepository: this.mirror.remoteRepository, proposalKind: "ref", proposalKey, remoteRef, baseRef: remoteRef, baseCommit: canonicalRef.oid, latestHeadCommit: remoteRefValue.oid, baseProjectRevisionId: this.canonicalProjectRevisionId, projectViewId: this.projectViewId, disclosure: this.mirror.disclosure, sourceSpaceSnapshots: { [this.mirror.sourceSpaceId]: remoteRefValue.oid }, status: "open", remoteAuthor: { ...commit.author }, receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `proposal=${proposalKey}; head=${remoteRefValue.oid}; providerObservation=verified` }) };
+    }
+    if (!externalProposal || !mirrorObservation) return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: "proposal-observation=missing; handoff=not-created" }), recoveryAction: "reinspect the provider proposal and return one exact Mirror Repository observation" };
+    const verified = verifyMirrorRepositoryObservation({ observation: mirrorObservation, repositoryId: this.repositoryId, sourceSpaceId: this.mirror.sourceSpaceId, mirrorId: this.mirror.id, proposalKey: String(externalProposal.proposalKey), deliveryId: task.deliveryId, provider: "github", remoteRepository: this.mirror.remoteRepository, projectViewId: this.projectViewId, expectedCommitOid: String(externalProposal.latestHeadCommit), expectedBaseCommitOid: String(externalProposal.baseCommit ?? this.canonicalRefs[0]?.oid ?? "") });
+    if (!verified.valid) return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: "observation=binding-mismatch; handoff=not-created" }), recoveryAction: verified.recoveryAction };
+    const operationId = `mirror-operation:github-app:${task.deliveryId}`;
+    const checkpointId = `mirror-checkpoint:github-app:${task.deliveryId}`;
+    const idempotencyKey = `mirror:github-app:${this.mirror.id}:${task.deliveryId}`;
+    const delivery = { provider: "github", installationId: this.installationId, sourceIdentity: installationSourceIdentity(this.installationId), remoteRepository: this.mirror.remoteRepository, deliveryId: task.deliveryId, eventType: task.action ? `${task.eventType}.${task.action}` : task.eventType, proposalKey: String(externalProposal.proposalKey) };
+    const command: MirrorIngestionCommand = { protocol: "anyam.authority-command/v1", command: "mirror.sync", idempotencyKey, payload: { mirrorId: this.mirror.id, canonicalProjectRevisionId: this.canonicalProjectRevisionId, canonicalRefs: this.canonicalRefs, expectedRemoteGeneration: this.mirror.remoteGeneration, remoteGeneration: remoteState.generation, remoteRefs: remoteState.refs, operationId, checkpointId, operationKind: "inbound", operationState: "succeeded", mirrorState: "lagging", inboundChangeIds: [], completedInboundChangeIds: [], pendingInboundChangeIds: this.mirror.pendingInboundChangeIds, delivery, externalProposal, mirrorRepositoryObservations: { [this.mirror.sourceSpaceId]: verified.observation }, receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `reinspection=verified; remoteGeneration=${remoteState.generation}; observationDigest=${verified.observation.manifestDigest}` }) } };
+    const now = this.nowMilliseconds();
+    if (!Number.isSafeInteger(now)) return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: "clock=invalid; handoff=not-created" }), recoveryAction: "repair the producer clock and retry the same signed delivery" };
+    const expiresAt = new Date(now + MIRROR_HANDOFF_TTL_MS).toISOString();
+    const handoff = await signMirrorIngestionHandoff({ command, keyId: this.handoffKeyId, nonce: `nonce:github-app:${digest([this.mirror.id, task.deliveryId, task.bodyDigest])}`, expiresAt, secret: this.handoffSecret });
+    let ingested: GitHubMirrorIngestionResult;
+    try {
+      ingested = await this.ingest(handoff);
+    } catch (error) {
+      return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `handoff=signed; ingestion=indeterminate; error=${error instanceof Error ? error.name : "unknown"}` }), recoveryAction: "inspect the internal Mirror ingestion checkpoint and retry the same signed delivery only after reconciling Authority state" };
+    }
+    if (ingested.status !== "succeeded") return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `handoff=signed; ingestion=blocked; providerReceipt=${safeReceipt(ingested.receipt, "ingestion.receipt")}` }), recoveryAction: ingested.recoveryAction ?? "inspect the internal Mirror ingestion checkpoint and retry the same signed delivery" };
+    return { status: "succeeded", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `handoff=signed; ingestion=succeeded; nonceDigest=${digest(handoff.nonce)}; ${MIRROR_HANDOFF_SIZING_RECEIPT}` }) };
+  }
+}
+
+/** Create the customer-Realm HTTP transport used by a deployed producer. */
+export function createGitHubMirrorIngestionHttpTransport(input: { baseUrl: string; fetchImpl?: typeof fetch }): (handoff: MirrorIngestionHandoff) => Promise<GitHubMirrorIngestionResult> {
+  let baseUrl: URL;
+  try {
+    baseUrl = new URL(input.baseUrl);
+  } catch {
+    throw new GitHubAppAdapterError({ errorCode: "github_app.ingestion_url_invalid", message: "Mirror ingestion base URL is malformed.", retryable: false, recoveryAction: "configure the HTTPS customer Realm URL for internal Mirror ingestion", receipt: "producer=mirror-ingestion; baseUrl=invalid; credentialMaterialStored=false" });
+  }
+  if (baseUrl.protocol !== "https:") throw new GitHubAppAdapterError({ errorCode: "github_app.ingestion_url_invalid", message: "Mirror ingestion base URL must use HTTPS.", retryable: false, recoveryAction: "configure an HTTPS customer Realm URL for internal Mirror ingestion", receipt: `producer=mirror-ingestion; protocol=${baseUrl.protocol}; credentialMaterialStored=false` });
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const endpoint = new URL("/internal/mirrors/ingest", baseUrl).toString();
+  return async (handoff) => {
+    let response: Response;
+    try {
+      response = await fetchImpl(endpoint, { method: "POST", headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify({ handoff }) });
+    } catch {
+      return { status: "blocked", receipt: `provider=anyam-realm; ingestion=transport-unavailable; handoffNonceDigest=${digest(handoff.nonce)}; credentialMaterialStored=false`, recoveryAction: "retry the same signed Mirror handoff after the customer Realm internal route is reachable" };
+    }
+    const value: unknown = await response.json().catch(() => undefined);
+    const bodyStatus = value !== null && typeof value === "object" && !Array.isArray(value) && (value as Record<string, unknown>).status === "succeeded" ? "succeeded" : "blocked";
+    if (response.status >= 200 && response.status < 300 && bodyStatus === "succeeded") return { status: "succeeded", receipt: `provider=anyam-realm; ingestion=accepted; httpStatus=${response.status}; handoffNonceDigest=${digest(handoff.nonce)}; credentialMaterialStored=false` };
+    return { status: "blocked", receipt: `provider=anyam-realm; ingestion=rejected; httpStatus=${response.status}; handoffNonceDigest=${digest(handoff.nonce)}; credentialMaterialStored=false`, recoveryAction: "inspect the customer Realm Mirror checkpoint and retry the same signed handoff only after reconciling its response" };
+  };
 }
 
 type GitHubHttpClientOptions = {
@@ -632,9 +859,11 @@ export class FetchGitHubRestClient implements GitHubRestClient {
     const data = response.data as Record<string, unknown> | undefined;
     const commit = data?.commit as Record<string, unknown> | undefined;
     const author = commit?.author as Record<string, unknown> | undefined;
+    const tree = commit?.tree as Record<string, unknown> | undefined;
     const name = typeof author?.name === "string" ? author.name : "GitHub contributor";
     const email = typeof author?.email === "string" ? author.email : undefined;
-    return { oid: input.oid, author: { name, ...(email ? { email } : {}) } };
+    const treeOid = typeof tree?.sha === "string" ? tree.sha : undefined;
+    return { oid: input.oid, author: { name, ...(email ? { email } : {}) }, ...(treeOid ? { treeOid } : {}) };
   }
 
   async compare(input: { repository: string; baseOid: string; headOid: string; token: string }): Promise<{ status: "identical" | "ahead" | "behind" | "diverged"; receipt: string }> {

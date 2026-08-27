@@ -8,7 +8,9 @@ import { promisify } from "node:util";
 import {
   GitHubAppInstallationTokenIssuer,
   GitHubAppProjectionAdapter,
+  GitHubMirrorProducer,
   cleanupGitHubAppDisposable,
+  createGitHubMirrorIngestionHttpTransport,
   FetchGitHubAppHttpClient,
   FetchGitHubRestClient,
   NodeGitSmartHttpTransport,
@@ -191,7 +193,15 @@ function authoritySession(): string | undefined {
   return direct;
 }
 
-type AuthorityConfig = { baseUrl: string; ownerSession: string };
+type AuthorityConfig = { baseUrl: string; ownerSession: string; mirrorHandoffKeyId: string; mirrorHandoffSecret: string };
+
+function authorityMirrorHandoffSecret(): string | undefined {
+  const direct = optional("ANYAM_GITHUB_APP_MIRROR_HANDOFF_SECRET");
+  const file = optional("ANYAM_GITHUB_APP_MIRROR_HANDOFF_SECRET_FILE");
+  if (direct && file) throw new Error("set only one of ANYAM_GITHUB_APP_MIRROR_HANDOFF_SECRET or ANYAM_GITHUB_APP_MIRROR_HANDOFF_SECRET_FILE; credential material is not printed");
+  if (file) return readFileSync(file, "utf8").trim();
+  return direct;
+}
 
 function authorityConfig(): AuthorityConfig | undefined {
   const baseUrl = optional("ANYAM_GITHUB_APP_AUTHORITY_BASE_URL");
@@ -208,7 +218,10 @@ function authorityConfig(): AuthorityConfig | undefined {
     "ANYAM_GITHUB_APP_AUTHORITY_MIRROR_ID",
   ].find((name) => optional(name) !== undefined);
   if (staleBinding) throw new Error(`${staleBinding} is no longer accepted; the qualification creates a disposable Authority Project and restores the credential-free Realm snapshot after cleanup`);
-  return { baseUrl, ownerSession };
+  const mirrorHandoffKeyId = optional("ANYAM_GITHUB_APP_MIRROR_HANDOFF_KEY_ID");
+  const mirrorHandoffSecret = authorityMirrorHandoffSecret();
+  if (!mirrorHandoffKeyId || !mirrorHandoffSecret) throw new Error("ANYAM_GITHUB_APP_MIRROR_HANDOFF_KEY_ID and ANYAM_GITHUB_APP_MIRROR_HANDOFF_SECRET (or _FILE) are required when live customer Realm Mirror ingestion qualification is enabled; credential material is not printed");
+  return { baseUrl, ownerSession, mirrorHandoffKeyId, mirrorHandoffSecret };
 }
 
 function refsValue(value: unknown, field: string): GitRef[] {
@@ -229,13 +242,6 @@ function authorityMirrorRefs(mirror: JsonObject, field: "canonicalRefs" | "remot
 
 function authorityMirrorGeneration(mirror: JsonObject): string {
   return authorityField(mirror.remoteGeneration, "mirror.remoteGeneration");
-}
-
-function authorityProposalChangeId(value: JsonObject): string | undefined {
-  const proposal = authorityResultValue(value).proposal;
-  if (proposal === null || proposal === undefined) return undefined;
-  const record = authorityObject(proposal, "proposal");
-  return typeof record.changeId === "string" ? record.changeId : undefined;
 }
 
 async function restoreAuthorityRecovery(client: RealmAuthorityHttpClient, bundle: JsonObject): Promise<CleanupReceipt> {
@@ -260,10 +266,10 @@ async function qualifyCustomerRealmAuthority(input: {
   repository: string;
   installationId: string;
   qualificationId: string;
+  webhookSecret: string;
   authorityClient: RealmAuthorityHttpClient;
   authorityConfig: AuthorityConfig;
-  outbound: Extract<Awaited<ReturnType<MirrorCoordinator["sync"]>>, { status: "succeeded" }>;
-  externalPush: Extract<Awaited<ReturnType<GitHubAppProjectionAdapter["push"]>>, { status: "succeeded" }>;
+  adapter: GitHubAppProjectionAdapter;
   forcePush: Extract<Awaited<ReturnType<GitHubAppProjectionAdapter["push"]>>, { status: "succeeded" }>;
   reconciled: Extract<Awaited<ReturnType<MirrorCoordinator["sync"]>>, { status: "succeeded" }>;
   pullRequestNumber: number;
@@ -279,7 +285,8 @@ async function qualifyCustomerRealmAuthority(input: {
   const workspaceId = `workspace:github-app-qualification:${suffix}`;
   const projectionId = `projection:github-app-qualification-public:${suffix}`;
   const mirrorId = `mirror:github-app-qualification:${suffix}`;
-  const createdProject = await client.createProject({ projectId, name: "Anyam GitHub App qualification", referenceType: "git", sourceSpaces: [{ id: sourceSpaceId, name: "Qualification public", classification: "public", snapshotId: input.seeded.initialOid }], projectRevisionId }, `github-app:${input.qualificationId}:authority:project-create`);
+  const repositoryId = `repository:github-app-qualification:${suffix}`;
+  const createdProject = await client.createProject({ projectId, name: "Anyam GitHub App qualification", referenceType: "git", sourceSpaces: [{ id: sourceSpaceId, name: "Qualification public", classification: "public", snapshotId: input.seeded.initialOid, repositoryId }], projectRevisionId }, `github-app:${input.qualificationId}:authority:project-create`);
   const createdCanonical = authorityObject(createdProject.canonicalRevision, "createdProject.canonicalRevision");
   if (authorityField(createdCanonical.id, "createdProject.canonicalRevision.id") !== projectRevisionId) throw new Error("customer Realm Authority created a different canonical Project Revision than requested");
   // Omit mounts so the Authority applies its canonical Source Space mount
@@ -308,6 +315,7 @@ async function qualifyCustomerRealmAuthority(input: {
   if (authorityField(canonicalRevision.projectId, "canonicalRevision.projectId") !== config.projectId) throw new Error("customer Realm Authority canonical Project Revision is bound to a different Project");
   const source = sourceSpaces.find((entry) => entry.id === config.sourceSpaceId);
   if (!source || authorityField(source.classification, "sourceSpace.classification") !== "public") throw new Error("customer Realm Authority qualification requires the bound Source Space to be public");
+  if (authorityField(source.repositoryId, "sourceSpace.repositoryId") !== repositoryId) throw new Error("customer Realm Authority Source Space did not retain the Realm-issued Repository identity");
   const initialSnapshot = authorityField((canonicalRevision.sourceSpaceSnapshots as Record<string, unknown> | undefined)?.[config.sourceSpaceId], "canonicalRevision.sourceSpaceSnapshots");
   if (initialSnapshot !== input.seeded.initialOid) throw new Error(`customer Realm Authority canonical Source Space snapshot ${initialSnapshot} does not match the seeded provider snapshot ${input.seeded.initialOid}; recreate the disposable Authority binding for this qualification`);
   const initialMirrorResponse = await client.inspectMirror(config.mirrorId);
@@ -318,13 +326,14 @@ async function qualifyCustomerRealmAuthority(input: {
   if (authorityMirrorRefs(initialMirror, "canonicalRefs").some((ref) => ref.name !== "refs/heads/main" || ref.oid !== input.seeded.initialOid)) throw new Error("customer Realm Authority Mirror canonical refs do not match the seeded qualification ref");
 
   const canonicalRefs = [{ name: "refs/heads/main", oid: input.seeded.initialOid }];
-  const outboundMirror = input.outbound.value.mirror;
+  const providerCurrent = input.reconciled.value.mirror;
+  if (providerCurrent.remoteRefs.length !== 1 || providerCurrent.remoteRefs[0]?.name !== "refs/heads/main" || providerCurrent.remoteRefs[0]?.oid !== input.seeded.initialOid) throw new Error("provider Mirror was not at the canonical ref before the Authority producer qualification");
   const authorityOutbound = await client.syncMirror(config.mirrorId, {
     canonicalProjectRevisionId: config.projectRevisionId,
     canonicalRefs,
     expectedRemoteGeneration: "qualification:empty",
-    remoteGeneration: outboundMirror.remoteGeneration,
-    remoteRefs: outboundMirror.remoteRefs,
+    remoteGeneration: providerCurrent.remoteGeneration,
+    remoteRefs: providerCurrent.remoteRefs,
     operationId: `github-app:${input.qualificationId}:authority:outbound`,
     checkpointId: `checkpoint:github-app:${input.qualificationId}:authority:outbound`,
     operationKind: "outbound",
@@ -336,32 +345,60 @@ async function qualifyCustomerRealmAuthority(input: {
     receipt: "qualification=github-app-authority; operation=outbound; provider=github-app; credentialMaterialStored=false",
   }, `github-app:${input.qualificationId}:authority:outbound`);
   const afterOutbound = authorityMirrorFromResponse(authorityOutbound);
-  const authorityInboundProposalKey = `ref:refs/heads/main:${input.seeded.secondOid}`;
-  const authorityInboundDeliveryId = `delivery:github-app:${input.qualificationId}:push-inbound`;
-  const authorityInbound = await client.syncMirror(config.mirrorId, {
+  if (authorityMirrorGeneration(afterOutbound) !== providerCurrent.remoteGeneration) throw new Error("customer Realm Authority outbound Mirror generation did not bind to the provider generation used by the signed producer");
+  const providerInboundPush = await input.adapter.push({
+    mirror: providerCurrent,
+    expectedGeneration: providerCurrent.remoteGeneration,
+    expectedRefs: providerCurrent.remoteRefs,
+    desiredRefs: [{ name: "refs/heads/main", oid: input.seeded.secondOid }],
+    operationId: `github-app:${input.qualificationId}:authority:producer-inbound`,
+    idempotencyKey: `github-app:${input.qualificationId}:authority:producer-inbound`,
+  });
+  if (providerInboundPush.status !== "succeeded") throw new Error(`provider inbound producer seed failed: ${providerInboundPush.errorCode}; ${providerInboundPush.recoveryAction}`);
+  const producerMirror: RepositoryMirror = {
+    ...providerCurrent,
+    id: config.mirrorId,
+    projectId: config.projectId,
+    sourceSpaceId: config.sourceSpaceId,
     canonicalProjectRevisionId: config.projectRevisionId,
     canonicalRefs,
-    expectedRemoteGeneration: authorityMirrorGeneration(afterOutbound),
-    remoteGeneration: input.externalPush.value.generation,
-    remoteRefs: [{ name: "refs/heads/main", oid: input.seeded.secondOid }],
-    operationId: `github-app:${input.qualificationId}:authority:inbound`,
-    checkpointId: `checkpoint:github-app:${input.qualificationId}:authority:inbound`,
-    operationKind: "inbound",
-    operationState: "succeeded",
-    mirrorState: "lagging",
-    inboundChangeIds: [],
-    completedInboundChangeIds: [],
+    remoteGeneration: providerCurrent.remoteGeneration,
+    remoteRefs: providerCurrent.remoteRefs.map((ref) => ({ ...ref })),
     pendingInboundChangeIds: [],
-    delivery: { provider: "github", installationId: input.installationId, sourceIdentity: `github-app:${input.installationId}`, remoteRepository: input.repository, deliveryId: authorityInboundDeliveryId, eventType: "push", proposalKey: authorityInboundProposalKey },
-    externalProposal: { provider: "github", installationId: input.installationId, sourceIdentity: `github-app:${input.installationId}`, remoteRepository: input.repository, proposalKind: "ref", proposalKey: authorityInboundProposalKey, latestHeadCommit: input.seeded.secondOid, baseProjectRevisionId: config.projectRevisionId, projectViewId: config.projectViewId, disclosure: "public", receipt: "qualification=github-app-authority; proposal=push; credentialMaterialStored=false", remoteRef: "refs/heads/main", baseRef: "refs/heads/main", baseCommit: input.seeded.initialOid, sourceSpaceSnapshots: { [config.sourceSpaceId]: input.seeded.secondOid }, status: "open" },
-    receipt: "qualification=github-app-authority; operation=inbound; proposal=ref; credentialMaterialStored=false",
-  }, `github-app:${input.qualificationId}:authority:inbound`);
-  const authorityInboundChangeId = authorityProposalChangeId(authorityInbound);
+    receipt: "qualification=github-app-authority; producer=mirror-ingestion; credentialMaterialStored=false",
+  };
+  const producer = new GitHubMirrorProducer({
+    adapter: input.adapter,
+    mirror: producerMirror,
+    repositoryId,
+    projectViewId: config.projectViewId,
+    canonicalProjectRevisionId: config.projectRevisionId,
+    canonicalRefs,
+    installationId: input.installationId,
+    handoffKeyId: input.authorityConfig.mirrorHandoffKeyId,
+    handoffSecret: input.authorityConfig.mirrorHandoffSecret,
+    ingest: createGitHubMirrorIngestionHttpTransport({ baseUrl: config.baseUrl }),
+  });
+  const authorityInboundDeliveryId = `delivery:github-app:${input.qualificationId}:producer-inbound`;
+  const producerWebhookBody = JSON.stringify({ ref: "refs/heads/main", before: input.seeded.initialOid, after: input.seeded.secondOid, forced: false, deleted: false, repository: { full_name: input.repository }, installation: { id: input.installationId } });
+  const producerWebhook = { body: producerWebhookBody, event: "push", deliveryId: authorityInboundDeliveryId, signature: signed(producerWebhookBody, input.webhookSecret), secret: input.webhookSecret, mirrorId: config.mirrorId, mappedRemoteRefs: ["refs/heads/main"] } as const;
+  const authorityInbound = await producer.processWebhook(producerWebhook);
+  if (authorityInbound.status !== "succeeded") throw new Error(`customer Realm signed Mirror producer did not ingest the provider delivery: ${authorityInbound.recoveryAction ?? authorityInbound.receipt}`);
+  const authorityInboundDuplicate = await producer.processWebhook(producerWebhook);
+  if (authorityInboundDuplicate.status !== "succeeded" || authorityInboundDuplicate.webhook.status !== "duplicate") throw new Error(`customer Realm signed Mirror producer did not deduplicate the redelivered provider delivery: state=${authorityInboundDuplicate.status}; webhook=${authorityInboundDuplicate.webhook.status}`);
+  const authorityInboundReadBack = await client.inspectMirror(config.mirrorId);
+  const authorityInboundMirror = authorityMirrorFromResponse(authorityInboundReadBack);
+  const authorityInboundProposalKey = "ref:refs/heads/main";
+  const authorityInboundProposal = authorityArray(authorityInboundReadBack.proposals, "authorityInbound.proposals").find((proposal) => proposal.proposalKey === authorityInboundProposalKey && proposal.latestHeadCommit === input.seeded.secondOid);
+  if (!authorityInboundProposal) throw new Error("customer Realm signed Mirror ingestion did not create the expected inbound external proposal");
+  const authorityInboundChangeId = authorityField(authorityInboundProposal.changeId, "authorityInbound.proposal.changeId");
+  const authorityInboundRevisionIds = authorityInboundProposal.changeRevisionIds;
+  if (!Array.isArray(authorityInboundRevisionIds) || authorityInboundRevisionIds.length !== 1 || authorityMirrorGeneration(authorityInboundMirror) !== providerInboundPush.value.generation) throw new Error("customer Realm signed Mirror ingestion did not persist the exact provider generation and one inbound Change Revision");
 
   const authorityForcePush = await client.syncMirror(config.mirrorId, {
     canonicalProjectRevisionId: config.projectRevisionId,
     canonicalRefs,
-    expectedRemoteGeneration: input.externalPush.value.generation,
+    expectedRemoteGeneration: authorityMirrorGeneration(authorityInboundMirror),
     remoteGeneration: input.forcePush.value.generation,
     remoteRefs: [{ name: "refs/heads/main", oid: input.seeded.divergentOid }],
     operationId: `github-app:${input.qualificationId}:authority:force-push`,
@@ -419,7 +456,7 @@ async function qualifyCustomerRealmAuthority(input: {
   const duplicateReceipt = typeof authorityPrDuplicate.receipt === "string" ? authorityPrDuplicate.receipt : "";
   if (!duplicateReceipt.includes("duplicate=true")) throw new Error("customer Realm Authority did not deduplicate the repeated PR delivery");
   const outboundValue = authorityResultValue(authorityOutbound);
-  return { status: "succeeded", realm: { baseUrl: config.baseUrl, projectId: config.projectId, sourceSpaceId: config.sourceSpaceId, projectRevisionId: config.projectRevisionId, projectViewId: config.projectViewId, mirrorId: config.mirrorId }, stateReceipt: authorityField(state.receipt, "authority.receipt"), outbound: { status: authorityOutbound.status, operation: authorityField(authorityObject(outboundValue.operation, "outbound.operation").id, "outbound.operation.id") }, inbound: { status: authorityInbound.status, changeId: authorityInboundChangeId ?? "missing", deliveryId: authorityInboundDeliveryId }, forcePush: { status: authorityForcePush.status, mirrorState: authorityField(forceMirror.state, "forcePush.mirror.state") }, reconciliation: { status: authorityReconciled.status, mirrorState: authorityField(afterReconcile.state, "reconciliation.mirror.state") }, pullRequest: { proposalKey, changeId: authorityField(proposal.changeId, "proposal.changeId"), revisionCount: revisionIds.length, stableChange: true, successiveRevisions: true, duplicateDelivery: true, setupReceipt: input.proposalRevisionPush.receipt, observationAttempts: input.waitForSecond.attempts }, mirrorLedgerReadBack: { exportedDigest, readBackDigest, readBackVerified: true }, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true, finalMirrorState: authorityField(finalMirror.state, "finalMirror.state") };
+  return { status: "succeeded", realm: { baseUrl: config.baseUrl, projectId: config.projectId, sourceSpaceId: config.sourceSpaceId, repositoryId, projectRevisionId: config.projectRevisionId, projectViewId: config.projectViewId, mirrorId: config.mirrorId }, stateReceipt: authorityField(state.receipt, "authority.receipt"), outbound: { status: authorityOutbound.status, operation: authorityField(authorityObject(outboundValue.operation, "outbound.operation").id, "outbound.operation.id") }, inbound: { status: authorityInbound.status, producerReceipt: authorityInbound.receipt, duplicateDelivery: authorityInboundDuplicate.webhook.status === "duplicate", changeId: authorityInboundChangeId ?? "missing", changeRevisionCount: authorityInboundRevisionIds.length, deliveryId: authorityInboundDeliveryId, providerGeneration: providerInboundPush.value.generation }, forcePush: { status: authorityForcePush.status, mirrorState: authorityField(forceMirror.state, "forcePush.mirror.state") }, reconciliation: { status: authorityReconciled.status, mirrorState: authorityField(afterReconcile.state, "reconciliation.mirror.state") }, pullRequest: { proposalKey, changeId: authorityField(proposal.changeId, "proposal.changeId"), revisionCount: revisionIds.length, stableChange: true, successiveRevisions: true, duplicateDelivery: true, setupReceipt: input.proposalRevisionPush.receipt, observationAttempts: input.waitForSecond.attempts }, mirrorLedgerReadBack: { exportedDigest, readBackDigest, readBackVerified: true }, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true, finalMirrorState: authorityField(finalMirror.state, "finalMirror.state") };
 }
 
 async function waitForSecondProposalRevision(input: { adapter: GitHubAppProjectionAdapter; first: GitHubPullRequestObservation; number: number; waitMs: number; pollMs: number; fallbackHeadCommit?: string }): Promise<{ first: { changeKey: string; revisionKey: string }; second?: { changeKey: string; revisionKey: string }; attempts: number; lastHeadCommit: string; headSource: "pull-request-api" | "git-ref-readback" }> {
@@ -627,7 +664,7 @@ async function main(): Promise<void> {
       const occupied = Object.entries(initialCounts).filter(([key, value]) => key !== "audit" && typeof value === "number" && value > 0);
       if (occupied.length > 0) throw new Error(`customer Realm Authority is not an empty disposable boundary (${occupied.map(([key, value]) => `${key}=${String(value)}`).join(", ")}); use a fresh Realm or restore its credential-free recovery snapshot before retrying`);
       authorityMutated = true;
-      authority = await qualifyCustomerRealmAuthority({ seeded, repository, installationId, qualificationId, authorityClient, authorityConfig: authorityInputs, outbound, externalPush, forcePush, reconciled, pullRequestNumber, observedPr: observedPr.value, proposalRevisionPush, waitForSecond: secondProposal });
+      authority = await qualifyCustomerRealmAuthority({ seeded, repository, installationId, qualificationId, webhookSecret, authorityClient, authorityConfig: authorityInputs, adapter, forcePush, reconciled, pullRequestNumber, observedPr: observedPr.value, proposalRevisionPush, waitForSecond: secondProposal });
       if (authority.status === "not-run") throw new Error("customer Realm Authority qualification did not run; set the Realm URL and owner session and retry the same disposable qualification");
     }
 

@@ -73,11 +73,22 @@ is never printed.
 ```text
 ANYAM_GITHUB_APP_AUTHORITY_BASE_URL=https://customer-realm.example
 ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION_FILE=/path/to/owner-session.txt
+ANYAM_GITHUB_APP_MIRROR_HANDOFF_KEY_ID=customer-mirror-key-v1
+ANYAM_GITHUB_APP_MIRROR_HANDOFF_SECRET_FILE=/path/to/mirror-handoff-secret.txt
 ```
 
 The Authority URL must be HTTPS (loopback HTTP is allowed only for local
 development), and the owner session file should contain only the opaque
 session value with no cookie header or other credentials.
+
+The handoff key ID and secret must match the Realm's
+`ANYAM_MIRROR_HANDOFF_KEY_ID` and `ANYAM_MIRROR_HANDOFF_SECRET` configuration.
+Use either `ANYAM_GITHUB_APP_MIRROR_HANDOFF_SECRET` or
+`ANYAM_GITHUB_APP_MIRROR_HANDOFF_SECRET_FILE`, never both. The producer keeps
+the secret in process memory only, signs one exact `mirror.sync` envelope, and
+the Realm's `/internal/mirrors/ingest` route verifies and consumes it. The
+secret is never sent to GitHub, persisted in Authority, or included in a
+receipt.
 
 Use exactly one of `ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION` or
 `ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION_FILE`. The Realm must be an empty,
@@ -92,10 +103,12 @@ owner completes the separate passkey-authenticated
 revoke or restore identity, passkeys, owner sessions, or OAuth grants. A
 non-empty Authority Realm is rejected before mutation.
 
-The qualification records outbound projection, inbound ref proposal, explicit
-force-push failure, canonical-wins reconciliation, one stable pull-request
-Change with successive Revisions, duplicate delivery, and a credential-free
-Mirror read-back digest. It never exports or prints credentials.
+The qualification records outbound projection, a live provider ref update
+re-inspected by the `GitHubMirrorProducer`, an exact signed handoff accepted by
+the Realm's internal Mirror-ingestion route, explicit force-push failure,
+canonical-wins reconciliation, one stable pull-request Change with successive
+Revisions, duplicate delivery, and a credential-free Mirror read-back digest.
+It never exports or prints credentials.
 
 The private key, webhook secret, installation tokens, App JWT, and provider
 responses containing credentials are never printed or persisted by the
@@ -109,6 +122,8 @@ The command exercises:
 
 - selected-installation JIT credentials and Git Smart HTTP projection;
 - inbound ref observation through the provider-neutral Mirror coordinator;
+- provider reinspection, signed Mirror handoff, internal Realm ingestion, and
+  redelivery deduplication;
 - signed, action-filtered webhook hints and persisted deduplication;
 - explicit force-push blocking and `canonical-wins` reconciliation;
 - credential expiry followed by fresh-credential resume;
@@ -123,8 +138,12 @@ does not require a pre-existing PR or human timing. The adapter still observes
 the PR; it does not itself write Anyam's Change/Revision ledger. The enclosing
 qualification command writes the observed provider events through the
 customer-operated Authority boundary and restores its credential-free Authority
-Plane snapshot after cleanup. These are deliberate qualification boundaries, not
-hidden claims.
+Plane snapshot after cleanup. For the live Authority path, the producer obtains
+the selected installation credential just in time, re-inspects the provider
+commit/tree/ancestry, signs the exact credential-free command envelope, and
+sends it to the internal Realm route. The Realm verifies the handoff and writes
+the Mirror operation, external proposal, stable Change, and Change Revision.
+These are deliberate qualification boundaries, not hidden claims.
 
 The repository is the explicitly disposable selected repository. The script
 creates only its disposable Authority state inside the empty customer Realm;
@@ -140,5 +159,5 @@ App, qualification repository adapter, and the exercised customer Realm /
 Authority boundary only. Without those inputs, a provider-only receipt proves
 only the selected GitHub App and qualification repository adapter boundary. It
 does not claim GitHub Enterprise support, general repository mirroring, or
-production readiness. #193 remains open until the live customer-operated
-Realm receipt is captured.
+production readiness. #321 remains open until the owner captures a live producer
+receipt; #193 (the adapter implementation ticket) is closed.

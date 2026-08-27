@@ -7,6 +7,7 @@ export type HostedRevisionObservationInput = {
   readonly sourceSpaceId: string;
   readonly workspaceId: string;
   readonly projectViewId: string;
+  readonly expectedSymbolicRef?: string;
   readonly expectedCommitOid: string;
   readonly expectedBaseCommitOid: string;
 };
@@ -67,6 +68,7 @@ export async function prepareHostedRevisionPublish(input: {
   if (!baseRevision || baseRevision.projectId !== project.id || workspace.projectRevisionId !== change.baseProjectRevisionId || projectView.projectRevisionId !== change.baseProjectRevisionId) throw new AuthorityPlaneError({ code: "conflict", message: "Hosted revision publication requires the Workspace and Project View to share the Change base Project Revision.", recoveryAction: "rebase the Change onto a fresh Workspace and Project View derived from its declared base", receipt: `change=${change.id}; changeBase=${change.baseProjectRevisionId}; workspaceBase=${workspace.projectRevisionId}; viewBase=${projectView.projectRevisionId}; repositoryObservation=lineage-mismatch; transition=not-applied` });
 
   const snapshots = sourceSnapshots(payload.sourceSpaceSnapshots);
+  const expectedSymbolicRef = nonEmptyString(payload.expectedSymbolicRef);
   const visibleSourceSpaceIds = [...projectView.visibleSourceSpaceIds];
   if (visibleSourceSpaceIds.length === 0 || !sameSet(Object.keys(snapshots), visibleSourceSpaceIds)) throw new AuthorityPlaneError({ code: "conflict", message: "Hosted revision publication must cover exactly the Source Spaces disclosed by the Project View.", recoveryAction: "publish one candidate snapshot for every Source Space in the exact Project View and no others", receipt: `project=${project.id}; projectView=${projectView.id}; repositoryObservation=source-space-set-mismatch; transition=not-applied` });
 
@@ -77,8 +79,8 @@ export async function prepareHostedRevisionPublish(input: {
     const expectedCommitOid = snapshots[sourceSpaceId];
     const expectedBaseCommitOid = baseRevision.sourceSpaceSnapshots[sourceSpaceId];
     if (!sourceSpace?.repositoryId || !expectedCommitOid || !expectedBaseCommitOid) throw new AuthorityPlaneError({ code: "blocked", message: `Hosted Source Space ${sourceSpaceId} is missing a Repository identity or complete candidate/base snapshot.`, recoveryAction: "bind the Source Space to an authoritative Repository identity and publish the complete candidate/base snapshot set", receipt: `sourceSpace=${sourceSpaceId}; repositoryObservation=inputs-incomplete; transition=not-applied` });
-    const observed = await input.observe({ repositoryId: sourceSpace.repositoryId, sourceSpaceId, workspaceId, projectViewId: projectView.id, expectedCommitOid, expectedBaseCommitOid });
-    const verified = await verifyRepositoryObservation({ observation: observed, repositoryId: sourceSpace.repositoryId, sourceSpaceId, workspaceId, projectViewId: projectView.id, expectedCommitOid, expectedBaseCommitOid });
+    const observed = await input.observe({ repositoryId: sourceSpace.repositoryId, sourceSpaceId, workspaceId, projectViewId: projectView.id, ...(expectedSymbolicRef ? { expectedSymbolicRef } : {}), expectedCommitOid, expectedBaseCommitOid });
+    const verified = await verifyRepositoryObservation({ observation: observed, repositoryId: sourceSpace.repositoryId, sourceSpaceId, workspaceId, projectViewId: projectView.id, ...(expectedSymbolicRef ? { expectedSymbolicRef } : {}), expectedCommitOid, expectedBaseCommitOid });
     if (!verified.valid) throw new AuthorityPlaneError({ code: "conflict", message: verified.message, recoveryAction: verified.recoveryAction, receipt: verified.receipt });
     observations[sourceSpaceId] = verified.observation;
   }

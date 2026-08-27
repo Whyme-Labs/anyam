@@ -28,7 +28,7 @@ const workers = [
     id: "repository-driver",
     config: "apps/repository-driver/wrangler.example.jsonc",
     source: "apps/repository-driver/src/index.ts",
-    routes: ["/health", "/observe", "REPOSITORY_STATE", "repository-driver-snapshot"],
+    routes: ["/health", "/observe", "REPOSITORY_STATE", "repository-driver-snapshot/v2", "repository-driver-snapshot-index/v1", "workspaceRef", "expiresAt", "latestGeneration"],
   },
   {
     id: "public-gateway",

@@ -1589,6 +1589,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       sourceSpaceId: input.sourceSpaceId,
       workspaceId: input.workspaceId,
       projectViewId: input.projectViewId,
+      ...(input.expectedSymbolicRef ? { expectedSymbolicRef: input.expectedSymbolicRef } : {}),
       expectedCommitOid: input.expectedCommitOid,
       expectedBaseCommitOid: input.expectedBaseCommitOid,
     };
@@ -1597,7 +1598,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const parsed = parseRepositoryObservationServiceResponse(value);
     if (!parsed.valid) throw new AuthorityPlaneError({ code: "indeterminate", message: "The RepositoryDriver observer returned an invalid response.", recoveryAction: "repair the customer-owned RepositoryDriver observer and retry the same idempotent revision publication", receipt: parsed.receipt });
     if (parsed.response.status !== "succeeded" || !parsed.response.observation) throw new AuthorityPlaneError({ code: parsed.response.status === "blocked" ? "blocked" : "indeterminate", message: "The RepositoryDriver observer did not verify the hosted Workspace.", recoveryAction: parsed.response.recoveryAction ?? "inspect the RepositoryDriver observer receipt and retry only the same immutable publication", receipt: parsed.response.receipt });
-    const verified = await verifyRepositoryObservation({ observation: parsed.response.observation, repositoryId, sourceSpaceId: input.sourceSpaceId, workspaceId: input.workspaceId, projectViewId: input.projectViewId, expectedCommitOid: input.expectedCommitOid, expectedBaseCommitOid: input.expectedBaseCommitOid });
+    const verified = await verifyRepositoryObservation({ observation: parsed.response.observation, repositoryId, sourceSpaceId: input.sourceSpaceId, workspaceId: input.workspaceId, projectViewId: input.projectViewId, ...(input.expectedSymbolicRef ? { expectedSymbolicRef: input.expectedSymbolicRef } : {}), expectedCommitOid: input.expectedCommitOid, expectedBaseCommitOid: input.expectedBaseCommitOid });
     if (!verified.valid) throw new AuthorityPlaneError({ code: "conflict", message: verified.message, recoveryAction: verified.recoveryAction, receipt: verified.receipt });
     return verified.observation;
   }

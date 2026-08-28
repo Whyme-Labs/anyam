@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const AUTH_CALLBACK_TIMEOUT_MS = 300_000;
 const AUTH_CALLBACK_RECEIPT = "oauth=authorization-code; pkce=S256; callback=loopback; timeout=300000ms; sizing=qualification-tripwire; remeasure-before-production";
+const AUTH_KEYCHAIN_SERVICE = "anyam.oauth.refresh";
 
 export type AnyamAuthLoginInput = {
   realm: string;
@@ -27,6 +28,16 @@ export type AnyamAuthLoginResult = {
   scope: string;
   expiresAt?: string;
   credentialStorage: "os-keychain";
+  receipt: string;
+};
+
+export type AnyamAuthAccessCredential = {
+  accessToken: string;
+  clientId: string;
+  scope: string;
+  resource: string;
+  expiresAt?: string;
+  credentialStorage: "os-keychain" | "process-memory";
   receipt: string;
 };
 
@@ -104,6 +115,111 @@ async function defaultStoreSecret(service: string, account: string, value: strin
   throw new AnyamAuthError({ code: "auth.keychain_unsupported", message: `No supported OS keychain adapter is available for ${platform()}.`, recoveryAction: "use a supported OS keychain adapter or a managed CI workload identity; no plaintext credential was written", receipt: `credentialStorage=os-keychain; platform=${platform()}; stored=false` });
 }
 
+async function defaultReadSecret(service: string, account: string): Promise<string | undefined> {
+  if (platform() === "darwin") {
+    try {
+      const { stdout } = await execFileAsync("security", ["find-generic-password", "-a", account, "-s", service, "-w"]);
+      return stdout.trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  if (platform() === "linux") {
+    try {
+      const { stdout } = await execFileAsync("secret-tool", ["lookup", "service", service, "account", account]);
+      return stdout.trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  throw new AnyamAuthError({ code: "auth.keychain_unsupported", message: `No supported OS keychain adapter is available for ${platform()}.`, recoveryAction: "use a supported OS keychain adapter or a managed CI workload identity; no plaintext credential was read", receipt: `credentialStorage=os-keychain; platform=${platform()}; read=false` });
+}
+
+async function defaultDeleteSecret(service: string, account: string): Promise<boolean> {
+  if (platform() === "darwin") {
+    try {
+      await execFileAsync("security", ["delete-generic-password", "-a", account, "-s", service]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  if (platform() === "linux") {
+    try {
+      await execFileAsync("secret-tool", ["clear", "service", service, "account", account]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  throw new AnyamAuthError({ code: "auth.keychain_unsupported", message: `No supported OS keychain adapter is available for ${platform()}.`, recoveryAction: "use a supported OS keychain adapter or a managed CI workload identity; no plaintext credential was removed", receipt: `credentialStorage=os-keychain; platform=${platform()}; delete=false` });
+}
+
+function authRealm(value: string): URL {
+  return baseUrl(required(value, "realm"), "realm");
+}
+
+function storedAuthRecord(value: string): { refreshToken: string; accessToken?: string; expiresAt?: string; clientId: string; scope: string; resource: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new AnyamAuthError({ code: "auth.keychain_record_invalid", message: "The Anyam OAuth keychain record is not valid JSON.", recoveryAction: "run anyam auth logout, then authenticate again through OAuth PKCE", receipt: "credentialStorage=os-keychain; record=invalid; credentialStored=false" });
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new AnyamAuthError({ code: "auth.keychain_record_invalid", message: "The Anyam OAuth keychain record has an invalid shape.", recoveryAction: "run anyam auth logout, then authenticate again through OAuth PKCE", receipt: "credentialStorage=os-keychain; record=invalid; credentialStored=false" });
+  const record = parsed as Record<string, unknown>;
+  if (typeof record.refreshToken !== "string" || record.refreshToken.trim().length === 0 || typeof record.clientId !== "string" || record.clientId.trim().length === 0 || typeof record.scope !== "string" || record.scope.trim().length === 0 || typeof record.resource !== "string" || record.resource.trim().length === 0) throw new AnyamAuthError({ code: "auth.keychain_record_invalid", message: "The Anyam OAuth keychain record is incomplete.", recoveryAction: "run anyam auth login again with the Realm, client ID, and requested scope", receipt: "credentialStorage=os-keychain; record=incomplete; credentialStored=false" });
+  return { refreshToken: record.refreshToken, ...(typeof record.accessToken === "string" && record.accessToken.trim() ? { accessToken: record.accessToken } : {}), ...(typeof record.expiresAt === "string" && record.expiresAt.trim() ? { expiresAt: record.expiresAt } : {}), clientId: record.clientId.trim(), scope: record.scope.trim(), resource: record.resource.trim() };
+}
+
+export async function loadAnyamAuthCredential(input: {
+  realm: string;
+  clientId?: string;
+  accessToken?: string;
+  scope?: string;
+  resource?: string;
+  readSecret?: (service: string, account: string) => Promise<string | undefined>;
+  storeSecret?: (service: string, account: string, value: string) => Promise<void>;
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+}): Promise<AnyamAuthAccessCredential> {
+  const realm = authRealm(input.realm);
+  const now = input.now ?? (() => Date.now());
+  if (input.accessToken?.trim()) return { accessToken: input.accessToken.trim(), clientId: input.clientId?.trim() ?? "process-memory", scope: input.scope?.trim() ?? "qualification.github-app", resource: input.resource?.trim() ?? new URL("/mcp", realm).toString(), credentialStorage: "process-memory", receipt: "oauth=access-token; source=process-memory; refresh=not-read; credentialMaterialStored=false" };
+  const account = realm.origin;
+  const stored = await (input.readSecret ?? defaultReadSecret)(AUTH_KEYCHAIN_SERVICE, account);
+  if (!stored) throw new AnyamAuthError({ code: "auth.keychain_record_missing", message: "No Anyam OAuth credential is stored for this Realm.", recoveryAction: `run anyam auth login --realm ${realm.origin} with the qualification scope, then retry the qualification`, receipt: "credentialStorage=os-keychain; record=missing; credentialStored=false" });
+  let record = storedAuthRecord(stored);
+  if (input.clientId?.trim() && input.clientId.trim() !== record.clientId) throw new AnyamAuthError({ code: "auth.keychain_client_mismatch", message: "The stored Anyam OAuth credential belongs to a different client.", recoveryAction: "run anyam auth login again with the client ID that owns this Realm qualification grant", receipt: "credentialStorage=os-keychain; client=unexpected; credentialStored=false" });
+  const expiry = record.expiresAt ? Date.parse(record.expiresAt) : Number.POSITIVE_INFINITY;
+  const refreshRequired = !record.accessToken || (record.expiresAt !== undefined && (!Number.isFinite(expiry) || expiry <= now() + 30_000));
+  if (refreshRequired) {
+    const tokenUrl = new URL("/oauth/token", realm);
+    const response = await (input.fetchImpl ?? fetch)(tokenUrl, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: record.refreshToken, client_id: record.clientId }).toString() });
+    const body: unknown = await response.json().catch(() => undefined);
+    if (!response.ok || body === null || typeof body !== "object" || Array.isArray(body) || typeof (body as Record<string, unknown>).access_token !== "string") throw new AnyamAuthError({ code: "auth.refresh_failed", message: "The Anyam OAuth refresh credential was rejected by the Realm.", recoveryAction: "run anyam auth login again through passkey-approved OAuth PKCE, then retry the qualification", receipt: "oauth=refresh; tokenExchange=failed; credentialStored=false" });
+    const refreshed = body as Record<string, unknown>;
+    const expiresIn = typeof refreshed.expires_in === "number" && Number.isSafeInteger(refreshed.expires_in) && refreshed.expires_in > 0 ? refreshed.expires_in : undefined;
+    record = { ...record, accessToken: refreshed.access_token as string, ...(typeof refreshed.refresh_token === "string" && refreshed.refresh_token.trim() ? { refreshToken: refreshed.refresh_token } : {}), ...(expiresIn ? { expiresAt: new Date(now() + expiresIn * 1000).toISOString() } : {}) };
+    await (input.storeSecret ?? defaultStoreSecret)(AUTH_KEYCHAIN_SERVICE, account, JSON.stringify(record));
+  }
+  return { accessToken: record.accessToken!, clientId: record.clientId, scope: record.scope, resource: record.resource, ...(record.expiresAt ? { expiresAt: record.expiresAt } : {}), credentialStorage: "os-keychain", receipt: `oauth=access-token; source=os-keychain; refresh=${record.accessToken ? "observed-or-refreshed" : "not-observed"}; scope=${record.scope}; credentialMaterialStored=false` };
+}
+
+export async function logoutAnyam(input: { realm: string; readSecret?: (service: string, account: string) => Promise<string | undefined>; deleteSecret?: (service: string, account: string) => Promise<boolean>; fetchImpl?: typeof fetch }): Promise<{ protocol: "anyam.cli-auth/v1"; status: "logged-out"; realm: string; credentialStorage: "os-keychain"; receipt: string }> {
+  const realm = authRealm(input.realm);
+  const stored = await (input.readSecret ?? defaultReadSecret)(AUTH_KEYCHAIN_SERVICE, realm.origin);
+  let revocation: "confirmed" | "not-needed" = "not-needed";
+  if (stored) {
+    const record = storedAuthRecord(stored);
+    const response = await (input.fetchImpl ?? fetch)(new URL("/oauth/token", realm), { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, body: new URLSearchParams({ token: record.refreshToken, token_type_hint: "refresh_token", client_id: record.clientId }).toString() });
+    if (!response.ok) throw new AnyamAuthError({ code: "auth.revocation_failed", message: "The Realm did not confirm OAuth credential revocation.", recoveryAction: "retry anyam auth logout while the Realm is reachable; the local keychain record was retained", receipt: "oauth=logout; revocation=unconfirmed; credentialMaterialStored=false" });
+    revocation = "confirmed";
+  }
+  const deleted = await (input.deleteSecret ?? defaultDeleteSecret)(AUTH_KEYCHAIN_SERVICE, realm.origin);
+  return { protocol: "anyam.cli-auth/v1", status: "logged-out", realm: realm.origin, credentialStorage: "os-keychain", receipt: `oauth=logout; credentialStorage=os-keychain; revocation=${revocation}; deleted=${deleted ? "true" : "false"}; credentialMaterialStored=false` };
+}
+
 function callbackResult(requestUrl: URL, expectedState: string): { code: string } | { error: string; description?: string } {
   const state = requestUrl.searchParams.get("state");
   if (state !== expectedState) throw new AnyamAuthError({ code: "auth.state_mismatch", message: "The OAuth callback state did not match this CLI session.", recoveryAction: "discard the callback and restart anyam auth login; no credential was stored", receipt: "oauth=callback; state=not-matched; credentialStored=false" });
@@ -167,7 +283,7 @@ export async function loginAnyam(input: AnyamAuthLoginInput): Promise<AnyamAuthL
     const token = tokenBody as Record<string, unknown>;
     const expiresIn = typeof token.expires_in === "number" && Number.isSafeInteger(token.expires_in) && token.expires_in > 0 ? token.expires_in : undefined;
     const expiresAt = expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : undefined;
-    await (input.storeSecret ?? defaultStoreSecret)("anyam.oauth.refresh", realm.origin, JSON.stringify({ refreshToken: token.refresh_token, ...(typeof token.access_token === "string" ? { accessToken: token.access_token } : {}), ...(expiresAt ? { expiresAt } : {}), clientId, scope, resource }));
+    await (input.storeSecret ?? defaultStoreSecret)(AUTH_KEYCHAIN_SERVICE, realm.origin, JSON.stringify({ refreshToken: token.refresh_token, ...(typeof token.access_token === "string" ? { accessToken: token.access_token } : {}), ...(expiresAt ? { expiresAt } : {}), clientId, scope, resource }));
     return { protocol: "anyam.cli-auth/v1", status: "authenticated", realm: realm.origin, clientId, scope, ...(expiresAt ? { expiresAt } : {}), credentialStorage: "os-keychain", receipt: `${AUTH_CALLBACK_RECEIPT}; tokenExchange=succeeded; refreshToken=keychain-only; credentialMaterialStored=false` };
   } finally {
     clearTimeout(timer);

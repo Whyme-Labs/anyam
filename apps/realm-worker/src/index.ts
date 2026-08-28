@@ -1500,6 +1500,30 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     });
   }
 
+  /**
+   * Owner-approved qualification-only Mirror mutation. Production provider
+   * ingestion remains signed and internal-only; this route exists solely so
+   * the explicit OAuth qualification capability can exercise the disposable
+   * Authority lifecycle without exporting an owner cookie.
+   */
+  private async authorityQualificationMirror(body: CoordinatorRequestBody): Promise<Response> {
+    await this.requireAuthorityActive();
+    const owner = this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const operation = coordinatorString(body, "operation");
+    if (operation !== "sync" && operation !== "reconcile") throw new AuthorityPlaneError({ code: "invalid_request", message: "Qualification Mirror operation must be sync or reconcile.", recoveryAction: "use the documented disposable qualification Mirror operation", receipt: `qualification=github-app; mirrorOperation=${operation}; transition=not-applied` });
+    const payload = body.payload;
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new AuthorityPlaneError({ code: "invalid_request", message: "Qualification Mirror payload must be an object.", recoveryAction: "send the typed credential-free Mirror payload; no Authority state was changed", receipt: `qualification=github-app; mirrorOperation=${operation}; payload=object-required; transition=not-applied` });
+    const command: AuthorityCommand = { protocol: AUTHORITY_COMMAND_PROTOCOL, command: operation === "sync" ? "mirror.sync" : "mirror.reconcile", idempotencyKey: coordinatorString(body, "idempotencyKey"), payload: payload as Record<string, unknown> };
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      const current = await this.authoritySnapshot();
+      const coordinator = new AuthorityPlaneCoordinator(current);
+      const qualificationSession: AuthoritySession = { ...owner, clientId: "anyam-github-app-qualification", kind: "mirror" };
+      const result = coordinator.execute(command, qualificationSession);
+      await this.persistAuthoritySnapshot(current, coordinator.snapshot());
+      return coordinatorJson({ ...result, qualification: "github-app-disposable-only", providerClaims: "owner-authorized-qualification", credentialFree: true, canonicalWrite: false, receipt: `${result.receipt}; qualification=github-app; mirrorOperation=${operation}; ownerSession=oauth-capability; credentialMaterialStored=false; canonicalWrite=false` }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
+    });
+  }
+
   private async authorityCommand(body: CoordinatorRequestBody): Promise<Response> {
     await this.requireAuthorityActive();
     const command = coordinatorString(body, "command") as AuthorityCommandName;
@@ -1887,6 +1911,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/github-actions-bridge/proposal/internal") return await this.githubActionsBridgeProposal(body);
       if (url.pathname === "/authority/promotion/status/internal") return await this.authorityPromotionStatus(body);
       if (url.pathname === "/authority/mirror-ingest/internal") return await this.authorityMirrorIngest(body);
+      if (url.pathname === "/authority/qualification/mirror/internal") return await this.authorityQualificationMirror(body);
       if (url.pathname === "/authority/mcp-command/internal") return await this.authorityMcpCommand(body);
       if (url.pathname === "/authority/runner-profile/internal") return await this.authorityRunnerProfile(body);
       if (url.pathname === "/authority/runner-complete/internal") return await this.authorityRunnerComplete(body);
@@ -2527,6 +2552,13 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         const sessionId = coordinatorString(body, "sessionId");
         const session = identity.validateSession(sessionId);
         return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "session-valid", session, identity: identitySummary(identity), recoveryStatus: this.recoveryStatus, receipt: "kernelMembership=verified; session=active; authorizationEpoch=checked; recoveryStatus=observed" });
+      }
+
+      if (url.pathname === "/identity/owner/validate") {
+        const session = identity.validateSession(coordinatorString(body, "sessionId"));
+        const owner = Object.values(identity.getRecoverySnapshot().relationships).some((relationship) => relationship.status === "active" && relationship.role === "owner" && relationship.principalId === session.principalId && relationship.resource.realmId === identity.realm.id);
+        if (!owner) throw new RealmIdentityError({ code: "authority.owner_denied", message: "The requested operation requires an active Realm owner.", recoveryAction: "authenticate an active Realm owner session and retry", receipt: "owner=false; operation=owner-validate; transition=not-applied" });
+        return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, status: "owner-valid", principalId: session.principalId, sessionId: session.id, authorizationEpoch: identity.realm.authorizationEpoch, receipt: "owner=verified; session=active; credentialMaterialStored=false" });
       }
 
       if (url.pathname === "/identity/session/revoke") {

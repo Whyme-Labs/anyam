@@ -71,6 +71,10 @@ export ANYAM_REAL_TEAM_AUTHORITY_KEY_FILE=/secure/real-team/authority-keys.json
 export ANYAM_REAL_TEAM_ATTESTATION_KEYS_FILE=/secure/real-team/attestation-keys.json
 ```
 
+The bundle signer is owner-controlled and is looked up in the Authority key map
+by its `integrity.signingKeyId`; it may be the same key that signs the Authority
+export or a separately named owner key.
+
 The evidence bundle must include `authorityExport`, `terminalChanges`, and
 `externalAttestations`. `authorityExport` signs the complete credential-free
 Authority snapshot and names its `cohortId`, `realmId`, `exportDigest`,
@@ -80,6 +84,17 @@ external attestation names its `attestationId`, reviewer identity, report
 digest, signing key, cohort, Realm, and `signedAt`; its reviewer must not be a
 trial participant. The independent-security-review receipt must repeat the
 attestation ID, reviewer ID, and report digest.
+
+The current bundle also requires an `integrity` envelope with exactly
+`protocol`, `bundleDigest`, `signingKeyId`, `signedAt`, and `signature`. Compute
+`bundleDigest` with `realTeamGateBundleDigest` over the canonical evidence
+content, bind that digest and the Authority `exportDigest` into every external
+attestation, sign the attestation, then sign the complete evidence content with
+the owner-controlled bundle key. The validator rejects unknown integrity fields,
+duplicate JSON object keys, digest mismatches, and partial signatures. A legacy
+bundle with valid component signatures is reported as
+`authority-and-external-attestations-verified` but remains blocked until the
+full-bundle envelope is added.
 
 For bidirectional GitHub projection, provider sync and reconciliation must use
 the internal signed Mirror handoff after RepositoryDriver observation. The
@@ -93,13 +108,16 @@ npm run qualification:real-team-gate -- ./real-team-evidence.json
 ```
 
 The command prints a disclosure-safe blocker list and a `summary.verification`
-mode. It returns success only after the trial spans 30 calendar days, at least
-25 terminal Changes exist, the signed Authority export and external
-attestations verify with the configured public keys, all scenarios and
-operations are verified, the provider receipt is bound to the signed
-Promotion, and the team records an explicit `continue` decision. Without
-trusted keys the result is explicitly `manual-review-only` and remains
-blocked.
+mode. A ready result must report
+`bundle-cryptographically-verified`; the component-only
+`authority-and-external-attestations-verified` mode remains blocked for
+compatibility migration. The command returns success only after the trial spans
+30 calendar days, at least 25 terminal Changes exist, the full-bundle,
+Authority-export, and external-attestation signatures verify with the
+configured public keys, all scenarios and operations are verified, the provider
+receipt is bound to the signed Promotion, and the team records an explicit
+`continue` decision. Without trusted keys the result is explicitly
+`manual-review-only` and remains blocked.
 
 Until that command returns `status=ready`, Anyam remains an internal/private
 alpha for production-readiness claims.

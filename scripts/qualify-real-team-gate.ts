@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import { validateRealTeamGate } from "../src/qualification/real-team-gate.ts";
+import { parseJsonWithUniqueObjectKeys } from "../src/qualification/real-team-proof.ts";
 
 const evidencePath = process.argv[2];
 if (!evidencePath) {
@@ -8,7 +9,7 @@ if (!evidencePath) {
   process.exitCode = 2;
 } else {
   try {
-    const evidence = JSON.parse(await readFile(evidencePath, "utf8")) as unknown;
+    const evidence = parseJsonWithUniqueObjectKeys(await readFile(evidencePath, "utf8"));
     const result = await validateRealTeamGate(evidence, {
       authoritySigningKeys: await loadSigningKeys(process.env.ANYAM_REAL_TEAM_AUTHORITY_KEY_FILE, "authority export"),
       attestationSigningKeys: await loadSigningKeys(process.env.ANYAM_REAL_TEAM_ATTESTATION_KEYS_FILE, "external attestation"),

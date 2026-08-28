@@ -33,8 +33,12 @@ The validator now requires:
   Changes, matching terminal audit events, Change Revisions, Landings, and
   provider Promotion identities; and
 - an independently signed external security attestation bound to the cohort,
-  Realm, report digest, and signing time. Missing trusted keys are explicitly
-  `manual-review-only`, never `ready`.
+  Realm, report digest, exact Authority export digest, exact full-bundle digest,
+  and signing time; and
+- a full-bundle integrity envelope whose canonical digest and signature cover
+  the complete readiness claim. Missing trusted keys are explicitly
+  `manual-review-only`, component-only signatures are
+  `authority-and-external-attestations-verified`, and neither is `ready`.
 
 Missing, malformed, duplicate, future, out-of-window, unrelated, and
 credential-bearing evidence remains a blocker with an actionable key and next

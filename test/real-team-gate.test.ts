@@ -6,6 +6,9 @@ import {
   authorityExportDigest,
   authorityExportSigningMessage,
   externalAttestationSigningMessage,
+  parseJsonWithUniqueObjectKeys,
+  realTeamGateBundleDigest,
+  realTeamGateSigningMessage,
   type RealTeamAuthorityExport,
   type RealTeamExternalAttestation,
 } from "../src/qualification/real-team-proof.ts";
@@ -58,11 +61,18 @@ async function completeFixture(): Promise<{ evidence: Record<string, unknown>; o
   const exportDigest = await authorityExportDigest(snapshot);
   const unsignedExport: Omit<RealTeamAuthorityExport, "signature"> = { protocol: "anyam.real-team-authority-export/v1", cohortId: "cohort:unit", realmId: "realm:unit", exportDigest, signingKeyId: AUTHORITY_KEY_ID, exportedAt: TRIAL_TIME, snapshot };
   const authorityExport: RealTeamAuthorityExport = { ...unsignedExport, signature: signMessage(authorityKeys.privateKey, authorityExportSigningMessage(unsignedExport)) };
-  const unsignedAttestation: Omit<RealTeamExternalAttestation, "signature"> = { protocol: "anyam.real-team-external-attestation/v1", attestationId: "attestation:security:unit", cohortId: "cohort:unit", realmId: "realm:unit", kind: "independent-security-review", reviewerId: EXTERNAL_REVIEWER, reviewerOrganization: "External Security Lab", reportDigest: REPORT_DIGEST, signingKeyId: ATTESTATION_KEY_ID, signedAt: TRIAL_TIME };
-  const attestation: RealTeamExternalAttestation = { ...unsignedAttestation, signature: signMessage(attestationKeys.privateKey, externalAttestationSigningMessage(unsignedAttestation)) };
+  const unsignedAttestation: Omit<RealTeamExternalAttestation, "signature"> = { protocol: "anyam.real-team-external-attestation/v1", attestationId: "attestation:security:unit", cohortId: "cohort:unit", realmId: "realm:unit", kind: "independent-security-review", reviewerId: EXTERNAL_REVIEWER, reviewerOrganization: "External Security Lab", reportDigest: REPORT_DIGEST, signingKeyId: ATTESTATION_KEY_ID, signedAt: TRIAL_TIME, authorityExportDigest: exportDigest };
   const scenarios = { ordinaryGit: receipt(), concurrentWorkspaces: receipt(), intentLifecycle: receipt(), pullRequestLifecycle: receipt(), reviewAndLanding: receipt(), conflictAndRebase: receipt(), hybridProjection: receipt(), bidirectionalGitHub: receipt(), exportRestore: receipt(), noCanonicalWrite: receipt() };
   const operations = { sustainedLoad: receipt(), queueRecovery: receipt(), durableObjectContention: receipt(), backupRestoreRpoRto: receipt(), authenticationThrottling: receipt(), keyRotation: receipt(), incidentAlerting: receipt(), independentSecurityReview: { ...receipt(), receipt: `fixture=independent-review; attestationId=${unsignedAttestation.attestationId}; reviewerId=${EXTERNAL_REVIEWER}; reportDigest=${REPORT_DIGEST}; credentialMaterialStored=false` } };
-  const evidence = { protocol: "anyam.real-team-adoption-gate/v1", cohort: { id: "cohort:unit", realmId: "realm:unit", hostingMode: "customer-operated", canonicalAuthority: "anyam", humanParticipantIds: ["human:1", "human:2", "human:3"], agentProducts: ["codex", "claude-code"], startedAt: "2026-01-01T00:00:00.000Z", endedAt: "2026-02-01T00:00:00.000Z" }, authorityExport, terminalChanges, changes: { terminalCount: 25, changeIds: terminalChanges.map((entry) => entry.changeId) }, scenarios, provider: { workerReleaseTarget: { ...receipt(), ...provider, provider: "cloudflare-workers", receipt: `provider=cloudflare-workers; targetId=${provider.targetId}; releaseId=${provider.releaseId}; operationId=${provider.operationId}; providerVersionId=${provider.providerVersionId}; deploymentId=${provider.deploymentId}; credentialMaterialStored=false` } }, externalAttestations: [attestation], operations, retentionDecision: { decision: "continue", recordedAt: "2026-02-01T00:00:00.000Z", owner: "human:1", receipt: "fixture=retention; credentialMaterialStored=false", nextAction: "continue" } };
+  const evidenceWithoutAttestationSignature: Record<string, unknown> = { protocol: "anyam.real-team-adoption-gate/v1", cohort: { id: "cohort:unit", realmId: "realm:unit", hostingMode: "customer-operated", canonicalAuthority: "anyam", humanParticipantIds: ["human:1", "human:2", "human:3"], agentProducts: ["codex", "claude-code"], startedAt: "2026-01-01T00:00:00.000Z", endedAt: "2026-02-01T00:00:00.000Z" }, authorityExport, terminalChanges, changes: { terminalCount: 25, changeIds: terminalChanges.map((entry) => entry.changeId) }, scenarios, provider: { workerReleaseTarget: { ...receipt(), ...provider, provider: "cloudflare-workers", receipt: `provider=cloudflare-workers; targetId=${provider.targetId}; releaseId=${provider.releaseId}; operationId=${provider.operationId}; providerVersionId=${provider.providerVersionId}; deploymentId=${provider.deploymentId}; credentialMaterialStored=false` } }, externalAttestations: [unsignedAttestation], operations, retentionDecision: { decision: "continue", recordedAt: "2026-02-01T00:00:00.000Z", owner: "human:1", receipt: "fixture=retention; credentialMaterialStored=false", nextAction: "continue" } };
+  const bundleDigest = await realTeamGateBundleDigest(evidenceWithoutAttestationSignature);
+  const signedAttestationInput: Omit<RealTeamExternalAttestation, "signature"> = { ...unsignedAttestation, bundleDigest };
+  const attestation: RealTeamExternalAttestation = { ...signedAttestationInput, signature: signMessage(attestationKeys.privateKey, externalAttestationSigningMessage(signedAttestationInput)) };
+  const evidenceWithoutIntegrity: Record<string, unknown> = { ...evidenceWithoutAttestationSignature, externalAttestations: [attestation] };
+  assert.equal(await realTeamGateBundleDigest(evidenceWithoutIntegrity), bundleDigest);
+  const unsignedIntegrity = { protocol: "anyam.real-team-adoption-gate-integrity/v1", bundleDigest, signingKeyId: AUTHORITY_KEY_ID, signedAt: TRIAL_TIME };
+  const evidenceForSigning = { ...evidenceWithoutIntegrity, integrity: unsignedIntegrity };
+  const evidence: Record<string, unknown> = { ...evidenceForSigning, integrity: { ...unsignedIntegrity, signature: signMessage(authorityKeys.privateKey, realTeamGateSigningMessage(evidenceForSigning)) } };
   return { evidence, options: { authoritySigningKeys: { [AUTHORITY_KEY_ID]: publicKeyPem(authorityKeys.publicKey) }, attestationSigningKeys: { [ATTESTATION_KEY_ID]: publicKeyPem(attestationKeys.publicKey) }, now: () => NOW } };
 }
 
@@ -71,7 +81,7 @@ test("real-team gate accepts only a cryptographically verified complete evidence
   const result = await validateRealTeamGate(fixture.evidence, fixture.options);
   assert.equal(result.status, "ready");
   assert.equal(result.blockers.length, 0);
-  assert.equal(result.summary.verification, "cryptographically-verified");
+  assert.equal(result.summary.verification, "bundle-cryptographically-verified");
   assert.equal(result.summary.verifiedScenarioCount, 10);
   assert.equal(result.summary.verifiedOperationsCount, 8);
 });
@@ -92,6 +102,7 @@ test("a complete unsigned bundle stays manual-review-only until both trusted key
   assert.equal(result.summary.verification, "manual-review-only");
   assert.ok(result.blockers.some((blocker) => blocker.key === "authorityExport.signature.trust"));
   assert.ok(result.blockers.some((blocker) => blocker.key === "externalAttestations[0].signature.trust"));
+  assert.ok(result.blockers.some((blocker) => blocker.key === "integrity.signature.trust"));
 });
 
 test("real-team gate remains blocked for missing human, provider, operations, retention, and signed proof", async () => {
@@ -203,4 +214,73 @@ test("real-team gate binds provider and receipt owners to the named cohort", asy
   assert.ok(result.blockers.some((blocker) => blocker.key === "provider.workerReleaseTarget.provider"));
   assert.ok(result.blockers.some((blocker) => blocker.key === "provider.workerReleaseTarget.owner"));
   assert.ok(result.blockers.some((blocker) => blocker.key === "operations.sustainedLoad.owner"));
+});
+
+test("the full-bundle signature covers scenarios, operations, retention, provider, terminal, and attestation fields", async () => {
+  const mutations: ReadonlyArray<readonly [string, (evidence: Record<string, unknown>) => void]> = [
+    ["scenario", (evidence) => { const scenarios = evidence.scenarios as Record<string, Record<string, unknown>>; scenarios.ordinaryGit!.receipt = "fixture=scenario-tampered; credentialMaterialStored=false"; }],
+    ["operation", (evidence) => { const operations = evidence.operations as Record<string, Record<string, unknown>>; operations.sustainedLoad!.receipt = "fixture=operation-tampered; credentialMaterialStored=false"; }],
+    ["retention", (evidence) => { const retention = evidence.retentionDecision as Record<string, unknown>; retention.nextAction = "tampered"; }],
+    ["authority export", (evidence) => { const authority = evidence.authorityExport as Record<string, unknown>; const snapshot = authority.snapshot as Record<string, unknown>; snapshot.version = 999; }],
+    ["provider", (evidence) => { const provider = evidence.provider as Record<string, Record<string, unknown>>; provider.workerReleaseTarget!.releaseId = "release:tampered"; }],
+    ["terminal", (evidence) => { const terminals = evidence.terminalChanges as Array<Record<string, unknown>>; terminals[0]!.revisionId = "revision:tampered"; }],
+    ["attestation", (evidence) => { const attestations = evidence.externalAttestations as Array<Record<string, unknown>>; attestations[0]!.reviewerOrganization = "Tampered Review Lab"; }],
+    ["integrity metadata", (evidence) => { const integrity = evidence.integrity as Record<string, unknown>; integrity.signedAt = "2026-01-31T00:00:00.000Z"; }],
+  ];
+  for (const [label, mutate] of mutations) {
+    const fixture = await completeFixture();
+    mutate(fixture.evidence);
+    const result = await validateRealTeamGate(fixture.evidence, fixture.options);
+    assert.equal(result.status, "blocked", label);
+    assert.ok(result.blockers.some((blocker) => blocker.key === "integrity.bundleDigest" || blocker.key === "integrity.signature"), label);
+  }
+});
+
+test("legacy component signatures are reported as compatibility evidence and remain blocked", async () => {
+  const fixture = await completeFixture();
+  delete fixture.evidence.integrity;
+  const result = await validateRealTeamGate(fixture.evidence, fixture.options);
+  assert.equal(result.status, "blocked");
+  assert.equal(result.summary.verification, "authority-and-external-attestations-verified");
+  assert.ok(result.blockers.some((blocker) => blocker.key === "integrity.missing"));
+});
+
+test("integrity rejects unknown fields and partial signatures", async () => {
+  const unknown = await completeFixture();
+  const unknownIntegrity = unknown.evidence.integrity as Record<string, unknown>;
+  unknownIntegrity.unexpected = "reject-me";
+  const unknownResult = await validateRealTeamGate(unknown.evidence, unknown.options);
+  assert.equal(unknownResult.status, "blocked");
+  assert.equal(unknownResult.summary.verification, "blocked");
+  assert.ok(unknownResult.blockers.some((blocker) => blocker.key === "integrity.unknownFields"));
+
+  const partial = await completeFixture();
+  const partialIntegrity = partial.evidence.integrity as Record<string, unknown>;
+  delete partialIntegrity.signature;
+  const partialResult = await validateRealTeamGate(partial.evidence, partial.options);
+  assert.equal(partialResult.status, "blocked");
+  assert.equal(partialResult.summary.verification, "blocked");
+  assert.ok(partialResult.blockers.some((blocker) => blocker.key === "integrity.shape"));
+});
+
+test("modern external attestations bind the exact bundle and Authority export digests", async () => {
+  const missing = await completeFixture();
+  const missingAttestation = missing.evidence.externalAttestations as Array<Record<string, unknown>>;
+  delete missingAttestation[0]!.authorityExportDigest;
+  const missingResult = await validateRealTeamGate(missing.evidence, missing.options);
+  assert.equal(missingResult.status, "blocked");
+  assert.ok(missingResult.blockers.some((blocker) => blocker.key === "externalAttestations[0].bundleBinding"));
+
+  const mismatched = await completeFixture();
+  const mismatchedAttestation = mismatched.evidence.externalAttestations as Array<Record<string, unknown>>;
+  mismatchedAttestation[0]!.authorityExportDigest = `sha256:${"b".repeat(64)}`;
+  const mismatchedResult = await validateRealTeamGate(mismatched.evidence, mismatched.options);
+  assert.equal(mismatchedResult.status, "blocked");
+  assert.ok(mismatchedResult.blockers.some((blocker) => blocker.key === "externalAttestations[0].authorityExportDigest"));
+});
+
+test("the JSON boundary rejects duplicate object keys before parsing", async () => {
+  assert.throws(() => parseJsonWithUniqueObjectKeys('{"integrity":{"protocol":"one","protocol":"two"}}'), /duplicate JSON object key: protocol/u);
+  const parsed = parseJsonWithUniqueObjectKeys('{"integrity":{"protocol":"one","bundleDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}');
+  assert.deepEqual(parsed, { integrity: { protocol: "one", bundleDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } });
 });

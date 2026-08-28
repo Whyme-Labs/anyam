@@ -3,10 +3,14 @@ import {
   authorityExportSigningMessage,
   externalAttestationSigningMessage,
   isRecord,
+  realTeamGateBundleDigest,
+  realTeamGateSigningMessage,
+  REAL_TEAM_GATE_INTEGRITY_PROTOCOL,
   stableJson,
   verifyEd25519Signature,
   type RealTeamAuthorityExport,
   type RealTeamExternalAttestation,
+  type RealTeamGateIntegrity,
   type RealTeamGateVerificationOptions,
   type RealTeamTerminalChange,
 } from "./real-team-proof.ts";
@@ -14,6 +18,7 @@ import {
 export type {
   RealTeamAuthorityExport,
   RealTeamExternalAttestation,
+  RealTeamGateIntegrity,
   RealTeamGateVerificationOptions,
   RealTeamTerminalChange,
 } from "./real-team-proof.ts";
@@ -49,6 +54,7 @@ export type RealTeamGateEvidence = {
     startedAt: string;
     endedAt: string;
   };
+  integrity: RealTeamGateIntegrity;
   authorityExport: RealTeamAuthorityExport;
   terminalChanges: readonly RealTeamTerminalChange[];
   changes: {
@@ -96,7 +102,7 @@ export type RealTeamGateBlocker = {
   nextAction: string;
 };
 
-export type RealTeamVerificationMode = "cryptographically-verified" | "manual-review-only" | "blocked";
+export type RealTeamVerificationMode = "bundle-cryptographically-verified" | "authority-and-external-attestations-verified" | "manual-review-only" | "blocked";
 
 export type RealTeamGateResult = {
   protocol: typeof REAL_TEAM_GATE_PROTOCOL;
@@ -222,6 +228,87 @@ function providerPromotionMatches(snapshot: ObjectRecord, provider: { targetId: 
   if (match && !stableJson(match).includes(provider.providerVersionId)) push(blockers, "provider.workerReleaseTarget.providerVersionId", `Provider version ${provider.providerVersionId} is not present in the matching signed Promotion receipt.`, "retain the exact provider version identity in the signed deployment receipt");
 }
 
+type ComponentVerification = {
+  verified: boolean;
+  trustMissing: boolean;
+  cryptographicFailure: boolean;
+};
+
+type BundleIntegrityVerification = ComponentVerification & {
+  present: boolean;
+  malformed: boolean;
+  bundleDigest?: string;
+};
+
+const INTEGRITY_FIELDS = ["protocol", "bundleDigest", "signingKeyId", "signedAt", "signature"] as const;
+
+function hasOwn(value: ObjectRecord, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function unknownFields(value: ObjectRecord, allowed: readonly string[]): readonly string[] {
+  const allowedSet = new Set(allowed);
+  return Object.keys(value).filter((key) => !allowedSet.has(key)).sort();
+}
+
+async function verifyBundleIntegrity(input: {
+  value: unknown;
+  expectedDigest: string | undefined;
+  cohortStarted: number | undefined;
+  cohortEnded: number | undefined;
+  now: number;
+  options: RealTeamGateVerificationOptions;
+  blockers: RealTeamGateBlocker[];
+}): Promise<BundleIntegrityVerification> {
+  const root = object(input.value);
+  const present = root !== undefined && hasOwn(root, "integrity");
+  if (!present) {
+    push(input.blockers, "integrity.missing", "The evidence bundle is missing its full-bundle integrity envelope; component signatures alone are compatibility evidence, not readiness proof.", "compute the canonical bundle digest, bind it to every external attestation, and add the signed integrity envelope");
+    return { present: false, malformed: false, verified: false, trustMissing: false, cryptographicFailure: false };
+  }
+  const integrity = object(root?.integrity);
+  if (!integrity) {
+    push(input.blockers, "integrity.shape", "The full-bundle integrity envelope must be an object.", "provide exactly protocol, bundleDigest, signingKeyId, signedAt, and signature in integrity");
+    return { present: true, malformed: true, verified: false, trustMissing: false, cryptographicFailure: false };
+  }
+  const extras = unknownFields(integrity, INTEGRITY_FIELDS);
+  if (extras.length > 0) {
+    push(input.blockers, "integrity.unknownFields", `The full-bundle integrity envelope contains unsupported fields: ${extras.join(", ")}.`, "remove unknown integrity fields and sign the exact supported envelope");
+  }
+  const protocol = integrity.protocol;
+  const bundleDigest = digest(integrity.bundleDigest);
+  const signingKeyId = string(integrity.signingKeyId);
+  const signedAt = string(integrity.signedAt);
+  const signature = string(integrity.signature);
+  let malformed = extras.length > 0;
+  if (protocol !== REAL_TEAM_GATE_INTEGRITY_PROTOCOL || !bundleDigest || !signingKeyId || !signedAt || !signature) {
+    malformed = true;
+    push(input.blockers, "integrity.shape", "The full-bundle integrity envelope is incomplete or uses an unsupported protocol.", "provide protocol, bundleDigest, signingKeyId, signedAt, and signature with a sha256 bundle digest");
+  }
+  const signedTimestamp = utcTimestamp(signedAt, "integrity.signedAt", input.blockers);
+  if (signedTimestamp !== undefined && input.cohortStarted !== undefined && input.cohortEnded !== undefined && (signedTimestamp < input.cohortStarted || signedTimestamp > input.cohortEnded)) push(input.blockers, "integrity.signedAt.window", "The full-bundle signature was created outside the completed trial window.", "sign the complete evidence bundle inside the named trial window");
+  if (signedTimestamp !== undefined && signedTimestamp > input.now) push(input.blockers, "integrity.signedAt.future", "The full-bundle signature is dated in the future.", "record the actual bundle-signing time");
+  if (bundleDigest && input.expectedDigest && bundleDigest !== input.expectedDigest) {
+    malformed = true;
+    push(input.blockers, "integrity.bundleDigest", "The full-bundle digest does not match the canonical evidence content.", "recompute the digest over the exact evidence bundle, bind attestations to it, and sign again");
+  }
+  if (protocol === REAL_TEAM_GATE_INTEGRITY_PROTOCOL && bundleDigest && signingKeyId && signedAt && signature && !malformed) {
+    const trustedKey = input.options.authoritySigningKeys?.[signingKeyId];
+    if (!trustedKey) {
+      push(input.blockers, "integrity.signature.trust", `No trusted public key is configured for bundle signing key ${signingKeyId}; this result is manual-review-only.`, "configure the owner-controlled full-bundle public key and rerun cryptographic verification");
+      return { present: true, malformed: false, verified: false, trustMissing: true, cryptographicFailure: false, bundleDigest };
+    }
+    if (!root) return { present: true, malformed: true, verified: false, trustMissing: false, cryptographicFailure: false, bundleDigest };
+    const valid = await verifyEd25519Signature({ publicKey: trustedKey, message: realTeamGateSigningMessage(root), signature });
+    if (!valid) {
+      push(input.blockers, "integrity.signature", "The full-bundle signature is invalid for the trusted signing key.", "sign the unchanged canonical evidence bundle with the configured owner key");
+      return { present: true, malformed: false, verified: false, trustMissing: false, cryptographicFailure: true, bundleDigest };
+    }
+    return { present: true, malformed: false, verified: true, trustMissing: false, cryptographicFailure: false, bundleDigest };
+  }
+  return { present: true, malformed, verified: false, trustMissing: false, cryptographicFailure: false, ...(bundleDigest ? { bundleDigest } : {}) };
+}
+
 async function verifyAuthorityExport(input: {
   value: unknown;
   cohortId: string | undefined;
@@ -231,13 +318,14 @@ async function verifyAuthorityExport(input: {
   now: number;
   options: RealTeamGateVerificationOptions;
   blockers: RealTeamGateBlocker[];
-}): Promise<{ snapshot?: ObjectRecord; trustMissing: boolean; cryptographicFailure: boolean }> {
+}): Promise<{ snapshot?: ObjectRecord; verified: boolean; trustMissing: boolean; cryptographicFailure: boolean }> {
   const authority = object(input.value);
   let trustMissing = false;
   let cryptographicFailure = false;
+  let verified = false;
   if (!authority) {
     push(input.blockers, "authorityExport", "A signed Authority export is required; checklist JSON is not readiness proof.", "export the exact customer Realm Authority snapshot and sign it with a trusted Realm export key");
-    return { trustMissing: true, cryptographicFailure: false };
+    return { verified, trustMissing: true, cryptographicFailure: false };
   }
   const protocol = authority.protocol;
   const cohortId = string(authority.cohortId);
@@ -270,12 +358,12 @@ async function verifyAuthorityExport(input: {
       if (!valid) {
         cryptographicFailure = true;
         push(input.blockers, "authorityExport.signature", "The Authority export signature is invalid for the trusted signing key.", "export and sign a new Authority snapshot through the Realm recovery/export ceremony");
-      }
+      } else verified = true;
     }
   } else {
     trustMissing = true;
   }
-  return { ...(snapshot ? { snapshot } : {}), trustMissing, cryptographicFailure };
+  return { ...(snapshot ? { snapshot } : {}), verified, trustMissing, cryptographicFailure };
 }
 
 async function verifyExternalAttestations(input: {
@@ -283,19 +371,23 @@ async function verifyExternalAttestations(input: {
   cohortId: string | undefined;
   realmId: string | undefined;
   humans: readonly string[] | undefined;
+  expectedBundleDigest: string | undefined;
+  expectedAuthorityExportDigest: string | undefined;
+  requireBundleBinding: boolean;
   startedTimestamp: number | undefined;
   endedTimestamp: number | undefined;
   now: number;
   options: RealTeamGateVerificationOptions;
   independentReceipt: RealTeamReceipt | undefined;
   blockers: RealTeamGateBlocker[];
-}): Promise<{ trustMissing: boolean; cryptographicFailure: boolean; attestationIds: readonly string[] }> {
+}): Promise<ComponentVerification & { attestationIds: readonly string[] }> {
   let trustMissing = false;
   let cryptographicFailure = false;
+  let verified = true;
   const attestationIds: string[] = [];
   if (!Array.isArray(input.value) || input.value.length === 0) {
     push(input.blockers, "externalAttestations", "At least one signed external attestation is required; an in-cohort receipt cannot prove independence.", "obtain an independently signed security-review attestation from outside the trial cohort");
-    return { trustMissing: true, cryptographicFailure: false, attestationIds };
+    return { verified: false, trustMissing: true, cryptographicFailure: false, attestationIds };
   }
   for (const [index, value] of input.value.entries()) {
     const key = `externalAttestations[${index}]`;
@@ -303,6 +395,7 @@ async function verifyExternalAttestations(input: {
     if (!attestation) {
       push(input.blockers, key, `${key} must be a signed attestation object.`, "record the complete external attestation envelope");
       trustMissing = true;
+      verified = false;
       continue;
     }
     const protocol = attestation.protocol;
@@ -319,6 +412,7 @@ async function verifyExternalAttestations(input: {
     if (protocol !== "anyam.real-team-external-attestation/v1" || !attestationId || !cohortId || !realmId || kind !== "independent-security-review" || !reviewerId || !reportDigest || !signingKeyId || !signedAt || !signature) {
       push(input.blockers, `${key}.shape`, `${key} is incomplete or uses an unsupported protocol.`, "provide the exact signed independent-security-review envelope");
       trustMissing = true;
+      verified = false;
       continue;
     }
     if (attestationIds.includes(attestationId)) push(input.blockers, `${key}.replay`, `Attestation ${attestationId} is repeated in the evidence bundle.`, "include each signed attestation identity exactly once");
@@ -330,20 +424,29 @@ async function verifyExternalAttestations(input: {
     if (signedTimestamp !== undefined && input.startedTimestamp !== undefined && input.endedTimestamp !== undefined && (signedTimestamp < input.startedTimestamp || signedTimestamp > input.endedTimestamp)) push(input.blockers, `${key}.signedAt.window`, `Attestation ${attestationId} was signed outside the completed trial window.`, "obtain the external review during the named trial window");
     if (signedTimestamp !== undefined && signedTimestamp > input.now) push(input.blockers, `${key}.signedAt.future`, `Attestation ${attestationId} is dated in the future.`, "record the actual external signing time");
     if (input.independentReceipt && (!input.independentReceipt.receipt.includes(`attestationId=${attestationId}`) || !input.independentReceipt.receipt.includes(`reportDigest=${reportDigest}`) || !input.independentReceipt.receipt.includes(`reviewerId=${reviewerId}`))) push(input.blockers, `${key}.operationBinding`, `The independent-security-review operation receipt does not name attestation ${attestationId}, reviewer ${reviewerId}, and report ${reportDigest}.`, "record the exact external attestation identities in the operation receipt");
+    const declaredBundleDigest = digest(attestation.bundleDigest);
+    const declaredAuthorityExportDigest = digest(attestation.authorityExportDigest);
+    if (input.requireBundleBinding && (!declaredBundleDigest || !declaredAuthorityExportDigest)) {
+      push(input.blockers, `${key}.bundleBinding`, `The current attestation contract requires bundleDigest and authorityExportDigest for ${attestationId}.`, "bind the external attestation to the exact full-bundle and Authority export digests before signing it");
+    }
+    if (declaredBundleDigest && input.expectedBundleDigest && declaredBundleDigest !== input.expectedBundleDigest) push(input.blockers, `${key}.bundleDigest`, `Attestation ${attestationId} names a different readiness bundle digest.`, "sign the attestation for the exact canonical readiness bundle");
+    if (declaredAuthorityExportDigest && input.expectedAuthorityExportDigest && declaredAuthorityExportDigest !== input.expectedAuthorityExportDigest) push(input.blockers, `${key}.authorityExportDigest`, `Attestation ${attestationId} names a different Authority export digest.`, "sign the attestation for the exact Authority export used by the readiness bundle");
     const trustedKey = input.options.attestationSigningKeys?.[signingKeyId];
     if (!trustedKey) {
       trustMissing = true;
+      verified = false;
       push(input.blockers, `${key}.signature.trust`, `No trusted public key is configured for attestation signing key ${signingKeyId}; this result is manual-review-only.`, "configure the independent reviewer public key and rerun cryptographic verification");
       continue;
     }
-    const unsigned: Omit<RealTeamExternalAttestation, "signature"> = { protocol, attestationId, cohortId, realmId, kind, reviewerId, ...(reviewerOrganization ? { reviewerOrganization } : {}), reportDigest, signingKeyId, signedAt };
+    const unsigned: Omit<RealTeamExternalAttestation, "signature"> = { protocol, attestationId, cohortId, realmId, kind, reviewerId, ...(reviewerOrganization ? { reviewerOrganization } : {}), reportDigest, signingKeyId, signedAt, ...(declaredBundleDigest ? { bundleDigest: declaredBundleDigest } : {}), ...(declaredAuthorityExportDigest ? { authorityExportDigest: declaredAuthorityExportDigest } : {}) };
     const valid = await verifyEd25519Signature({ publicKey: trustedKey, message: externalAttestationSigningMessage(unsigned), signature });
     if (!valid) {
       cryptographicFailure = true;
+      verified = false;
       push(input.blockers, `${key}.signature`, `Attestation ${attestationId} has an invalid signature.`, "obtain a fresh signature from the enrolled independent reviewer key");
     }
   }
-  return { trustMissing, cryptographicFailure, attestationIds };
+  return { verified, trustMissing, cryptographicFailure, attestationIds };
 }
 
 function validateTerminalChanges(input: {
@@ -420,6 +523,9 @@ export async function validateRealTeamGate(value: unknown, options: RealTeamGate
   if (startedTimestamp !== undefined && startedTimestamp > now) push(blockers, "cohort.startedAt.future", "The trial start is in the future.", "record the actual UTC trial start time after the trial begins");
   if (endedTimestamp !== undefined && endedTimestamp > now) push(blockers, "cohort.endedAt.future", "The trial end is in the future, so the adoption gate cannot be complete.", "run the trial to completion and record an endedAt timestamp no later than the current time");
 
+  const expectedBundleDigest = root ? await realTeamGateBundleDigest(root) : undefined;
+  const bundleIntegrity = await verifyBundleIntegrity({ value: root, expectedDigest: expectedBundleDigest, cohortStarted: startedTimestamp, cohortEnded: endedTimestamp, now, options, blockers });
+
   const changes = object(root?.changes);
   const terminalCount = typeof changes?.terminalCount === "number" && Number.isSafeInteger(changes.terminalCount) ? changes.terminalCount : undefined;
   const changeIds = strings(changes?.changeIds);
@@ -474,7 +580,9 @@ export async function validateRealTeamGate(value: unknown, options: RealTeamGate
       if (observedAt !== undefined && (observedAt < startedTimestamp || observedAt > endedTimestamp)) push(blockers, `operations.${key}.observedAt.window`, `${key} was observed outside the completed trial window.`, `record ${key} between cohort.startedAt and cohort.endedAt`);
     }
   }
-  const attestationVerification = await verifyExternalAttestations({ value: root?.externalAttestations, cohortId, realmId, humans, startedTimestamp, endedTimestamp, now, options, independentReceipt: operationReceipts.independentSecurityReview, blockers });
+  const authorityExportValue = object(root?.authorityExport);
+  const expectedAuthorityExportDigest = digest(authorityExportValue?.exportDigest);
+  const attestationVerification = await verifyExternalAttestations({ value: root?.externalAttestations, cohortId, realmId, humans, expectedBundleDigest, expectedAuthorityExportDigest, requireBundleBinding: bundleIntegrity.present, startedTimestamp, endedTimestamp, now, options, independentReceipt: operationReceipts.independentSecurityReview, blockers });
   const retention = object(root?.retentionDecision);
   const retentionDecision = retention?.decision === "continue" ? "continue" as const : retention?.decision === "conditional" ? "conditional" as const : retention?.decision === "stop" ? "stop" as const : undefined;
   if (!retentionDecision || !string(retention?.recordedAt) || !string(retention?.owner) || !string(retention?.receipt) || !string(retention?.nextAction)) push(blockers, "retentionDecision", "The team retention decision is missing or incomplete.", "record the named team's continue, conditional, or stop decision with owner, timestamp, receipt, and next action");
@@ -486,9 +594,10 @@ export async function validateRealTeamGate(value: unknown, options: RealTeamGate
   if (/(?:token|secret|password|private[_-]?key|bearer\s+)/iu.test(string(retention?.receipt) ?? "")) push(blockers, "retentionDecision.receipt", "The retention receipt contains credential-like material.", "replace the retention receipt with a credential-free digest-only receipt");
   if (retentionDecision !== "continue") push(blockers, "retentionDecision.decision", `The team retention decision is ${retentionDecision ?? "missing"}; the adoption gate is not ready.`, "obtain an explicit continue decision from the named cohort");
 
-  const cryptographicFailure = authority.cryptographicFailure || attestationVerification.cryptographicFailure;
-  const trustMissing = authority.trustMissing || attestationVerification.trustMissing;
-  const verification: RealTeamVerificationMode = cryptographicFailure ? "blocked" : trustMissing ? "manual-review-only" : "cryptographically-verified";
+  const cryptographicFailure = authority.cryptographicFailure || attestationVerification.cryptographicFailure || bundleIntegrity.cryptographicFailure;
+  const trustMissing = authority.trustMissing || attestationVerification.trustMissing || bundleIntegrity.trustMissing;
+  const componentSignaturesVerified = authority.verified && attestationVerification.verified;
+  const verification: RealTeamVerificationMode = cryptographicFailure || bundleIntegrity.malformed ? "blocked" : bundleIntegrity.verified ? "bundle-cryptographically-verified" : componentSignaturesVerified ? "authority-and-external-attestations-verified" : trustMissing ? "manual-review-only" : "blocked";
   const summary = { ...(cohortId ? { cohortId } : {}), ...(humans ? { humanParticipantCount: humans.length } : {}), ...(agents ? { agentProductCount: new Set(agents).size } : {}), ...(trialCalendarDays === undefined ? {} : { trialCalendarDays }), ...(terminalCount === undefined ? {} : { terminalChangeCount: terminalCount }), verifiedScenarioCount, requiredScenarioCount: SCENARIO_KEYS.length, providerReceipt: providerReceipt?.status ?? "indeterminate" as const, verifiedOperationsCount, requiredOperationsCount: OPERATION_KEYS.length, ...(retentionDecision ? { retentionDecision } : {}), verification };
-  return { protocol: REAL_TEAM_GATE_PROTOCOL, status: blockers.length === 0 && verification === "cryptographically-verified" ? "ready" : "blocked", blockers, summary, credentialValues: "not-printed", canonicalWrite: false, receipt: `cohort=${cohortId ?? "missing"}; realm=${realmId ?? "missing"}; humans=${humans?.length ?? "unknown"}; agents=${agents?.length ?? "unknown"}; trialDays=${trialCalendarDays ?? "unknown"}; terminalChanges=${terminalCount ?? "unknown"}; scenarios=${verifiedScenarioCount}/${SCENARIO_KEYS.length}; operations=${verifiedOperationsCount}/${OPERATION_KEYS.length}; provider=${providerReceipt?.status ?? "indeterminate"}; retention=${retentionDecision ?? "missing"}; verification=${verification}; externalAttestations=${attestationVerification.attestationIds.length}; blockers=${blockers.length}; credentialValues=not-printed; canonicalWrite=false` };
+  return { protocol: REAL_TEAM_GATE_PROTOCOL, status: blockers.length === 0 && verification === "bundle-cryptographically-verified" ? "ready" : "blocked", blockers, summary, credentialValues: "not-printed", canonicalWrite: false, receipt: `cohort=${cohortId ?? "missing"}; realm=${realmId ?? "missing"}; humans=${humans?.length ?? "unknown"}; agents=${agents?.length ?? "unknown"}; trialDays=${trialCalendarDays ?? "unknown"}; terminalChanges=${terminalCount ?? "unknown"}; scenarios=${verifiedScenarioCount}/${SCENARIO_KEYS.length}; operations=${verifiedOperationsCount}/${OPERATION_KEYS.length}; provider=${providerReceipt?.status ?? "indeterminate"}; retention=${retentionDecision ?? "missing"}; verification=${verification}; bundleDigest=${bundleIntegrity.bundleDigest ?? "missing"}; externalAttestations=${attestationVerification.attestationIds.length}; blockers=${blockers.length}; credentialValues=not-printed; canonicalWrite=false` };
 }

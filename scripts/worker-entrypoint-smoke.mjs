@@ -15,8 +15,14 @@ const workers = [
   {
     id: "realm",
     config: "apps/realm-worker/wrangler.example.jsonc",
-    sources: ["apps/realm-worker/src/index.ts", "apps/realm-worker/src/passkey-owner.ts", "apps/realm-worker/src/authority-edge.ts", "apps/realm-worker/src/github-actions-bridge-route.ts", "apps/realm-worker/src/github-actions-bridge-contract.ts", "src/cloudflare/realm-worker.ts"],
-    routes: ["/health", "/mcp", "/authorize", "/owner/login", "/api/projects", "/api/projects/", "/api/intents", "/api/pull-requests", "/api/integrations/github-actions/bridge/exchange", "/api/integrations/github-actions/bridge/outbound/bundle", "/api/integrations/github-actions/bridge/outbound/complete", "/internal/mirrors/ingest"],
+    sources: ["apps/realm-worker/src/index.ts", "apps/realm-worker/src/passkey-owner.ts", "apps/realm-worker/src/authority-edge.ts", "apps/realm-worker/src/github-actions-bridge-route.ts", "apps/realm-worker/src/github-actions-bridge-contract.ts", "apps/realm-worker/src/github-webhook-route.ts", "src/cloudflare/realm-worker.ts"],
+    routes: ["/health", "/mcp", "/authorize", "/owner/login", "/api/projects", "/api/projects/", "/api/intents", "/api/pull-requests", "/api/integrations/github-actions/bridge/exchange", "/api/integrations/github-actions/bridge/outbound/bundle", "/api/integrations/github-actions/bridge/outbound/complete", "/internal/mirrors/ingest", "/internal/mirrors/producer-context", "/webhooks/github"],
+  },
+  {
+    id: "github-mirror-producer",
+    config: "apps/github-mirror-producer/wrangler.example.jsonc",
+    sources: ["apps/github-mirror-producer/src/index.ts", "src/portability/github-webhook-producer.ts"],
+    routes: ["/health", "/events/github", "anyam.github-mirror-producer/v1", "ANYAM_REALM"],
   },
   {
     id: "repository-observer",

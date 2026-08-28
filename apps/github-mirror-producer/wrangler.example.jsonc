@@ -1,0 +1,32 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-github-mirror-producer",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "ANYAM_REALM_ID": "replace-with-customer-realm-id",
+    "ANYAM_GITHUB_APP_ID": "replace-with-github-app-id",
+    "ANYAM_GITHUB_APP_INSTALLATION_ID": "replace-with-github-app-installation-id",
+    "ANYAM_GITHUB_APP_REPOSITORY": "replace-with-selected-github-owner/name",
+    "ANYAM_GITHUB_APP_JWT_LIFETIME_SECONDS": "600",
+    "ANYAM_GITHUB_APP_JWT_SIZING_RECEIPT": "qualification-tripwire; jwtLifetimeSeconds=600; remeasure-before-production",
+    "ANYAM_GITHUB_APP_JWT_CLOCK_SKEW_SECONDS": "30",
+    "ANYAM_GITHUB_APP_JWT_CLOCK_SKEW_SIZING_RECEIPT": "qualification-tripwire; clockSkewSeconds=30; remeasure-before-production",
+    "ANYAM_GITHUB_APP_RESPONSE_BYTES_LIMIT": "262144",
+    "ANYAM_GITHUB_APP_RESPONSE_BYTES_RECEIPT": "qualification-tripwire; responseBytesLimit=262144; remeasure-before-production",
+    "ANYAM_GITHUB_APP_REQUEST_TIMEOUT_MS": "10000",
+    "ANYAM_GITHUB_APP_REQUEST_TIMEOUT_RECEIPT": "qualification-tripwire; requestTimeoutMs=10000; remeasure-before-production",
+    "ANYAM_MIRROR_HANDOFF_KEY_ID": "mirror-handoff-v1",
+    "ANYAM_GITHUB_PRODUCER_ENVELOPE_BYTES_LIMIT": "2097152",
+    "ANYAM_GITHUB_PRODUCER_ENVELOPE_BYTES_RECEIPT": "qualification-tripwire; envelopeBytesLimit=2097152; remeasure-before-production"
+  },
+  "services": [
+    {
+      "binding": "ANYAM_REALM",
+      "service": "anyam-realm"
+    }
+  ]
+}

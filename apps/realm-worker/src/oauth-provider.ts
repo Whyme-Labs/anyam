@@ -85,6 +85,24 @@ export type AnyamRealmOAuthEnv = CustomerRealmWorkerEnv & {
   ANYAM_MIRROR_HANDOFF_KEY_ID?: string;
   /** Secret shared only with the internal Mirror provider adapter. */
   ANYAM_MIRROR_HANDOFF_SECRET?: string;
+  /** GitHub App webhook secret used only at the public wake-up ingress. */
+  ANYAM_GITHUB_APP_WEBHOOK_SECRET?: string;
+  /** Exact selected GitHub repository accepted by the webhook boundary. */
+  ANYAM_GITHUB_APP_REPOSITORY?: string;
+  /** Exact GitHub App installation accepted by the webhook boundary. */
+  ANYAM_GITHUB_APP_INSTALLATION_ID?: string;
+  /** Measured maximum raw GitHub webhook body accepted by the ingress. */
+  ANYAM_GITHUB_WEBHOOK_BODY_BYTES_LIMIT?: string;
+  /** Receipt for the GitHub webhook body tripwire. */
+  ANYAM_GITHUB_WEBHOOK_BODY_BYTES_RECEIPT?: string;
+  /** Cloudflare Rate Limit binding used to protect the public webhook wake-up. */
+  ANYAM_GITHUB_WEBHOOK_RATE_LIMITER?: RateLimit;
+  /** Receipt for the configured webhook Rate Limit tripwire. */
+  ANYAM_GITHUB_WEBHOOK_RATE_LIMIT_RECEIPT?: string;
+  /** Optional customer-owned synchronizer that consumes queued GitHub hints. */
+  ANYAM_GITHUB_MIRROR_PRODUCER?: Fetcher;
+  /** Shared only with the bound GitHub Mirror producer service. */
+  ANYAM_GITHUB_MIRROR_PRODUCER_SECRET?: string;
   /** Customer-owned verifier for GitHub Actions OIDC assertions. The token is
    * forwarded only to this binding and never stored in Realm state. */
   ANYAM_GITHUB_OIDC_VERIFIER?: Fetcher;

@@ -13,7 +13,12 @@
     "ANYAM_REALM_RP_ID": "anyam-p3-24-live-20260810.swmengappdev.workers.dev",
     "ANYAM_BUILD_REVISION": "6a0e2186e716c5cc4723186de70c84a3d0c5cb19",
     "ANYAM_PROVIDER_WORKER_URL": "https://anyam-p3-24-target-20260810.swmengappdev.workers.dev",
-    "ANYAM_MIRROR_HANDOFF_KEY_ID": "mirror-handoff-v1"
+    "ANYAM_MIRROR_HANDOFF_KEY_ID": "mirror-handoff-v1",
+    "ANYAM_GITHUB_APP_REPOSITORY": "replace-with-selected-github-owner/name",
+    "ANYAM_GITHUB_APP_INSTALLATION_ID": "replace-with-selected-github-app-installation-id",
+    "ANYAM_GITHUB_WEBHOOK_BODY_BYTES_LIMIT": "1048576",
+    "ANYAM_GITHUB_WEBHOOK_BODY_BYTES_RECEIPT": "qualification-tripwire; bodyBytesLimit=1048576; remeasure-before-production",
+    "ANYAM_GITHUB_WEBHOOK_RATE_LIMIT_RECEIPT": "qualification-tripwire; limit=100; period=60s; remeasure-before-production"
   },
   "kv_namespaces": [
     {
@@ -39,6 +44,10 @@
     {
       "binding": "ANYAM_PROVIDER_WORKER",
       "service": "anyam-p3-24-target-20260810"
+    },
+    {
+      "binding": "ANYAM_GITHUB_MIRROR_PRODUCER",
+      "service": "anyam-github-mirror-producer-p3-24-live-20260810"
     }
   ],
   "d1_databases": [
@@ -68,6 +77,13 @@
       }
     ]
   },
+  "ratelimits": [
+    {
+      "name": "ANYAM_GITHUB_WEBHOOK_RATE_LIMITER",
+      "namespace_id": "replace-with-customer-rate-limit-namespace-id",
+      "simple": { "limit": 100, "period": 60 }
+    }
+  ],
   "workflows": [
     {
       "binding": "ANYAM_WORKFLOW",

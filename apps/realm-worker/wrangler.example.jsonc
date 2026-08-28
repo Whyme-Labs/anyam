@@ -17,7 +17,12 @@
     "ANYAM_CONFIGURATION_DIGEST": "replace-with-configuration-digest",
     "ANYAM_AUTHORITY_RECOVERY_KEY_ID": "replace-with-customer-authority-recovery-key-id",
     "ANYAM_PROMOTION_HANDOFF_KEY_ID": "replace-with-customer-promotion-handoff-key-id",
-    "ANYAM_MIRROR_HANDOFF_KEY_ID": "mirror-handoff-v1"
+    "ANYAM_MIRROR_HANDOFF_KEY_ID": "mirror-handoff-v1",
+    "ANYAM_GITHUB_APP_REPOSITORY": "replace-with-selected-github-owner/name",
+    "ANYAM_GITHUB_APP_INSTALLATION_ID": "replace-with-selected-github-app-installation-id",
+    "ANYAM_GITHUB_WEBHOOK_BODY_BYTES_LIMIT": "1048576",
+    "ANYAM_GITHUB_WEBHOOK_BODY_BYTES_RECEIPT": "qualification-tripwire; bodyBytesLimit=1048576; remeasure-before-production",
+    "ANYAM_GITHUB_WEBHOOK_RATE_LIMIT_RECEIPT": "qualification-tripwire; limit=100; period=60s; remeasure-before-production"
   },
   "kv_namespaces": [
     {
@@ -66,6 +71,13 @@
       }
     ]
   },
+  "ratelimits": [
+    {
+      "name": "ANYAM_GITHUB_WEBHOOK_RATE_LIMITER",
+      "namespace_id": "replace-with-customer-rate-limit-namespace-id",
+      "simple": { "limit": 100, "period": 60 }
+    }
+  ],
   "workflows": [
     {
       "binding": "ANYAM_WORKFLOW",
@@ -81,6 +93,10 @@
     {
       "binding": "ANYAM_REPOSITORY_OBSERVER",
       "service": "anyam-repository-observer"
+    },
+    {
+      "binding": "ANYAM_GITHUB_MIRROR_PRODUCER",
+      "service": "anyam-github-mirror-producer"
     }
   ]
 }

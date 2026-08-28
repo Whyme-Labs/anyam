@@ -70,6 +70,7 @@ import {
 import { runnerResultDigest, runnerResultMessage, verifyRunnerResultSignature } from "../execution/runner-proof.ts";
 import type { RunnerResult } from "../execution/runner.ts";
 import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
+import { validateWorkspaceMountPaths, validateWorkspaceMounts, WorkspaceMountValidationError, WORKSPACE_MOUNT_VALIDATION_PROTOCOL } from "../kernel/workspace-mounts.ts";
 
 export const AUTHORITY_PLANE_PROTOCOL = "anyam.authority-plane/v1" as const;
 export const AUTHORITY_COMMAND_PROTOCOL = "anyam.authority-command/v1" as const;
@@ -261,7 +262,7 @@ function receiptString(value: unknown, field: string): string {
   return receipt;
 }
 
-function stringArray(value: unknown, field: string, allowEmpty = false): string[] {
+function stringArray(value: unknown, field: string, allowEmpty = false, deduplicate = true): string[] {
   if (!Array.isArray(value) || (!allowEmpty && value.length === 0) || value.some((entry) => typeof entry !== "string" || entry.trim().length === 0)) {
     throw new AuthorityPlaneError({
       code: "invalid_request",
@@ -270,7 +271,32 @@ function stringArray(value: unknown, field: string, allowEmpty = false): string[
       receipt: `${field}=string-array-required; transition=not-applied`,
     });
   }
-  return [...new Set((value as string[]).map((entry) => entry.trim()))];
+  const values = (value as string[]).map((entry) => entry.trim());
+  return deduplicate ? [...new Set(values)] : values;
+}
+
+function authorityWorkspaceMounts(value: { sourceSpaceIds: readonly string[]; mounts: readonly string[] }, projectId: string, revision: ProjectRevision): WorkspaceMount[] {
+  try {
+    const validated = validateWorkspaceMountPaths({
+      sourceSpaceIds: value.sourceSpaceIds,
+      mountPaths: value.mounts,
+    });
+    return validated.map((mount) => {
+      const snapshotId = revision.sourceSpaceSnapshots[mount.sourceSpaceId];
+      if (snapshotId === undefined) {
+        throw new AuthorityPlaneError({
+          code: "not_found",
+          message: `Project Revision ${revision.id} has no snapshot for Source Space ${mount.sourceSpaceId}.`,
+          recoveryAction: "read the exact Project Revision and retry with its complete Source Space set",
+          receipt: `project=${projectId}; revision=${revision.id}; sourceSpace=${mount.sourceSpaceId}; workspace=not-created`,
+        });
+      }
+      return { sourceSpaceId: mount.sourceSpaceId, snapshotId, mountPath: mount.mountPath };
+    });
+  } catch (error) {
+    if (!(error instanceof WorkspaceMountValidationError)) throw error;
+    throw new AuthorityPlaneError({ code: "invalid_request", message: error.message, recoveryAction: error.recoveryAction, receipt: error.receipt });
+  }
 }
 
 function record<T>(value: unknown, field: string): Record<string, T> {
@@ -600,6 +626,22 @@ function assertAuthorityWorkspaceChangeLineage(snapshot: AuthorityPlaneSnapshot)
     const revision = snapshot.projectRevisions[workspace.projectRevisionId];
     const view = snapshot.projectViews[workspace.projectViewId];
     if (!project || !revision || revision.projectId !== workspace.projectId || !view || view.projectId !== workspace.projectId || view.projectRevisionId !== workspace.projectRevisionId) fail(`Workspace ${workspace.id} has incomplete Project, Revision, or View lineage.`, `workspace=${workspace.id}; project=${workspace.projectId}; projectRevision=${workspace.projectRevisionId}; projectView=${workspace.projectViewId}; lineage=incomplete`);
+    if (!view) {
+      fail(`Workspace ${workspace.id} has no Project View for its mount set.`, `workspace=${workspace.id}; projectView=${workspace.projectViewId}; lineage=incomplete`);
+      continue;
+    }
+    try {
+      const validatedMounts = validateWorkspaceMounts({ sourceSpaceIds: view.visibleSourceSpaceIds, mounts: workspace.mounts });
+      const normalizedBySource = new Map(validatedMounts.map((mount) => [mount.sourceSpaceId, mount.mountPath]));
+      for (const mount of workspace.mounts) {
+        if (normalizedBySource.get(mount.sourceSpaceId) !== mount.mountPath || mount.snapshotId !== view.disclosedSourceSpaceSnapshots[mount.sourceSpaceId]) {
+          fail(`Workspace ${workspace.id} contains a non-canonical or stale Source Space mount.`, `workspace=${workspace.id}; sourceSpace=${mount.sourceSpaceId}; mountPath=${JSON.stringify(mount.mountPath)}; mount=stale-or-noncanonical`);
+        }
+      }
+    } catch (error) {
+      if (!(error instanceof WorkspaceMountValidationError)) throw error;
+      fail(`Workspace ${workspace.id} has invalid Source Space mounts.`, `workspace=${workspace.id}; ${error.receipt}`);
+    }
     if (workspace.changeId) {
       const existingChange = snapshot.changes[workspace.changeId];
       if (!existingChange) {
@@ -1466,19 +1508,20 @@ export class AuthorityPlaneCoordinator {
         const revisionId = requiredString(payload.projectRevisionId, "projectRevisionId");
         const revision = next.projectRevisions[revisionId];
         if (!revision || revision.projectId !== currentProject.id) throw new AuthorityPlaneError({ code: "not_found", message: `Project Revision ${revisionId} is not available for Project ${currentProject.id}.`, recoveryAction: "read the current canonical Project Revision and retry", receipt: `project=${currentProject.id}; revision=${revisionId}; workspace=not-created` });
-        const sourceIds = stringArray(payload.sourceSpaceIds ?? currentProject.sourceSpaceIds, "sourceSpaceIds");
+        const sourceIds = stringArray(payload.sourceSpaceIds ?? currentProject.sourceSpaceIds, "sourceSpaceIds", false, false);
         const sourceSpaces = sourceIds.map((id) => next.sourceSpaces[id]).filter((value): value is SourceSpace => value !== undefined);
         const requestedClassification = optionalString(payload.classification) as ProjectView["classification"] | undefined;
-        const view = deriveProjectView({ project: currentProject, revision, sourceSpaces, allowedSourceSpaceIds: sourceIds, projectionId: optionalString(payload.projectionId) ?? opaqueId("projection"), ...(requestedClassification ? { classification: requestedClassification } : {}) });
         const mountsValue = payload.mounts;
-        const mounts: WorkspaceMount[] = mountsValue === undefined
-          ? sourceIds.map((sourceSpaceId) => ({ sourceSpaceId, snapshotId: revision.sourceSpaceSnapshots[sourceSpaceId]!, mountPath: sourceSpaceId.replaceAll(":", "-") }))
-          : stringArray(mountsValue, "mounts").map((mountPath, index) => ({ sourceSpaceId: sourceIds[index]!, snapshotId: revision.sourceSpaceSnapshots[sourceIds[index]!]!, mountPath }));
+        const mountPaths = mountsValue === undefined
+          ? sourceIds.map((sourceSpaceId) => sourceSpaceId.replaceAll(":", "-"))
+          : stringArray(mountsValue, "mounts", false, false);
+        const mounts = authorityWorkspaceMounts({ sourceSpaceIds: sourceIds, mounts: mountPaths }, currentProject.id, revision);
+        const view = deriveProjectView({ project: currentProject, revision, sourceSpaces, allowedSourceSpaceIds: sourceIds, projectionId: optionalString(payload.projectionId) ?? opaqueId("projection"), ...(requestedClassification ? { classification: requestedClassification } : {}) });
         const workspace: Workspace = { protocol: CONTRACT_VERSIONS.workspace, id: optionalString(payload.workspaceId) ?? opaqueId("workspace"), projectId: currentProject.id, projectRevisionId: revision.id, projectViewId: view.id, mounts, state: "active", actorId: session.actorId };
         if (next.workspaces[workspace.id]) throw new AuthorityPlaneError({ code: "conflict", message: `Workspace ${workspace.id} already exists.`, recoveryAction: "reuse the original idempotency key or choose a new Workspace identity", receipt: `workspace=${workspace.id}; exists=true; transition=not-applied` });
         next.projectViews[view.id] = view;
         next.workspaces[workspace.id] = workspace;
-        return success({ workspace, view }, `workspace=${workspace.id}; base=${revision.id}; actor=${session.actorId}; sourceTransfer=not-performed`);
+        return success({ workspace, view }, `workspace=${workspace.id}; base=${revision.id}; actor=${session.actorId}; sourceTransfer=not-performed; mountValidation=${WORKSPACE_MOUNT_VALIDATION_PROTOCOL}`);
       }
       case "change.create": {
         const currentProject = project ?? (() => { throw new AuthorityPlaneError({ code: "not_found", message: `Project ${requiredString(payload.projectId, "projectId")} does not exist.`, recoveryAction: "create the Project before creating a Change", receipt: `project=${payload.projectId ?? "missing"}; change=not-created` }); })();

@@ -41,3 +41,4 @@ export * from "./cloudflare/mcp-command-target.ts";
 export * from "./cloudflare/authority-sqlite.ts";
 export * from "./brand.ts";
 export * from "./security/credential-material.ts";
+export * from "./kernel/workspace-mounts.ts";

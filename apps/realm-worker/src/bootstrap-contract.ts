@@ -1,4 +1,5 @@
 import { AUTHORITY_PLANE_PROTOCOL } from "../../../src/cloudflare/authority-plane.ts";
+import { validateWorkspaceMountPaths, WorkspaceMountValidationError } from "../../../src/kernel/workspace-mounts.ts";
 
 export type BootstrapMutation = "project.create" | "workspace.create" | "change.create";
 
@@ -70,14 +71,15 @@ function safeBodyIdentifier(body: Record<string, unknown>, operation: BootstrapM
   return value;
 }
 
-function bootstrapStringList(body: Record<string, unknown>, operation: BootstrapMutation, field: string, required = true): string[] | undefined {
+function bootstrapStringList(body: Record<string, unknown>, operation: BootstrapMutation, field: string, required = true, deduplicate = true): string[] | undefined {
   if (body[field] === undefined) {
     if (required) throw bootstrapRequestError(operation, `${field} must be a non-empty array of strings.`, `provide ${field} as a non-empty string array; no transition was accepted`, `operation=${operation}; field=${field}; stringArray=required; transition=not-applied`);
     return undefined;
   }
   const value = body[field];
   if (!Array.isArray(value) || (required && value.length === 0) || value.some((entry) => typeof entry !== "string" || entry.trim().length === 0)) throw bootstrapRequestError(operation, `${field} must be an array of non-empty strings.`, `provide ${field} as a valid string array; no transition was accepted`, `operation=${operation}; field=${field}; stringArray=invalid; transition=not-applied`);
-  return [...new Set((value as string[]).map((entry) => entry.trim()))];
+  const values = (value as string[]).map((entry) => entry.trim());
+  return deduplicate ? [...new Set(values)] : values;
 }
 
 function bootstrapExpectedVersion(body: Record<string, unknown>, operation: BootstrapMutation): number | undefined {
@@ -124,8 +126,16 @@ export function bootstrapCommand(path: BootstrapPath, body: Record<string, unkno
   if (operation === "workspace.create") {
     const workspaceId = safeBodyIdentifier(body, operation, "workspaceId");
     const projectRevisionId = safeBodyIdentifier(body, operation, "projectRevisionId", true)!;
-    const sourceSpaceIds = bootstrapStringList(body, operation, "sourceSpaceIds");
-    const mounts = bootstrapStringList(body, operation, "mounts", false);
+    const sourceSpaceIds = bootstrapStringList(body, operation, "sourceSpaceIds", true, false)!;
+    const mounts = bootstrapStringList(body, operation, "mounts", false, false);
+    if (mounts !== undefined) {
+      try {
+        validateWorkspaceMountPaths({ sourceSpaceIds, mountPaths: mounts });
+      } catch (error) {
+        if (!(error instanceof WorkspaceMountValidationError)) throw error;
+        throw bootstrapRequestError(operation, error.message, error.recoveryAction, error.receipt);
+      }
+    }
     const projectionId = safeBodyIdentifier(body, operation, "projectionId");
     const classification = optionalBootstrapString(body, operation, "classification");
     return { command: operation, idempotencyKey, ...(expectedVersion === undefined ? {} : { expectedVersion }), payload: { projectId, ...(workspaceId ? { workspaceId } : {}), projectRevisionId, sourceSpaceIds, ...(mounts ? { mounts } : {}), ...(projectionId ? { projectionId } : {}), ...(classification ? { classification } : {}) } };

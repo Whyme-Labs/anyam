@@ -20,6 +20,7 @@ import {
   type Workspace,
   type WorkspaceMount,
 } from "../kernel/contracts.ts";
+import { validateWorkspaceMounts, WorkspaceMountValidationError } from "../kernel/workspace-mounts.ts";
 
 /**
  * A provider-neutral source snapshot used by the local Workspace materializer.
@@ -116,32 +117,6 @@ function notFound(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
-function normalizedMountPath(value: string): string {
-  const replaced = value.replaceAll("\\", "/");
-  const normalized = posix.normalize(replaced).replace(/^\.\//, "").replace(/\/$/, "");
-  const containsTraversalSegment = replaced.split("/").some((segment) => segment === "..");
-  if (
-    replaced.length === 0 ||
-    normalized.length === 0 ||
-    normalized === "." ||
-    normalized.startsWith("/") ||
-    containsTraversalSegment ||
-    normalized === ".." ||
-    normalized.startsWith("../") ||
-    normalized.includes("/../") ||
-    normalized.includes("\0")
-  ) {
-    failure({
-      code: "workspace-mount-invalid",
-      message: `Workspace mount path is invalid; use a non-empty relative path without traversal.`,
-      affectedObject: "workspace-mount",
-      recoveryAction: "choose an explicit relative mount path and retry materialization",
-      receipt: `mount-path=${JSON.stringify(value)}; rule=relative-no-traversal`,
-    });
-  }
-  return normalized;
-}
-
 function normalizedFilePath(value: string): string {
   const replaced = value.replaceAll("\\", "/");
   const normalized = posix.normalize(replaced).replace(/^\.\//, "");
@@ -168,8 +143,29 @@ function normalizedFilePath(value: string): string {
   return normalized;
 }
 
-function mountCollision(left: string, right: string): boolean {
-  return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+function mapWorkspaceMountValidationError(error: unknown, viewId: string): never {
+  if (!(error instanceof WorkspaceMountValidationError)) throw error;
+  const code: ChangeControlErrorCode = error.code === "mount-source-undisclosed"
+    ? "workspace-source-not-authorized"
+    : error.code === "source-space-duplicate"
+      ? "workspace-source-duplicate"
+      : error.code === "mount-invalid" || error.code === "source-space-empty" || error.code === "source-space-array-invalid" || error.code === "mount-array-invalid"
+        ? "workspace-mount-invalid"
+        : error.code === "mount-count-mismatch"
+          ? "workspace-source-missing"
+          : "workspace-mount-collision";
+  failure({
+    code,
+    message: error.code === "mount-source-undisclosed" ? "Workspace composition requested a Source Space outside the authorized Project View." : error.message,
+    affectedObject: viewId,
+    recoveryAction: error.recoveryAction,
+    // Do not expose an unauthorized Source Space ID through a public View.
+    receipt: error.code === "mount-source-undisclosed"
+      ? `view=${viewId}; rule=visible-source-spaces-only`
+      : error.code === "mount-path-duplicate" || error.code === "mount-path-overlap"
+        ? `view=${viewId}; mount-a=${error.conflictingMountPath ?? "unknown"}; mount-b=${error.mountPath ?? "unknown"}; ${error.receipt}`
+        : error.receipt,
+  });
 }
 
 function cloneWorkspace(workspace: Workspace): Workspace {
@@ -225,7 +221,6 @@ export async function materializeWorkspace(input: MaterializeWorkspaceInput): Pr
     });
   }
 
-  const visibleIds = new Set(input.view.visibleSourceSpaceIds);
   const sourceById = new Map<string, WorkspaceSource>();
   for (const source of input.sources) {
     if (sourceById.has(source.sourceSpaceId)) {
@@ -239,45 +234,15 @@ export async function materializeWorkspace(input: MaterializeWorkspaceInput): Pr
     }
     sourceById.set(source.sourceSpaceId, source);
   }
-  const mountById = new Map<string, WorkspaceMount>();
+  let validatedMounts: WorkspaceMountInput[];
+  try {
+    validatedMounts = validateWorkspaceMounts({ sourceSpaceIds: input.view.visibleSourceSpaceIds, mounts: input.mounts });
+  } catch (error) {
+    mapWorkspaceMountValidationError(error, input.view.id);
+  }
   const mounts: WorkspaceMount[] = [];
-  const mountPaths: string[] = [];
 
-  for (const mountInput of input.mounts) {
-    if (!visibleIds.has(mountInput.sourceSpaceId)) {
-      // Deliberately do not echo the unauthorized Source Space ID. A public
-      // projection must not turn a failed request into a metadata oracle.
-      failure({
-        code: "workspace-source-not-authorized",
-        message: `Workspace composition requested a Source Space outside the authorized Project View.`,
-        affectedObject: input.view.id,
-        recoveryAction: "request a new authorized Project View before materializing the Workspace",
-        receipt: `view=${input.view.id}; rule=visible-source-spaces-only`,
-      });
-    }
-    if (mountById.has(mountInput.sourceSpaceId)) {
-      failure({
-        code: "workspace-mount-collision",
-        message: `Workspace composition names one Source Space more than once.`,
-        affectedObject: input.view.id,
-        recoveryAction: "assign exactly one mount path to each authorized Source Space",
-        receipt: `view=${input.view.id}; rule=unique-source-space-mounts`,
-      });
-    }
-
-    const mountPath = normalizedMountPath(mountInput.mountPath);
-    for (const priorPath of mountPaths) {
-      if (mountCollision(priorPath, mountPath)) {
-        failure({
-          code: "workspace-mount-collision",
-          message: `Workspace mount paths overlap; materialization was not started.`,
-          affectedObject: input.view.id,
-          recoveryAction: "choose non-overlapping explicit mount paths and retry",
-          receipt: `view=${input.view.id}; mount-a=${priorPath}; mount-b=${mountPath}`,
-        });
-      }
-    }
-
+  for (const mountInput of validatedMounts) {
     const source = sourceById.get(mountInput.sourceSpaceId);
     const disclosedSnapshot = input.view.disclosedSourceSpaceSnapshots[mountInput.sourceSpaceId];
     if (!source) {
@@ -299,26 +264,12 @@ export async function materializeWorkspace(input: MaterializeWorkspaceInput): Pr
       });
     }
 
-    mountPaths.push(mountPath);
     const mount: WorkspaceMount = {
       sourceSpaceId: mountInput.sourceSpaceId,
       snapshotId: source.snapshotId,
-      mountPath,
+      mountPath: mountInput.mountPath,
     };
     mounts.push(mount);
-    mountById.set(mountInput.sourceSpaceId, mount);
-  }
-
-  for (const visibleId of input.view.visibleSourceSpaceIds) {
-    if (!mountById.has(visibleId)) {
-      failure({
-        code: "workspace-source-missing",
-        message: `Workspace composition omitted an authorized Source Space.`,
-        affectedObject: input.view.id,
-        recoveryAction: "provide one mount for every Source Space in the Project View",
-        receipt: `view=${input.view.id}; missing-authorized-mount=true`,
-      });
-    }
   }
 
   for (const mount of mounts) {

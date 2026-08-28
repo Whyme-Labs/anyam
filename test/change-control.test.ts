@@ -186,6 +186,32 @@ test("rejects overlapping mounts before touching the Workspace target", async ()
   await rm(target, { recursive: true, force: true });
 });
 
+test("rejects mount count, duplicate source, and cross-platform case collisions before materialization", async () => {
+  const root = await temporaryDirectory("mount-bijection");
+  try {
+    const control = coordinator();
+    const view = viewFor(canonicalRevision(), "project", ["public-player", "private-codec"]);
+    await assert.rejects(
+      control.createWorkspace({ view, sources, mounts: [{ sourceSpaceId: "public-player", mountPath: "public" }], directory: join(root, "missing") }),
+      (error: unknown) => error instanceof ChangeControlError && error.code === "workspace-source-missing" && error.recoveryAction.includes("exactly one mount"),
+    );
+    await assert.rejects(
+      control.createWorkspace({ view, sources, mounts: [{ sourceSpaceId: "public-player", mountPath: "public" }, { sourceSpaceId: "public-player", mountPath: "private" }], directory: join(root, "duplicate") }),
+      (error: unknown) => error instanceof ChangeControlError && error.code === "workspace-mount-collision" && error.receipt.includes("mount-source-duplicate"),
+    );
+    await assert.rejects(
+      control.createWorkspace({ view, sources, mounts: [{ sourceSpaceId: "public-player", mountPath: "Public\\Web" }, { sourceSpaceId: "private-codec", mountPath: "public/web" }], directory: join(root, "case") }),
+      (error: unknown) => error instanceof ChangeControlError && error.code === "workspace-mount-collision" && error.receipt.includes("mount-path-duplicate"),
+    );
+    await assert.rejects(
+      control.createWorkspace({ view, sources, mounts: [{ sourceSpaceId: "public-player", mountPath: "./public" }, { sourceSpaceId: "private-codec", mountPath: "private" }], directory: join(root, "dot") }),
+      (error: unknown) => error instanceof ChangeControlError && error.code === "workspace-mount-invalid" && error.recoveryAction.includes("dot"),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("keeps one stable Change identity through revisions, conflict resolution, handoff, and rebase", async () => {
   const root = await temporaryDirectory("stable-change");
   try {

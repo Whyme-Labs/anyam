@@ -32,6 +32,34 @@ test("Workspace creation cannot accept a speculative Change binding", () => {
   assert.equal(Object.keys(coordinator.snapshot().workspaces).length, 0);
 });
 
+test("Authority Workspace creation enforces a complete cross-platform mount bijection", () => {
+  const coordinator = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot(session.realmId));
+  assert.equal(command(coordinator, "project.create", "mounts:project", {
+    projectId: "project:mounts",
+    name: "Mounts",
+    referenceType: "git",
+    sourceSpaces: [
+      { id: "source:one", name: "One", classification: "public", snapshotId: "commit:one" },
+      { id: "source:two", name: "Two", classification: "public", snapshotId: "commit:two" },
+    ],
+    projectRevisionId: "revision:mounts",
+  }).status, "succeeded");
+
+  assert.throws(
+    () => command(coordinator, "workspace.create", "mounts:missing", { projectId: "project:mounts", projectRevisionId: "revision:mounts", sourceSpaceIds: ["source:one", "source:two"], mounts: ["one"] }),
+    (error: unknown) => error instanceof AuthorityPlaneError && error.code === "invalid_request" && error.receipt.includes("mount-count-mismatch"),
+  );
+  assert.throws(
+    () => command(coordinator, "workspace.create", "mounts:duplicate", { projectId: "project:mounts", projectRevisionId: "revision:mounts", sourceSpaceIds: ["source:one", "source:one"], mounts: ["one", "two"] }),
+    (error: unknown) => error instanceof AuthorityPlaneError && error.code === "invalid_request" && error.receipt.includes("source-space-duplicate"),
+  );
+  assert.throws(
+    () => command(coordinator, "workspace.create", "mounts:case", { projectId: "project:mounts", projectRevisionId: "revision:mounts", sourceSpaceIds: ["source:one", "source:two"], mounts: ["Public\\Web", "public/web"] }),
+    (error: unknown) => error instanceof AuthorityPlaneError && error.code === "invalid_request" && error.receipt.includes("mount-path-duplicate"),
+  );
+  assert.equal(Object.keys(coordinator.snapshot().workspaces).length, 0);
+});
+
 test("Change creation requires matching active Workspace/View lineage and cannot steal a Workspace", () => {
   const { coordinator } = fixture();
   assert.throws(() => command(coordinator, "change.create", "lineage:mismatch", { projectId: "project:lineage", changeId: "change:mismatch", intentId: "intent:mismatch", baseProjectRevisionId: "revision:other", workspaceId: "workspace:lineage" }), (error: unknown) => error instanceof AuthorityPlaneError && error.code === "conflict" && error.receipt.includes("workspaceBase=revision:base") && error.receipt.includes("changeBase=revision:other"));
@@ -77,4 +105,23 @@ test("Authority restore rejects a Workspace/View/Change lineage mismatch", () =>
   const malformedChange = coordinator.snapshot();
   malformedChange.changes["change:restore"] = { ...malformedChange.changes["change:restore"]!, baseProjectRevisionId: "revision:missing" };
   assert.throws(() => new AuthorityPlaneCoordinator(malformedChange), (error: unknown) => error instanceof AuthorityPlaneError && error.code === "indeterminate" && error.receipt.includes("change=change:restore"));
+});
+
+test("Authority restore rejects non-canonical or stale Workspace mounts", () => {
+  const { snapshot } = fixture();
+  const workspace = snapshot.workspaces["workspace:lineage"]!;
+  const malformed = {
+    ...snapshot,
+    workspaces: {
+      ...snapshot.workspaces,
+      "workspace:lineage": {
+        ...workspace,
+        mounts: [{ ...workspace.mounts[0]!, mountPath: "source\\nested" }],
+      },
+    },
+  };
+  assert.throws(
+    () => new AuthorityPlaneCoordinator(malformed),
+    (error: unknown) => error instanceof AuthorityPlaneError && error.code === "indeterminate" && error.receipt.includes("mount=stale-or-noncanonical"),
+  );
 });

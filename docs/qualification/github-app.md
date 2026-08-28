@@ -14,6 +14,88 @@ explicit disposable-repository cleanup step. Subscribe the App to exactly
 `push` and `pull_request` events. The qualification repository must be
 disposable and must equal the explicit cleanup target.
 
+## Webhook ingress
+
+The customer Realm exposes the provider wake-up boundary at:
+
+```text
+POST https://<realm-host>/webhooks/github
+```
+
+Configure the GitHub App's **Webhook URL** to that exact HTTPS URL only after
+the Realm Worker has been deployed with its Queue binding and a bound
+`ANYAM_GITHUB_MIRROR_PRODUCER` synchronizer. Set the Worker variables
+`ANYAM_GITHUB_APP_REPOSITORY` and `ANYAM_GITHUB_APP_INSTALLATION_ID` to the
+exact selected `owner/name` and GitHub App installation ID. Subscribe the App
+to `push` and `pull_request` events. Store the App webhook secret only as a
+Worker secret:
+
+```bash
+wrangler secret put ANYAM_GITHUB_APP_WEBHOOK_SECRET --config <customer-wrangler-config>
+```
+
+The ingress verifies the raw request body using `X-Hub-Signature-256`, checks
+the event, repository, installation, and delivery identities, and enforces the
+configured body tripwire. It returns a `202` quickly and queues a
+credential-free wake-up envelope. The envelope is a hint, not provider truth:
+the synchronizer must re-inspect GitHub with a just-in-time installation token,
+create the signed `mirror.sync` handoff, and send it to
+`/internal/mirrors/ingest`. Provider tokens and App private keys must never be
+placed in Queue messages, Authority state, Evidence, exports, or issue
+comments.
+
+The non-secret body tripwire is configured in Wrangler variables:
+
+```jsonc
+{
+  "vars": {
+    "ANYAM_GITHUB_WEBHOOK_BODY_BYTES_LIMIT": "1048576",
+    "ANYAM_GITHUB_WEBHOOK_BODY_BYTES_RECEIPT": "measured=<receipt>; bodyBytesLimit=1048576; remeasure-before-production"
+  }
+}
+```
+
+The public ingress also requires a Cloudflare Rate Limit binding. The example
+configs use a qualification tripwire of `100` requests per `60` seconds per
+edge client; the value is not a product limit and must be remeasured before
+production. Create a Rate Limit namespace in the customer account, replace
+the example `namespace_id`, and keep the matching
+`ANYAM_GITHUB_WEBHOOK_RATE_LIMIT_RECEIPT` in the Worker variables. A missing
+binding or receipt fails closed with `503`; a tripped binding returns `429` so
+GitHub can redeliver after the window.
+
+`1048576` is a qualification tripwire inherited by the example configs, not a
+universal product limit. Remeasure the largest healthy delivery for the
+customer's enabled events before production. If the Queue or synchronizer is
+not configured, the endpoint fails closed with an actionable `503` and the
+provider should retry the delivery.
+
+Do not use a guessed URL, a public HTTP endpoint, or a qualification Worker as
+the production App webhook target. The route is shipped by the Realm Worker;
+the provider synchronizer remains a separate, least-privilege service binding
+so GitHub credentials stay outside the Realm and Queue boundary.
+
+The Realm-to-producer service binding uses one separate shared secret. Set the
+same value as a secret on both Workers; it is only an internal service
+authentication value and is never sent to GitHub:
+
+```bash
+wrangler secret put ANYAM_GITHUB_MIRROR_PRODUCER_SECRET --config <realm-wrangler-config>
+wrangler secret put ANYAM_GITHUB_MIRROR_PRODUCER_SECRET --config <producer-wrangler-config>
+wrangler secret put ANYAM_MIRROR_HANDOFF_SECRET --config <realm-wrangler-config>
+wrangler secret put ANYAM_MIRROR_HANDOFF_SECRET --config <producer-wrangler-config>
+wrangler secret put ANYAM_GITHUB_APP_PRIVATE_KEY --config <producer-wrangler-config>
+```
+
+The producer calls the Realm's service-only
+`/internal/mirrors/producer-context` route to obtain the current Mirror
+lineage. The Realm rejects missing, ambiguous, or incomplete context. The
+producer then re-inspects the configured GitHub refs/commits or pull request,
+creates one signed `mirror.sync` handoff, and calls the existing internal
+`/internal/mirrors/ingest` route. Queue acknowledgement happens only after the
+producer returns `status=succeeded`; a blocked or response-loss attempt is
+retried without accepting provider state.
+
 Required environment variables:
 
 ```text
@@ -45,11 +127,13 @@ ANYAM_GITHUB_APP_PR_REVISION_POLL_MS
    disposable repository. Grant `Contents: write`, `Metadata: read`, and
    `Pull requests: write` for this qualification. Grant `Administration: write`
    only because the final cleanup deletes that explicitly disposable
-   repository. Subscribe the App to exactly `push` and `pull_request`.
+   repository. Subscribe the App to exactly `push` and `pull_request`, and set
+   the App Webhook URL to the deployed Realm `POST /webhooks/github` endpoint.
 2. Generate the App's private key and keep the PEM in a local file readable
    only by the operator. Record the App ID and installation ID; do not paste
    the private key, webhook secret, or installation token into chat or commit
-   them to the repository.
+   them to the repository. Store the webhook secret with `wrangler secret put`
+   on the customer Realm Worker.
 3. Set `ANYAM_GITHUB_APP_REPOSITORY` and
    `ANYAM_GITHUB_APP_DISPOSABLE_REPOSITORY` to that same `owner/name`. The
    qualification refuses a different cleanup target.
@@ -147,6 +231,15 @@ commit/tree/ancestry, signs the exact credential-free command envelope, and
 sends it to the internal Realm route. The Realm verifies the handoff and writes
 the Mirror operation, external proposal, stable Change, and Change Revision.
 These are deliberate qualification boundaries, not hidden claims.
+
+The live qualification currently exercises the producer in the qualification
+process. A deployed App webhook adds one more boundary: GitHub signs and sends
+the raw delivery to `/webhooks/github`; the Realm authenticates and queues the
+hint; and the bound synchronizer performs the provider reinspection. A green
+provider-only or synthetic-producer receipt does not prove live webhook
+delivery. Record the webhook delivery ID, Queue receipt, reinspection receipt,
+signed handoff receipt, duplicate redelivery result, and exact disposable
+cleanup before calling that boundary qualified.
 
 The repository is the explicitly disposable selected repository. The script
 creates only its disposable Authority state inside the empty customer Realm;

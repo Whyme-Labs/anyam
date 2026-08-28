@@ -1,0 +1,10 @@
+{
+  "name": "@anyam/github-mirror-producer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "npm run typecheck && wrangler deploy --dry-run --config wrangler.example.jsonc --outdir=dist"
+  }
+}

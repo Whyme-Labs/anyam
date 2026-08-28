@@ -35,6 +35,7 @@ import { handleAnyamRealmOwnerRequest, requestAnyamRealmCoordinator } from "./pa
 import { createCloudflareCustomerProviderAdapters } from "./customer-provider-adapters.ts";
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "./coordinator-protocol.ts";
 import { handleAuthorityRequest } from "./authority-edge.ts";
+import { GITHUB_PRODUCER_CONTEXT_BODY_BYTES_LIMIT, GITHUB_PRODUCER_CONTEXT_BODY_SIZING_RECEIPT, handleGitHubWebhookRequest, readBoundedRequestBody } from "./github-webhook-route.ts";
 import { isMcpDeliveryOperation, mcpDeliveryScope, parseMcpDeliveryBinding, MCP_DELIVERY_OPERATIONS, type McpDeliveryOperation } from "./mcp-delivery-grant.ts";
 import { AUTHORITY_RECOVERY_PROTOCOL, createAuthorityRecoveryBundle, verifyAuthorityRecoveryBundle, type AuthorityRecoveryBundle } from "../../../src/cloudflare/authority-recovery.ts";
 import { GitHubActionsBridgeAuthority, type GitHubActionsBridgeConnectionInput, type GitHubActionsEventName, type GitHubActionsBridgeOperation, type GitHubActionsBridgeSnapshot, type GitHubActionsOidcVerification } from "../../../src/portability/github-actions-bridge.ts";
@@ -47,6 +48,7 @@ import { parseRepositoryObservationServiceResponse, verifyRepositoryObservation,
 import { prepareHostedRevisionPublish, type HostedRevisionObservationInput } from "../../../src/cloudflare/hosted-revision-publication.ts";
 import { assertAuthoritySnapshotEquivalent, AuthoritySQLiteStore, type AuthoritySqlHost } from "../../../src/cloudflare/authority-sqlite.ts";
 import { verifyMirrorIngestionHandoff, type MirrorIngestionHandoff } from "../../../src/portability/mirror-observation.ts";
+import { GITHUB_WEBHOOK_INGRESS_PROTOCOL, type GitHubWebhookIngressEnvelope } from "../../../src/portability/github-webhook.ts";
 
 export type Env = AnyamRealmOAuthEnv;
 
@@ -1327,6 +1329,23 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", mirrors, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=mirror.list; mirrorCount=${mirrors.length}; readOnly=true; credentialFree=true; canonicalWrite=false` });
   }
 
+  private async authorityMirrorProducerContext(body: CoordinatorRequestBody): Promise<Response> {
+    await this.requireAuthorityActive();
+    const repository = coordinatorString(body, "repository");
+    const installationId = coordinatorString(body, "installationId");
+    const snapshot = await this.authoritySnapshot();
+    const matches = Object.values(snapshot.mirrors).filter((mirror) => mirror.provider === "github" && mirror.remoteRepository === repository);
+    if (matches.length === 0) throw new AuthorityPlaneError({ code: "not_found", message: `No GitHub Mirror is configured for ${repository}.`, recoveryAction: "configure the selected GitHub repository as an Anyam Mirror before accepting its webhook", receipt: `operation=mirror.producer-context; repository=${repository}; mirrors=0; providerInvocation=false` });
+    if (matches.length > 1) throw new AuthorityPlaneError({ code: "conflict", message: `More than one GitHub Mirror is configured for ${repository}.`, recoveryAction: "configure one unambiguous Mirror for the selected provider repository before retrying", receipt: `operation=mirror.producer-context; repository=${repository}; mirrors=${matches.length}; providerInvocation=false` });
+    const mirror = matches[0]!;
+    const project = snapshot.projects[mirror.projectId];
+    const sourceSpace = snapshot.sourceSpaces[mirror.sourceSpaceId];
+    const projectView = Object.values(snapshot.projectViews).find((view) => view.projectId === mirror.projectId && view.projectRevisionId === mirror.canonicalProjectRevisionId && view.visibleSourceSpaceIds.includes(mirror.sourceSpaceId) && view.classification === mirror.disclosure);
+    const repositoryId = sourceSpace?.repositoryId;
+    if (!project || !sourceSpace || !repositoryId || !projectView || !project.sourceSpaceIds.includes(mirror.sourceSpaceId)) throw new AuthorityPlaneError({ code: "indeterminate", message: `GitHub Mirror ${mirror.id} has incomplete producer context.`, recoveryAction: "restore the Project, Source Space repository identity, and matching Project View before retrying the provider delivery", receipt: `operation=mirror.producer-context; mirror=${mirror.id}; lineage=incomplete; providerInvocation=false` });
+    return coordinatorJson({ protocol: "anyam.github-mirror-producer-context/v1", realmId: snapshot.realmId, mirrorId: mirror.id, projectId: mirror.projectId, repositoryId, sourceSpaceId: mirror.sourceSpaceId, projectViewId: projectView.id, remoteRepository: mirror.remoteRepository, installationId, canonicalProjectRevisionId: mirror.canonicalProjectRevisionId, canonicalRefs: mirror.canonicalRefs.map((ref) => ({ ...ref })), refMappings: mirror.refMappings.map((mapping) => ({ ...mapping })), remoteGeneration: mirror.remoteGeneration, remoteRefs: mirror.remoteRefs.map((ref) => ({ ...ref })), pendingInboundChangeIds: [...mirror.pendingInboundChangeIds], disclosure: mirror.disclosure, receipt: `authority=coordinator; operation=mirror.producer-context; mirror=${mirror.id}; repository=${repository}; installation=${installationId}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+  }
+
   private async authorityPromotionExecute(body: CoordinatorRequestBody): Promise<Response> {
     await this.requireAuthorityActive();
     const promotionId = coordinatorString(body, "promotionId");
@@ -1866,6 +1885,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/pull-requests/internal") return await this.authorityPullRequests(body);
       if (url.pathname === "/authority/runs/internal") return await this.authorityRun(body);
       if (url.pathname === "/authority/mirrors/internal") return await this.authorityMirrors(body);
+      if (url.pathname === "/authority/mirror-producer-context/internal") return await this.authorityMirrorProducerContext(body);
       if (url.pathname === "/authority/promotion/execute/internal") return await this.authorityPromotionExecute(body);
       if (url.pathname === "/authority/promotion/reconcile/internal") return await this.authorityPromotionReconcile(body);
       if (url.pathname === "/github-actions-bridge/audience/internal") return await this.githubActionsBridgeAudience(body);
@@ -2610,7 +2630,16 @@ function queueMessageString(message: Record<string, unknown>, key: string): stri
 async function reconcileCustomerProviderQueue(batch: MessageBatch<Record<string, unknown>>, env: Env): Promise<void> {
   const binding = env.REALM_COORDINATOR as unknown as DurableObjectNamespace | undefined;
   for (const message of batch.messages) {
-    const body = message.body;
+    const bodyValue: unknown = message.body;
+    if (bodyValue === null || typeof bodyValue !== "object" || Array.isArray(bodyValue)) {
+      message.ack();
+      continue;
+    }
+    const body = bodyValue as Record<string, unknown>;
+    if (body.protocol === GITHUB_WEBHOOK_INGRESS_PROTOCOL) {
+      await reconcileGitHubWebhookQueueMessage(message, env);
+      continue;
+    }
     if (body.protocol !== CUSTOMER_PROVIDER_OPERATION_PROTOCOL) {
       // This queue is disposable and qualification-scoped. Do not allow an
       // unrelated message to become a poison message or an authority input.
@@ -2652,6 +2681,67 @@ async function reconcileCustomerProviderQueue(batch: MessageBatch<Record<string,
   }
 }
 
+async function reconcileGitHubWebhookQueueMessage(message: Message<Record<string, unknown>>, env: Env): Promise<void> {
+  const producer = env.ANYAM_GITHUB_MIRROR_PRODUCER;
+  const body = message.body as Partial<GitHubWebhookIngressEnvelope>;
+  if (!producer || typeof producer.fetch !== "function") {
+    message.retry();
+    return;
+  }
+  if (body.protocol !== GITHUB_WEBHOOK_INGRESS_PROTOCOL || typeof body.realmId !== "string" || typeof body.deliveryId !== "string" || typeof body.repository !== "string" || typeof body.installationId !== "string" || typeof body.body !== "string" || typeof body.signature !== "string" || typeof body.bodyDigest !== "string") {
+    message.retry();
+    return;
+  }
+  let response: Response;
+  try {
+    const headers = new Headers({ "content-type": "application/json", "cache-control": "no-store" });
+    const producerSecret = env.ANYAM_GITHUB_MIRROR_PRODUCER_SECRET?.trim();
+    if (producerSecret) headers.set("x-anyam-github-mirror-producer-secret", producerSecret);
+    response = await producer.fetch(new Request("https://anyam-github-mirror-producer/events/github", { method: "POST", headers, body: JSON.stringify(body) }));
+  } catch {
+    message.retry();
+    return;
+  }
+  const payload: unknown = await response.json().catch(() => undefined);
+  const accepted = payload !== null && typeof payload === "object" && !Array.isArray(payload) && (payload as Record<string, unknown>).status === "succeeded";
+  if (response.ok && accepted) message.ack();
+  else message.retry();
+}
+
+async function handleGitHubMirrorProducerContextRequest(request: Request, env: Env): Promise<Response | undefined> {
+  if (new URL(request.url).pathname !== "/internal/mirrors/producer-context") return undefined;
+  if (request.method !== "POST") return coordinatorJson({ protocol: GITHUB_WEBHOOK_INGRESS_PROTOCOL, status: "blocked", code: "method_not_allowed", recoveryAction: "Use POST /internal/mirrors/producer-context from the bound GitHub Mirror producer service.", receipt: "githubMirrorProducerContext=post-required; credentialMaterialStored=false" }, 405);
+  const configured = env.ANYAM_GITHUB_MIRROR_PRODUCER_SECRET?.trim();
+  const presented = request.headers.get("x-anyam-github-mirror-producer-secret")?.trim();
+  if (!configured || !presented || !constantTimeEqual(configured, presented)) return coordinatorJson({ protocol: GITHUB_WEBHOOK_INGRESS_PROTOCOL, status: "blocked", code: "producer_unauthorized", recoveryAction: "Invoke this route only through the customer-owned GitHub Mirror producer service binding.", receipt: "githubMirrorProducerContext=unauthorized; credentialMaterialStored=false" }, 403);
+  const contextBody = await readBoundedRequestBody(request, GITHUB_PRODUCER_CONTEXT_BODY_BYTES_LIMIT);
+  if (contextBody.status === "too-large") return coordinatorJson({ protocol: GITHUB_WEBHOOK_INGRESS_PROTOCOL, status: "blocked", code: "request_too_large", recoveryAction: "Send only the bounded repository and installation identity context.", receipt: `githubMirrorProducerContext=request-too-large; bytes=${contextBody.bytes}; ${GITHUB_PRODUCER_CONTEXT_BODY_SIZING_RECEIPT}; providerMutation=false; credentialMaterialStored=false` }, 413);
+  if (contextBody.status === "read-failed") return coordinatorJson({ protocol: GITHUB_WEBHOOK_INGRESS_PROTOCOL, status: "blocked", code: "request_read_failed", recoveryAction: "Retry the producer context request after its bounded body can be read completely.", receipt: `githubMirrorProducerContext=request-read-failed; bytes=${contextBody.bytes}; ${GITHUB_PRODUCER_CONTEXT_BODY_SIZING_RECEIPT}; providerMutation=false; credentialMaterialStored=false` }, 503);
+  let body: unknown;
+  try {
+    body = JSON.parse(contextBody.body) as unknown;
+  } catch {
+    return coordinatorJson({ protocol: GITHUB_WEBHOOK_INGRESS_PROTOCOL, status: "blocked", code: "request_invalid", recoveryAction: "Send a JSON object containing repository and installationId.", receipt: "githubMirrorProducerContext=json-invalid; providerMutation=false; credentialMaterialStored=false" }, 422);
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return coordinatorJson({ protocol: GITHUB_WEBHOOK_INGRESS_PROTOCOL, status: "blocked", code: "request_invalid", recoveryAction: "Send a JSON object containing repository and installationId.", receipt: "githubMirrorProducerContext=object-required; providerMutation=false; credentialMaterialStored=false" }, 422);
+  const value = body as Record<string, unknown>;
+  const repository = typeof value.repository === "string" ? value.repository.trim() : "";
+  const installationId = typeof value.installationId === "string" || typeof value.installationId === "number" ? String(value.installationId).trim() : "";
+  if (!repository || repository.length > 256 || !installationId || installationId.length > 256 || /[\r\n]/u.test(repository) || /[\r\n]/u.test(installationId)) return coordinatorJson({ protocol: GITHUB_WEBHOOK_INGRESS_PROTOCOL, status: "blocked", code: "request_invalid", recoveryAction: "Send bounded repository and installationId values from the queued delivery.", receipt: "githubMirrorProducerContext=identity-invalid; providerMutation=false; credentialMaterialStored=false" }, 422);
+  const configuredRepository = env.ANYAM_GITHUB_APP_REPOSITORY?.trim();
+  const configuredInstallationId = env.ANYAM_GITHUB_APP_INSTALLATION_ID?.trim();
+  if (!configuredRepository || !configuredInstallationId) return coordinatorJson({ protocol: GITHUB_WEBHOOK_INGRESS_PROTOCOL, status: "blocked", code: "binding_unconfigured", recoveryAction: "Configure the exact GitHub repository and App installation on the Realm Worker before binding the producer.", receipt: "githubMirrorProducerContext=binding-unconfigured; providerMutation=false; credentialMaterialStored=false" }, 503);
+  if (repository !== configuredRepository || installationId !== configuredInstallationId) return coordinatorJson({ protocol: GITHUB_WEBHOOK_INGRESS_PROTOCOL, status: "blocked", code: "binding_mismatch", recoveryAction: "Use the Realm configured for the exact GitHub repository and App installation.", receipt: `githubMirrorProducerContext=binding-mismatch; expectedRepository=${configuredRepository}; expectedInstallation=${configuredInstallationId}; providerMutation=false; credentialMaterialStored=false` }, 403);
+  try {
+    const result = await requestAnyamRealmCoordinator(env, "/authority/mirror-producer-context/internal", { repository, installationId });
+    return coordinatorJson(result, 200);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "producer context unavailable";
+    const status = message.includes("realm_coordinator_not_found") ? 404 : message.includes("realm_coordinator_conflict") ? 409 : 503;
+    return coordinatorJson({ protocol: GITHUB_WEBHOOK_INGRESS_PROTOCOL, status: "blocked", code: "producer_context_unavailable", recoveryAction: "reconcile the Authority Mirror and retry the same Queue delivery; no provider state was accepted", receipt: `githubMirrorProducerContext=coordinator-unavailable; status=${status}; error=${message.split(";")[0]}; providerMutation=false; credentialMaterialStored=false` }, status);
+  }
+}
+
 function constantTimeEqual(left: string, right: string): boolean {
   const leftBytes = new TextEncoder().encode(left);
   const rightBytes = new TextEncoder().encode(right);
@@ -2683,6 +2773,10 @@ export default {
     if (publicGatewayResponse) return publicGatewayResponse;
     const githubActionsBridgeResponse = await handleGitHubActionsBridgeRequest(request, env);
     if (githubActionsBridgeResponse) return githubActionsBridgeResponse;
+    const githubWebhookResponse = await handleGitHubWebhookRequest(request, env);
+    if (githubWebhookResponse) return githubWebhookResponse;
+    const githubProducerContextResponse = await handleGitHubMirrorProducerContextRequest(request, env);
+    if (githubProducerContextResponse) return githubProducerContextResponse;
     // Owner ceremony routes do not need the OAuth provider to be constructed.
     // This keeps local HTTP development useful while the provider correctly
     // enforces HTTPS issuer metadata for MCP/OAuth requests.

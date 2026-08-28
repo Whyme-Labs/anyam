@@ -6,6 +6,8 @@
  * when every required drill has a verified, evidence-linked receipt.
  */
 
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
+
 export const PRODUCTION_OPERATIONS_PROTOCOL = "anyam.production-operations/v1" as const;
 
 export const PRODUCTION_OPERATIONS_REQUIRED_DRILLS = [
@@ -62,7 +64,6 @@ export type ProductionOperationsLedgerSnapshot = {
   readonly credentialFree: true;
 };
 
-const CREDENTIAL_PATTERN = /(?:token|secret|password|private[_-]?key|credential|api[_-]?key|access[_-]?key|refresh[_-]?token|jwt)/iu;
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,200}$/u;
 
 function fail(message: string): never {
@@ -101,20 +102,8 @@ function drillStatus(value: string): OperationalDrillStatus {
 }
 
 function assertCredentialFree(value: unknown, location: string): void {
-  if (typeof value === "string") {
-    if (CREDENTIAL_PATTERN.test(value)) fail(`credential_material_forbidden:${location}`);
-    return;
-  }
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertCredentialFree(item, `${location}[${index}]`));
-    return;
-  }
-  if (value !== null && typeof value === "object") {
-    for (const [key, nested] of Object.entries(value)) {
-      if (CREDENTIAL_PATTERN.test(key)) fail(`credential_material_forbidden:${location}.${key}`);
-      assertCredentialFree(nested, `${location}.${key}`);
-    }
-  }
+  const finding = scanCredentialMaterial(value, location);
+  if (finding) fail(`credential_material_forbidden:${finding.path};scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}`);
 }
 
 function observationRecord(value: OperationalObservations): OperationalObservations {

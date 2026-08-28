@@ -1,4 +1,5 @@
 import type { AuthorityPlaneSnapshot } from "./authority-plane.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 export const AUTHORITY_RECOVERY_PROTOCOL = "anyam.authority-recovery/v1" as const;
 
@@ -72,6 +73,8 @@ export async function createAuthorityRecoveryBundle(input: {
   const bundleId = input.bundleId.trim();
   const recoveryKeyId = input.recoveryKeyId.trim();
   if (!bundleId || !recoveryKeyId) throw new Error("authority recovery bundle identity is required");
+  const finding = scanCredentialMaterial(input.snapshot, "snapshot");
+  if (finding) throw new Error(`authority recovery snapshot contains credential material at ${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}`);
   const issuedAt = input.issuedAt ?? new Date().toISOString();
   const snapshotDigest = await authorityRecoverySnapshotDigest(input.snapshot);
   const auditChainDigest = await authorityRecoveryAuditChainDigest(input.snapshot);
@@ -95,6 +98,8 @@ export async function verifyAuthorityRecoveryBundle(input: {
 }): Promise<AuthorityRecoveryVerification> {
   if (!isRecord(input.value)) return { valid: false, code: "bundle_invalid", recoveryAction: "submit the exact signed recovery bundle returned by Authority export", receipt: "authorityRecovery=bundle-object-required; restore=not-applied" };
   const value = input.value;
+  const finding = scanCredentialMaterial(value, "authorityRecovery");
+  if (finding) return { valid: false, code: "credential_material", recoveryAction: "export a credential-free Authority recovery bundle and retry without provider secrets", receipt: `authorityRecovery=credential-material-rejected; field=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; restore=not-applied` };
   const snapshot = value.snapshot;
   if (!isRecord(snapshot) || snapshot.protocol !== "anyam.authority-plane/v1" || snapshot.realmId !== input.realmId || !Number.isSafeInteger(snapshot.version) || !Array.isArray(snapshot.audit)) return { valid: false, code: "bundle_invalid", recoveryAction: "export a fresh complete Authority recovery bundle for this Realm", receipt: "authorityRecovery=bundle-snapshot-invalid; restore=not-applied" };
   const requiredStrings = ["bundleId", "realmId", "snapshotDigest", "auditChainDigest", "recoveryKeyId", "issuedAt", "bundleDigest", "signature"];

@@ -440,6 +440,11 @@ test("Worker provider payload parsing preserves abuse decisions instead of dropp
   assert.deepEqual(parsePublicGatewayProviderOutcome({ status: "abuse", outcome: "challenge", retryable: true, receipt: "" }), { status: "abuse", outcome: "denied", retryable: false, receipt: "provider=invalid; receipt=missing; failClosed=true" });
   assert.deepEqual(parsePublicGatewayProviderOutcome({ status: "abuse", outcome: "unexpected", retryable: true, receipt: "provider=bad" }), { status: "abuse", outcome: "denied", retryable: false, receipt: "provider=invalid; outcome=not-recognized; failClosed=true" });
   assert.deepEqual(parsePublicGatewayProviderOutcome("timeout"), { status: "timeout", receipt: "provider=fixture-driver; timeout=simulated; retryable=true" });
+  const credential = parsePublicGatewayProviderOutcome({ status: "abuse", outcome: "challenge", retryable: true, receipt: "provider=fixture; accessToken=must-not-cross" });
+  assert.equal(credential?.status, "abuse");
+  assert.equal(credential?.outcome, "denied");
+  assert.equal(credential?.receipt.includes("must-not-cross"), false);
+  assert.match(credential?.receipt ?? "", /credential-material-scanner\/v1/u);
 });
 
 test("suspension, review reopen, approval-only intake, and cleanup preserve accepted lineage", async () => {

@@ -7,6 +7,7 @@ import {
   type CloudflareWorkerApiTransport,
   type CloudflareWorkerCredentialBroker,
 } from "./worker-target.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 type AssetManifestEntry = { hash: string; size: number };
 type AssetUploadSession = { buckets?: readonly (readonly string[])[]; jwt?: string };
@@ -33,7 +34,11 @@ export type CloudflareWorkerStaticAssetUploader = (input: CloudflareWorkerStatic
 
 function safeProviderErrors<T>(response: CloudflareWorkerApiResponse<T>): string {
   return [...response.errors, ...response.messages]
-    .map((error) => `${error.code ?? "unknown"}:${error.message.replace(/(?:Bearer\s+\S+|cfat_[A-Za-z0-9]+)/giu, "[redacted]")}`)
+    .map((error) => {
+      const finding = scanCredentialMaterial(error.message, "providerError");
+      const message = finding ? `credential-material-redacted; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}` : error.message;
+      return `${error.code ?? "unknown"}:${message}`;
+    })
     .join(" | ") || `http-${response.status}`;
 }
 

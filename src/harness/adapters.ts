@@ -11,6 +11,7 @@ import type {
   RepositoryOperationReceipt,
   RepositoryState,
 } from "../portability/repository-driver.ts";
+import { isCredentialFree as scanIsCredentialFree } from "../security/credential-material.ts";
 
 export type {
   RepositoryDriver,
@@ -34,19 +35,8 @@ export type AdapterFailure = {
 
 export type AdapterResult<T> = AdapterSuccess<T> | AdapterFailure;
 
-function containsCredentialField(value: unknown): boolean {
-  if (Array.isArray(value)) return value.some(containsCredentialField);
-  if (typeof value !== "object" || value === null) return false;
-  return Object.entries(value).some(([key, nested]) => {
-    const normalizedKey = key.toLowerCase();
-    if (normalizedKey === "credentialfree") return containsCredentialField(nested);
-    return /token|password|secret|credential/.test(normalizedKey)
-      || containsCredentialField(nested);
-  });
-}
-
 export function isCredentialFree(value: unknown): boolean {
-  return !containsCredentialField(value);
+  return scanIsCredentialFree(value);
 }
 
 export interface Runner {

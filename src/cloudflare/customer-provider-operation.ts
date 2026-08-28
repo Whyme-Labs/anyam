@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 /**
  * Bounded qualification protocol for customer-owned provider operations.
@@ -246,12 +247,13 @@ function assertAuthorization(input: CustomerProviderOperationInput): void {
       receipt: `realm=${input.realmId}; authorizationRealm=${input.authorization.realmId}; capability=${input.authorization.capability}; mutation=not-performed`,
     });
   }
-  if (Object.keys(input.authorization).some((key) => /token|password|secret|credential/i.test(key))) {
+  const finding = scanCredentialMaterial(input.authorization, "authorization");
+  if (finding) {
     throw new CustomerProviderOperationError({
       code: "invalid-request",
       message: "Provider authorization contains credential material; no provider operation was attempted.",
       recoveryAction: "send only the owner authorization receipt and digest, never a provider credential",
-      receipt: "credential-material=reject; mutation=not-performed",
+      receipt: `credential-material=reject; field=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; mutation=not-performed`,
     });
   }
 }
@@ -551,12 +553,13 @@ export class CustomerProviderQualificationCoordinator {
 
   async restoreRecovery(bundle: CustomerProviderRecoveryBundle): Promise<void> {
     const unsigned = { protocol: bundle.protocol, version: bundle.version, realmId: bundle.realmId, installationId: bundle.installationId, records: bundle.records };
-    if (bundle.protocol !== CUSTOMER_PROVIDER_OPERATION_PROTOCOL || bundle.version !== "recovery-v1" || bundle.realmId !== this.input.realmId || bundle.installationId !== this.input.installationId || bundle.integrity.credentialFree !== true || bundle.integrity.digest !== digest(unsigned) || /"(?:token|password|secret|credential)"\s*:/i.test(JSON.stringify(bundle))) {
+    const finding = scanCredentialMaterial(bundle, "recoveryBundle");
+    if (bundle.protocol !== CUSTOMER_PROVIDER_OPERATION_PROTOCOL || bundle.version !== "recovery-v1" || bundle.realmId !== this.input.realmId || bundle.installationId !== this.input.installationId || bundle.integrity.credentialFree !== true || bundle.integrity.digest !== digest(unsigned) || finding) {
       throw new CustomerProviderOperationError({
         code: "recovery-invalid",
         message: "The provider-operation Recovery bundle failed credential-free identity or integrity validation.",
         recoveryAction: "export a fresh exact Recovery bundle from the authoritative coordinator and retry restore",
-        receipt: `realm=${this.input.realmId}; installation=${this.input.installationId}; authority=resumed=false`,
+        receipt: `realm=${this.input.realmId}; installation=${this.input.installationId}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; credentialField=${finding?.path ?? "none"}; authority=resumed=false`,
       });
     }
     await this.input.store.restore(bundle.records);
@@ -759,6 +762,7 @@ export function verifyCustomerProviderOperationRecord(record: CustomerProviderOp
   if (record.protocol !== CUSTOMER_PROVIDER_OPERATION_PROTOCOL) errors.push("unsupported operation protocol");
   if (record.credentialFree !== true || record.canonicalWrite !== false) errors.push("credential or canonical-write boundary is invalid");
   if (record.checkpoint.stateDigest !== stateDigest(record)) errors.push("checkpoint state digest does not match record");
-  if (/(?:"token|"password|"secret|"credential)"\s*:/i.test(JSON.stringify(record))) errors.push("record contains credential material");
+  const finding = scanCredentialMaterial(record, "record");
+  if (finding) errors.push(`record contains credential material at ${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}`);
   return { status: errors.length === 0 ? "verified" : "failed", errors, receipt: `operation=${record.operationId}; verified=${errors.length === 0}; errors=${errors.length}` };
 }

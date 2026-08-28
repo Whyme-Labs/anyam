@@ -20,6 +20,7 @@ import {
   type MirrorIngestionHandoff,
   type MirrorIngestionCommand,
 } from "./mirror-observation.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 export const GITHUB_APP_ADAPTER_PROTOCOL = "anyam.github-app-adapter/v1" as const;
 const execFile = promisify(execFileCallback);
@@ -178,10 +179,9 @@ function digest(value: unknown): string {
 
 function safeReceipt(value: unknown, field: string): string {
   const receipt = required(value, field);
-  // Reject credential-shaped fields and bearer/PEM material, while allowing
-  // harmless words such as `token` in a provider operation name or path.
-  if (/(?:^|[;,{\s])(?:"|'?)(?:token|bearer|client[_ -]?secret|password|authorization|private[_ -]?key)(?:"|'?)\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^,;}\s]+)/i.test(receipt) || /\bBearer\s+\S+/i.test(receipt) || /-----BEGIN [^-]+ PRIVATE KEY-----/i.test(receipt)) {
-    throw new GitHubAppAdapterError({ errorCode: "github_app.unsafe_receipt", message: `${field} contains credential-like material.`, retryable: false, recoveryAction: `return a digest-only ${field} receipt without credential material`, receipt: `field=${field}; credentialMaterialStored=false; transition=not-applied` });
+  const finding = scanCredentialMaterial(receipt, field);
+  if (finding) {
+    throw new GitHubAppAdapterError({ errorCode: "github_app.unsafe_receipt", message: `${field} contains credential-like material.`, retryable: false, recoveryAction: `return a digest-only ${field} receipt without credential material`, receipt: `field=${field}; fieldPath=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; credentialMaterialStored=false; transition=not-applied` });
   }
   return receipt;
 }

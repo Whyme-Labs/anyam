@@ -12,6 +12,7 @@ import { TARGET_CONFIGURE_COMMAND, targetConfigureCommand, targetConfigureValue,
 import { PROMOTION_REQUEST_COMMAND, promotionRequestCommand, promotionRequestValue, PromotionRequestInputError } from "./promotion-contract.ts";
 import { PROMOTION_EXECUTE_COMMAND, PROMOTION_RECONCILE_COMMAND, promotionExecutionCommand, promotionExecutionValue, promotionReconciliationCommand, promotionReconciliationValue, promotionStatusValue, PromotionExecutionInputError } from "./promotion-execution-contract.ts";
 import { mirrorCommand, mirrorMutationValue, mirrorPath, MirrorInputError, type MirrorMutation } from "./mirror-contract.ts";
+import { credentialMaterialReceipt, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
@@ -25,10 +26,8 @@ function json(body: unknown, status = 200): Response {
 
 function coordinatorDetailReceipt(error: unknown): string {
   const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
-  const redacted = detail
-    .replace(/(Bearer\s+)[^\s;]+/giu, "$1<redacted>")
-    .replace(/((?:token|secret|credential|password|privateKey)\s*[=:]\s*)[^\s;,]+/giu, "$1<redacted>");
-  return `coordinatorDetail=${encodeURIComponent(redacted)}`;
+  const finding = scanCredentialMaterial(detail, "coordinatorDetail");
+  return finding ? credentialMaterialReceipt(finding, "inspect the owner-visible redacted coordinator receipt") : `coordinatorDetail=${encodeURIComponent(detail)}`;
 }
 
 async function readBody(request: Request): Promise<Record<string, unknown>> {

@@ -1,4 +1,5 @@
 import { CONTRACT_VERSIONS, opaqueId } from "../kernel/contracts.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 export const GITHUB_ACTIONS_OIDC_ISSUER = "https://token.actions.githubusercontent.com" as const;
 
@@ -193,7 +194,8 @@ function nonEmpty(value: unknown, field: string): string {
 
 function credentialFreeReceipt(value: unknown, field: string): string {
   const receipt = nonEmpty(value, field);
-  if (/(?:Bearer\s+\S+|(?:token|secret|password|api[_-]?key|private[_-]?key)\s*[=:]\s*\S+)/iu.test(receipt) || /-----BEGIN [^-]+ PRIVATE KEY-----/iu.test(receipt)) throw new GitHubActionsBridgeInputError({ code: "receipt_credential_material", message: `${field} contains credential-shaped material.`, recoveryAction: "return a digest-only credential-free verifier receipt and retry; no capability was issued", receipt: `${field}=credential-shaped; capability=not-issued; credentialMaterialStored=false` });
+  const finding = scanCredentialMaterial(receipt, field);
+  if (finding) throw new GitHubActionsBridgeInputError({ code: "receipt_credential_material", message: `${field} contains credential-shaped material.`, recoveryAction: "return a digest-only credential-free verifier receipt and retry; no capability was issued", receipt: `${field}=credential-shaped; fieldPath=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; capability=not-issued; credentialMaterialStored=false` });
   return receipt;
 }
 

@@ -1,6 +1,7 @@
 import { anyamRealmOwnerSessionId, requestAnyamRealmCoordinator } from "./passkey-owner.ts";
 import type { AnyamRealmOAuthEnv } from "./oauth-provider.ts";
 import { encodeGitHubActionsBridgeHistory, encodeGitHubActionsBridgeSourcePackage, parseGitHubActionsBridgeHistory, parseGitHubActionsBridgeMode, parseGitHubActionsBridgePlan, parseGitHubActionsBridgeSourcePackage } from "./github-actions-bridge-contract.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
 
 const BRIDGE_PROTOCOL = "anyam.github-actions-bridge/v1" as const;
 
@@ -24,25 +25,8 @@ function blocked(code: string, recoveryAction: string, receipt: string, status =
 }
 
 function rejectCredentialFields(value: Record<string, unknown>): void {
-  const find = (candidate: unknown, path: string): string | undefined => {
-    if (Array.isArray(candidate)) {
-      for (const [index, item] of candidate.entries()) {
-        const found = find(item, `${path}[${index}]`);
-        if (found) return found;
-      }
-      return undefined;
-    }
-    if (candidate === null || typeof candidate !== "object") return undefined;
-    for (const [key, item] of Object.entries(candidate)) {
-      const current = `${path}.${key}`;
-      if (/^(?:token|accessToken|refreshToken|secret|password|privateKey|apiKey)$/iu.test(key)) return current;
-      const found = find(item, current);
-      if (found) return found;
-    }
-    return undefined;
-  };
-  const field = find(value, "body");
-  if (field) throw new Error(`credentialField=${field}; credentialMaterial=not-accepted`);
+  const finding = scanCredentialMaterial(value, "body");
+  if (finding) throw new Error(`credentialField=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; credentialMaterial=not-accepted`);
 }
 
 async function exchange(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {

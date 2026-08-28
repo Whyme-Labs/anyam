@@ -9,6 +9,7 @@ import type {
   TargetPreviewStrategy,
   TargetResourceSharing,
 } from "../kernel/contracts.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 export type { TargetChannel, TargetDataClass, TargetDeploymentProfile, TargetEnvironment, TargetPreviewStrategy, TargetResourceSharing } from "../kernel/contracts.ts";
 
@@ -49,8 +50,9 @@ function fail(input: ConstructorParameters<typeof TargetDeploymentProfileError>[
 }
 
 function safeMetadata(value: string, field: string): string {
-  if (/(?:bearer\s+|(?:access|refresh|api|client)[_-]?token\s*[:=]|secret\s*[:=]|password\s*[:=]|private[_ -]?key\s*[:=]|\b(?:cfat|gho|sk)-[A-Za-z0-9])/iu.test(value)) {
-    fail({ code: "invalid-profile", message: `${field} contains credential-like material.`, recoveryAction: `send a digest or non-secret identity for ${field}; no credential values are accepted`, receipt: `field=${field}; credential-material=rejected` });
+  const finding = scanCredentialMaterial(value, field);
+  if (finding) {
+    fail({ code: "invalid-profile", message: `${field} contains credential-like material.`, recoveryAction: `send a digest or non-secret identity for ${field}; no credential values are accepted`, receipt: `field=${field}; fieldPath=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; credential-material=rejected` });
   }
   return value;
 }

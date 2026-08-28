@@ -33,6 +33,14 @@ The product rule is:
 regulatory claim. Every guarantee still needs a contract, a measured receipt,
 a failure mode, and a recovery path.
 
+The participant count, trial duration, and terminal-Change count used by the
+current real-team gate are inherited acceptance predicates from
+[#286](https://github.com/Whyme-Labs/anyam/issues/286). They are not product
+capacity limits. Keep them in the gate until the owner changes that issue. Do
+not use them as evidence for throughput, availability, or cost. Record dated
+observations for every operational number before turning an observation into a
+product tripwire.
+
 Anyam should provide the machinery for:
 
 - immutable and attributable Changes;
@@ -44,6 +52,12 @@ Anyam should provide the machinery for:
 - production access without reusable raw credentials;
 - drift detection and reconciliation;
 - Evidence-backed readiness claims.
+
+The safety rule for credential exposure is qualitative: no direct secret value
+may cross an agent, Runner, Evidence, log, export, or provider-response
+boundary. A qualification receipt records the number of observed exposures and
+the exact test or live observation that produced it. The rule itself is not a
+capacity target.
 
 Anyam must not become a runtime dependency for the deployed application. A
 Mailda Node, Lajur deployment, or company ledger must keep serving permitted
@@ -233,7 +247,7 @@ credential-bearing, replayed, or ambiguous inputs outside Authority state.
 
 Run issue #286 with a named 3 to 10 person cohort for 30 calendar days and at
 least 25 terminal Changes. Use Anyam itself and Mailda as the first two genuine
-coding-agent products. Add Lajur if its current pilot work benefits from the
+workloads for the trial. Add Lajur if its current pilot work benefits from the
 trial, but do not simulate a product merely to satisfy the count.
 
 The trial must include:
@@ -309,8 +323,11 @@ for inventory, authority, or provider state.
 
 ## Work package 2: add the application runtime protocol
 
-Create a small Cloudflare runtime adapter. Keep it optional and local to the
-customer-operated application.
+Create a small Cloudflare runtime adapter. Keep it local to the
+customer-operated application and optional for ungoverned local use. A Target
+cannot enter the application-assurance V0 gate without this adapter or an
+equivalent application-owned contract that emits the same release, health,
+invariant, and compatibility observations.
 
 ### Runtime responsibilities
 
@@ -334,6 +351,12 @@ every request.
 
 ### Acceptance
 
+- A qualifying Target declares either the runtime adapter or an equivalent
+  application-owned implementation of every runtime responsibility above.
+- If an application cannot install the adapter, the adoption report lists the
+  missing observations and names the external Verifiers that will provide
+  them. The Target remains non-ready until those Verifiers produce valid
+  Evidence.
 - Removing network access to the Anyam Realm does not stop ordinary application
   traffic.
 - Health output identifies the exact Release without revealing secrets.
@@ -373,6 +396,22 @@ Reproducibility is not a cosmetic green check. A non-reproducible Project may
 state why and use another accepted provenance control. A Protected Policy
 Profile may require reproducibility and block when it is unavailable.
 
+### Acceptance
+
+- A Release is sealed only after Anyam verifies the exact Artifact, Project
+  Revision, Change Revision, dependency, configuration, migration, Evidence,
+  policy, and signer identities listed above.
+- A stale, failed, indeterminate, or replayed Evidence record blocks sealing and
+  names the invalidation key and recovery action.
+- Signing-key rotation has an explicit overlap receipt. A retired key cannot
+  sign a new Release, and a Release signed by an unknown key is rejected.
+- A non-reproducible build records the failed comparison and the accepted
+  replacement provenance control. It never becomes an unexplained green check.
+- A provider read-back verifies the uploaded Artifact and deployment manifest
+  before the Release can be used by a Target.
+- Export and restore preserve the Release's provenance and signer identities;
+  restore fails when any digest or recovery assumption differs.
+
 ## Work package 4: complete the Cloudflare Target and Promotion path
 
 Extend the existing promotion executor into the first complete application
@@ -394,6 +433,25 @@ Target adapter.
 11. Revoke or release the executor capability and seal the receipt.
 ```
 
+The Promotion plan is data, not an implementation detail. Each rollout step
+must declare its traffic percentage or cohort, minimum observation window,
+health and business-invariant thresholds, version-affinity rule, and response-
+loss policy. The owner records the measurements that justify those values
+before a Protected Target can use the plan. A response loss pauses the plan and
+requires provider reinspection against the original operation identity before
+any retry.
+
+The minimum shape is:
+
+```text
+PromotionPlan {
+  steps: [{ percentage, cohort, observationWindow, abortWhen }]
+  versionAffinity: required | best-effort
+  onResponseLoss: reconcile-before-retry | stop-for-human
+  sizingReceipts: [receipt]
+}
+```
+
 The adapter must support measured fallbacks because a provider preview alias or
 canary mechanism may not work in every account state. A fallback is not assumed
 safe because the API accepted it. It needs its own live receipt.
@@ -402,6 +460,21 @@ The provider credential may remain encrypted in a customer-operated vault when
 the provider does not offer true short-lived credentials. The Runner and agent
 still receive only a short-lived Anyam Capability Grant to request one exact
 operation. They never receive the provider credential itself.
+
+The first Cloudflare adapter must materialize a complete Worker release
+manifest. The manifest names every module and asset digest, compatibility date
+and flag, binding and resource identity, Durable Object migration, route, and
+health contract. The adapter uploads that manifest, reads the exact provider
+version back, compares every returned field, and binds the read-back digest to
+the Deployment. A provider response that omits or changes a field blocks the
+Promotion.
+
+The Target record resolves the provider account, Worker, executor service, and
+credential broker from the authoritative Target identity. Callers cannot
+supply those identifiers in a Promotion request. Installation and upgrade
+operations are resumable and idempotent, preserve existing Project and Target
+state, and produce a drift receipt when the provider differs from the desired
+manifest.
 
 ### Required Target observations
 
@@ -420,7 +493,12 @@ operation. They never receive the provider credential itself.
 - Uploading a candidate does not move production traffic unless the Promotion
   plan explicitly reaches that stage.
 - A failed canary blocks broader exposure.
+- Every rollout step records its observation window, thresholds, version
+  affinity, and sizing receipt before traffic moves.
 - A response loss cannot cause a blind duplicate provider mutation.
+- An unknown provider result remains `indeterminate` with the original
+  operation identity, last observation, and recovery action until reinspection
+  resolves it.
 - A Runner cannot promote even if it produces a valid Artifact.
 - A compromised application repository does not reveal a reusable production
   credential.
@@ -428,6 +506,10 @@ operation. They never receive the provider credential itself.
   truth.
 - Rollback is blocked when the prior Release cannot safely use the current data
   state.
+- A Worker version is not eligible for Promotion until provider read-back
+  matches the complete Worker release manifest.
+- A caller cannot choose a provider account, Worker, executor, or credential
+  outside the authoritative Target registry.
 
 ## Work package 5: make migration safety executable
 
@@ -560,12 +642,21 @@ break-glass.
 - required approval;
 - result digest and audit receipt.
 
+Every budget is named by the contract. When a request exceeds one, the broker
+returns the budget name, configured limit, requested amount, sizing receipt, and
+recovery action. The broker stops the operation before it can produce an
+unbounded result. If the requested amount is not knowable before execution, the
+response records the observed amount and the point at which the tripwire
+fired.
+
 ### Acceptance
 
 - No caller receives a reusable D1, PostgreSQL, or provider credential.
 - A grant for one Target fails against another Target.
 - Expired or revoked authority fails before resource access.
 - A query exceeding its declared budget stops and names the recovery action.
+- A budget failure names the budget, configured limit, requested or observed
+  amount, sizing receipt, and recovery action.
 - Supervised or sensitive reads leave an immutable disclosure record.
 - Exported results follow the receiving Actor's Project View and data policy.
 - Removing the broker does not stop ordinary application traffic.
@@ -687,6 +778,21 @@ Required views include:
 
 Every blocked state names the failed control, observed value, expected value,
 Evidence, and recovery action.
+
+## Workload glossary
+
+- **Anyam:** this repository and its customer-operated Realm. It is the first
+  workload because it exercises the source, authority, Runner, and Promotion
+  paths that govern the others.
+- **Mailda:** the first adopted Cloudflare application. It exercises Workers,
+  D1, Durable Objects, R2, Queues, Workflows, customer-held keys, and sensitive
+  customer data.
+- **Company ledger:** a high-integrity reference application for identity,
+  ownership, issuance, transfers, resolutions, voting snapshots, and an
+  append-only journal.
+- **Lajur:** a later commercial application with high-integrity transaction
+  lanes such as holds, bookings, deposits, commissions, inventory, and
+  integration outboxes.
 
 ## Dogfood sequence
 
@@ -847,16 +953,19 @@ for:
 - false-block and false-pass findings;
 - percentage of production Changes with complete Release lineage;
 - stale Evidence rate;
-- direct secret exposures, which should remain zero;
+- direct secret-exposure findings with their exact test or live receipt; no
+  direct secret value is permitted to cross a declared boundary;
 - operator and reviewer burden under Solo, Team, and Protected Policy Profiles.
 
 A measurement becomes a product limit only after a separate owner decision and
 capacity policy. Provider facts remain provider facts.
 
-## Suggested repository layout
+## Candidate repository layout
 
-Do not create a package for every concept. Keep domain contracts in the current
-kernel until a real boundary requires extraction.
+This is a set of candidate boundaries, not an extraction plan. Keep each
+contract in the current kernel until a real workload needs the boundary. Extract
+it only after an ADR records the owner, interface, export and recovery contract,
+and a second consumer proves that the boundary is real.
 
 A reasonable first layout is:
 
@@ -867,12 +976,12 @@ src/
 
 packages/
   create-anyam/                Existing scaffold plus read-only adopt flow
-  runtime-cloudflare/          Small customer-runtime adapter
+  runtime-cloudflare/          Small customer-runtime adapter after a second consumer
 
 apps/
   promotion-executor/          Existing executor extended for application Targets
-  target-observer/             Read-only provider state and drift Evidence
-  production-access-broker/    Customer-operated task-scoped diagnostic access
+  target-observer/             Read-only provider state and drift Evidence after a second Target
+  production-access-broker/    Customer-operated task-scoped diagnostic access after a second workload
 
 fixtures/
   application-assurance/       Simple Worker, monorepo, Mailda-shaped, and failure fixtures
@@ -892,6 +1001,8 @@ Application assurance V0 is complete only when all of these are true:
 
 - Anyam has passed the current credible-team gate;
 - an existing Mailda deployment can be adopted without a rewrite;
+- every qualifying Target emits the runtime release, health, invariant, and
+  compatibility observations through the adapter or an equivalent contract;
 - the Runner and agent do not receive reusable production credentials;
 - an immutable Release reaches staging and production only through governed
   Promotion;

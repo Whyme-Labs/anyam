@@ -144,7 +144,7 @@ test("Worker-compatible GitHub producer re-inspects a push, signs a Mirror hando
   assert.equal(result.receipt.includes(handoffSecret), false);
   assert.equal(JSON.stringify(result).includes("ghs-jit-token"), false);
   assert.ok(captured);
-  const verified = await verifyMirrorIngestionHandoff({ value: captured, keyId: "mirror-handoff-v1", secret: handoffSecret, now: Date.parse("2026-08-28T00:00:00.000Z") });
+  const verified = await verifyMirrorIngestionHandoff({ value: captured, keyId: "mirror-handoff-v1", secret: handoffSecret, expectedRealmId: "realm:test", expectedInstallationId: installationId, expectedAudience: "anyam-realm-mirror-ingestion", expectedIssuer: `github-app:${installationId}`, expectedProvider: "github", expectedRemoteRepository: repository, expectedMirrorId: "mirror:test", expectedDeliveryId: "delivery:producer-test", expectedProposalKey: "ref:refs/heads/main", now: Date.parse("2026-08-28T00:01:00.000Z") });
   assert.equal(verified.valid, true);
   if (verified.valid) {
     assert.equal(verified.handoff.command.command, "mirror.sync");

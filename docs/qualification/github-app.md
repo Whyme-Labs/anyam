@@ -87,6 +87,14 @@ wrangler secret put ANYAM_MIRROR_HANDOFF_SECRET --config <producer-wrangler-conf
 wrangler secret put ANYAM_GITHUB_APP_PRIVATE_KEY --config <producer-wrangler-config>
 ```
 
+The Realm and producer must also carry the same measured Mirror-handoff
+tripwires. The checked-in Wrangler examples use a 300-second maximum lifetime
+and a 30-second clock-skew allowance; remeasure both before production and
+replace the values and receipts together. During key rotation, configure
+`ANYAM_MIRROR_HANDOFF_PREVIOUS_KEY_ID` on the Realm and store its matching
+`ANYAM_MIRROR_HANDOFF_PREVIOUS_SECRET` only for the overlap window. An unknown
+key ID is rejected before the Authority transition.
+
 The producer calls the Realm's service-only
 `/internal/mirrors/producer-context` route to obtain the current Mirror
 lineage. The Realm rejects missing, ambiguous, or incomplete context. The
@@ -194,10 +202,12 @@ The handoff key ID and secret must match the Realm's
 `ANYAM_MIRROR_HANDOFF_KEY_ID` and `ANYAM_MIRROR_HANDOFF_SECRET` configuration.
 Use either `ANYAM_GITHUB_APP_MIRROR_HANDOFF_SECRET` or
 `ANYAM_GITHUB_APP_MIRROR_HANDOFF_SECRET_FILE`, never both. The producer keeps
-the secret in process memory only, signs one exact `mirror.sync` envelope, and
-the Realm's `/internal/mirrors/ingest` route verifies and consumes it. The
-secret is never sent to GitHub, persisted in Authority, or included in a
-receipt.
+the secret in process memory only, signs one exact `anyam.mirror-ingestion/v2`
+envelope, and the Realm's `/internal/mirrors/ingest` route verifies and consumes
+it. The envelope binds the current Realm, provider installation, audience,
+issuer, provider repository, Mirror, delivery, proposal, issued/expiry window,
+nonce, and typed command. The secret is never sent to GitHub, persisted in
+Authority, or included in a receipt.
 
 For compatibility only, an already-issued opaque session may be supplied with
 exactly one of `ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION` or

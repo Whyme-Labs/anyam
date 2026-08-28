@@ -364,6 +364,7 @@ async function qualifyCustomerRealmAuthority(input: {
   authorityMirrorFromResponse(configuredMirror);
   const config = { ...input.authorityConfig, projectId, sourceSpaceId, projectRevisionId, projectViewId, mirrorId };
   const state = await client.inspectState();
+  const realmId = authorityField(state.realmId, "authority.realmId");
   const projectResponse = await client.inspectProject(config.projectId);
   const project = authorityObject(projectResponse.project, "project");
   const canonicalRevision = authorityObject(projectResponse.canonicalRevision, "canonicalRevision");
@@ -428,6 +429,7 @@ async function qualifyCustomerRealmAuthority(input: {
   const producer = new GitHubMirrorProducer({
     adapter: input.adapter,
     mirror: producerMirror,
+    realmId,
     repositoryId,
     projectViewId: config.projectViewId,
     canonicalProjectRevisionId: config.projectRevisionId,

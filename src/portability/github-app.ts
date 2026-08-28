@@ -13,6 +13,7 @@ import type {
 import type { GitRef, MirrorRepositoryObservation, RepositoryMirror } from "../kernel/contracts.ts";
 import {
   MIRROR_HANDOFF_SIZING_RECEIPT,
+  MIRROR_HANDOFF_CLOCK_SKEW_MS,
   MIRROR_HANDOFF_TTL_MS,
   mirrorObservationDigest,
   signMirrorIngestionHandoff,
@@ -597,6 +598,7 @@ export type GitHubMirrorIngestionResult = {
 export type GitHubMirrorProducerOptions = {
   adapter: GitHubAppProjectionAdapter;
   mirror: RepositoryMirror;
+  realmId: string;
   repositoryId: string;
   projectViewId: string;
   canonicalProjectRevisionId: string;
@@ -606,6 +608,8 @@ export type GitHubMirrorProducerOptions = {
   handoffSecret: string;
   ingest: (handoff: MirrorIngestionHandoff) => Promise<GitHubMirrorIngestionResult>;
   nowMilliseconds?: () => number;
+  handoffMaxLifetimeMs?: number;
+  handoffClockSkewMs?: number;
 };
 
 export type GitHubMirrorProducerResult = {
@@ -632,6 +636,7 @@ function producerReceipt(input: { mirrorId: string; deliveryId: string; detail: 
 export class GitHubMirrorProducer {
   private readonly adapter: GitHubAppProjectionAdapter;
   private readonly mirror: RepositoryMirror;
+  private readonly realmId: string;
   private readonly repositoryId: string;
   private readonly projectViewId: string;
   private readonly canonicalProjectRevisionId: string;
@@ -641,10 +646,13 @@ export class GitHubMirrorProducer {
   private readonly handoffSecret: string;
   private readonly ingest: (handoff: MirrorIngestionHandoff) => Promise<GitHubMirrorIngestionResult>;
   private readonly nowMilliseconds: () => number;
+  private readonly handoffMaxLifetimeMs: number;
+  private readonly handoffClockSkewMs: number;
 
   constructor(input: GitHubMirrorProducerOptions) {
     this.adapter = input.adapter;
     this.mirror = { ...input.mirror, refMappings: input.mirror.refMappings.map((mapping) => ({ ...mapping })), canonicalRefs: input.mirror.canonicalRefs.map((ref) => ({ ...ref })), remoteRefs: input.mirror.remoteRefs.map((ref) => ({ ...ref })) };
+    this.realmId = required(input.realmId, "realmId");
     this.repositoryId = required(input.repositoryId, "repositoryId");
     this.projectViewId = required(input.projectViewId, "projectViewId");
     this.canonicalProjectRevisionId = required(input.canonicalProjectRevisionId, "canonicalProjectRevisionId");
@@ -654,6 +662,9 @@ export class GitHubMirrorProducer {
     this.handoffSecret = required(input.handoffSecret, "handoffSecret");
     this.ingest = input.ingest;
     this.nowMilliseconds = input.nowMilliseconds ?? (() => Date.now());
+    this.handoffMaxLifetimeMs = input.handoffMaxLifetimeMs ?? MIRROR_HANDOFF_TTL_MS;
+    this.handoffClockSkewMs = input.handoffClockSkewMs ?? MIRROR_HANDOFF_CLOCK_SKEW_MS;
+    if (!Number.isSafeInteger(this.handoffMaxLifetimeMs) || this.handoffMaxLifetimeMs <= 0 || !Number.isSafeInteger(this.handoffClockSkewMs) || this.handoffClockSkewMs < 0) throw new GitHubAppAdapterError({ errorCode: "github_app.mirror_handoff_configuration_invalid", message: "Mirror handoff lifetime and clock-skew tripwires are invalid.", retryable: false, recoveryAction: "configure measured handoff lifetime and clock-skew values before binding the producer", receipt: "producer=mirror-ingestion; handoffTripwires=invalid; credentialMaterialStored=false" });
     if (this.mirror.canonicalAuthority !== "anyam" || this.mirror.provider !== "github") throw new GitHubAppAdapterError({ errorCode: "github_app.producer_mirror_invalid", message: "The GitHub Mirror producer requires an Anyam-canonical GitHub Mirror.", retryable: false, recoveryAction: "configure a GitHub projection Mirror with Anyam as canonical authority", receipt: "producer=mirror-invalid; canonicalAuthority=anyam-required; provider=github-required; credentialMaterialStored=false" });
     if (this.canonicalProjectRevisionId !== this.mirror.canonicalProjectRevisionId || !refsEqual(this.canonicalRefs, this.mirror.canonicalRefs)) throw new GitHubAppAdapterError({ errorCode: "github_app.producer_canonical_stale", message: "The producer canonical state is stale relative to the configured Mirror.", retryable: false, recoveryAction: "read the current Anyam canonical Project Revision and recreate the producer with that exact ref set", receipt: `producer=canonical-stale; mirror=${this.mirror.id}; credentialMaterialStored=false` });
   }
@@ -711,8 +722,9 @@ export class GitHubMirrorProducer {
     const command: MirrorIngestionCommand = { protocol: "anyam.authority-command/v1", command: "mirror.sync", idempotencyKey, payload: { mirrorId: this.mirror.id, canonicalProjectRevisionId: this.canonicalProjectRevisionId, canonicalRefs: this.canonicalRefs, expectedRemoteGeneration: this.mirror.remoteGeneration, remoteGeneration: remoteState.generation, remoteRefs: remoteState.refs, operationId, checkpointId, operationKind: "inbound", operationState: "succeeded", mirrorState: "lagging", inboundChangeIds: [], completedInboundChangeIds: [], pendingInboundChangeIds: this.mirror.pendingInboundChangeIds, delivery, externalProposal, mirrorRepositoryObservations: { [this.mirror.sourceSpaceId]: verified.observation }, receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `reinspection=verified; remoteGeneration=${remoteState.generation}; observationDigest=${verified.observation.manifestDigest}` }) } };
     const now = this.nowMilliseconds();
     if (!Number.isSafeInteger(now)) return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: "clock=invalid; handoff=not-created" }), recoveryAction: "repair the producer clock and retry the same signed delivery" };
-    const expiresAt = new Date(now + MIRROR_HANDOFF_TTL_MS).toISOString();
-    const handoff = await signMirrorIngestionHandoff({ command, keyId: this.handoffKeyId, nonce: `nonce:github-app:${digest([this.mirror.id, task.deliveryId, task.bodyDigest])}`, expiresAt, secret: this.handoffSecret });
+    const issuedAt = new Date(now).toISOString();
+    const expiresAt = new Date(now + this.handoffMaxLifetimeMs).toISOString();
+    const handoff = await signMirrorIngestionHandoff({ command, keyId: this.handoffKeyId, nonce: `nonce:github-app:${digest([this.mirror.id, task.deliveryId, task.bodyDigest])}`, realmId: this.realmId, installationId: this.installationId, issuer: `github-app:${this.installationId}`, provider: "github", remoteRepository: this.mirror.remoteRepository, mirrorId: this.mirror.id, deliveryId: task.deliveryId, proposalKey: String(externalProposal.proposalKey), issuedAt, expiresAt, secret: this.handoffSecret, now, maxLifetimeMs: this.handoffMaxLifetimeMs, clockSkewMs: this.handoffClockSkewMs });
     let ingested: GitHubMirrorIngestionResult;
     try {
       ingested = await this.ingest(handoff);

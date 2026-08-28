@@ -1,11 +1,12 @@
 import type { GitRef, MirrorRepositoryObservation } from "../kernel/contracts.ts";
 
 import { GITHUB_WEBHOOK_INGRESS_PROTOCOL, type GitHubWebhookIngressEnvelope } from "./github-webhook.ts";
+import { MIRROR_HANDOFF_AUDIENCE, MIRROR_HANDOFF_CLOCK_SKEW_MS, MIRROR_HANDOFF_SIZING_RECEIPT, MIRROR_HANDOFF_TTL_MS, signMirrorIngestionHandoff, type MirrorIngestionCommand, type MirrorIngestionHandoff } from "./mirror-observation.ts";
 
 export const GITHUB_MIRROR_PRODUCER_PROTOCOL = "anyam.github-mirror-producer/v1" as const;
 export const GITHUB_MIRROR_PRODUCER_CONTEXT_PROTOCOL = "anyam.github-mirror-producer-context/v1" as const;
-export const GITHUB_MIRROR_HANDOFF_TTL_MS = 300_000;
-export const GITHUB_MIRROR_HANDOFF_SIZING_RECEIPT = "handoffTtl=300000ms; sizing=qualification-tripwire; remeasure-before-production";
+export const GITHUB_MIRROR_HANDOFF_TTL_MS = MIRROR_HANDOFF_TTL_MS;
+export const GITHUB_MIRROR_HANDOFF_SIZING_RECEIPT = MIRROR_HANDOFF_SIZING_RECEIPT;
 export const GITHUB_MIRROR_PRODUCER_ENVELOPE_MAX_BYTES = 2_097_152;
 export const GITHUB_MIRROR_PRODUCER_ENVELOPE_SIZING_RECEIPT = "envelopeBytesLimit=2097152; sizing=qualification-tripwire; remeasure-before-production";
 
@@ -40,14 +41,7 @@ export type GitHubMirrorProducerResult = {
   recoveryAction?: string;
 };
 
-export type GitHubMirrorHandoff = {
-  protocol: "anyam.mirror-ingestion/v1";
-  keyId: string;
-  nonce: string;
-  expiresAt: string;
-  command: JsonObject;
-  signature: string;
-};
+export type GitHubMirrorHandoff = MirrorIngestionHandoff;
 
 export type GitHubMirrorIngestResult = {
   status: "succeeded" | "blocked";
@@ -390,13 +384,8 @@ function remoteRefSet(context: GitHubMirrorProducerContext, values: readonly Git
   return values.filter((ref) => mapped.has(ref.name)).map((ref) => ({ ...ref }));
 }
 
-export async function signGitHubMirrorHandoff(input: { command: JsonObject; keyId: string; secret: string; nonce: string; expiresAt: string }): Promise<GitHubMirrorHandoff> {
-  const keyId = requiredString(input.keyId, "keyId");
-  const secret = requiredString(input.secret, "secret");
-  const unsigned = { protocol: "anyam.mirror-ingestion/v1", keyId, nonce: requiredString(input.nonce, "nonce"), expiresAt: requiredString(input.expiresAt, "expiresAt"), command: input.command } as const;
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(stableJson(unsigned)));
-  return { ...unsigned, signature: base64Url(new Uint8Array(signature)) };
+export async function signGitHubMirrorHandoff(input: { command: JsonObject; keyId: string; secret: string; nonce: string; realmId: string; installationId: string; issuer: string; provider: string; remoteRepository: string; mirrorId: string; deliveryId: string; proposalKey: string; issuedAt: string; expiresAt: string; audience?: typeof MIRROR_HANDOFF_AUDIENCE; now?: number; maxLifetimeMs?: number; clockSkewMs?: number }): Promise<GitHubMirrorHandoff> {
+  return await signMirrorIngestionHandoff({ command: input.command as unknown as MirrorIngestionCommand, keyId: input.keyId, secret: input.secret, nonce: input.nonce, realmId: input.realmId, installationId: input.installationId, issuer: input.issuer, provider: input.provider, remoteRepository: input.remoteRepository, mirrorId: input.mirrorId, deliveryId: input.deliveryId, proposalKey: input.proposalKey, issuedAt: input.issuedAt, expiresAt: input.expiresAt, ...(input.audience === undefined ? {} : { audience: input.audience }), ...(input.now === undefined ? {} : { now: input.now }), ...(input.maxLifetimeMs === undefined ? {} : { maxLifetimeMs: input.maxLifetimeMs }), clockSkewMs: input.clockSkewMs ?? MIRROR_HANDOFF_CLOCK_SKEW_MS }) as GitHubMirrorHandoff;
 }
 
 export class GitHubWebhookMirrorProducer {
@@ -409,11 +398,16 @@ export class GitHubWebhookMirrorProducer {
     handoffSecret: string;
     ingest: GitHubMirrorIngest;
     nowMilliseconds: () => number;
+    handoffMaxLifetimeMs: number;
+    handoffClockSkewMs: number;
   };
 
-  constructor(input: { api: GitHubApiClientOptions; realmId: string; appInstallationId: string; repository: string; handoffKeyId: string; handoffSecret: string; ingest: GitHubMirrorIngest; nowMilliseconds?: () => number }) {
+  constructor(input: { api: GitHubApiClientOptions; realmId: string; appInstallationId: string; repository: string; handoffKeyId: string; handoffSecret: string; ingest: GitHubMirrorIngest; nowMilliseconds?: () => number; handoffMaxLifetimeMs?: number; handoffClockSkewMs?: number }) {
     this.api = new GitHubWebhookApiClient(input.api);
-    this.options = { realmId: requiredString(input.realmId, "realmId"), appInstallationId: requiredString(input.appInstallationId, "appInstallationId"), repository: requiredString(input.repository, "repository"), handoffKeyId: requiredString(input.handoffKeyId, "handoffKeyId"), handoffSecret: requiredString(input.handoffSecret, "handoffSecret"), ingest: input.ingest, nowMilliseconds: input.nowMilliseconds ?? (() => Date.now()) };
+    const handoffMaxLifetimeMs = input.handoffMaxLifetimeMs ?? MIRROR_HANDOFF_TTL_MS;
+    const handoffClockSkewMs = input.handoffClockSkewMs ?? MIRROR_HANDOFF_CLOCK_SKEW_MS;
+    if (!Number.isSafeInteger(handoffMaxLifetimeMs) || handoffMaxLifetimeMs <= 0 || !Number.isSafeInteger(handoffClockSkewMs) || handoffClockSkewMs < 0) throw new GitHubMirrorProducerError({ code: "configuration_invalid", message: "The GitHub producer requires valid Mirror handoff lifetime and clock-skew tripwires.", recoveryAction: "configure measured Mirror handoff lifetime and clock-skew values before accepting webhook deliveries", receipt: `producer=${GITHUB_MIRROR_PRODUCER_PROTOCOL}; handoffTripwires=invalid; credentialMaterialStored=false` });
+    this.options = { realmId: requiredString(input.realmId, "realmId"), appInstallationId: requiredString(input.appInstallationId, "appInstallationId"), repository: requiredString(input.repository, "repository"), handoffKeyId: requiredString(input.handoffKeyId, "handoffKeyId"), handoffSecret: requiredString(input.handoffSecret, "handoffSecret"), ingest: input.ingest, nowMilliseconds: input.nowMilliseconds ?? (() => Date.now()), handoffMaxLifetimeMs, handoffClockSkewMs };
   }
 
   async process(input: { envelope: unknown; context: unknown }): Promise<GitHubMirrorProducerResult> {
@@ -481,7 +475,9 @@ export class GitHubWebhookMirrorProducer {
       const command: JsonObject = { protocol: "anyam.authority-command/v1", command: "mirror.sync", idempotencyKey: `mirror:github-app:${context.mirrorId}:${envelope.deliveryId}`, payload: { mirrorId: context.mirrorId, canonicalProjectRevisionId: context.canonicalProjectRevisionId, canonicalRefs: context.canonicalRefs, expectedRemoteGeneration: context.remoteGeneration, remoteGeneration: await digest({ repository: context.remoteRepository, refs: remoteRefs }), remoteRefs, operationId: `mirror-operation:github-app:${envelope.deliveryId}`, checkpointId: `mirror-checkpoint:github-app:${envelope.deliveryId}`, operationKind: "inbound", operationState: "succeeded", mirrorState: "lagging", inboundChangeIds: [], completedInboundChangeIds: [], pendingInboundChangeIds: context.pendingInboundChangeIds, delivery: { provider: "github", installationId: envelope.installationId, sourceIdentity: sourceIdentity(envelope.installationId), remoteRepository: context.remoteRepository, deliveryId: envelope.deliveryId, eventType, proposalKey }, externalProposal, mirrorRepositoryObservations: { [context.sourceSpaceId]: observation }, receipt: `producer=${GITHUB_MIRROR_PRODUCER_PROTOCOL}; delivery=${envelope.deliveryId}; providerReinspection=verified; observationDigest=${observation.manifestDigest}; credentialMaterialStored=false` } };
       const now = this.options.nowMilliseconds();
       if (!Number.isSafeInteger(now)) throw new GitHubMirrorProducerError({ code: "clock_invalid", message: "The producer clock did not return a safe integer.", recoveryAction: "repair the producer runtime clock and retry the same delivery", receipt: `producer=${GITHUB_MIRROR_PRODUCER_PROTOCOL}; delivery=${envelope.deliveryId}; clock=invalid; providerMutation=false; credentialMaterialStored=false` });
-      const handoff = await signGitHubMirrorHandoff({ command, keyId: this.options.handoffKeyId, secret: this.options.handoffSecret, nonce: `nonce:github-app:${await digest([context.mirrorId, envelope.deliveryId, envelope.bodyDigest])}`, expiresAt: new Date(now + GITHUB_MIRROR_HANDOFF_TTL_MS).toISOString() });
+      const issuedAt = new Date(now).toISOString();
+      const expiresAt = new Date(now + this.options.handoffMaxLifetimeMs).toISOString();
+      const handoff = await signGitHubMirrorHandoff({ command, keyId: this.options.handoffKeyId, secret: this.options.handoffSecret, nonce: `nonce:github-app:${await digest([context.mirrorId, envelope.deliveryId, envelope.bodyDigest])}`, realmId: context.realmId, installationId: context.installationId, issuer: `github-app:${context.installationId}`, provider: "github", remoteRepository: context.remoteRepository, mirrorId: context.mirrorId, deliveryId: envelope.deliveryId, proposalKey, issuedAt, expiresAt, now, maxLifetimeMs: this.options.handoffMaxLifetimeMs, clockSkewMs: this.options.handoffClockSkewMs });
       const ingested = await this.options.ingest(handoff);
       if (ingested.status === "succeeded") return { protocol: GITHUB_MIRROR_PRODUCER_PROTOCOL, status: "succeeded", deliveryId: envelope.deliveryId, ...(ingested.duplicate ? { duplicate: true } : {}), receipt: `producer=${GITHUB_MIRROR_PRODUCER_PROTOCOL}; delivery=${envelope.deliveryId}; handoff=signed; ingestion=succeeded; ${GITHUB_MIRROR_HANDOFF_SIZING_RECEIPT}; providerCredential=jit-memory-only; credentialMaterialStored=false` };
       throw new GitHubMirrorProducerError({ code: "ingestion_blocked", message: "The Realm rejected the signed Mirror handoff.", recoveryAction: ingested.recoveryAction ?? "inspect the Mirror checkpoint and retry the same signed delivery only after reconciling Authority state", receipt: `producer=${GITHUB_MIRROR_PRODUCER_PROTOCOL}; delivery=${envelope.deliveryId}; handoff=signed; ingestion=blocked; ${ingested.receipt}; credentialMaterialStored=false` });

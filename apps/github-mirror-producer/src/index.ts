@@ -26,6 +26,10 @@ export type Env = {
   ANYAM_GITHUB_APP_REQUEST_TIMEOUT_RECEIPT?: string;
   ANYAM_MIRROR_HANDOFF_KEY_ID?: string;
   ANYAM_MIRROR_HANDOFF_SECRET?: string;
+  ANYAM_MIRROR_HANDOFF_MAX_LIFETIME_MS?: string;
+  ANYAM_MIRROR_HANDOFF_MAX_LIFETIME_RECEIPT?: string;
+  ANYAM_MIRROR_HANDOFF_CLOCK_SKEW_MS?: string;
+  ANYAM_MIRROR_HANDOFF_CLOCK_SKEW_RECEIPT?: string;
   ANYAM_GITHUB_MIRROR_PRODUCER_SECRET?: string;
   ANYAM_GITHUB_PRODUCER_ENVELOPE_BYTES_LIMIT?: string;
   ANYAM_GITHUB_PRODUCER_ENVELOPE_BYTES_RECEIPT?: string;
@@ -55,6 +59,12 @@ function required(value: string | undefined, field: string): string {
 function number(value: string | undefined, field: string): number {
   const parsed = Number(text(value));
   if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new GitHubMirrorProducerError({ code: "configuration_invalid", message: `${field} must be a positive safe integer.`, recoveryAction: `configure a measured ${field} tripwire before accepting webhook deliveries`, receipt: `producer=${GITHUB_MIRROR_PRODUCER_PROTOCOL}; field=${field}; configuration=invalid; credentialMaterialStored=false` });
+  return parsed;
+}
+
+function nonNegativeNumber(value: string | undefined, field: string): number {
+  const parsed = Number(text(value));
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new GitHubMirrorProducerError({ code: "configuration_invalid", message: `${field} must be a non-negative safe integer.`, recoveryAction: `configure a measured ${field} tripwire before accepting webhook deliveries`, receipt: `producer=${GITHUB_MIRROR_PRODUCER_PROTOCOL}; field=${field}; configuration=invalid; credentialMaterialStored=false` });
   return parsed;
 }
 
@@ -126,7 +136,7 @@ async function realmRequest(env: Env, path: string, body: Record<string, unknown
 }
 
 function configurationHealth(env: Env): Record<string, unknown> {
-  const fields = ["ANYAM_REALM", "ANYAM_REALM_ID", "ANYAM_GITHUB_APP_ID", "ANYAM_GITHUB_APP_INSTALLATION_ID", "ANYAM_GITHUB_APP_REPOSITORY", "ANYAM_GITHUB_APP_PRIVATE_KEY", "ANYAM_MIRROR_HANDOFF_KEY_ID", "ANYAM_MIRROR_HANDOFF_SECRET", "ANYAM_GITHUB_MIRROR_PRODUCER_SECRET"] as const;
+  const fields = ["ANYAM_REALM", "ANYAM_REALM_ID", "ANYAM_GITHUB_APP_ID", "ANYAM_GITHUB_APP_INSTALLATION_ID", "ANYAM_GITHUB_APP_REPOSITORY", "ANYAM_GITHUB_APP_PRIVATE_KEY", "ANYAM_MIRROR_HANDOFF_KEY_ID", "ANYAM_MIRROR_HANDOFF_SECRET", "ANYAM_MIRROR_HANDOFF_MAX_LIFETIME_MS", "ANYAM_MIRROR_HANDOFF_MAX_LIFETIME_RECEIPT", "ANYAM_MIRROR_HANDOFF_CLOCK_SKEW_MS", "ANYAM_MIRROR_HANDOFF_CLOCK_SKEW_RECEIPT", "ANYAM_GITHUB_MIRROR_PRODUCER_SECRET"] as const;
   const configured = Object.fromEntries(fields.map((field) => [field, field === "ANYAM_REALM" ? Boolean(env[field]) : Boolean(text(env[field as keyof Env] as string | undefined))]));
   const status = Object.values(configured).every(Boolean) ? "ready" : "blocked";
   return { protocol: GITHUB_MIRROR_PRODUCER_PROTOCOL, status, configured, credentialMaterialStored: false, canonicalWrite: false, receipt: `producer=${GITHUB_MIRROR_PRODUCER_PROTOCOL}; health=${status}; providerCredential=not-returned; credentialMaterialStored=false` };
@@ -165,6 +175,8 @@ async function processWebhook(request: Request, env: Env): Promise<Response> {
       repository: required(env.ANYAM_GITHUB_APP_REPOSITORY, "ANYAM_GITHUB_APP_REPOSITORY"),
       handoffKeyId: required(env.ANYAM_MIRROR_HANDOFF_KEY_ID, "ANYAM_MIRROR_HANDOFF_KEY_ID"),
       handoffSecret: required(env.ANYAM_MIRROR_HANDOFF_SECRET, "ANYAM_MIRROR_HANDOFF_SECRET"),
+      handoffMaxLifetimeMs: number(env.ANYAM_MIRROR_HANDOFF_MAX_LIFETIME_MS, "ANYAM_MIRROR_HANDOFF_MAX_LIFETIME_MS"),
+      handoffClockSkewMs: nonNegativeNumber(env.ANYAM_MIRROR_HANDOFF_CLOCK_SKEW_MS, "ANYAM_MIRROR_HANDOFF_CLOCK_SKEW_MS"),
       ingest: async (handoff) => {
         const response = await realmRequest(env, INGEST_PATH, { handoff }, { allowConflict: true });
         const status = response.status === "succeeded" ? "succeeded" : response.code === "conflict" && response.receipt?.toString().includes("handoff-replay") ? "succeeded" : "blocked";

@@ -47,7 +47,7 @@ import { authorizeMcpCommandTarget } from "../../../src/cloudflare/mcp-command-t
 import { parseRepositoryObservationServiceResponse, verifyRepositoryObservation, type RepositoryObservationRequest } from "../../../src/portability/repository-observation.ts";
 import { prepareHostedRevisionPublish, type HostedRevisionObservationInput } from "../../../src/cloudflare/hosted-revision-publication.ts";
 import { assertAuthoritySnapshotEquivalent, AuthoritySQLiteStore, type AuthoritySqlHost } from "../../../src/cloudflare/authority-sqlite.ts";
-import { verifyMirrorIngestionHandoff, type MirrorIngestionHandoff } from "../../../src/portability/mirror-observation.ts";
+import { MIRROR_HANDOFF_AUDIENCE, MIRROR_INGESTION_PROTOCOL, verifyMirrorIngestionHandoff, type MirrorHandoffKey, type MirrorIngestionHandoff } from "../../../src/portability/mirror-observation.ts";
 import { GITHUB_WEBHOOK_INGRESS_PROTOCOL, type GitHubWebhookIngressEnvelope } from "../../../src/portability/github-webhook.ts";
 import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
 
@@ -1475,9 +1475,29 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     await this.requireAuthorityActive();
     const keyId = this.env.ANYAM_MIRROR_HANDOFF_KEY_ID?.trim();
     const secret = this.env.ANYAM_MIRROR_HANDOFF_SECRET?.trim();
-    if (!keyId || !secret) throw new AuthorityPlaneError({ code: "blocked", message: "Mirror ingestion is not configured with an internal handoff key.", recoveryAction: "configure ANYAM_MIRROR_HANDOFF_KEY_ID and the secret ANYAM_MIRROR_HANDOFF_SECRET before binding a provider Mirror adapter", receipt: `mirrorIngestion=key-not-configured; keyId=${keyId ? "present" : "missing"}; secret=${secret ? "present" : "missing"}; transition=not-applied` });
-    const verification = await verifyMirrorIngestionHandoff({ value: body.handoff, keyId, secret });
-    if (!verification.valid) throw new AuthorityPlaneError({ code: "invalid_request", message: "The signed Mirror handoff is invalid.", recoveryAction: verification.recoveryAction, receipt: verification.receipt });
+    const previousKeyId = this.env.ANYAM_MIRROR_HANDOFF_PREVIOUS_KEY_ID?.trim();
+    const previousSecret = this.env.ANYAM_MIRROR_HANDOFF_PREVIOUS_SECRET?.trim();
+    if (!keyId || !secret || Boolean(previousKeyId) !== Boolean(previousSecret)) throw new AuthorityPlaneError({ code: "blocked", message: "Mirror ingestion is not configured with a complete active or rotation-overlap handoff key.", recoveryAction: "configure ANYAM_MIRROR_HANDOFF_KEY_ID and ANYAM_MIRROR_HANDOFF_SECRET, and configure both previous-key fields or neither before binding a provider Mirror adapter", receipt: `mirrorIngestion=key-configuration-invalid; activeKey=${keyId ? "present" : "missing"}; previousKey=${previousKeyId ? "complete" : "none"}; transition=not-applied` });
+    const maxLifetimeRaw = this.env.ANYAM_MIRROR_HANDOFF_MAX_LIFETIME_MS?.trim();
+    const maxLifetimeReceipt = this.env.ANYAM_MIRROR_HANDOFF_MAX_LIFETIME_RECEIPT?.trim();
+    const clockSkewRaw = this.env.ANYAM_MIRROR_HANDOFF_CLOCK_SKEW_MS?.trim();
+    const clockSkewReceipt = this.env.ANYAM_MIRROR_HANDOFF_CLOCK_SKEW_RECEIPT?.trim();
+    const maxLifetimeMs = maxLifetimeRaw === undefined ? NaN : Number(maxLifetimeRaw);
+    const clockSkewMs = clockSkewRaw === undefined ? NaN : Number(clockSkewRaw);
+    if (!Number.isSafeInteger(maxLifetimeMs) || maxLifetimeMs <= 0 || !maxLifetimeReceipt || !Number.isSafeInteger(clockSkewMs) || clockSkewMs < 0 || !clockSkewReceipt) throw new AuthorityPlaneError({ code: "blocked", message: "Mirror ingestion lifetime and clock-skew tripwires are not configured with receipts.", recoveryAction: "configure positive ANYAM_MIRROR_HANDOFF_MAX_LIFETIME_MS and non-negative ANYAM_MIRROR_HANDOFF_CLOCK_SKEW_MS values with their measurement receipts", receipt: `mirrorIngestion=tripwire-configuration-invalid; maxLifetimeMs=${Number.isSafeInteger(maxLifetimeMs) ? maxLifetimeMs : "invalid"}; clockSkewMs=${Number.isSafeInteger(clockSkewMs) ? clockSkewMs : "invalid"}; transition=not-applied` });
+    const identitySnapshot = this.requireIdentity().getRecoverySnapshot();
+    const handoffValue = body.handoff;
+    const handoffCredentialFinding = scanCredentialMaterial(handoffValue, "mirrorHandoff");
+    if (handoffCredentialFinding) throw new AuthorityPlaneError({ code: "invalid_request", message: "The signed Mirror handoff contains credential material.", recoveryAction: "remove provider credentials from the handoff and submit only typed identities, digests, and receipts", receipt: `mirrorIngestion=credential-material; field=${handoffCredentialFinding.path}; providerInvocation=false; transition=not-applied` });
+    const candidateMirrorId = handoffValue !== null && typeof handoffValue === "object" && !Array.isArray(handoffValue) && typeof (handoffValue as Record<string, unknown>).mirrorId === "string" ? (handoffValue as Record<string, unknown>).mirrorId.trim() : "";
+    const current = await this.authoritySnapshot();
+    const mirror = candidateMirrorId ? current.mirrors[candidateMirrorId] : undefined;
+    if (!mirror) throw new AuthorityPlaneError({ code: "not_found", message: "The signed Mirror handoff names an unavailable Mirror.", recoveryAction: "configure the Mirror in this Realm and request a fresh signed handoff", receipt: `mirror=${candidateMirrorId || "missing"}; mirrorIngestion=not-found; providerInvocation=false; transition=not-applied` });
+    const installationId = this.env.ANYAM_MIRROR_HANDOFF_INSTALLATION_ID?.trim() ?? this.env.ANYAM_GITHUB_APP_INSTALLATION_ID?.trim();
+    if (!installationId) throw new AuthorityPlaneError({ code: "blocked", message: "Mirror ingestion has no configured provider installation identity.", recoveryAction: "configure ANYAM_MIRROR_HANDOFF_INSTALLATION_ID or the exact GitHub App installation identity before accepting a provider handoff", receipt: `mirror=${mirror.id}; mirrorIngestion=installation-unconfigured; providerInvocation=false; transition=not-applied` });
+    const keys: MirrorHandoffKey[] = [{ id: keyId, secret, role: "active" }, ...(previousKeyId && previousSecret ? [{ id: previousKeyId, secret: previousSecret, role: "previous" as const }] : [])];
+    const verification = await verifyMirrorIngestionHandoff({ value: handoffValue, keys, expectedRealmId: identitySnapshot.realm.id, expectedInstallationId: installationId, expectedAudience: MIRROR_HANDOFF_AUDIENCE, expectedIssuer: `${mirror.provider}-app:${installationId}`, expectedProvider: mirror.provider, expectedRemoteRepository: mirror.remoteRepository, expectedMirrorId: mirror.id, maxLifetimeMs, clockSkewMs });
+    if (!verification.valid) throw new AuthorityPlaneError({ code: "invalid_request", message: "The signed Mirror handoff is invalid.", recoveryAction: verification.recoveryAction, receipt: `${verification.receipt}; maxLifetimeReceipt=${maxLifetimeReceipt}; clockSkewReceipt=${clockSkewReceipt}` });
     const handoff: MirrorIngestionHandoff = verification.handoff;
     return await this.ctx.blockConcurrencyWhile(async () => {
       const nonceKey = `${REALM_MIRROR_HANDOFF_NONCE_PREFIX}${handoff.nonce}`;
@@ -1486,17 +1506,20 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         if (Date.parse(value.expiresAt) <= nowTimestamp) await this.ctx.storage.delete(key);
       }
       if (await this.ctx.storage.get<{ expiresAt: string }>(nonceKey)) throw new AuthorityPlaneError({ code: "conflict", message: "The signed Mirror handoff nonce has already been consumed.", recoveryAction: "request a fresh signed handoff for the same provider delivery after reconciling the prior checkpoint", receipt: "mirrorIngestion=handoff-replay; providerInvocation=false; transition=not-applied" });
-      const mirrorId = typeof handoff.command.payload.mirrorId === "string" ? handoff.command.payload.mirrorId : "";
-      const current = await this.authoritySnapshot();
-      const mirror = current.mirrors[mirrorId];
+      const latest = await this.authoritySnapshot();
+      const latestMirror = latest.mirrors[handoff.mirrorId];
+      if (!latestMirror) throw new AuthorityPlaneError({ code: "not_found", message: "The signed Mirror handoff names an unavailable Mirror.", recoveryAction: "configure the Mirror in this Realm and request a fresh signed handoff", receipt: `mirror=${handoff.mirrorId}; mirrorIngestion=not-found; providerInvocation=false; transition=not-applied` });
+      if (latestMirror.provider !== handoff.provider || latestMirror.remoteRepository !== handoff.remoteRepository) throw new AuthorityPlaneError({ code: "conflict", message: "The signed Mirror handoff no longer matches the current Mirror provider identity.", recoveryAction: "re-read the current Mirror configuration and request a fresh provider handoff", receipt: `mirror=${handoff.mirrorId}; mirrorIngestion=mirror-binding-stale; providerInvocation=false; transition=not-applied` });
+      const mirrorId = handoff.mirrorId;
+      const current = latest;
+      const mirror = latestMirror;
       if (!mirror) throw new AuthorityPlaneError({ code: "not_found", message: "The signed Mirror handoff names an unavailable Mirror.", recoveryAction: "configure the Mirror in this Realm and request a fresh provider handoff", receipt: `mirror=${mirrorId || "missing"}; mirrorIngestion=not-found; providerInvocation=false` });
       await this.ctx.storage.put(nonceKey, { expiresAt: handoff.expiresAt });
-      const identitySnapshot = this.requireIdentity().getRecoverySnapshot();
-      const session: AuthoritySession = { realmId: identitySnapshot.realm.id, principalId: `mirror-provider:${mirror.provider}`, actorId: `mirror:${mirror.id}`, sessionId: `mirror-handoff:${handoff.nonce}`, clientId: "anyam-mirror-coordinator", authorizationEpoch: identitySnapshot.realm.authorizationEpoch, kind: "mirror" };
+      const session: AuthoritySession = { realmId: identitySnapshot.realm.id, principalId: `mirror-provider:${handoff.provider}`, actorId: `mirror:${mirrorId}`, sessionId: `mirror-handoff:${handoff.nonce}`, clientId: "anyam-mirror-coordinator", authorizationEpoch: identitySnapshot.realm.authorizationEpoch, kind: "mirror" };
       const coordinator = new AuthorityPlaneCoordinator(current);
       const result = coordinator.execute(handoff.command, session);
       await this.persistAuthoritySnapshot(current, coordinator.snapshot());
-      return coordinatorJson({ ...result, provenance: { mirrorId: mirror.id, provider: mirror.provider, handoffKeyId: handoff.keyId, nonce: handoff.nonce }, credentialFree: true, canonicalWrite: false, receipt: `${result.receipt}; authority=mirror-ingestion; signedHandoff=true; canonicalWrite=false` }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
+      return coordinatorJson({ ...result, provenance: { realmId: handoff.realmId, installationId: handoff.installationId, audience: handoff.audience, issuer: handoff.issuer, provider: handoff.provider, remoteRepository: handoff.remoteRepository, mirrorId: handoff.mirrorId, deliveryId: handoff.deliveryId, proposalKey: handoff.proposalKey, handoffKeyId: handoff.keyId, keyRole: verification.keyRole, nonce: handoff.nonce, issuedAt: handoff.issuedAt, expiresAt: handoff.expiresAt }, credentialFree: true, canonicalWrite: false, receipt: `${result.receipt}; authority=mirror-ingestion; signedHandoff=true; protocol=${MIRROR_INGESTION_PROTOCOL}; maxLifetimeReceipt=${maxLifetimeReceipt}; clockSkewReceipt=${clockSkewReceipt}; canonicalWrite=false` }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
     });
   }
 

@@ -468,6 +468,15 @@ accepted through the generic Authority or human REST command surface; the
 adapter must use the signed internal Mirror handoff after RepositoryDriver
 observation.
 
+The handoff is `anyam.mirror-ingestion/v2`. It is an audience-bound capability,
+not a Realm-wide bearer message: Realm, installation, issuer/provider,
+repository, Mirror, delivery, proposal, issued/expiry window, nonce, and the
+typed command are signed together. `/internal/mirrors/ingest` verifies those
+bindings against the current Mirror and accepts only the active key or an
+explicitly configured rotation-overlap key. Lifetime and clock-skew values
+must be configured with receipts; expired nonces are compacted before replay
+checks.
+
 The owner-authenticated Agent delegation surface accepts an explicit
 Project/Workspace/Change resource, mounted Source Space IDs, agent identity
 metadata, non-promotional capabilities/effects, allowed `realm-api`/`git`/`mcp`

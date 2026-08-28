@@ -20,6 +20,10 @@
     "ANYAM_GITHUB_APP_REQUEST_TIMEOUT_MS": "10000",
     "ANYAM_GITHUB_APP_REQUEST_TIMEOUT_RECEIPT": "qualification-tripwire; requestTimeoutMs=10000; remeasure-before-production",
     "ANYAM_MIRROR_HANDOFF_KEY_ID": "mirror-handoff-v1",
+    "ANYAM_MIRROR_HANDOFF_MAX_LIFETIME_MS": "300000",
+    "ANYAM_MIRROR_HANDOFF_MAX_LIFETIME_RECEIPT": "qualification-tripwire; handoffMaxLifetimeMs=300000; remeasure-before-production",
+    "ANYAM_MIRROR_HANDOFF_CLOCK_SKEW_MS": "30000",
+    "ANYAM_MIRROR_HANDOFF_CLOCK_SKEW_RECEIPT": "qualification-tripwire; clockSkewMs=30000; remeasure-before-production",
     "ANYAM_GITHUB_PRODUCER_ENVELOPE_BYTES_LIMIT": "2097152",
     "ANYAM_GITHUB_PRODUCER_ENVELOPE_BYTES_RECEIPT": "qualification-tripwire; envelopeBytesLimit=2097152; remeasure-before-production"
   },

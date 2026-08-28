@@ -21,7 +21,7 @@ provider, repository, and Project View context but no Workspace.
   provider Mirror sync or reconciliation commands.
 - Local mirror fixtures use an explicitly named `anyam-mirror-fixture` seam and
   are not hosted ingestion.
-- Hosted ingestion uses a short-lived HMAC-signed `anyam.mirror-ingestion/v1`
+- Hosted ingestion uses a short-lived, audience-bound HMAC-signed `anyam.mirror-ingestion/v2`
   handoff with a one-time nonce.
 - A `MirrorRepositoryObservation` records the explicit provider proposal
   context and is required before the internal path creates a Change Revision.

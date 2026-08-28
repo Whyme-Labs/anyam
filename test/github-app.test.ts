@@ -421,6 +421,7 @@ test("GitHub Mirror producer re-inspects a push, signs the exact handoff, and de
   const producer = new GitHubMirrorProducer({
     adapter: value,
     mirror: producerMirror(),
+    realmId: "realm:github-producer",
     repositoryId: "repository:producer",
     projectViewId,
     canonicalProjectRevisionId: "project-revision:producer:one",
@@ -430,7 +431,7 @@ test("GitHub Mirror producer re-inspects a push, signs the exact handoff, and de
     handoffSecret: "fixture-mirror-secret",
     ingest: async (handoff) => {
       handoffCount += 1;
-      captured = await verifyMirrorIngestionHandoff({ value: handoff, keyId: "mirror-key-v1", secret: "fixture-mirror-secret", now: Date.parse("2026-08-27T01:00:00.000Z") });
+      captured = await verifyMirrorIngestionHandoff({ value: handoff, keyId: "mirror-key-v1", secret: "fixture-mirror-secret", expectedRealmId: "realm:github-producer", expectedInstallationId: "installation:github-app", expectedAudience: "anyam-realm-mirror-ingestion", expectedIssuer: "github-app:installation:github-app", expectedProvider: "github", expectedRemoteRepository: "acme/video-player", expectedMirrorId: "mirror:github-producer", expectedDeliveryId: "delivery:producer-push", expectedProposalKey: "ref:refs/heads/main", now: Date.parse("2026-08-27T01:00:00.000Z") });
       if (!captured.valid) return { status: "blocked", receipt: captured.receipt, recoveryAction: captured.recoveryAction };
       const authorityResult = execute(captured.handoff.command, mirrorSession);
       return { status: authorityResult.status === "succeeded" ? "succeeded" : "blocked", receipt: authorityResult.receipt, ...(authorityResult.recoveryAction ? { recoveryAction: authorityResult.recoveryAction } : {}) };
@@ -468,6 +469,7 @@ test("GitHub Mirror producer maps pull-request deliveries and keeps failed inges
   const producer = new GitHubMirrorProducer({
     adapter: value,
     mirror: producerMirror(),
+    realmId: "realm:github-producer",
     repositoryId: "repository:producer",
     projectViewId: "project-view:producer",
     canonicalProjectRevisionId: "project-revision:producer:one",
@@ -499,7 +501,7 @@ test("GitHub Mirror producer refuses force-push/deletion without signed ingestio
   api.commits.oid = PRODUCER_COMMIT_REWRITTEN;
   api.compareStatus = "diverged";
   let ingested = false;
-  const producer = new GitHubMirrorProducer({ adapter: value, mirror: producerMirror(), repositoryId: "repository:producer", projectViewId: "project-view:producer", canonicalProjectRevisionId: "project-revision:producer:one", canonicalRefs: refs([["refs/heads/main", PRODUCER_COMMIT_ONE]]), installationId: "installation:github-app", handoffKeyId: "mirror-key-v1", handoffSecret: "fixture-mirror-secret", ingest: async () => { ingested = true; return { status: "succeeded", receipt: "unexpected" }; } });
+  const producer = new GitHubMirrorProducer({ adapter: value, mirror: producerMirror(), realmId: "realm:github-producer", repositoryId: "repository:producer", projectViewId: "project-view:producer", canonicalProjectRevisionId: "project-revision:producer:one", canonicalRefs: refs([["refs/heads/main", PRODUCER_COMMIT_ONE]]), installationId: "installation:github-app", handoffKeyId: "mirror-key-v1", handoffSecret: "fixture-mirror-secret", ingest: async () => { ingested = true; return { status: "succeeded", receipt: "unexpected" }; } });
   const body = JSON.stringify({ ref: "refs/heads/main", before: PRODUCER_COMMIT_ONE, after: PRODUCER_COMMIT_REWRITTEN, forced: true, deleted: false, repository: { full_name: "acme/video-player" }, installation: { id: "installation:github-app" } });
   const result = await producer.processWebhook({ body, event: "push", deliveryId: "delivery:producer-force", signature: signed(body, "fixture-webhook-secret"), secret: "fixture-webhook-secret", mirrorId: "mirror:github-producer", mappedRemoteRefs: ["refs/heads/main"] });
   assert.equal(result.status, "blocked");
@@ -517,10 +519,10 @@ test("GitHub Mirror ingestion HTTP transport accepts only a successful internal 
       return new Response(JSON.stringify({ status: "succeeded" }), { status: 200 });
     },
   });
-  const handoff = { protocol: "anyam.mirror-ingestion/v1", keyId: "mirror-key-v1", nonce: "nonce:test", expiresAt: "2026-08-27T01:05:00.000Z", command: { protocol: "anyam.authority-command/v1", command: "mirror.sync", idempotencyKey: "idempotency:test", payload: {} }, signature: "opaque" } as const;
+  const handoff = { protocol: "anyam.mirror-ingestion/v2", keyId: "mirror-key-v1", nonce: "nonce:test", realmId: "realm:test", installationId: "installation:github-app", audience: "anyam-realm-mirror-ingestion", issuer: "github-app:installation:github-app", provider: "github", remoteRepository: "acme/video-player", mirrorId: "mirror:github", deliveryId: "delivery:test", proposalKey: "42", issuedAt: "2026-08-27T01:00:00.000Z", expiresAt: "2026-08-27T01:05:00.000Z", command: { protocol: "anyam.authority-command/v1", command: "mirror.sync", idempotencyKey: "idempotency:test", payload: { mirrorId: "mirror:github", delivery: { provider: "github", installationId: "installation:github-app", remoteRepository: "acme/video-player", deliveryId: "delivery:test", proposalKey: "42" }, externalProposal: { provider: "github", installationId: "installation:github-app", remoteRepository: "acme/video-player", proposalKey: "42" } } }, signature: "opaque" } as const;
   const result = await transport(handoff);
   assert.equal(result.status, "succeeded");
-  assert.match(requestBody, /anyam\.mirror-ingestion\/v1/u);
+  assert.match(requestBody, /anyam\.mirror-ingestion\/v2/u);
   const rejected = createGitHubMirrorIngestionHttpTransport({ baseUrl: "https://realm.example", fetchImpl: async () => new Response(JSON.stringify({ status: "blocked" }), { status: 409 }) });
   const rejectedResult = await rejected(handoff);
   assert.equal(rejectedResult.status, "blocked");

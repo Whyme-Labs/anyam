@@ -88,6 +88,16 @@ export type AnyamRealmOAuthEnv = CustomerRealmWorkerEnv & {
   ANYAM_MIRROR_HANDOFF_KEY_ID?: string;
   /** Secret shared only with the internal Mirror provider adapter. */
   ANYAM_MIRROR_HANDOFF_SECRET?: string;
+  /** Optional previous key accepted only during an explicit rotation overlap. */
+  ANYAM_MIRROR_HANDOFF_PREVIOUS_KEY_ID?: string;
+  ANYAM_MIRROR_HANDOFF_PREVIOUS_SECRET?: string;
+  /** Provider installation identity bound into every signed Mirror handoff. */
+  ANYAM_MIRROR_HANDOFF_INSTALLATION_ID?: string;
+  /** Bound handoff lifetime and clock-skew tripwires. */
+  ANYAM_MIRROR_HANDOFF_MAX_LIFETIME_MS?: string;
+  ANYAM_MIRROR_HANDOFF_MAX_LIFETIME_RECEIPT?: string;
+  ANYAM_MIRROR_HANDOFF_CLOCK_SKEW_MS?: string;
+  ANYAM_MIRROR_HANDOFF_CLOCK_SKEW_RECEIPT?: string;
   /** GitHub App webhook secret used only at the public wake-up ingress. */
   ANYAM_GITHUB_APP_WEBHOOK_SECRET?: string;
   /** Exact selected GitHub repository accepted by the webhook boundary. */

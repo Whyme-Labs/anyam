@@ -20,6 +20,7 @@ import {
   type RealmIdentityPolicy,
 } from "../identity/realm.ts";
 import type { ExtensionAuthorization } from "../extensions/registry.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 export type GovernanceProfileAuthorization = ExtensionAuthorization;
 
@@ -260,21 +261,7 @@ function exportDigest(bundle: Omit<GovernanceProfileExport, "integrityDigest">):
 }
 
 function credentialField(value: unknown): string | undefined {
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = credentialField(item);
-      if (found) return found;
-    }
-    return undefined;
-  }
-  if (typeof value !== "object" || value === null) return undefined;
-  for (const [key, nested] of Object.entries(value)) {
-    const lower = key.toLowerCase();
-    if (lower !== "credentialfree" && /token|password|secret|credential|privatekey|accesskey/.test(lower)) return key;
-    const found = credentialField(nested);
-    if (found) return found;
-  }
-  return undefined;
+  return scanCredentialMaterial(value)?.path;
 }
 
 export function verifyGovernanceProfileExport(bundle: GovernanceProfileExport): GovernanceProfileExport {
@@ -305,7 +292,7 @@ export function verifyGovernanceProfileExport(bundle: GovernanceProfileExport): 
       message: `Governance Profile export contains credential-shaped field ${credentialKey}.`,
       affectedObject: bundle.exportId,
       recoveryAction: "remove credential material and regenerate the credential-free export",
-      receipt: `credentialField=${credentialKey}; credentialFree=true required`,
+      receipt: `credentialField=${credentialKey}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; credentialFree=true required`,
     });
   }
   if (governanceProfileDigest(bundle.profile) !== bundle.profile.digest) {

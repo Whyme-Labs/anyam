@@ -69,6 +69,7 @@ import {
 } from "./promotion-execution.ts";
 import { runnerResultDigest, runnerResultMessage, verifyRunnerResultSignature } from "../execution/runner-proof.ts";
 import type { RunnerResult } from "../execution/runner.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 export const AUTHORITY_PLANE_PROTOCOL = "anyam.authority-plane/v1" as const;
 export const AUTHORITY_COMMAND_PROTOCOL = "anyam.authority-command/v1" as const;
@@ -249,12 +250,12 @@ function optionalString(value: unknown): string | undefined {
 
 function receiptString(value: unknown, field: string): string {
   const receipt = requiredString(value, field);
-  if (/(?:access|refresh|provider|api)?[_ -]?token\s*[:=]|bearer\s+|client[_ -]?secret\s*[:=]|password\s*[:=]|authorization\s*[:=]|private[_ -]?key\s*[:=]/i.test(receipt)) {
+  if (scanCredentialMaterial(receipt)) {
     throw new AuthorityPlaneError({
       code: "invalid_request",
       message: `${field} contains credential-like material and cannot be persisted.`,
       recoveryAction: `send a digest-only ${field} receipt without token, secret, password, authorization, or key material; no authority transition was accepted`,
-      receipt: `${field}=credential-material-rejected; transition=not-applied`,
+      receipt: `${field}=credential-material-rejected; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; transition=not-applied`,
     });
   }
   return receipt;

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { Artifact } from "../kernel/contracts.ts";
 import type { ImmutableRelease } from "../delivery/promotion.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 export const WORKER_RELEASE_MANIFEST_PROTOCOL = "anyam.worker-release-manifest/v1" as const;
 
@@ -158,8 +159,12 @@ function digestString(value: string, field: string): string {
 }
 
 function validateProviderFields(fields: Readonly<Record<string, string>> | undefined, field: string): void {
+  const finding = scanCredentialMaterial(fields, field);
+  if (finding) {
+    throw new WorkerReleaseManifestError({ code: "invalid", message: `${field} contains credential-shaped provider metadata.`, recoveryAction: "record only non-secret provider resource identities and configuration fields in the Worker Release Manifest", receipt: `field=${field}; fieldPath=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; credentialMaterialStored=false; manifest=invalid; providerMutation=false` });
+  }
   for (const [key, value] of Object.entries(fields ?? {})) {
-    if (!key.trim() || !value.trim() || /(?:token|secret|password|credential|jwt|private[_-]?key)/iu.test(key)) {
+    if (!key.trim() || !value.trim()) {
       throw new WorkerReleaseManifestError({ code: "invalid", message: `${field} contains credential-shaped provider metadata.`, recoveryAction: "record only non-secret provider resource identities and configuration fields in the Worker Release Manifest", receipt: `field=${field}; providerField=${key}; credentialMaterialStored=false; manifest=invalid; providerMutation=false` });
     }
   }

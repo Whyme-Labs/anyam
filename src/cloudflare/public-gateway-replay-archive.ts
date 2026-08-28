@@ -5,6 +5,7 @@ import {
   type PublicGatewayReplayArchiveReceipt,
   type PublicGatewayRequestTombstone,
 } from "./public-gateway.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 export type PublicGatewayReplayArchiveObject = {
   protocol: typeof PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL;
@@ -229,6 +230,8 @@ export class CloudflarePublicGatewayReplayArchive {
     if (!parsed || typeof parsed !== "object") throw invalidStoredObject("The replay archive object is not an object.", `key=${key}; object=invalid`);
     const candidate = parsed as Partial<PublicGatewayReplayArchiveObject>;
     if (candidate.protocol !== PUBLIC_GATEWAY_REPLAY_ARCHIVE_PROTOCOL || typeof candidate.requestId !== "string" || !candidate.tombstone || typeof candidate.digest !== "string" || typeof candidate.bytes !== "number") throw invalidStoredObject("The replay archive object has an unsupported shape.", `key=${key}; protocol=${String(candidate.protocol ?? "missing")}; shape=invalid`);
+    const finding = scanCredentialMaterial(candidate, "archive");
+    if (finding) throw invalidStoredObject("The replay archive object contains credential material.", `key=${key}; field=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; integrity=false`);
     const calculatedDigest = await digest(unsignedObject(candidate as PublicGatewayReplayArchiveObject));
     if (calculatedDigest !== candidate.digest) throw invalidStoredObject("The replay archive object failed content-digest verification.", `key=${key}; recordedDigest=${candidate.digest}; calculatedDigest=${calculatedDigest}; integrity=false`);
     return candidate as PublicGatewayReplayArchiveObject;

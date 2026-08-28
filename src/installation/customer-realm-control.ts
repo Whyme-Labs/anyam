@@ -9,6 +9,7 @@ import {
   type CustomerRealmProjectImporter,
   type CustomerRealmProviderAuthorization,
 } from "./customer-realm.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 export const CUSTOMER_REALM_CONTROL_PROTOCOL = "anyam.customer-realm-control/v1" as const;
 
@@ -159,7 +160,8 @@ function providerAuthorization(value: unknown, accountId: string, now = new Date
   if (!/^sha256:[0-9a-f]{64}$/.test(authorization.authorizationDigest)) throw new CustomerRealmControlError({ code: "invalid_request", message: "Provider authorization digest is not an immutable SHA-256 receipt.", recoveryAction: "record the provider credential digest without sending the credential to Anyam", receipt: "authorizationDigest=sha256:64-lowercase-hex required" });
   if (!Number.isFinite(Date.parse(authorization.expiresAt))) throw new CustomerRealmControlError({ code: "invalid_request", message: "Provider authorization expiry is not a valid timestamp.", recoveryAction: "renew the customer provider session and retry", receipt: "providerAuthorization.expiresAt=timestamp required" });
   if (Date.parse(authorization.expiresAt) <= now.getTime()) throw new CustomerRealmControlError({ code: "unauthorized", message: "Provider authorization has expired; no customer provider operation was attempted.", recoveryAction: "renew the customer provider session and retry the same command identity", receipt: "providerAuthorization=expired; credentialStoredByAnyam=false" });
-  if (Object.keys(candidate).some((key) => /token|password|secret|credential/i.test(key))) throw new CustomerRealmControlError({ code: "invalid_request", message: "Provider authorization contains credential material; no provider credential was accepted.", recoveryAction: "send only the provider authorization digest and receipt", receipt: "credential-material=reject" });
+  const finding = scanCredentialMaterial(candidate, "providerAuthorization");
+  if (finding) throw new CustomerRealmControlError({ code: "invalid_request", message: "Provider authorization contains credential material; no provider credential was accepted.", recoveryAction: "send only the provider authorization digest and receipt", receipt: `credential-material=reject; field=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}` });
   return authorization;
 }
 
@@ -378,7 +380,8 @@ function recoveryBody(body: Record<string, unknown>): { method: CustomerRealmOwn
   const method = requiredString(recovery.method, "recovery.method") as CustomerRealmOwner["recoveryMethod"];
   const enrollmentReceipt = requiredString(recovery.enrollmentReceipt, "recovery.enrollmentReceipt");
   const materialDigest = recovery.materialDigest === undefined ? undefined : requiredString(recovery.materialDigest, "recovery.materialDigest");
-  if (Object.keys(recovery).some((key) => /token|password|secret|credential|code/i.test(key))) throw new CustomerRealmControlError({ code: "invalid_request", message: "Owner recovery input contains recovery material; no recovery secret was accepted.", recoveryAction: "send only the external recovery receipt and optional material digest", receipt: "recovery-material=reject" });
+  const finding = scanCredentialMaterial(recovery, "recovery");
+  if (finding) throw new CustomerRealmControlError({ code: "invalid_request", message: "Owner recovery input contains recovery material; no recovery secret was accepted.", recoveryAction: "send only the external recovery receipt and optional material digest", receipt: `recovery-material=reject; field=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}` });
   return { method, enrollmentReceipt, ...(materialDigest ? { materialDigest } : {}) };
 }
 

@@ -6,6 +6,7 @@ import {
   REPOSITORY_OBSERVATION_PROTOCOL,
   type RepositoryObservationRequest,
 } from "../../../src/portability/repository-observation.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
 
 export const REPOSITORY_DRIVER_PROTOCOL = "anyam.repository-driver/v1" as const;
 export const REPOSITORY_DRIVER_SNAPSHOT_PROTOCOL = "anyam.repository-driver-snapshot/v2" as const;
@@ -79,22 +80,9 @@ function nonEmpty(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-const SENSITIVE_KEY_PATTERN = /^(?:token|secret|password|authorization|private[_ -]?key)$/iu;
-const CREDENTIAL_TEXT_PATTERN = /(?:\b(?:token|secret|password|authorization|private[_ -]?key)\b["']?\s*[:=]\s*|\bBearer\s+\S+|-----BEGIN [^-]+ PRIVATE KEY-----)/iu;
-
-function containsCredentialMaterial(value: unknown): boolean {
-  if (typeof value === "string") return CREDENTIAL_TEXT_PATTERN.test(value);
-  if (Array.isArray(value)) return value.some(containsCredentialMaterial);
-  if (value === null || typeof value !== "object") return false;
-  return Object.entries(value).some(([key, entry]) => {
-    if (SENSITIVE_KEY_PATTERN.test(key) && typeof entry === "string" && entry !== "not-printed" && entry !== "not-issued") return true;
-    return containsCredentialMaterial(entry);
-  });
-}
-
 function safeReceipt(value: unknown): string | undefined {
   const receipt = nonEmpty(value);
-  if (!receipt || containsCredentialMaterial(receipt)) return undefined;
+  if (!receipt || scanCredentialMaterial(receipt)) return undefined;
   return receipt;
 }
 
@@ -208,7 +196,7 @@ function json(value: unknown, status = 200): Response {
 }
 
 function failure(status: "blocked" | "unavailable", code: string, recoveryAction: string, receipt: string, httpStatus: number): Response {
-  return json({ protocol: REPOSITORY_OBSERVATION_PROTOCOL, status, code, recoveryAction, receipt: `${receipt}; credentialMaterialStored=false`, credentialValues: "not-printed", canonicalWrite: false }, httpStatus);
+  return json({ protocol: REPOSITORY_OBSERVATION_PROTOCOL, status, code, recoveryAction, receipt: `${receipt}; credentialScanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; credentialMaterialStored=false`, credentialValues: "not-printed", canonicalWrite: false }, httpStatus);
 }
 
 function requestFailure(code: string, message: string, recoveryAction: string, receipt: string): Response {
@@ -332,7 +320,7 @@ async function observe(request: Request, env: Env, config: DriverConfiguration):
   if (mismatches.length > 0) return failure("blocked", "repository_driver_snapshot_mismatch", "inspect the exact provider head, tree, ref, base, object format, and ancestry; publish a new immutable snapshot before retrying", `repositoryDriver=${REPOSITORY_DRIVER_PROTOCOL}; repository=${manifest.repositoryId}; context=workspace:${observationRequest.workspaceId}; generation=${manifest.generation}; mismatch=${mismatches.join(",")}; providerMutation=false`, 409);
   const claims = { protocol: REPOSITORY_OBSERVATION_PROTOCOL, repositoryId: manifest.repositoryId, sourceSpaceId: manifest.sourceSpaceId, workspaceId: manifest.context.kind === "workspace" ? manifest.context.workspaceId : observationRequest.workspaceId, projectViewId: manifest.context.kind === "workspace" ? manifest.context.projectViewId : observationRequest.projectViewId, objectFormat: manifest.objectFormat, symbolicRef: manifest.symbolicRef, commitOid: manifest.commitOid, treeOid: manifest.treeOid, baseCommitOid: manifest.baseCommitOid, ancestryVerified: true as const, observedAt: manifest.observedAt, receipt: `provider=anyam-r2-snapshot; repository=${manifest.repositoryId}; sourceSpace=${manifest.sourceSpaceId}; context=workspace:${observationRequest.workspaceId}; projectView=${observationRequest.projectViewId}; generation=${manifest.generation}; expiresAt=${manifest.expiresAt}; previousGeneration=${index.previousGeneration ?? "none"}; sourceReceipt=${manifest.receipt}; credentialMaterialStored=false` };
   const manifestDigest = await repositoryObservationDigest(claims);
-  return json({ protocol: REPOSITORY_OBSERVATION_PROTOCOL, status: "succeeded", observation: { ...claims, manifestDigest }, receipt: `repositoryDriver=${REPOSITORY_DRIVER_PROTOCOL}; repository=${manifest.repositoryId}; sourceSpace=${manifest.sourceSpaceId}; context=workspace:${observationRequest.workspaceId}; projectView=${observationRequest.projectViewId}; generation=${manifest.generation}; expiresAt=${manifest.expiresAt}; previousGeneration=${index.previousGeneration ?? "none"}; ancestry=verified; providerMutation=false; requestBudget=${config.limit}; sizingReceipt=${config.receipt}; credentialMaterialStored=false`, credentialValues: "not-printed", canonicalWrite: false });
+  return json({ protocol: REPOSITORY_OBSERVATION_PROTOCOL, status: "succeeded", observation: { ...claims, manifestDigest }, receipt: `repositoryDriver=${REPOSITORY_DRIVER_PROTOCOL}; repository=${manifest.repositoryId}; sourceSpace=${manifest.sourceSpaceId}; context=workspace:${observationRequest.workspaceId}; projectView=${observationRequest.projectViewId}; generation=${manifest.generation}; expiresAt=${manifest.expiresAt}; previousGeneration=${index.previousGeneration ?? "none"}; ancestry=verified; providerMutation=false; requestBudget=${config.limit}; sizingReceipt=${config.receipt}; credentialScanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; credentialMaterialStored=false`, credentialValues: "not-printed", canonicalWrite: false });
 }
 
 export default {
@@ -340,7 +328,7 @@ export default {
     const url = new URL(request.url);
     try {
       const config = configuration(env);
-      if (url.pathname === "/health" && request.method === "GET") return json({ protocol: REPOSITORY_DRIVER_PROTOCOL, snapshotProtocol: REPOSITORY_DRIVER_SNAPSHOT_PROTOCOL, indexProtocol: REPOSITORY_DRIVER_SNAPSHOT_INDEX_PROTOCOL, status: "ready", state: "r2-context-snapshot-driver", credentialValues: "not-printed", canonicalWrite: false, receipt: `repositoryDriver=${REPOSITORY_DRIVER_PROTOCOL}; snapshot=${REPOSITORY_DRIVER_SNAPSHOT_PROTOCOL}; index=${REPOSITORY_DRIVER_SNAPSHOT_INDEX_PROTOCOL}; context=workspace-or-mirror; storage=r2; providerCredentials=not-held; requestBudget=${config.limit}; sizingReceipt=${config.receipt}; credentialMaterialStored=false` });
+      if (url.pathname === "/health" && request.method === "GET") return json({ protocol: REPOSITORY_DRIVER_PROTOCOL, snapshotProtocol: REPOSITORY_DRIVER_SNAPSHOT_PROTOCOL, indexProtocol: REPOSITORY_DRIVER_SNAPSHOT_INDEX_PROTOCOL, status: "ready", state: "r2-context-snapshot-driver", credentialValues: "not-printed", canonicalWrite: false, receipt: `repositoryDriver=${REPOSITORY_DRIVER_PROTOCOL}; snapshot=${REPOSITORY_DRIVER_SNAPSHOT_PROTOCOL}; index=${REPOSITORY_DRIVER_SNAPSHOT_INDEX_PROTOCOL}; context=workspace-or-mirror; storage=r2; providerCredentials=not-held; requestBudget=${config.limit}; sizingReceipt=${config.receipt}; credentialScanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; credentialMaterialStored=false` });
       if (url.pathname !== "/observe") return json({ protocol: REPOSITORY_DRIVER_PROTOCOL, status: "blocked", code: "not_found", recoveryAction: "use POST /observe through the private RepositoryObserver service binding", receipt: "repositoryDriver=route-not-found; credentialMaterialStored=false", credentialValues: "not-printed", canonicalWrite: false }, 404);
       if (request.method !== "POST") return json({ protocol: REPOSITORY_DRIVER_PROTOCOL, status: "blocked", code: "method_not_allowed", recoveryAction: "use POST /observe", receipt: "repositoryDriver=post-required; credentialMaterialStored=false", credentialValues: "not-printed", canonicalWrite: false }, 405);
       if (request.headers.get(OBSERVER_PROTOCOL_HEADER) !== OBSERVER_PROTOCOL) return requestFailure("observer_protocol_required", "The RepositoryDriver only accepts requests from the qualified RepositoryObserver service binding.", "route the request through the private RepositoryObserver binding; no provider observation was attempted", `repositoryDriver=${REPOSITORY_DRIVER_PROTOCOL}; serviceBinding=observer-required; providerInvocation=false`);

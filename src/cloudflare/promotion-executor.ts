@@ -31,6 +31,7 @@ import {
   type PromotionHandoffKeyring,
 } from "./promotion-execution.ts";
 import { verifyPromotionHandoff, type PromotionHandoffNonceStore } from "./promotion-execution.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 /**
  * The executor is the customer-owned provider boundary. Authority sends the
@@ -167,27 +168,7 @@ function safeObject(value: unknown, field: string): Record<string, unknown> {
 }
 
 function credentialMaterial(value: unknown): string | undefined {
-  if (value === null || value === undefined) return undefined;
-  if (typeof value === "string") {
-    return /(?:bearer\s+[A-Za-z0-9._~-]{8,}|cfat_[A-Za-z0-9]+|(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*[^;\s]{4,})/iu.test(value)
-      ? "string"
-      : undefined;
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      const found = credentialMaterial(entry);
-      if (found) return found;
-    }
-    return undefined;
-  }
-  if (typeof value === "object") {
-    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      if (/(?:token|secret|password|credentials?|api[_-]?key)$/iu.test(key)) return key;
-      const found = credentialMaterial(entry);
-      if (found) return found;
-    }
-  }
-  return undefined;
+  return scanCredentialMaterial(value)?.path;
 }
 
 function allowedContextKeys(value: Record<string, unknown>): void {
@@ -340,7 +321,7 @@ function validateContext(value: unknown): PromotionExecutionContext {
     throw new PromotionExecutorInputError(
       "Promotion execution context contains caller-supplied credential material.",
       "remove provider credentials and send only the Authority-issued detached context; provider invocation was not attempted",
-      `credentialMaterial=${forbidden}; context=rejected; providerInvocation=false`,
+      `credentialMaterial=${forbidden}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; context=rejected; providerInvocation=false`,
     );
   }
   if (context.protocol !== PROMOTION_EXECUTION_PROTOCOL) {

@@ -6,6 +6,7 @@ import {
 } from "../kernel/contracts.ts";
 import { verifyRunnerResultSignature } from "../execution/runner-proof.ts";
 import type { GitHubActionsBridgeCapability } from "./github-actions-bridge.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 export const GITHUB_ACTIONS_BRIDGE_OUTBOUND_PROTOCOL = CONTRACT_VERSIONS.githubActionsBridgeOutbound;
 
@@ -184,7 +185,8 @@ function required(value: unknown, field: string): string {
 
 function safeReceipt(value: unknown, field: string): string {
   const receipt = required(value, field);
-  if (/(?:Bearer\s+\S+|(?:token|secret|password|api[_-]?key|private[_-]?key)\s*[=:]\s*\S+)/iu.test(receipt) || /-----BEGIN [^-]+ PRIVATE KEY-----/iu.test(receipt)) throw new OutboundBridgeError({ code: "credential_in_receipt", message: `${field} contains credential-shaped material.`, recoveryAction: "return a digest-only credential-free provider receipt", receipt: `${field}=credential-shaped; transition=not-applied; credentialMaterialStored=false` });
+  const finding = scanCredentialMaterial(receipt, field);
+  if (finding) throw new OutboundBridgeError({ code: "credential_in_receipt", message: `${field} contains credential-shaped material.`, recoveryAction: "return a digest-only credential-free provider receipt", receipt: `${field}=credential-shaped; fieldPath=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; transition=not-applied; credentialMaterialStored=false` });
   return receipt;
 }
 

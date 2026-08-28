@@ -19,6 +19,7 @@ import type {
   PromotionReconciliationCheckpoint,
   PromotionRecord,
 } from "../delivery/promotion.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 /**
  * The internal handoff is deliberately separate from promotion.request. A
@@ -213,25 +214,7 @@ function resultError(input: ConstructorParameters<typeof PromotionExecutionValid
 }
 
 function forbiddenCredentialMaterial(value: unknown): string | undefined {
-  if (value === null || value === undefined) return undefined;
-  if (typeof value === "string") {
-    return /(?:bearer\s+[A-Za-z0-9._~-]{8,}|cfat_[A-Za-z0-9]+|(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*[^;\s]{4,})/iu.test(value) ? "string" : undefined;
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      const found = forbiddenCredentialMaterial(entry);
-      if (found) return found;
-    }
-    return undefined;
-  }
-  if (typeof value === "object") {
-    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      if (/(?:token|secret|password|credentials?|api[_-]?key)$/iu.test(key)) return key;
-      const found = forbiddenCredentialMaterial(entry);
-      if (found) return found;
-    }
-  }
-  return undefined;
+  return scanCredentialMaterial(value)?.path;
 }
 
 function baseTargetState(target: Target): {
@@ -548,7 +531,7 @@ export function validatePromotionExecutionResult(input: PromotionExecutionContex
       code: "credential-material",
       message: "Promotion execution result contains credential material or a credential-shaped field.",
       recoveryAction: "remove credential material; return provider IDs, digests, and safe receipts only",
-      receipt: `promotion=${input.promotion.id}; credentialMaterial=${forbidden}; targetMutation=false`,
+      receipt: `promotion=${input.promotion.id}; credentialMaterial=${forbidden}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; targetMutation=false`,
     });
   }
   if (result.checkpoint && result.checkpoint.idempotencyKey !== input.executionIdempotencyKey) {

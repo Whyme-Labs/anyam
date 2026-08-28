@@ -20,6 +20,7 @@ import { customerRealmOperatorPreflight, inspectCustomerRealmOperatorStatus, typ
 import { customerRealmControlRoomResponse } from "../../../src/cloudflare/control-room.ts";
 import { anyamBrandLockup, anyamBrandStyleTag } from "../../../src/brand.ts";
 import { parseMcpDeliveryBinding } from "./mcp-delivery-grant.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
 
 export const ANYAM_PASSKEY_OWNER_PROTOCOL = "anyam.passkey-owner/v1" as const;
 export const ANYAM_PASSKEY_CHALLENGE_TTL_SECONDS = 300;
@@ -589,8 +590,7 @@ type QualificationOperation = "delegate" | "credentials" | "revoke" | "recovery/
 type AgentDelegationOperation = "delegate" | "revoke";
 
 function credentialMaterialField(body: Record<string, unknown>): string | undefined {
-  const forbidden = ["token", "tokens", "credentials", "providerToken", "providerTokens", "accessToken", "refreshToken", "apiKey", "secret", "password"];
-  return Object.keys(body).find((key) => key !== "credentialClasses" && (forbidden.includes(key) || /(?:token|secret|password|api[_-]?key|credential)/iu.test(key)));
+  return scanCredentialMaterial(body, "body")?.path;
 }
 
 async function qualificationRequest(request: Request, env: AnyamRealmOAuthEnv, operation: QualificationOperation): Promise<Response> {
@@ -647,7 +647,7 @@ async function agentCredentialExchangeRequest(request: Request, env: AnyamRealmO
     return json({ code: "invalid_request", recoveryAction: "Send the exact Agent, Session, Task, Grant, Project, Workspace, Change, Source Space, and credentialClasses fields as one JSON object.", receipt: "credentialExchange=request=json-object-required; credentialMaterialStored=false" }, 422);
   }
   const forbiddenField = credentialMaterialField(body);
-  if (forbiddenField) return json({ code: "credential_exchange_material_rejected", recoveryAction: "Remove provider credentials and token material; request only the exact approved credential classes.", receipt: `field=${forbiddenField}; credentialExchange=not-created; credentialMaterialStored=false` }, 422);
+  if (forbiddenField) return json({ code: "credential_exchange_material_rejected", recoveryAction: "Remove provider credentials and token material; request only the exact approved credential classes.", receipt: `field=${forbiddenField}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; credentialExchange=not-created; credentialMaterialStored=false` }, 422);
   try {
     const coordinator = await realmCoordinatorRequest(env, "/identity/agent/delegation/credentials", { ...body, humanSessionId: ownerState.session.kernelSessionId });
     if (coordinator.status !== "credentials-issued" || !Array.isArray(coordinator.credentials) || !coordinator.identity || typeof coordinator.identity !== "object" || (coordinator.identity as Record<string, unknown>).credentialFree !== true) throw new Error("credential_exchange_invalid_coordinator_response");

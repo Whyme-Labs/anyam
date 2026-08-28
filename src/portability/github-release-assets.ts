@@ -15,6 +15,7 @@ import {
   type ReleaseAssetTarget,
   type ReleaseTargetAdapter,
 } from "../delivery/release-publication.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 /**
  * GitHub is a replaceable publication projection. This adapter never receives
@@ -173,7 +174,8 @@ function safeAssetName(value: string): string {
 
 function safeReceipt(value: string, field: string): string {
   const receipt = required(value, field);
-  if (/(token|password|secret|credential)\s*[=:]/iu.test(receipt)) throw new Error(`${field}=credential-material`);
+  const finding = scanCredentialMaterial(receipt, field);
+  if (finding) throw new Error(`${field}=credential-material; fieldPath=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}`);
   return receipt;
 }
 

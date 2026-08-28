@@ -6,6 +6,7 @@ import {
   type PublicIntakePolicy,
 } from "../disclosure/public-intake.ts";
 import { CONTRACT_VERSIONS } from "../kernel/contracts.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, credentialMaterialReceipt, scanCredentialMaterial } from "../security/credential-material.ts";
 
 export const PUBLIC_GATEWAY_PROTOCOL = CONTRACT_VERSIONS.publicGateway;
 export const PUBLIC_GATEWAY_LEDGER_PROTOCOL = CONTRACT_VERSIONS.publicGatewayLedger;
@@ -200,6 +201,8 @@ export function parsePublicGatewayProviderOutcome(value: unknown): PublicGateway
   if (value === "timeout") return { status: "timeout", receipt: "provider=fixture-driver; timeout=simulated; retryable=true" };
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   const candidate = value as Record<string, unknown>;
+  const finding = scanCredentialMaterial(candidate, "provider");
+  if (finding) return { status: "abuse", outcome: "denied", retryable: false, receipt: `provider=invalid; credentialMaterial=blocked; ${credentialMaterialReceipt(finding, "return a digest-only provider receipt")}` };
   if (candidate.status !== "abuse") return undefined;
   if (candidate.outcome !== "challenge" && candidate.outcome !== "denied" && candidate.outcome !== "unavailable") {
     return { status: "abuse", outcome: "denied", retryable: false, receipt: "provider=invalid; outcome=not-recognized; failClosed=true" };
@@ -341,6 +344,15 @@ export function parsePublicGatewayLedgerRetentionPolicy(value: unknown): PublicG
     });
   }
   const candidate = value as Record<string, unknown>;
+  const credentialFinding = scanCredentialMaterial(candidate, "ledgerRetention");
+  if (credentialFinding) {
+    throw new PublicGatewayError({
+      code: "invalid-request",
+      message: "Public Gateway ledger retention contains credential-like material.",
+      recoveryAction: "return a digest-only retention policy without credential material",
+      receipt: `ledgerRetention=credential-material-rejected; field=${credentialFinding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}`,
+    });
+  }
   if (candidate.protocol !== PUBLIC_GATEWAY_LEDGER_PROTOCOL) {
     throw new PublicGatewayError({
       code: "invalid-request",

@@ -42,6 +42,7 @@ import type {
   RepositoryExportReceipt,
   RepositoryHandle,
 } from "./repository-driver.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 export type PortabilityBudgetReceipt = {
   name: string;
@@ -597,7 +598,7 @@ export function verifyProjectExportManifest(manifest: ProjectExport): Portabilit
       affectedObject: manifest.exportId || "export",
       checkpointId: "checkpoint:manifest:credentials",
       recoveryAction: "remove credential material and regenerate the export",
-      budget: budgetReceipt("a credential-free Project Export", "credential field detected in manifest"),
+      budget: budgetReceipt("a credential-free Project Export", `credential field detected in manifest; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}`),
     };
   }
   const actualDigest = manifestDigest(manifest);
@@ -617,21 +618,7 @@ export function verifyProjectExportManifest(manifest: ProjectExport): Portabilit
 }
 
 function credentialField(value: unknown): string | undefined {
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = credentialField(item);
-      if (found) return found;
-    }
-    return undefined;
-  }
-  if (typeof value !== "object" || value === null) return undefined;
-  for (const [key, nested] of Object.entries(value)) {
-    const lower = key.toLowerCase();
-    if (lower !== "credentialfree" && lower !== "secretusealiases" && /token|password|secret|credential/.test(lower)) return key;
-    const found = credentialField(nested);
-    if (found) return found;
-  }
-  return undefined;
+  return scanCredentialMaterial(value)?.path;
 }
 
 export function isProjectExportCredentialFree(manifest: ProjectExport): boolean {

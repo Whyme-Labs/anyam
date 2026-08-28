@@ -9,6 +9,7 @@ import { promotionRequestCommand, promotionRequestValue, PROMOTION_REQUEST_COMMA
 import { MCP_DELIVERY_SCOPE_BY_OPERATION } from "./mcp-delivery-grant.ts";
 import type { Capability } from "../../../src/identity/realm.ts";
 import type { ResourceRef } from "../../../src/kernel/contracts.ts";
+import { credentialMaterialReceipt, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
 
 export const ANYAM_MCP_PROTOCOL_VERSION = "2025-06-18" as const;
 export const ANYAM_MCP_PROTOCOL = "anyam.remote-mcp/v1" as const;
@@ -124,10 +125,8 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
 
 function coordinatorDetailReceipt(error: unknown): string {
   const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
-  const redacted = detail
-    .replace(/(Bearer\s+)[^\s;]+/giu, "$1<redacted>")
-    .replace(/((?:token|secret|credential|password|privateKey)\s*[=:]\s*)[^\s;,]+/giu, "$1<redacted>");
-  return `coordinatorDetail=${encodeURIComponent(redacted)}`;
+  const finding = scanCredentialMaterial(detail, "coordinatorDetail");
+  return finding ? credentialMaterialReceipt(finding, "inspect the owner-visible redacted coordinator receipt") : `coordinatorDetail=${encodeURIComponent(detail)}`;
 }
 
 function mcpJson(body: unknown, status = 200): Response {

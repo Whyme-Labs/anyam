@@ -14,6 +14,7 @@ import {
   type RealTeamGateVerificationOptions,
   type RealTeamTerminalChange,
 } from "./real-team-proof.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 export type {
   RealTeamAuthorityExport,
@@ -179,7 +180,8 @@ function receipt(value: unknown, key: string, blockers: RealTeamGateBlocker[], a
     blockers.push({ key, message: `${key} is incomplete.`, nextAction: `record status, receipt, observedAt, owner, and nextAction for ${key}` });
     return undefined;
   }
-  if (/(?:token|secret|password|private[_-]?key|bearer\s+)/iu.test(receiptValue)) blockers.push({ key, message: `${key} receipt contains credential-like material.`, nextAction: `replace ${key} with a digest-only credential-free receipt` });
+  const finding = scanCredentialMaterial(receiptValue, key);
+  if (finding) blockers.push({ key, message: `${key} receipt contains credential-like material.`, nextAction: `replace ${key} with a digest-only credential-free receipt; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}` });
   if (allowedOwners && !allowedOwners.has(owner)) blockers.push({ key: `${key}.owner`, message: `${key} owner ${owner} is not one of the named cohort participants.`, nextAction: `bind ${key}.owner to a named humanParticipantId in the cohort` });
   if (status !== "verified") blockers.push({ key, message: `${key} is ${status}, not verified.`, nextAction });
   return { status, receipt: receiptValue, observedAt, owner, nextAction };
@@ -591,7 +593,8 @@ export async function validateRealTeamGate(value: unknown, options: RealTeamGate
   const retentionRecordedAt = retention?.recordedAt ? utcTimestamp(retention.recordedAt, "retentionDecision.recordedAt", blockers) : undefined;
   if (retentionRecordedAt !== undefined && endedTimestamp !== undefined && retentionRecordedAt < endedTimestamp) push(blockers, "retentionDecision.recordedAt.window", "The retention decision was recorded before the trial ended.", "record the retention decision after the completed trial window");
   if (retentionRecordedAt !== undefined && retentionRecordedAt > now) push(blockers, "retentionDecision.recordedAt.future", "The retention decision is in the future.", "record the retention decision at or before the current UTC time");
-  if (/(?:token|secret|password|private[_-]?key|bearer\s+)/iu.test(string(retention?.receipt) ?? "")) push(blockers, "retentionDecision.receipt", "The retention receipt contains credential-like material.", "replace the retention receipt with a credential-free digest-only receipt");
+  const retentionReceiptFinding = scanCredentialMaterial(string(retention?.receipt) ?? "", "retentionDecision.receipt");
+  if (retentionReceiptFinding) push(blockers, "retentionDecision.receipt", "The retention receipt contains credential-like material.", `replace the retention receipt with a credential-free digest-only receipt; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}`);
   if (retentionDecision !== "continue") push(blockers, "retentionDecision.decision", `The team retention decision is ${retentionDecision ?? "missing"}; the adoption gate is not ready.`, "obtain an explicit continue decision from the named cohort");
 
   const cryptographicFailure = authority.cryptographicFailure || attestationVerification.cryptographicFailure || bundleIntegrity.cryptographicFailure;

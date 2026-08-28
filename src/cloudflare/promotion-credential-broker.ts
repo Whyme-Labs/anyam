@@ -7,6 +7,7 @@ import {
   type CloudflareWorkerCredentialObservation,
   type CloudflareWorkerTargetOperation,
 } from "./worker-target.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 /**
  * The broker is a customer-owned boundary. The Promotion executor can ask for
@@ -78,7 +79,11 @@ function requiredString(value: unknown, field: string): string {
 }
 
 function safeProviderErrors(response: CloudflareWorkerApiResponse<unknown>): string {
-  return [...response.errors, ...response.messages].map((error) => `${error.code ?? "unknown"}:${error.message.replace(/(?:cfat_[A-Za-z0-9]+|bearer\s+[A-Za-z0-9._~-]{8,})/giu, "[redacted]")}`).join(" | ") || `http-${response.status}`;
+  return [...response.errors, ...response.messages].map((error) => {
+    const finding = scanCredentialMaterial(error.message, "providerError");
+    const message = finding ? `credential-material-redacted; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}` : error.message;
+    return `${error.code ?? "unknown"}:${message}`;
+  }).join(" | ") || `http-${response.status}`;
 }
 
 function credentialProviderOperationId(operation: string, credentialId: string, sourceId: string): string {

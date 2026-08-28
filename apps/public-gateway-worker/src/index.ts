@@ -27,6 +27,7 @@ import {
 import { handlePublicGitRequest } from "../../../src/cloudflare/public-git-transport.ts";
 import { SmartHttpBudgetTracker, type SmartHttpBudgetPolicy } from "../../../src/portability/smart-http.ts";
 import { DurableSmartHttpBudgetCoordinator, emptySmartHttpBudgetCoordinatorState, handleSmartHttpBudgetCoordinatorRequest } from "../../../src/cloudflare/smart-http-budget-coordinator.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
 
 export interface Env {
   PUBLIC_GATEWAY_COORDINATOR: DurableObjectNamespace;
@@ -237,7 +238,10 @@ async function bodyObject(request: Request): Promise<JsonObject> {
     throw new Error("request body must be JSON");
   }
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("request body must be a JSON object");
-  return value as JsonObject;
+  const body = value as JsonObject;
+  const finding = scanCredentialMaterial(body, "request");
+  if (finding) throw new Error(`credential material is not accepted at ${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}`);
+  return body;
 }
 
 function gatewayStub(env: Env): DurableObjectStub {

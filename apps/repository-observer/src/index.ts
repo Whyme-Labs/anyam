@@ -6,6 +6,7 @@ import {
   REPOSITORY_OBSERVATION_PROTOCOL,
   verifyRepositoryObservation,
 } from "../../../src/portability/repository-observation.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
 
 export const REPOSITORY_OBSERVER_PROTOCOL = "anyam.repository-observer/v1" as const;
 
@@ -40,22 +41,9 @@ function json(value: unknown, status = 200): Response {
   });
 }
 
-const SENSITIVE_KEY_PATTERN = /^(?:token|secret|password|authorization|private[_ -]?key)$/iu;
-const CREDENTIAL_TEXT_PATTERN = /(?:\b(?:token|secret|password|authorization|private[_ -]?key)\b["']?\s*[:=]\s*|\bBearer\s+\S+|-----BEGIN [^-]+ PRIVATE KEY-----)/iu;
-
-function containsCredentialMaterial(value: unknown): boolean {
-  if (typeof value === "string") return CREDENTIAL_TEXT_PATTERN.test(value);
-  if (Array.isArray(value)) return value.some(containsCredentialMaterial);
-  if (value === null || typeof value !== "object") return false;
-  return Object.entries(value).some(([key, entry]) => {
-    if (SENSITIVE_KEY_PATTERN.test(key) && typeof entry === "string" && entry !== "not-printed" && entry !== "not-issued") return true;
-    return containsCredentialMaterial(entry);
-  });
-}
-
 function safeReceipt(value: unknown, _field: string): string | undefined {
   if (typeof value !== "string" || value.trim().length === 0) return undefined;
-  if (containsCredentialMaterial(value)) return undefined;
+  if (scanCredentialMaterial(value)) return undefined;
   return value.trim();
 }
 
@@ -70,7 +58,7 @@ function configuration(env: Env): ObserverConfiguration {
 }
 
 function sizingReceipt(config: ObserverConfiguration): string {
-  return `requestBudget=${config.requestBytesLimit}; sizingReceipt=${config.requestBytesReceipt}; transportTimeoutMs=${config.transportTimeoutMs}; timeoutSizingReceipt=${config.transportTimeoutReceipt}`;
+  return `requestBudget=${config.requestBytesLimit}; sizingReceipt=${config.requestBytesReceipt}; transportTimeoutMs=${config.transportTimeoutMs}; timeoutSizingReceipt=${config.transportTimeoutReceipt}; credentialScanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}`;
 }
 
 function timeoutError(timeoutMs: number, bytes: number): Error {
@@ -135,11 +123,11 @@ async function withTransportTimeout<T>(operation: () => Promise<T>, timeoutMs: n
 }
 
 function failure(input: ObserverFailure, httpStatus: number): Response {
-  return json({ protocol: REPOSITORY_OBSERVATION_PROTOCOL, status: input.status, code: input.code, ...(input.message ? { message: input.message } : {}), recoveryAction: input.recoveryAction, receipt: input.receipt, credentialValues: "not-printed", canonicalWrite: false }, httpStatus);
+  return json({ protocol: REPOSITORY_OBSERVATION_PROTOCOL, status: input.status, code: input.code, ...(input.message ? { message: input.message } : {}), recoveryAction: input.recoveryAction, receipt: `${input.receipt}; credentialScanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; credentialMaterialStored=false`, credentialValues: "not-printed", canonicalWrite: false }, httpStatus);
 }
 
 function requestFailure(code: string, message: string, recoveryAction: string, receipt: string): Response {
-  return failure({ status: "blocked", code, message, recoveryAction, receipt: `${receipt}; credentialMaterialStored=false` }, 422);
+  return failure({ status: "blocked", code, message, recoveryAction, receipt }, 422);
 }
 
 async function observe(request: Request, env: Env, config: ObserverConfiguration): Promise<Response> {
@@ -173,7 +161,7 @@ async function observe(request: Request, env: Env, config: ObserverConfiguration
     const timedOut = message.startsWith("repository_observer_transport_timeout:");
     return failure({ status: "unavailable", code: timedOut ? "repository_driver_response_timeout" : budget ? "repository_driver_response_budget_exceeded" : "repository_driver_response_invalid", recoveryAction: timedOut ? "repair the customer-owned RepositoryDriver response stream and retry within the configured transport timeout" : budget ? "reduce the customer-owned RepositoryDriver response to the configured observer budget or remeasure the tripwire" : "repair the customer-owned RepositoryDriver response and retry the same immutable observation", receipt: `repositoryObserver=driver-response-${timedOut ? "timeout" : budget ? "budget-exceeded" : "invalid"}; httpStatus=${driverResponse.status}; providerInvocation=true; ${sizingReceipt(config)}` }, 502);
   }
-  if (containsCredentialMaterial(driverBody)) return failure({ status: "unavailable", code: "repository_driver_response_credential_material", recoveryAction: "remove credential material from the customer-owned RepositoryDriver response and retry the same immutable observation", receipt: `repositoryObserver=driver-response-credential-material; httpStatus=${driverResponse.status}; providerInvocation=true; ${sizingReceipt(config)}` }, 502);
+  if (scanCredentialMaterial(driverBody)) return failure({ status: "unavailable", code: "repository_driver_response_credential_material", recoveryAction: "remove credential material from the customer-owned RepositoryDriver response and retry the same immutable observation", receipt: `repositoryObserver=driver-response-credential-material; httpStatus=${driverResponse.status}; providerInvocation=true; ${sizingReceipt(config)}` }, 502);
   const parsedResponse = parseRepositoryObservationServiceResponse(driverBody);
   if (!parsedResponse.valid) return failure({ status: "unavailable", code: parsedResponse.code, recoveryAction: parsedResponse.recoveryAction, receipt: `${parsedResponse.receipt}; providerInvocation=true; ${sizingReceipt(config)}` }, 502);
   const providerReceipt = safeReceipt(parsedResponse.response.receipt, "driver_receipt");

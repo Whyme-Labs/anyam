@@ -49,6 +49,7 @@ import { prepareHostedRevisionPublish, type HostedRevisionObservationInput } fro
 import { assertAuthoritySnapshotEquivalent, AuthoritySQLiteStore, type AuthoritySqlHost } from "../../../src/cloudflare/authority-sqlite.ts";
 import { verifyMirrorIngestionHandoff, type MirrorIngestionHandoff } from "../../../src/portability/mirror-observation.ts";
 import { GITHUB_WEBHOOK_INGRESS_PROTOCOL, type GitHubWebhookIngressEnvelope } from "../../../src/portability/github-webhook.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
 
 export type Env = AnyamRealmOAuthEnv;
 
@@ -370,9 +371,8 @@ function credentialExchangeClasses(body: CoordinatorRequestBody): CredentialClas
 }
 
 function rejectCredentialMaterial(body: CoordinatorRequestBody): void {
-  const forbidden = ["token", "tokens", "credentials", "providerToken", "providerTokens", "accessToken", "refreshToken", "apiKey", "secret", "password"] as const;
-  const field = Object.keys(body).find((key) => key !== "credentialClasses" && (forbidden.includes(key as typeof forbidden[number]) || /(?:token|secret|password|api[_-]?key|credential)/iu.test(key)));
-  if (field) throw new RealmIdentityError({ code: "credential_exchange.material_rejected", message: "Credential exchange accepts credential classes, not provider credentials or token material.", recoveryAction: "remove token or provider-credential fields and request only the exact approved credential classes", receipt: `field=${field}; credentialMaterial=not-accepted; credentialExchange=not-created` });
+  const finding = scanCredentialMaterial(body, "body");
+  if (finding) throw new RealmIdentityError({ code: "credential_exchange.material_rejected", message: "Credential exchange accepts credential classes, not provider credentials or token material.", recoveryAction: "remove token or provider-credential fields and request only the exact approved credential classes", receipt: `field=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; credentialMaterial=not-accepted; credentialExchange=not-created` });
 }
 
 function delegationBudget(body: CoordinatorRequestBody): Record<string, string | number> {
@@ -563,6 +563,8 @@ function recoverySnapshot(body: CoordinatorRequestBody): RealmRecoverySnapshot {
   if (value === null || typeof value !== "object" || Array.isArray(value) || (value as Record<string, unknown>).credentialFree !== true || Object.prototype.hasOwnProperty.call(value, "credentials")) {
     throw new RealmIdentityError({ code: "recovery.snapshot_invalid", message: "Recovery restore requires a credential-free Realm snapshot produced by this coordinator.", recoveryAction: "export a fresh credential-free snapshot and submit it without credential fields", receipt: "recoverySnapshot=credential-free-required" });
   }
+  const finding = scanCredentialMaterial(value, "snapshot");
+  if (finding) throw new RealmIdentityError({ code: "recovery.snapshot_invalid", message: "Recovery restore contains credential material.", recoveryAction: "export a fresh credential-free Realm snapshot and submit it without credential fields", receipt: `recoverySnapshot=credential-material-rejected; field=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}` });
   return value as RealmRecoverySnapshot;
 }
 
@@ -597,21 +599,7 @@ const AUTHORITY_RECOVERY_FIELDS = [
 ] as const;
 
 function authorityRecoveryCredentialField(value: unknown): string | undefined {
-  const pending: Array<{ value: unknown; path: string }> = [{ value, path: "snapshot" }];
-  const forbidden = /^(?:access|refresh|provider|api)?token$|^(?:client)?secret$|^password$|^credentials?$|^private[_-]?key$|^authorization(?:[_-]?header)?$/iu;
-  while (pending.length > 0) {
-    const current = pending.pop();
-    if (!current || current.value === null || typeof current.value !== "object") continue;
-    if (Array.isArray(current.value)) {
-      current.value.forEach((entry, index) => pending.push({ value: entry, path: `${current.path}[${index}]` }));
-      continue;
-    }
-    for (const [key, child] of Object.entries(current.value as Record<string, unknown>)) {
-      if (forbidden.test(key)) return `${current.path}.${key}`;
-      pending.push({ value: child, path: `${current.path}.${key}` });
-    }
-  }
-  return undefined;
+  return scanCredentialMaterial(value, "snapshot")?.path;
 }
 
 function authorityRecoverySnapshot(body: CoordinatorRequestBody, realmId: string): AuthorityPlaneSnapshot {
@@ -657,7 +645,7 @@ function authorityRecoverySnapshot(body: CoordinatorRequestBody, realmId: string
       code: "invalid_request",
       message: `Authority recovery snapshot contains credential field ${credentialField}.`,
       recoveryAction: "restore only the credential-free Authority Plane snapshot returned by the customer Realm",
-      receipt: `authorityRecoverySnapshot=credential-field-rejected; field=${credentialField}; restore=not-applied; credentialMaterialStored=false`,
+      receipt: `authorityRecoverySnapshot=credential-field-rejected; field=${credentialField}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; restore=not-applied; credentialMaterialStored=false`,
     });
   }
   if (!Number.isSafeInteger(raw.version) || (raw.version as number) < 0) {

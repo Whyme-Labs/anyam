@@ -27,6 +27,7 @@ import {
   type CloudflareWorkerVersionResources,
   type WorkerReleaseManifest,
 } from "./worker-release-manifest.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 /**
  * Cloudflare's Worker Versions API is deliberately kept behind this module.
@@ -675,9 +676,8 @@ function normalizeBetaWorkerVersion(version: CloudflareBetaWorkerVersion): Cloud
 }
 
 function credentialMetadataSafe(value: string, field: string): boolean {
-  if (/(?:cfat_[A-Za-z0-9]+|bearer\s+|(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password)\s*[:=])/iu.test(value)) {
-    throw new Error(`credential broker returned credential material in ${field}`);
-  }
+  const finding = scanCredentialMaterial(value, field);
+  if (finding) throw new Error(`credential broker returned credential material in ${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}`);
   return true;
 }
 

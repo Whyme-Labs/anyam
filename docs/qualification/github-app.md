@@ -138,35 +138,57 @@ ANYAM_GITHUB_APP_PR_REVISION_POLL_MS
    `ANYAM_GITHUB_APP_DISPOSABLE_REPOSITORY` to that same `owner/name`. The
    qualification refuses a different cleanup target.
 4. Set `ANYAM_GITHUB_APP_AUTHORITY_BASE_URL` to the deployed Realm URL. The
-   current qualifier's REST client accepts an existing opaque owner-session
-   file only as a temporary compatibility path. The Realm no longer exports
-   raw owner sessions, and operators must not copy an HttpOnly browser cookie.
-   If you do not already have an unexpired session file, the live Authority
-   path is currently blocked pending
-   [#330](https://github.com/Whyme-Labs/anyam/issues/330), which adds the
-   supported OAuth/capability exchange.
+   supported path is an owner-approved OAuth grant stored by `anyam auth login`
+   in the OS keychain. Request the dedicated
+   `qualification.github-app` scope with the Realm's `/mcp` resource; the
+   qualifier loads or refreshes that credential in process memory and never
+   writes a session file. Do not copy an HttpOnly browser cookie.
 5. Run the qualification from the same terminal that contains the non-secret
    IDs, sizing receipts, and file paths. A successful receipt must show both
    provider and Authority cleanup success; otherwise the named disposable
    resources remain an operator-owned recovery task.
 
 To extend the provider qualification into the customer-operated Authority
-boundary, set the following additional inputs. The owner session fields below
-are temporary compatibility inputs for an already-issued opaque session; they
-are not a supported way to mint a new credential. The Realm no longer exports
-raw owner sessions. Do not copy an HttpOnly browser cookie; use #330 for the
-supported OAuth/capability path.
+boundary, set the following additional inputs. The OAuth credential is loaded
+from the OS keychain after the owner approves the dedicated scope.
 
 ```text
 ANYAM_GITHUB_APP_AUTHORITY_BASE_URL=https://customer-realm.example
-ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION_FILE=/path/to/owner-session.txt
 ANYAM_GITHUB_APP_MIRROR_HANDOFF_KEY_ID=customer-mirror-key-v1
 ANYAM_GITHUB_APP_MIRROR_HANDOFF_SECRET_FILE=/path/to/mirror-handoff-secret.txt
 ```
 
 The Authority URL must be HTTPS (loopback HTTP is allowed only for local
-development), and the owner session file should contain only the opaque
-session value with no cookie header or other credentials.
+development). The OAuth access token is audience-bound to the Realm `/mcp`
+resource and the qualification capability endpoint; it is never printed or
+persisted by the qualifier.
+
+Authenticate the operator once with the published CLI:
+
+```bash
+anyam auth login \
+  --realm https://customer-realm.example \
+  --client-id <registered-public-client-id> \
+  --scope qualification.github-app
+```
+
+Then run the qualification with:
+
+```text
+ANYAM_GITHUB_APP_AUTHORITY_BASE_URL=https://customer-realm.example
+```
+
+The qualifier reads the matching Realm record from the OS keychain and
+refreshes it through `/oauth/token` when its access token is near expiry. For
+an explicitly bounded one-off process-memory run, set
+`ANYAM_GITHUB_APP_AUTHORITY_OAUTH_TOKEN` instead; it is never printed or
+stored. `ANYAM_GITHUB_APP_AUTHORITY_OAUTH_CLIENT_ID` is optional and only
+checks that a keychain record belongs to the expected client.
+
+The old `ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION` and
+`ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION_FILE` inputs remain temporary
+compatibility inputs for an already-issued opaque session. They do not mint
+credentials and should not be used for new qualifications.
 
 The handoff key ID and secret must match the Realm's
 `ANYAM_MIRROR_HANDOFF_KEY_ID` and `ANYAM_MIRROR_HANDOFF_SECRET` configuration.
@@ -177,8 +199,10 @@ the Realm's `/internal/mirrors/ingest` route verifies and consumes it. The
 secret is never sent to GitHub, persisted in Authority, or included in a
 receipt.
 
-Use exactly one of `ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION` or
-`ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION_FILE`. The Realm must be an empty,
+For compatibility only, an already-issued opaque session may be supplied with
+exactly one of `ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION` or
+`ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION_FILE`. These inputs do not mint a
+credential. Do not copy an HttpOnly browser cookie. The Realm must be an empty,
 disposable Authority boundary: the qualification exports its signed,
 credential-free `anyam.authority-recovery/v1` bundle, creates one Project,
 public Source Space, public Project View, and empty mapped Mirror from the
@@ -256,5 +280,5 @@ Authority boundary only. Without those inputs, a provider-only receipt proves
 only the selected GitHub App and qualification repository adapter boundary. It
 does not claim GitHub Enterprise support, general repository mirroring, or
 production readiness. #321 remains open until the owner captures a live producer
-receipt through a supported owner credential path; #330 tracks that OAuth/
-capability exchange. #193 (the adapter implementation ticket) is closed.
+receipt; the supported OAuth/capability exchange is provided by #330. #193
+(the adapter implementation ticket) is closed.

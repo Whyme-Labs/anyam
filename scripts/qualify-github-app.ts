@@ -22,6 +22,8 @@ import {
 import { MirrorCoordinator, type MirrorChangeSink } from "../src/portability/mirror.ts";
 import { CONTRACT_VERSIONS, type Change, type GitRef, type RepositoryMirror } from "../src/kernel/contracts.ts";
 import { RealmAuthorityHttpClient, RealmAuthorityRequestError, type JsonObject } from "../src/portability/realm-authority-client.ts";
+import { loadAnyamAuthCredential } from "../packages/create-anyam/src/auth.ts";
+import { ANYAM_GITHUB_APP_QUALIFICATION_PATH, ANYAM_GITHUB_APP_QUALIFICATION_PROTOCOL, ANYAM_GITHUB_APP_QUALIFICATION_SCOPE, type AnyamGitHubAppQualificationOperation } from "../apps/realm-worker/src/qualification-protocol.ts";
 
 const protocol = "anyam.github-app-qualification/v1" as const;
 const execFile = promisify(execFileCallback);
@@ -193,7 +195,56 @@ function authoritySession(): string | undefined {
   return direct;
 }
 
-type AuthorityConfig = { baseUrl: string; ownerSession: string; mirrorHandoffKeyId: string; mirrorHandoffSecret: string };
+type QualificationAuthorityClient = {
+  inspectProject(projectId: string): Promise<JsonObject>;
+  inspectState(): Promise<JsonObject>;
+  inspectMirror(mirrorId: string): Promise<JsonObject>;
+  createProject(body: JsonObject, idempotencyKey: string): Promise<JsonObject>;
+  createWorkspace(projectId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject>;
+  configureMirror(body: JsonObject, idempotencyKey: string): Promise<JsonObject>;
+  syncMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject>;
+  reconcileMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject>;
+  exportAuthorityRecovery(): Promise<JsonObject>;
+  restoreAuthorityRecovery(bundle: JsonObject): Promise<JsonObject>;
+  activateAuthorityRecovery(bundleId: string, bundleDigest: string): Promise<JsonObject>;
+};
+
+class OAuthQualificationAuthorityClient implements QualificationAuthorityClient {
+  private readonly endpoint: string;
+
+  constructor(private readonly baseUrl: string, private readonly accessToken: string) {
+    this.endpoint = new URL(ANYAM_GITHUB_APP_QUALIFICATION_PATH, baseUrl).toString();
+  }
+
+  private async request(operation: AnyamGitHubAppQualificationOperation, body: JsonObject = {}): Promise<JsonObject> {
+    const response = await fetch(this.endpoint, {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json", authorization: `Bearer ${this.accessToken}` },
+      cache: "no-store",
+      redirect: "error",
+      body: JSON.stringify({ protocol: ANYAM_GITHUB_APP_QUALIFICATION_PROTOCOL, operation, ...body }),
+    });
+    const value: unknown = await response.json().catch(() => undefined);
+    if (value === null || typeof value !== "object" || Array.isArray(value)) throw new RealmAuthorityRequestError({ status: response.status, code: "qualification_response_invalid", recoveryAction: "inspect the customer Realm qualification capability response and retry the same immutable operation", receipt: `qualification=github-app; operation=${operation}; response=object-required; credentialMaterialStored=false` });
+    const payload = value as JsonObject;
+    if (!response.ok) throw new RealmAuthorityRequestError({ status: response.status, code: typeof payload.code === "string" ? payload.code : `http_${response.status}`, recoveryAction: typeof payload.recoveryAction === "string" ? payload.recoveryAction : "inspect the customer Realm qualification receipt and retry the same immutable operation", receipt: typeof payload.receipt === "string" ? payload.receipt : `qualification=github-app; operation=${operation}; receipt=not-returned; credentialMaterialStored=false` });
+    return payload;
+  }
+
+  inspectProject(projectId: string): Promise<JsonObject> { return this.request("authority.project.inspect", { projectId }); }
+  inspectState(): Promise<JsonObject> { return this.request("authority.state.inspect"); }
+  inspectMirror(mirrorId: string): Promise<JsonObject> { return this.request("authority.mirror.inspect", { mirrorId }); }
+  createProject(body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("authority.project.create", { payload: body, idempotencyKey }); }
+  createWorkspace(projectId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("authority.workspace.create", { payload: { ...body, projectId }, idempotencyKey }); }
+  configureMirror(body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("authority.mirror.configure", { payload: body, idempotencyKey }); }
+  syncMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("authority.mirror.mutate", { mirrorId, mirrorOperation: "sync", payload: { ...body, mirrorId }, idempotencyKey }); }
+  reconcileMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("authority.mirror.mutate", { mirrorId, mirrorOperation: "reconcile", payload: { ...body, mirrorId }, idempotencyKey }); }
+  exportAuthorityRecovery(): Promise<JsonObject> { return this.request("authority.recovery.export"); }
+  restoreAuthorityRecovery(bundle: JsonObject): Promise<JsonObject> { return this.request("authority.recovery.restore", { bundle, idempotencyKey: "qualification:authority-recovery-restore" }); }
+  activateAuthorityRecovery(bundleId: string, bundleDigest: string): Promise<JsonObject> { return this.request("authority.recovery.activate", { bundleId, bundleDigest, idempotencyKey: `qualification:authority-recovery-activate:${bundleId}` }); }
+}
+
+type AuthorityConfig = { baseUrl: string; ownerSession?: string; oauthAccessToken?: string; authMode: "owner-cookie" | "oauth-keychain" | "oauth-process"; authReceipt: string; mirrorHandoffKeyId: string; mirrorHandoffSecret: string };
 
 function authorityMirrorHandoffSecret(): string | undefined {
   const direct = optional("ANYAM_GITHUB_APP_MIRROR_HANDOFF_SECRET");
@@ -203,13 +254,14 @@ function authorityMirrorHandoffSecret(): string | undefined {
   return direct;
 }
 
-function authorityConfig(): AuthorityConfig | undefined {
+async function authorityConfig(): Promise<AuthorityConfig | undefined> {
   const baseUrl = optional("ANYAM_GITHUB_APP_AUTHORITY_BASE_URL");
   const ownerSession = authoritySession();
-  const configured = [baseUrl, ownerSession].some((value) => value !== undefined);
+  const directOauthToken = optional("ANYAM_GITHUB_APP_AUTHORITY_OAUTH_TOKEN");
+  const configured = [baseUrl, ownerSession, directOauthToken].some((value) => value !== undefined);
   if (!configured) return undefined;
   if (!baseUrl) throw new Error("ANYAM_GITHUB_APP_AUTHORITY_BASE_URL is required when live customer Realm Authority qualification is enabled");
-  if (!ownerSession) throw new Error("set ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION or ANYAM_GITHUB_APP_AUTHORITY_OWNER_SESSION_FILE for the authenticated Realm owner; credential material is never printed");
+  if (ownerSession && directOauthToken) throw new Error("set only one of the compatibility owner session or ANYAM_GITHUB_APP_AUTHORITY_OAUTH_TOKEN; credential material is never printed");
   const staleBinding = [
     "ANYAM_GITHUB_APP_AUTHORITY_PROJECT_ID",
     "ANYAM_GITHUB_APP_AUTHORITY_SOURCE_SPACE_ID",
@@ -221,7 +273,13 @@ function authorityConfig(): AuthorityConfig | undefined {
   const mirrorHandoffKeyId = optional("ANYAM_GITHUB_APP_MIRROR_HANDOFF_KEY_ID");
   const mirrorHandoffSecret = authorityMirrorHandoffSecret();
   if (!mirrorHandoffKeyId || !mirrorHandoffSecret) throw new Error("ANYAM_GITHUB_APP_MIRROR_HANDOFF_KEY_ID and ANYAM_GITHUB_APP_MIRROR_HANDOFF_SECRET (or _FILE) are required when live customer Realm Mirror ingestion qualification is enabled; credential material is not printed");
-  return { baseUrl, ownerSession, mirrorHandoffKeyId, mirrorHandoffSecret };
+  if (ownerSession) return { baseUrl, ownerSession, authMode: "owner-cookie", authReceipt: "oauth=compatibility-owner-session; credentialStorage=operator-file-or-process; supportedOAuth=false; credentialMaterialStored=false", mirrorHandoffKeyId, mirrorHandoffSecret };
+  const oauth = await loadAnyamAuthCredential({ realm: baseUrl, ...(directOauthToken ? { accessToken: directOauthToken } : {}), ...(optional("ANYAM_GITHUB_APP_AUTHORITY_OAUTH_CLIENT_ID") ? { clientId: optional("ANYAM_GITHUB_APP_AUTHORITY_OAUTH_CLIENT_ID")! } : {}) });
+  const grantedScopes = oauth.scope.split(/\s+/u).filter(Boolean);
+  if (!grantedScopes.includes(ANYAM_GITHUB_APP_QUALIFICATION_SCOPE)) throw new Error(`stored OAuth credential does not include ${ANYAM_GITHUB_APP_QUALIFICATION_SCOPE}; run anyam auth login --realm ${baseUrl} --client-id <client-id> --scope ${ANYAM_GITHUB_APP_QUALIFICATION_SCOPE}; credential values are not printed`);
+  const expectedResource = new URL("/mcp", baseUrl).toString();
+  if (oauth.resource !== expectedResource) throw new Error(`stored OAuth credential is bound to ${oauth.resource}, not ${expectedResource}; run anyam auth login again for the Realm qualification resource; credential values are not printed`);
+  return { baseUrl, oauthAccessToken: oauth.accessToken, authMode: oauth.credentialStorage === "os-keychain" ? "oauth-keychain" : "oauth-process", authReceipt: oauth.receipt, mirrorHandoffKeyId, mirrorHandoffSecret };
 }
 
 function refsValue(value: unknown, field: string): GitRef[] {
@@ -244,7 +302,7 @@ function authorityMirrorGeneration(mirror: JsonObject): string {
   return authorityField(mirror.remoteGeneration, "mirror.remoteGeneration");
 }
 
-async function restoreAuthorityRecovery(client: RealmAuthorityHttpClient, bundle: JsonObject): Promise<CleanupReceipt> {
+async function restoreAuthorityRecovery(client: QualificationAuthorityClient, bundle: JsonObject): Promise<CleanupReceipt> {
   try {
     const restored = await client.restoreAuthorityRecovery(bundle);
     if (restored.status !== "recovery-quarantined") return { status: "blocked", receipt: "cleanup=authority-restore-blocked; unexpected-recovery-status; credentialMaterialStored=false", recoveryAction: "authenticate the Realm owner again, inspect the Authority recovery receipt, and restore the exact signed bundle" };
@@ -267,7 +325,7 @@ async function qualifyCustomerRealmAuthority(input: {
   installationId: string;
   qualificationId: string;
   webhookSecret: string;
-  authorityClient: RealmAuthorityHttpClient;
+  authorityClient: QualificationAuthorityClient;
   authorityConfig: AuthorityConfig;
   adapter: GitHubAppProjectionAdapter;
   forcePush: Extract<Awaited<ReturnType<GitHubAppProjectionAdapter["push"]>>, { status: "succeeded" }>;
@@ -447,7 +505,7 @@ async function qualifyCustomerRealmAuthority(input: {
   const finalMirrorResponse = await client.inspectMirror(config.mirrorId);
   const finalMirror = authorityMirrorFromResponse(finalMirrorResponse);
   const exportedDigest = digest(finalMirrorResponse);
-  const readBackResponse = await new RealmAuthorityHttpClient({ baseUrl: config.baseUrl, ownerSession: config.ownerSession }).inspectMirror(config.mirrorId);
+  const readBackResponse = await client.inspectMirror(config.mirrorId);
   const readBackDigest = digest(readBackResponse);
   if (exportedDigest !== readBackDigest) throw new Error(`customer Realm Authority Mirror ledger read-back digest ${readBackDigest} did not match export digest ${exportedDigest}`);
   const proposal = authorityObject(authorityResultValue(authorityPrSecond).proposal, "authority PR proposal");
@@ -522,12 +580,12 @@ async function main(): Promise<void> {
   const proposalWaitMs = positiveInteger("ANYAM_GITHUB_APP_PR_REVISION_WAIT_MS");
   const proposalPollMs = positiveInteger("ANYAM_GITHUB_APP_PR_REVISION_POLL_MS");
   if (proposalPollMs > proposalWaitMs) throw new Error("ANYAM_GITHUB_APP_PR_REVISION_POLL_MS must not exceed ANYAM_GITHUB_APP_PR_REVISION_WAIT_MS");
-  const authorityInputs = authorityConfig();
+  const authorityInputs = await authorityConfig();
 
   const seeded = await seedRepository(gitMaxBufferBytes);
   let cleanup: CleanupReceipt | undefined;
   let authorityCleanup: CleanupReceipt | undefined;
-  let authorityClient: RealmAuthorityHttpClient | undefined;
+  let authorityClient: QualificationAuthorityClient | undefined;
   let authorityRecoverySnapshot: JsonObject | undefined;
   let authorityMutated = false;
   let authority: JsonObject | undefined;
@@ -653,7 +711,9 @@ async function main(): Promise<void> {
     }
 
     if (authorityInputs) {
-      authorityClient = new RealmAuthorityHttpClient({ baseUrl: authorityInputs.baseUrl, ownerSession: authorityInputs.ownerSession });
+      authorityClient = authorityInputs.authMode === "owner-cookie"
+        ? new RealmAuthorityHttpClient({ baseUrl: authorityInputs.baseUrl, ownerSession: authorityInputs.ownerSession! })
+        : new OAuthQualificationAuthorityClient(authorityInputs.baseUrl, authorityInputs.oauthAccessToken!);
       const recovery = await authorityClient.exportAuthorityRecovery();
       authorityRecoverySnapshot = authorityObject(recovery.bundle, "authority recovery bundle");
       const recoverySnapshot = authorityObject(authorityRecoverySnapshot.snapshot, "authority recovery snapshot");
@@ -675,8 +735,9 @@ async function main(): Promise<void> {
       if (authorityCleanup.status !== "succeeded") throw new Error(`customer Realm Authority cleanup failed: ${authorityCleanup.recoveryAction ?? authorityCleanup.receipt}`);
     }
     const authorityRun = authority ?? { status: "not-run", receipt: "authority=not-run; inputs=not-configured; credentialValues=not-printed; canonicalWrite=false" };
+    const authorityOutput = authorityInputs ? { ...authorityRun, authentication: authorityInputs.authMode, authenticationReceipt: authorityInputs.authReceipt } : authorityRun;
     const cleanupResult = authorityCleanup ? { provider: cleanup, authority: authorityCleanup } : { provider: cleanup };
-    console.log(JSON.stringify({ protocol, status: "succeeded", qualificationScope: authority ? "provider-adapter-and-customer-realm-authority" : "provider-adapter", acceptance: authority ? "qualified; provider and customer Realm/Authority boundary exercised" : "qualified; provider adapter boundary exercised; customer Realm/Authority not configured", qualificationId, repository, mappedRef: "refs/heads/main", outbound: "projected", inbound: { changeCount: changes.length }, forcePush: "classified", credentialExpiry: "rejected-and-resumed", webhook: "signed-deduplicated-and-reconciled", pullRequestSetup: { branch: seeded.proposalBranch, created: true, branchPush: proposalBranchPush.receipt, successiveRevisionPush: proposalRevisionPush.receipt }, pullRequestObservation: { proposalKey: String(pullRequestNumber), stableObservationIdentity: true, successiveHeadObserved: true, headSource: secondProposal.headSource, authorityChangeLedger: authority ? "customer-realm-recorded" : "not-run" }, gitBundleExportRestore: { bundleDigest: seeded.bundleDigest, restored: true, ...(authority ? { authorityExportRestore: "credential-free-snapshot-restored" } : { authorityExportRestore: "not-run" }) }, authority: authorityRun, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true, cleanup: cleanupResult }, null, 2));
+    console.log(JSON.stringify({ protocol, status: "succeeded", qualificationScope: authority ? "provider-adapter-and-customer-realm-authority" : "provider-adapter", acceptance: authority ? "qualified; provider and customer Realm/Authority boundary exercised" : "qualified; provider adapter boundary exercised; customer Realm/Authority not configured", qualificationId, repository, mappedRef: "refs/heads/main", outbound: "projected", inbound: { changeCount: changes.length }, forcePush: "classified", credentialExpiry: "rejected-and-resumed", webhook: "signed-deduplicated-and-reconciled", pullRequestSetup: { branch: seeded.proposalBranch, created: true, branchPush: proposalBranchPush.receipt, successiveRevisionPush: proposalRevisionPush.receipt }, pullRequestObservation: { proposalKey: String(pullRequestNumber), stableObservationIdentity: true, successiveHeadObserved: true, headSource: secondProposal.headSource, authorityChangeLedger: authority ? "customer-realm-recorded" : "not-run" }, gitBundleExportRestore: { bundleDigest: seeded.bundleDigest, restored: true, ...(authority ? { authorityExportRestore: "credential-free-snapshot-restored" } : { authorityExportRestore: "not-run" }) }, authority: authorityOutput, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true, cleanup: cleanupResult }, null, 2));
   } catch (error) {
     if (!cleanup) {
       try {

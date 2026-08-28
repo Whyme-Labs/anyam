@@ -20,6 +20,8 @@ import {
   handleAnyamRealmOwnerRequest,
 } from "./passkey-owner.ts";
 import { handleAnyamRealmMcpRequest } from "./mcp-handler.ts";
+import { handleAnyamGitHubAppQualificationRequest } from "./qualification-handler.ts";
+import { ANYAM_GITHUB_APP_QUALIFICATION_SCOPE } from "./qualification-protocol.ts";
 import { anyamBrandLockup, anyamBrandStyleTag } from "../../../src/brand.ts";
 
 export const ANYAM_REALM_OAUTH_PROTOCOL = "anyam.realm-oauth/v1" as const;
@@ -41,6 +43,7 @@ export const ANYAM_REALM_OAUTH_SCOPES = [
   "release.create",
   "target.configure",
   "promotion.request",
+  ANYAM_GITHUB_APP_QUALIFICATION_SCOPE,
 ] as const;
 
 export type AnyamRealmOAuthProps = {
@@ -396,6 +399,8 @@ async function authorizeRequest(request: Request, env: AnyamRealmOAuthEnv, adapt
 
 export class AnyamRealmOAuthQualificationHandler extends WorkerEntrypoint<AnyamRealmOAuthEnv, AnyamRealmOAuthProps> {
   override async fetch(request: Request): Promise<Response> {
+    const qualification = await handleAnyamGitHubAppQualificationRequest(request, this.env, this.ctx.props);
+    if (qualification) return qualification;
     return handleAnyamRealmMcpRequest(request, this.env, this.ctx.props);
   }
 }

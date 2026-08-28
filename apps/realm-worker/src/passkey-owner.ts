@@ -21,6 +21,7 @@ import { customerRealmControlRoomResponse } from "../../../src/cloudflare/contro
 import { anyamBrandLockup, anyamBrandStyleTag } from "../../../src/brand.ts";
 import { parseMcpDeliveryBinding } from "./mcp-delivery-grant.ts";
 import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
+import { ANYAM_GITHUB_APP_QUALIFICATION_SCOPE } from "./qualification-protocol.ts";
 
 export const ANYAM_PASSKEY_OWNER_PROTOCOL = "anyam.passkey-owner/v1" as const;
 export const ANYAM_PASSKEY_CHALLENGE_TTL_SECONDS = 300;
@@ -901,9 +902,12 @@ export const anyamPasskeyOwnerAuthorization: AnyamRealmOAuthAuthorizationAdapter
     const binding = parseMcpDeliveryBinding(resourceValue, session.realmId);
     const agentMutationScopes = ["workspace.write", "change.write", "run.invoke"];
     const deliveryMutationScopes = ["landing.request", "release.create", "target.configure", "promotion.request"];
+    const qualificationRequested = request.scope.includes(ANYAM_GITHUB_APP_QUALIFICATION_SCOPE);
     const agentMutationRequested = agentMutationScopes.some((scope) => request.scope.includes(scope));
     const deliveryMutationRequested = deliveryMutationScopes.some((scope) => request.scope.includes(scope));
     const mutationRequested = agentMutationRequested || deliveryMutationRequested;
+    if (qualificationRequested && mutationRequested) return { status: "blocked", code: "oauth_qualification_scope_conflict", recoveryAction: `authorize ${ANYAM_GITHUB_APP_QUALIFICATION_SCOPE} in its own owner OAuth grant; do not combine it with agent or delivery mutations`, receipt: "oauthGrant=qualification-and-mutation-scope-conflict; grant=not-created; canonicalWrite=false" };
+    if (qualificationRequested) await realmCoordinatorRequest(env, "/identity/owner/validate", { sessionId: session.kernelSessionId });
     if (agentMutationRequested && deliveryMutationRequested) return { status: "blocked", code: "mcp_mutation_scope_conflict", recoveryAction: "authorize either a delegated coding-agent resource or a human delivery resource, not both", receipt: "oauthGrant=agent-and-delivery-scope-conflict; mutation=not-authorized; canonicalWrite=false" };
     if (agentMutationRequested && (!binding?.agentId || !binding.agentSessionId || !binding.taskId || !binding.capabilityGrantId)) return { status: "blocked", code: "mcp_agent_delegation_required", recoveryAction: "authorize the MCP resource with agentId, agentSessionId, taskId, capabilityGrantId, and Source Space disclosure from an owner-approved delegation", receipt: "oauthGrant=agent-task-required; mutation=not-authorized; canonicalWrite=false" };
     if (deliveryMutationRequested && !binding) return { status: "blocked", code: "mcp_delivery_resource_required", recoveryAction: "authorize the delivery MCP resource with a project-scoped /mcp/projects/<projectId> binding and Source Space disclosure", receipt: "oauthGrant=human-delivery-resource-required; mutation=not-authorized; canonicalWrite=false" };
@@ -914,7 +918,7 @@ export const anyamPasskeyOwnerAuthorization: AnyamRealmOAuthAuthorizationAdapter
       const delegated = await realmCoordinatorRequest(env, "/identity/agent/delegation/validate", { humanSessionId: session.kernelSessionId, agentId: binding.agentId, agentSessionId: binding.agentSessionId, taskId: binding.taskId, grantId: binding.capabilityGrantId, capability: delegatedCapability, resource: binding.resourceRef, sourceSpaceIds: binding.sourceSpaceIds });
       props = { kernelSessionId: binding.agentSessionId, realmId: session.realmId, agentId: binding.agentId, taskId: binding.taskId, capabilityGrantId: binding.capabilityGrantId, resource: binding.resourceRef, sourceSpaceIds: binding.sourceSpaceIds, delegatedBySessionId: session.kernelSessionId, ...(typeof delegated.modelProvider === "string" ? { modelProvider: delegated.modelProvider } : {}) };
     }
-    return { status: "authorized", userId: session.userId, displayName: session.displayName, realmId: session.realmId, sessionId: session.kernelSessionId, scopes: ["project.read", "project.write", "workspace.inspect", "workspace.write", "change.inspect", "source.read", "change.write", "run.invoke", "landing.request", "release.create", "target.configure", "promotion.request"], props, authorizationReceipt: `ownerAuth=passkey; ownerRecord=verified; policy=${agentMutationRequested ? "agent-task-bound" : deliveryMutationRequested ? "human-delivery-grant" : "read-or-project-bootstrap"}; kernelMembership=verified; kernelSession=${session.kernelSessionId}; session=${session.sessionId}; credential=${session.credentialId}` };
+    return { status: "authorized", userId: session.userId, displayName: session.displayName, realmId: session.realmId, sessionId: session.kernelSessionId, scopes: ["project.read", "project.write", "workspace.inspect", "workspace.write", "change.inspect", "source.read", "change.write", "run.invoke", "landing.request", "release.create", "target.configure", "promotion.request", ANYAM_GITHUB_APP_QUALIFICATION_SCOPE], props, authorizationReceipt: `ownerAuth=passkey; ownerRecord=verified; policy=${qualificationRequested ? "github-app-qualification" : agentMutationRequested ? "agent-task-bound" : deliveryMutationRequested ? "human-delivery-grant" : "read-or-project-bootstrap"}; kernelMembership=verified; kernelSession=${session.kernelSessionId}; session=${session.sessionId}; credential=${session.credentialId}` };
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
     return { status: "blocked", code: "owner_kernel_session_invalid", recoveryAction: "Re-authenticate through /owner/login and retry after checking the Realm coordinator.", receipt: `kernelSession=invalid; oauthGrant=not-created; detail=${detail}` };

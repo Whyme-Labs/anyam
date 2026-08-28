@@ -733,7 +733,7 @@ export class AuthorityPlaneCoordinator {
         receipt: `sessionRealm=${session.realmId}; stateRealm=${this.state.realmId}; transition=not-applied`,
       });
     }
-    if ((command.command === "mirror.sync" || command.command === "mirror.reconcile") && (session.kind !== "mirror" || (session.clientId !== "anyam-mirror-coordinator" && session.clientId !== "anyam-mirror-fixture"))) {
+    if ((command.command === "mirror.sync" || command.command === "mirror.reconcile") && (session.kind !== "mirror" || (session.clientId !== "anyam-mirror-coordinator" && session.clientId !== "anyam-mirror-fixture" && session.clientId !== "anyam-github-app-qualification"))) {
       throw new AuthorityPlaneError({
         code: "invalid_request",
         message: `${command.command} is an internal signed Mirror-ingestion transition and cannot be submitted by a human, agent, OAuth, or generic Authority session.`,

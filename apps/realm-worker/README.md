@@ -117,6 +117,7 @@ public edge exposes policy-scoped Authority routes:
 | `POST /api/owner/agent/delegations` | Owner-authenticated, resource-bounded Agent Task delegation for one active Project/Workspace/Change; no credentials are issued |
 | `POST /api/owner/agent/delegations/revoke` | Owner-authenticated revocation of one enrolled Agent and its delegated authority; the owner Session remains active |
 | `POST /api/owner/agent/delegations/credentials` | Explicit exchange of an exact delegated Agent Session/Task/Grant for short-lived `realm-api`, Git, and/or MCP credentials; token material appears only in this response |
+| `POST /mcp/qualification/github-app` | Owner-only, `qualification.github-app`-scoped qualification capability; typed disposable Authority setup/read/recovery operations without exporting an owner cookie |
 
 `GET /api/projects` and `GET /api/projects/{projectId}` are owner-authenticated,
 read-only surfaces. The list is sorted by Project identifier using code-unit
@@ -174,6 +175,17 @@ source snapshots, authors, mounts, credentials, and raw Coordinator receipts
 are omitted. Publication does not transfer Git objects or change the canonical
 Project Revision pointer; Landing, Release creation, and Target Promotion
 remain separate operations.
+
+The owner-only GitHub App qualification path uses the same OAuth resource but
+a separate `qualification.github-app` scope. After passkey-approved OAuth, the
+qualifier sends typed requests to `POST /mcp/qualification/github-app`; the
+Worker receives only encrypted OAuth props and an opaque kernel session, then
+forwards the allowlisted disposable Project/Workspace/Mirror/recovery
+operation to the Coordinator. It never accepts provider credentials, exports
+an owner cookie, or exposes a generic command proxy. Production Mirror
+ingestion remains signed and internal-only; the qualification-only Mirror
+mutation endpoint is explicitly labelled and cannot be reached through the
+normal REST or MCP mutation surfaces.
 
 The `run.invoke` grant exposes typed `run.request` and `run.inspect` MCP
 surfaces. Caller-authoritative `run.record`, `evidence.record`, and

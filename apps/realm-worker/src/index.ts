@@ -50,6 +50,7 @@ import { assertAuthoritySnapshotEquivalent, AuthoritySQLiteStore, type Authority
 import { MIRROR_HANDOFF_AUDIENCE, MIRROR_INGESTION_PROTOCOL, verifyMirrorIngestionHandoff, type MirrorHandoffKey, type MirrorIngestionHandoff } from "../../../src/portability/mirror-observation.ts";
 import { GITHUB_WEBHOOK_INGRESS_PROTOCOL, type GitHubWebhookIngressEnvelope } from "../../../src/portability/github-webhook.ts";
 import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
+import { isAnyamOAuthPath } from "../../../src/cloudflare/oauth-path.ts";
 
 export type Env = AnyamRealmOAuthEnv;
 
@@ -2654,15 +2655,6 @@ export class AnyamRealmWorkflow extends WorkflowEntrypoint<Env, Record<string, u
       receipt: "workflowAuthority=qualification-only; credentialFree=true; canonicalWrite=false",
     };
   }
-}
-
-function isAnyamOAuthPath(pathname: string): boolean {
-  return pathname === "/mcp"
-    || pathname === "/authorize"
-    || pathname === "/oauth/token"
-    || pathname === "/oauth/register"
-    || pathname.startsWith("/.well-known/oauth-")
-    || pathname === "/.well-known/openid-configuration";
 }
 
 function queueMessageString(message: Record<string, unknown>, key: string): string | undefined {

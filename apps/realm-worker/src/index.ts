@@ -30,7 +30,7 @@ import {
 import { CREDENTIAL_AUDIENCES, RealmIdentityError, RealmIdentityPolicy, type Capability, type CredentialClass, type RealmRecoverySnapshot } from "../../../src/identity/realm.ts";
 import type { ResourceRef, RepositoryObservation } from "../../../src/kernel/contracts.ts";
 import { oauthConsentBindingMatches } from "../../../src/identity/oauth-consent.ts";
-import { createAnyamRealmOAuthProvider, type AnyamRealmOAuthEnv } from "./oauth-provider.ts";
+import { createAnyamRealmOAuthProvider, ensureAnyamRealmOAuthHelpers, type AnyamRealmOAuthEnv } from "./oauth-provider.ts";
 import { handleAnyamRealmOwnerRequest, requestAnyamRealmCoordinator } from "./passkey-owner.ts";
 import { createCloudflareCustomerProviderAdapters } from "./customer-provider-adapters.ts";
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "./coordinator-protocol.ts";
@@ -2812,6 +2812,7 @@ async function publicGatewayAuthorization(request: Request, env: Env): Promise<R
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
     const publicGatewayResponse = await publicGatewayAuthorization(request, env);
     if (publicGatewayResponse) return publicGatewayResponse;
     const githubActionsBridgeResponse = await handleGitHubActionsBridgeRequest(request, env);
@@ -2820,6 +2821,9 @@ export default {
     if (githubWebhookResponse) return githubWebhookResponse;
     const githubProducerContextResponse = await handleGitHubMirrorProducerContextRequest(request, env);
     if (githubProducerContextResponse) return githubProducerContextResponse;
+    if (request.method === "POST" && url.pathname === "/api/owner/oauth/grants/revoke") {
+      ensureAnyamRealmOAuthHelpers({ resource: `${url.origin}/mcp`, issuer: url.origin }, env);
+    }
     // Owner ceremony routes do not need the OAuth provider to be constructed.
     // This keeps local HTTP development useful while the provider correctly
     // enforces HTTPS issuer metadata for MCP/OAuth requests.
@@ -2829,7 +2833,6 @@ export default {
     const authorityResponse = await handleAuthorityRequest(request, env);
     if (authorityResponse) return authorityResponse;
 
-    const url = new URL(request.url);
     if (!isAnyamOAuthPath(url.pathname)) return handleCustomerRealmRequest(request, env);
 
     const origin = url.origin;

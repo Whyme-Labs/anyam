@@ -23,6 +23,25 @@ export function oauthConsentBindingMatches(record: OAuthConsentBinding, input: {
     && (input.csrfToken === undefined || record.csrfToken === input.csrfToken);
 }
 
+function oauthRedirectFormActionSource(redirectUri: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(redirectUri);
+  } catch {
+    throw new Error("oauth_redirect_uri_invalid");
+  }
+  if (parsed.username || parsed.password) throw new Error("oauth_redirect_uri_credentials_unsupported");
+  if (parsed.protocol === "http:" || parsed.protocol === "https:") return parsed.origin;
+  if (["about:", "blob:", "data:", "file:", "javascript:"].includes(parsed.protocol)) throw new Error("oauth_redirect_uri_scheme_unsupported");
+  if (parsed.host) throw new Error("oauth_redirect_uri_host_unsupported");
+  return parsed.protocol;
+}
+
+export function oauthConsentContentSecurityPolicy(redirectUri: string, scriptNonce: string): string {
+  if (!/^[A-Za-z0-9_-]+$/u.test(scriptNonce)) throw new Error("oauth_consent_script_nonce_invalid");
+  return `default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'nonce-${scriptNonce}'; form-action 'self' ${oauthRedirectFormActionSource(redirectUri)}; base-uri 'none'`;
+}
+
 export function isOAuthConsentDecision(value: string | null): value is "approve" | "deny" {
   return value === "approve" || value === "deny";
 }

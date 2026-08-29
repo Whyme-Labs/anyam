@@ -22,7 +22,7 @@ import {
 import { handleAnyamRealmMcpRequest } from "./mcp-handler.ts";
 import { handleAnyamGitHubAppQualificationRequest } from "./qualification-handler.ts";
 import { ANYAM_GITHUB_APP_QUALIFICATION_SCOPE } from "./qualification-protocol.ts";
-import { anyamBrandLockup, anyamBrandStyleTag } from "../../../src/brand.ts";
+import { renderOAuthConsentPage } from "../../../src/identity/oauth-consent-page.ts";
 
 export const ANYAM_REALM_OAUTH_PROTOCOL = "anyam.realm-oauth/v1" as const;
 export const ANYAM_REALM_OAUTH_RESOURCE_PATH = "/mcp" as const;
@@ -219,10 +219,6 @@ function oauthErrorRedirect(error: AuthorizationError): Response {
   return Response.redirect(redirect.toString(), 302);
 }
 
-function escapeHtml(value: string): string {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
-}
-
 function oauthAuthRequestRecord(request: AuthRequest): Record<string, unknown> {
   return {
     responseType: request.responseType,
@@ -241,23 +237,6 @@ function singularOAuthResource(resource: AuthRequest["resource"]): string | unde
   if (typeof resource === "string" && resource.trim().length > 0) return resource.trim();
   if (Array.isArray(resource) && resource.length === 1 && typeof resource[0] === "string" && resource[0].trim().length > 0) return resource[0].trim();
   return undefined;
-}
-
-function oauthConsentPage(input: { consentId: string; csrfToken: string; clientName: string; requestedScopes: readonly string[]; allowedScopes: readonly string[] }): Response {
-  const allowed = new Set(input.allowedScopes);
-  const scopeRows = input.requestedScopes.map((scope) => `<li><code>${escapeHtml(scope)}</code>${allowed.has(scope) ? "" : " <em>(not available)</em>"}</li>`).join("");
-  const html = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize ${escapeHtml(input.clientName)}</title>${anyamBrandStyleTag()}<style>
-.oauth-card{max-width:42rem;margin:2rem auto}
-.oauth-card h1{margin:.7rem 0 .5rem;font-size:clamp(1.7rem,4vw,2.4rem);letter-spacing:-.04em}
-.oauth-card .scope-list{padding-left:1.2rem}
-.oauth-card li{margin:.55rem 0}
-.oauth-card code{border-radius:.35rem;background:var(--anyam-code-bg);padding:.1rem .3rem}
-.oauth-card em{color:var(--anyam-muted)}
-.oauth-card form{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:1.5rem}
-.oauth-card .oauth-deny{border:1px solid var(--anyam-border);border-radius:.65rem;background:transparent;color:var(--anyam-text);cursor:pointer;font:inherit;font-weight:650;padding:.72rem 1rem}
-</style></head><body class="anyam-page"><main class="anyam-card anyam-shell oauth-card"><div>${anyamBrandLockup()}</div><p class="anyam-eyebrow">Realm authorization</p><h1>Authorize ${escapeHtml(input.clientName)}</h1><p class="anyam-muted">This application is requesting access to your Anyam Realm. Review the scopes before continuing.</p><ul class="scope-list">${scopeRows}</ul><form method="post" action="/authorize"><input type="hidden" name="consentId" value="${escapeHtml(input.consentId)}"><input type="hidden" name="csrfToken" value="${escapeHtml(input.csrfToken)}"><button class="anyam-button" name="decision" value="approve" type="submit">Approve access</button><button class="oauth-deny" name="decision" value="deny" type="submit">Deny</button></form></main></body></html>`;
-  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'" } });
 }
 
 function oauthConsentDenied(request: { redirectUri: string; state: string; issuer?: string }): Response {
@@ -404,7 +383,7 @@ async function authorizeRequest(request: Request, env: AnyamRealmOAuthEnv, adapt
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
     return jsonResponse({ code: "oauth_consent_creation_failed", recoveryAction: "Restart authorization after checking the durable Realm coordinator; no provider grant was created.", receipt: `${ANYAM_REALM_OAUTH_CONSENT_RECEIPT}; consent=not-created; detail=${detail}` }, 503);
   }
-  return oauthConsentPage({ consentId, csrfToken, clientName: client.clientName ?? client.clientId, requestedScopes: oauthRequest.scope, allowedScopes });
+  return renderOAuthConsentPage({ consentId, csrfToken, clientName: client.clientName ?? client.clientId, requestedScopes: oauthRequest.scope, allowedScopes, redirectUri: oauthRequest.redirectUri });
 }
 
 export class AnyamRealmOAuthQualificationHandler extends WorkerEntrypoint<AnyamRealmOAuthEnv, AnyamRealmOAuthProps> {

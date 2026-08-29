@@ -1,9 +1,11 @@
 import {
   AuthorizationError,
+  getOAuthApi,
   OAuthProvider,
   type AuthRequest,
   type ClientInfo,
   type OAuthHelpers,
+  type OAuthProviderOptions,
 } from "@cloudflare/workers-oauth-provider";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
@@ -179,6 +181,52 @@ export type AnyamRealmOAuthProviderOptions = {
   readonly resource: string;
   readonly issuer: string;
 };
+
+function anyamRealmOAuthProviderOptions(
+  options: AnyamRealmOAuthProviderOptions,
+  ownerAuthorization: AnyamRealmOAuthAuthorizationAdapter = anyamPasskeyOwnerAuthorization,
+): OAuthProviderOptions<AnyamRealmOAuthEnv> {
+  const defaultHandler = {
+    async fetch(request: Request, env: AnyamRealmOAuthEnv, ctx: ExecutionContext): Promise<Response> {
+      const ownerResponse = await handleAnyamRealmOwnerRequest(request, env);
+      if (ownerResponse) return ownerResponse;
+      const url = new URL(request.url);
+      if (url.pathname === "/authorize") return authorizeRequest(request, env, ownerAuthorization);
+      return handleCustomerRealmRequest(request, env);
+    },
+  };
+
+  return {
+    apiRoute: "/mcp",
+    apiHandler: AnyamRealmOAuthQualificationHandler,
+    defaultHandler,
+    authorizeEndpoint: "/authorize",
+    tokenEndpoint: "/oauth/token",
+    allowPlainPKCE: false,
+    allowImplicitFlow: false,
+    allowTokenExchangeGrant: false,
+    scopesSupported: [...ANYAM_REALM_OAUTH_SCOPES],
+    resourceMetadata: {
+      resource: options.resource,
+      authorization_servers: [options.issuer],
+      scopes_supported: [...ANYAM_REALM_OAUTH_SCOPES],
+      bearer_methods_supported: ["header"],
+      resource_name: "Anyam Realm qualification MCP resource",
+    },
+    clientIdMetadataDocumentEnabled: true,
+    clientRegistrationEndpoint: "/oauth/register",
+  };
+}
+
+/** Initialize the OAuth helper without requiring an earlier OAuth request in
+ * the same Worker isolate. Owner grant revocation uses this on a fresh isolate
+ * before the owner route is dispatched. */
+export function ensureAnyamRealmOAuthHelpers(options: AnyamRealmOAuthProviderOptions, env: AnyamRealmOAuthEnv): OAuthHelpers {
+  if (env.OAUTH_PROVIDER) return env.OAUTH_PROVIDER;
+  const helpers = getOAuthApi(anyamRealmOAuthProviderOptions(options), env);
+  env.OAUTH_PROVIDER = helpers;
+  return helpers;
+}
 
 export const ANYAM_REALM_OAUTH_CONSENT_TTL_SECONDS = 5 * 60;
 export const ANYAM_REALM_OAUTH_CONSENT_RECEIPT = "oauthConsent=explicit; csrf=durable-session-bound; sizing=qualification-tripwire; remeasure-before-production" as const;
@@ -398,34 +446,5 @@ export function createAnyamRealmOAuthProvider(
   options: AnyamRealmOAuthProviderOptions,
   ownerAuthorization: AnyamRealmOAuthAuthorizationAdapter = anyamPasskeyOwnerAuthorization,
 ): OAuthProvider<AnyamRealmOAuthEnv> {
-  const defaultHandler = {
-    async fetch(request: Request, env: AnyamRealmOAuthEnv): Promise<Response> {
-      const ownerResponse = await handleAnyamRealmOwnerRequest(request, env);
-      if (ownerResponse) return ownerResponse;
-      const url = new URL(request.url);
-      if (url.pathname === "/authorize") return authorizeRequest(request, env, ownerAuthorization);
-      return handleCustomerRealmRequest(request, env);
-    },
-  };
-
-  return new OAuthProvider<AnyamRealmOAuthEnv>({
-    apiRoute: "/mcp",
-    apiHandler: AnyamRealmOAuthQualificationHandler,
-    defaultHandler,
-    authorizeEndpoint: "/authorize",
-    tokenEndpoint: "/oauth/token",
-    allowPlainPKCE: false,
-    allowImplicitFlow: false,
-    allowTokenExchangeGrant: false,
-    scopesSupported: [...ANYAM_REALM_OAUTH_SCOPES],
-    resourceMetadata: {
-      resource: options.resource,
-      authorization_servers: [options.issuer],
-      scopes_supported: [...ANYAM_REALM_OAUTH_SCOPES],
-      bearer_methods_supported: ["header"],
-      resource_name: "Anyam Realm qualification MCP resource",
-    },
-    clientIdMetadataDocumentEnabled: true,
-    clientRegistrationEndpoint: "/oauth/register",
-  });
+  return new OAuthProvider<AnyamRealmOAuthEnv>(anyamRealmOAuthProviderOptions(options, ownerAuthorization));
 }

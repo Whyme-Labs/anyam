@@ -30,8 +30,18 @@ export function renderOAuthConsentPage(input: OAuthConsentPageInput): Response {
   const script = `
     const form = document.getElementById("oauth-consent-form");
     const status = document.getElementById("oauth-consent-status");
-    form?.addEventListener("submit", () => {
-      for (const button of form.querySelectorAll("button")) button.disabled = true;
+    form?.addEventListener("submit", (event) => {
+      if (form.dataset.submitting === "true") {
+        event.preventDefault();
+        return;
+      }
+      form.dataset.submitting = "true";
+      const submitter = event.submitter;
+      if (submitter) {
+        for (const button of form.querySelectorAll("button")) {
+          if (button !== submitter) button.disabled = true;
+        }
+      }
       if (status) status.textContent = "Submitting authorization…";
     });
   `.replaceAll("</script>", "<\\/script>");

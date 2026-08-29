@@ -38,6 +38,8 @@ test("OAuth consent allows the registered loopback redirect and prevents duplica
   const html = await response.text();
   assert.match(html, /id="oauth-consent-form"/u);
   assert.match(html, /addEventListener\("submit"/u);
-  assert.match(html, /button\.disabled = true/u);
+  assert.match(html, /event\.submitter/u);
+  assert.match(html, /form\.dataset\.submitting/u);
+  assert.match(html, /if \(button !== submitter\) button\.disabled = true/u);
   assert.equal(oauthConsentContentSecurityPolicy(redirectUri, "nonce-test"), "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'nonce-nonce-test'; form-action 'self' http://127.0.0.1:62026; base-uri 'none'");
 });

@@ -46,6 +46,39 @@ test("OAuth qualification capability fails closed without its dedicated scope", 
   assert.match(String(value.receipt), /qualification\.github-app/u);
 });
 
+test("OAuth qualification capability preserves bounded coordinator rejection details", async () => {
+  const env = {
+    ANYAM_INSTALLATION_ID: "qualification",
+    REALM_COORDINATOR: {
+      idFromName: (name: string) => name,
+      get: () => ({ fetch: async () => new Response(JSON.stringify({
+        protocol: "anyam.authority-plane/v1",
+        code: "authority.owner_denied",
+        message: "The Authority session is not an active Realm owner.",
+        recoveryAction: "Authenticate the Realm owner and retry.",
+        receipt: "authority=owner-denied; credentialMaterialStored=false",
+      }), { status: 403, headers: { "content-type": "application/json" } }) }),
+    },
+  } as unknown as AnyamRealmMcpEnv;
+  const props: AnyamRealmMcpProps = { realmId: "realm:qualification", kernelSessionId: "session:owner", scopes: [ANYAM_GITHUB_APP_QUALIFICATION_SCOPE], mcpResource: "https://realm.example/mcp" };
+  const response = await handleAnyamGitHubAppQualificationRequest(new Request(`https://realm.example${ANYAM_GITHUB_APP_QUALIFICATION_PATH}`, {
+    method: "POST",
+    body: JSON.stringify({ protocol: ANYAM_GITHUB_APP_QUALIFICATION_PROTOCOL, operation: "authority.state.inspect" }),
+  }), env, props);
+  assert.ok(response);
+  assert.equal(response.status, 403);
+  const value = await response.json() as Record<string, unknown>;
+  assert.equal(value.code, "qualification_coordinator_rejected");
+  assert.deepEqual(value.coordinator, {
+    httpStatus: 403,
+    code: "authority.owner_denied",
+    message: "The Authority session is not an active Realm owner.",
+    recoveryAction: "Authenticate the Realm owner and retry.",
+    receipt: "authority=owner-denied; credentialMaterialStored=false",
+  });
+  assert.equal(JSON.stringify(value).includes("secret"), false);
+});
+
 test("OAuth qualification capability rejects provider credential material before Coordinator dispatch", async () => {
   const { env, props, calls } = fixture();
   const response = await handleAnyamGitHubAppQualificationRequest(new Request(`https://realm.example${ANYAM_GITHUB_APP_QUALIFICATION_PATH}`, {

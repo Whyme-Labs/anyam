@@ -13,6 +13,24 @@ const QUALIFICATION_BODY_SIZING_RECEIPT = "bodyBytesLimit=262144; sizing=qualifi
 
 type JsonObject = Record<string, unknown>;
 
+class CoordinatorRejection extends Error {
+  readonly httpStatus: number;
+  readonly coordinatorCode: string | undefined;
+  readonly coordinatorMessage: string | undefined;
+  readonly coordinatorRecoveryAction: string | undefined;
+  readonly coordinatorReceipt: string | undefined;
+
+  constructor(input: { httpStatus: number; code?: string; message?: string; recoveryAction?: string; receipt?: string }) {
+    super(input.code ?? `coordinator-http-${input.httpStatus}`);
+    this.name = "CoordinatorRejection";
+    this.httpStatus = input.httpStatus;
+    this.coordinatorCode = input.code;
+    this.coordinatorMessage = input.message;
+    this.coordinatorRecoveryAction = input.recoveryAction;
+    this.coordinatorReceipt = input.receipt;
+  }
+}
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
     status,
@@ -75,11 +93,38 @@ async function coordinator(env: AnyamRealmMcpEnv, path: string, body: JsonObject
   }));
   const value = await response.json().catch(() => undefined);
   const payload = object(value, "coordinator-response");
-  if (!response.ok) throw new Error(typeof payload.code === "string" ? payload.code : `coordinator-http-${response.status}`);
+  if (!response.ok) {
+    throw new CoordinatorRejection({
+      httpStatus: response.status,
+      ...(typeof payload.code === "string" ? { code: payload.code } : {}),
+      ...(typeof payload.message === "string" ? { message: payload.message } : {}),
+      ...(typeof payload.recoveryAction === "string" ? { recoveryAction: payload.recoveryAction } : {}),
+      ...(typeof payload.receipt === "string" ? { receipt: payload.receipt } : {}),
+    });
+  }
   return payload;
 }
 
 function coordinatorFailure(error: unknown, operation: string): Response {
+  if (error instanceof CoordinatorRejection) {
+    const status = error.httpStatus === 404 ? 404 : error.httpStatus === 409 ? 409 : error.httpStatus === 422 ? 422 : error.httpStatus === 401 || error.httpStatus === 403 ? 403 : 503;
+    const errorClass = status === 404 ? "not_found" : status === 409 ? "conflict" : status === 422 ? "invalid_request" : status === 403 ? "session_rejected" : "unavailable";
+    const coordinator = {
+      httpStatus: error.httpStatus,
+      code: error.coordinatorCode ?? "not-returned",
+      ...(error.coordinatorMessage ? { message: error.coordinatorMessage } : {}),
+      ...(error.coordinatorRecoveryAction ? { recoveryAction: error.coordinatorRecoveryAction } : {}),
+      ...(error.coordinatorReceipt ? { receipt: error.coordinatorReceipt } : {}),
+    };
+    return json({
+      protocol: ANYAM_GITHUB_APP_QUALIFICATION_PROTOCOL,
+      status: "blocked",
+      code: "qualification_coordinator_rejected",
+      recoveryAction: error.coordinatorRecoveryAction ?? (status === 404 ? "verify the disposable qualification Project, Workspace, Mirror, or recovery identity and retry the same operation" : status === 409 ? "read the current qualification checkpoint, reuse the original idempotency key, or start a fresh disposable qualification" : status === 422 ? "correct the typed qualification payload and retry without widening the capability" : status === 403 ? "reauthorize the owner OAuth grant through a current passkey-authenticated Realm session" : "inspect the customer Realm coordinator and retry the same idempotent operation when safe"),
+      coordinator,
+      receipt: `qualification=github-app; operation=${operation}; errorClass=${errorClass}; coordinatorStatus=${error.httpStatus}; coordinatorCode=${error.coordinatorCode ?? "not-returned"}; ${QUALIFICATION_BODY_SIZING_RECEIPT}; credentialMaterialStored=false; canonicalWrite=false`,
+    }, status);
+  }
   const detail = error instanceof Error ? error.message : "coordinator-rejected";
   const status = detail.includes("not_found") ? 404 : detail.includes("conflict") || detail.includes("stale_state") ? 409 : detail.includes("invalid_request") || detail.includes("required") ? 422 : detail.includes("owner") || detail.includes("session") || detail.includes("unauthorized") ? 403 : 503;
   const errorClass = status === 404 ? "not_found" : status === 409 ? "conflict" : status === 422 ? "invalid_request" : "unavailable";

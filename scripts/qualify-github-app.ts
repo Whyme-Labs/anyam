@@ -578,6 +578,7 @@ async function main(): Promise<void> {
   const gitSizingReceipt = required("ANYAM_GITHUB_APP_GIT_SIZING_RECEIPT");
   const retryDelaysMs = commaSeparatedIntegers("ANYAM_GITHUB_APP_RETRY_DELAYS_MS");
   const retrySizingReceipt = required("ANYAM_GITHUB_APP_RETRY_SIZING_RECEIPT");
+  const gitRetry = { delaysMs: retryDelaysMs, sizingReceipt: retrySizingReceipt };
   const queueMaxPending = positiveInteger("ANYAM_GITHUB_APP_QUEUE_MAX_PENDING");
   const queueSizingReceipt = required("ANYAM_GITHUB_APP_QUEUE_SIZING_RECEIPT");
   const proposalWaitMs = positiveInteger("ANYAM_GITHUB_APP_PR_REVISION_WAIT_MS");
@@ -615,7 +616,7 @@ async function main(): Promise<void> {
     http = new FetchGitHubAppHttpClient({ baseUrl: apiBaseUrl, retry: { delaysMs: retryDelaysMs, sizingReceipt: retrySizingReceipt } });
     issuer = new GitHubAppInstallationTokenIssuer({ http, appId, privateKey: privateKey(), jwtLifetimeSeconds, clockSkewSeconds, sizingReceipt: jwtSizingReceipt, clockSkewSizingReceipt });
     api = new FetchGitHubRestClient(http);
-    adapter = new GitHubAppProjectionAdapter({ installation, issuer, git: new NodeGitSmartHttpTransport({ sourceDirectory: seeded.directory, maxBufferBytes: gitMaxBufferBytes, sizingReceipt: gitSizingReceipt }), api, queue: { maxPending: queueMaxPending, sizingReceipt: queueSizingReceipt, deliveryLedger } });
+    adapter = new GitHubAppProjectionAdapter({ installation, issuer, git: new NodeGitSmartHttpTransport({ sourceDirectory: seeded.directory, maxBufferBytes: gitMaxBufferBytes, sizingReceipt: gitSizingReceipt, inspectRetry: gitRetry }), api, readAfterWriteRetry: gitRetry, queue: { maxPending: queueMaxPending, sizingReceipt: queueSizingReceipt, deliveryLedger } });
     const emptyMirror = mirror({ repository, initialGeneration: "qualification:empty" });
     const initialInspection = await adapter.inspect({ mirror: emptyMirror, knownRefs: [], knownGeneration: "qualification:empty" });
     if (initialInspection.status !== "succeeded") throw new Error(`initial GitHub ref inspection failed: ${initialInspection.errorCode}; ${initialInspection.recoveryAction}`);
@@ -635,7 +636,7 @@ async function main(): Promise<void> {
 
     const setupToken = await issuer.issue({ installationId, repository, permissions: ["contents:write", "metadata:read", "pull_requests:write"] });
     if (!setupToken.token.trim() || !Number.isFinite(Date.parse(setupToken.expiresAt)) || Date.parse(setupToken.expiresAt) <= Date.now()) throw new Error("GitHub App qualification setup credential was missing or expired");
-    const setupGit = new NodeGitSmartHttpTransport({ sourceDirectory: seeded.directory, maxBufferBytes: gitMaxBufferBytes, sizingReceipt: gitSizingReceipt });
+    const setupGit = new NodeGitSmartHttpTransport({ sourceDirectory: seeded.directory, maxBufferBytes: gitMaxBufferBytes, sizingReceipt: gitSizingReceipt, inspectRetry: gitRetry });
     await runGit(seeded.directory, ["update-ref", `refs/heads/${seeded.proposalBranch}`, seeded.proposalInitialOid], gitMaxBufferBytes);
     const proposalBranchPush = await setupGit.push({ repositoryUrl, token: setupToken.token, expectedRefs: [], desiredRefs: [{ name: `refs/heads/${seeded.proposalBranch}`, oid: seeded.proposalInitialOid }], refMappings: [{ localRef: `refs/heads/${seeded.proposalBranch}`, remoteRef: `refs/heads/${seeded.proposalBranch}` }], operationId: "github:qualification:pr-branch", idempotencyKey: "github:qualification:pr-branch" });
     const pullRequest = await api.createPullRequest({ repository, head: seeded.proposalBranch, base: "main", title: "Anyam disposable projection qualification", token: setupToken.token });
@@ -674,7 +675,7 @@ async function main(): Promise<void> {
       }
     }
     const resumeIssuer = new ResumeIssuer(issuer);
-    const resumeAdapter = new GitHubAppProjectionAdapter({ installation, issuer: resumeIssuer, git: new NodeGitSmartHttpTransport({ sourceDirectory: seeded.directory, maxBufferBytes: gitMaxBufferBytes, sizingReceipt: gitSizingReceipt }), api, queue: { maxPending: queueMaxPending, sizingReceipt: queueSizingReceipt, deliveryLedger } });
+    const resumeAdapter = new GitHubAppProjectionAdapter({ installation, issuer: resumeIssuer, git: new NodeGitSmartHttpTransport({ sourceDirectory: seeded.directory, maxBufferBytes: gitMaxBufferBytes, sizingReceipt: gitSizingReceipt, inspectRetry: gitRetry }), api, readAfterWriteRetry: gitRetry, queue: { maxPending: queueMaxPending, sizingReceipt: queueSizingReceipt, deliveryLedger } });
     const resumedFirst = await resumeAdapter.inspect({ mirror: service.repositoryMirror, knownRefs: refs([["refs/heads/main", seeded.divergentOid]]), knownGeneration: forcePush.value.generation });
     if (resumedFirst.status !== "succeeded") throw new Error(`credential resume first inspection failed: ${resumedFirst.errorCode}`);
     const resumedExpired = await resumeAdapter.inspect({ mirror: service.repositoryMirror, knownRefs: refs([["refs/heads/main", seeded.divergentOid]]), knownGeneration: forcePush.value.generation });

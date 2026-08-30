@@ -205,7 +205,7 @@ type QualificationAuthorityClient = {
   syncMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject>;
   reconcileMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject>;
   exportAuthorityRecovery(): Promise<JsonObject>;
-  restoreAuthorityRecovery(bundle: JsonObject): Promise<JsonObject>;
+  restoreAuthorityRecovery(bundle: JsonObject, qualificationId: string): Promise<JsonObject>;
   activateAuthorityRecovery(bundleId: string, bundleDigest: string): Promise<JsonObject>;
 };
 
@@ -240,7 +240,7 @@ class OAuthQualificationAuthorityClient implements QualificationAuthorityClient 
   syncMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("authority.mirror.mutate", { mirrorId, mirrorOperation: "sync", payload: { ...body, mirrorId }, idempotencyKey }); }
   reconcileMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("authority.mirror.mutate", { mirrorId, mirrorOperation: "reconcile", payload: { ...body, mirrorId }, idempotencyKey }); }
   exportAuthorityRecovery(): Promise<JsonObject> { return this.request("authority.recovery.export"); }
-  restoreAuthorityRecovery(bundle: JsonObject): Promise<JsonObject> { return this.request("authority.recovery.restore", { bundle, idempotencyKey: "qualification:authority-recovery-restore" }); }
+  restoreAuthorityRecovery(bundle: JsonObject, qualificationId: string): Promise<JsonObject> { return this.request("authority.recovery.restore", { bundle, qualificationId, idempotencyKey: `qualification:${qualificationId}:authority-recovery-restore` }); }
   activateAuthorityRecovery(bundleId: string, bundleDigest: string): Promise<JsonObject> { return this.request("authority.recovery.activate", { bundleId, bundleDigest, idempotencyKey: `qualification:authority-recovery-activate:${bundleId}` }); }
 }
 
@@ -302,9 +302,9 @@ function authorityMirrorGeneration(mirror: JsonObject): string {
   return authorityField(mirror.remoteGeneration, "mirror.remoteGeneration");
 }
 
-async function restoreAuthorityRecovery(client: QualificationAuthorityClient, bundle: JsonObject): Promise<CleanupReceipt> {
+async function restoreAuthorityRecovery(client: QualificationAuthorityClient, bundle: JsonObject, qualificationId: string): Promise<CleanupReceipt> {
   try {
-    const restored = await client.restoreAuthorityRecovery(bundle);
+    const restored = await client.restoreAuthorityRecovery(bundle, qualificationId);
     if (restored.status !== "recovery-quarantined") return { status: "blocked", receipt: "cleanup=authority-restore-blocked; unexpected-recovery-status; credentialMaterialStored=false", recoveryAction: "authenticate the Realm owner again, inspect the Authority recovery receipt, and restore the exact signed bundle" };
     const readBack = await client.exportAuthorityRecovery();
     const readBackBundle = authorityObject(readBack.bundle, "restored Authority recovery bundle");
@@ -735,7 +735,7 @@ async function main(): Promise<void> {
     cleanup = await cleanupGitHubAppDisposable({ installation, issuer, api, repositoryPrefix: repository, qualificationId, disposableRepository });
     if (cleanup.status !== "succeeded") throw new Error(`provider cleanup failed: ${cleanup.recoveryAction ?? cleanup.receipt}`);
     if (authorityClient && authorityRecoverySnapshot) {
-      authorityCleanup = await restoreAuthorityRecovery(authorityClient, authorityRecoverySnapshot);
+      authorityCleanup = await restoreAuthorityRecovery(authorityClient, authorityRecoverySnapshot, qualificationId);
       if (authorityCleanup.status !== "succeeded") throw new Error(`customer Realm Authority cleanup failed: ${authorityCleanup.recoveryAction ?? authorityCleanup.receipt}`);
     }
     const authorityRun = authority ?? { status: "not-run", receipt: "authority=not-run; inputs=not-configured; credentialValues=not-printed; canonicalWrite=false" };
@@ -753,7 +753,7 @@ async function main(): Promise<void> {
         cleanup = { status: "blocked", receipt: `cleanup=blocked; repository=${repository}; exception=${cleanupError instanceof Error ? cleanupError.name : "unknown"}; credentialMaterialStored=false`, recoveryAction: "restore the GitHub App credential authority, then retry exact disposable-repository cleanup" };
       }
     }
-    if (!authorityCleanup && authorityMutated && authorityClient && authorityRecoverySnapshot) authorityCleanup = await restoreAuthorityRecovery(authorityClient, authorityRecoverySnapshot);
+    if (!authorityCleanup && authorityMutated && authorityClient && authorityRecoverySnapshot) authorityCleanup = await restoreAuthorityRecovery(authorityClient, authorityRecoverySnapshot, qualificationId);
     const cleanupReceipt = [cleanup?.receipt, authorityCleanup?.receipt].filter((receipt): receipt is string => receipt !== undefined).join("; ") || "cleanup=not-run; adapter-not-qualified";
     throw new Error(`${error instanceof Error ? error.message : "GitHub App qualification failed"}; cleanup=${cleanupReceipt}`);
   } finally {

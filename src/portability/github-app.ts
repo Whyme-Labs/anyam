@@ -26,6 +26,18 @@ import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "..
 export const GITHUB_APP_ADAPTER_PROTOCOL = "anyam.github-app-adapter/v1" as const;
 const execFile = promisify(execFileCallback);
 
+type GitRetryPolicyInput = {
+  delaysMs: readonly number[];
+  sizingReceipt: string;
+  sleep?: (milliseconds: number) => Promise<void>;
+};
+
+type GitRetryPolicy = {
+  delaysMs: readonly number[];
+  sizingReceipt: string;
+  sleep: (milliseconds: number) => Promise<void>;
+};
+
 export type GitHubWebhookEventName = "push" | "pull_request";
 export type GitHubAppPermission = "contents:read" | "contents:write" | "metadata:read" | "pull_requests:read" | "pull_requests:write" | "administration:write";
 
@@ -77,16 +89,17 @@ function gitErrorClass(stderr: string): string {
   return "provider-or-transport";
 }
 
-export function gitTransportFailure(error: unknown, operation: "inspect" | "push"): GitHubAppAdapterError {
+export function gitTransportFailure(error: unknown, operation: "inspect" | "push", retryAttempts?: number, retrySizingReceipt?: string): GitHubAppAdapterError {
   const record = error as { code?: unknown; stderr?: unknown };
   const stderr = typeof record.stderr === "string" ? record.stderr : "";
   const exitCode = typeof record.code === "number" || typeof record.code === "string" ? String(record.code) : "unknown";
+  const retryReceipt = retryAttempts === undefined ? "" : `; retryAttempts=${retryAttempts}; retry=${retrySizingReceipt ?? "not-configured"}`;
   return new GitHubAppAdapterError({
     errorCode: "github_app.git_transport",
     message: `Git Smart HTTP ${operation} failed; provider stderr is redacted.`,
     retryable: false,
     recoveryAction: "inspect the redacted Git transport receipt, reconcile the selected App installation and repository state, then retry the same disposable qualification",
-    receipt: `provider=github-app; transport=git-smart-http; operation=${operation}; exit=${exitCode}; stderrClass=${gitErrorClass(stderr)}; stderrDigest=${digest(stderr)}; credentialMaterialStored=false`,
+    receipt: `provider=github-app; transport=git-smart-http; operation=${operation}; exit=${exitCode}; stderrClass=${gitErrorClass(stderr)}; stderrDigest=${digest(stderr)}${retryReceipt}; credentialMaterialStored=false`,
   });
 }
 
@@ -185,6 +198,18 @@ function safeReceipt(value: unknown, field: string): string {
     throw new GitHubAppAdapterError({ errorCode: "github_app.unsafe_receipt", message: `${field} contains credential-like material.`, retryable: false, recoveryAction: `return a digest-only ${field} receipt without credential material`, receipt: `field=${field}; fieldPath=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; credentialMaterialStored=false; transition=not-applied` });
   }
   return receipt;
+}
+
+function retryPolicy(input: GitRetryPolicyInput | undefined, field: string): GitRetryPolicy {
+  if (input === undefined) return { delaysMs: [], sizingReceipt: "not-configured", sleep: async () => undefined };
+  if (input.delaysMs.some((delay) => !Number.isSafeInteger(delay) || delay < 0) || input.sizingReceipt.trim().length === 0) {
+    throw new GitHubAppAdapterError({ errorCode: "github_app.git_retry_invalid", message: `${field} requires non-negative measured delays and a sizing receipt.`, retryable: false, recoveryAction: `configure ${field} with non-negative delay values and its measurement receipt`, receipt: `${field}=invalid; transition=not-applied; credentialMaterialStored=false` });
+  }
+  return {
+    delaysMs: [...input.delaysMs],
+    sizingReceipt: safeReceipt(input.sizingReceipt, `${field}.sizingReceipt`),
+    sleep: input.sleep ?? (async (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))),
+  };
 }
 
 function providerFailure(mirror: RepositoryMirror, error: unknown, operation: string): MirrorProviderFailure {
@@ -362,14 +387,16 @@ export class GitHubAppProjectionAdapter implements MirrorRemoteAdapter {
   private readonly git: GitHubSmartHttpTransport;
   private readonly api: GitHubRestClient;
   private readonly queue: GitHubReconciliationQueue;
+  private readonly readAfterWriteRetry: GitRetryPolicy;
 
-  constructor(input: { installation: GitHubAppInstallation; issuer: GitHubAppTokenIssuer; git: GitHubSmartHttpTransport; api: GitHubRestClient; queue: GitHubReconciliationQueueOptions }) {
+  constructor(input: { installation: GitHubAppInstallation; issuer: GitHubAppTokenIssuer; git: GitHubSmartHttpTransport; api: GitHubRestClient; queue: GitHubReconciliationQueueOptions; readAfterWriteRetry?: GitRetryPolicyInput }) {
     validateInstallation(input.installation);
     this.installation = { ...input.installation, permissions: { ...input.installation.permissions }, events: [...input.installation.events] };
     this.issuer = input.issuer;
     this.git = input.git;
     this.api = input.api;
     this.queue = new GitHubReconciliationQueue(input.queue);
+    this.readAfterWriteRetry = retryPolicy(input.readAfterWriteRetry, "readAfterWriteRetry");
   }
 
   private assertMirror(mirror: RepositoryMirror): void {
@@ -446,12 +473,29 @@ export class GitHubAppProjectionAdapter implements MirrorRemoteAdapter {
       const desiredRefs = input.desiredRefs.filter((ref) => mappedRemoteRefs(input.mirror).has(ref.name)).map((ref) => ({ ...ref }));
       if (!refsEqual(desiredRefs, input.desiredRefs)) throw new GitHubAppAdapterError({ errorCode: "github_app.unmapped_ref", message: "The projection contains a ref outside the configured Mirror mapping.", retryable: false, recoveryAction: "project only the mapped public branch and resume the same outbound operation", receipt: `mirror=${input.mirror.id}; operation=${input.operationId}; refMapping=blocked; credentialMaterialStored=false` });
       const remote = await this.git.push({ repositoryUrl: this.installation.repositoryUrl, token: token.token, expectedRefs: input.expectedRefs, desiredRefs, refMappings: input.mirror.refMappings, operationId: input.operationId, idempotencyKey: input.idempotencyKey });
-      const reinspection = await this.git.inspect({ repositoryUrl: this.installation.repositoryUrl, token: token.token, refs: [...mappedRemoteRefs(input.mirror)], knownGeneration: remote.generation });
-      const resultRefs = reinspection.refs.filter((ref) => mappedRemoteRefs(input.mirror).has(ref.name)).map((ref) => ({ ...ref }));
-      if (!refsEqual(resultRefs, desiredRefs)) throw new GitHubAppAdapterError({ errorCode: "github_app.push_result_mismatch", message: "GitHub did not return the exact mapped refs requested by Anyam.", retryable: false, recoveryAction: "inspect the GitHub ref state and resume the Mirror checkpoint without accepting the provider result", receipt: `mirror=${input.mirror.id}; operation=${input.operationId}; expectedRefs=${desiredRefs.length}; actualRefs=${resultRefs.length}; credentialMaterialStored=false` });
+      let reinspection: GitHubSmartHttpRefs;
+      let resultRefs: GitRef[] = [];
+      let readAfterWriteAttempts = 0;
+      while (true) {
+        try {
+          reinspection = await this.git.inspect({ repositoryUrl: this.installation.repositoryUrl, token: token.token, refs: [...mappedRemoteRefs(input.mirror)], knownGeneration: remote.generation });
+        } catch (error) {
+          const delay = this.readAfterWriteRetry.delaysMs[readAfterWriteAttempts];
+          if (delay === undefined) throw error;
+          readAfterWriteAttempts += 1;
+          await this.readAfterWriteRetry.sleep(delay);
+          continue;
+        }
+        resultRefs = reinspection.refs.filter((ref) => mappedRemoteRefs(input.mirror).has(ref.name)).map((ref) => ({ ...ref }));
+        if (refsEqual(resultRefs, desiredRefs)) break;
+        const delay = this.readAfterWriteRetry.delaysMs[readAfterWriteAttempts];
+        if (delay === undefined) throw new GitHubAppAdapterError({ errorCode: "github_app.push_result_mismatch", message: "GitHub did not return the exact mapped refs requested by Anyam after the bounded read-after-write window.", retryable: false, recoveryAction: "inspect the GitHub ref state and resume the Mirror checkpoint without accepting the provider result", receipt: `mirror=${input.mirror.id}; operation=${input.operationId}; expectedRefs=${desiredRefs.length}; actualRefs=${resultRefs.length}; readAfterWriteAttempts=${readAfterWriteAttempts}; readAfterWriteRetry=${this.readAfterWriteRetry.sizingReceipt}; credentialMaterialStored=false` });
+        readAfterWriteAttempts += 1;
+        await this.readAfterWriteRetry.sleep(delay);
+      }
       const providerReceipt = safeReceipt(remote.receipt, "git.receipt");
       const reinspectionReceipt = safeReceipt(reinspection.receipt, "git.reinspectionReceipt");
-      return { status: "succeeded", value: { generation: reinspection.generation, refs: resultRefs, updates: resultRefs.map((ref) => ({ remoteRef: ref.name, currentOid: ref.oid, kind: "fast-forward" as const, originOperationId: input.operationId, receipt: `provider=github-app; ref=${ref.name}; operation=${input.operationId}; state=projected; credentialMaterialStored=false` })), commits: [], originOperationId: input.operationId, receipt: `provider=github-app; operation=push; installation=${this.installation.installationId}; repository=${this.installation.repository}; git=${providerReceipt}; reinspection=${reinspectionReceipt}; expiresAt=${token.expiresAt}; credentialMaterialStored=false` } };
+      return { status: "succeeded", value: { generation: reinspection.generation, refs: resultRefs, updates: resultRefs.map((ref) => ({ remoteRef: ref.name, currentOid: ref.oid, kind: "fast-forward" as const, originOperationId: input.operationId, receipt: `provider=github-app; ref=${ref.name}; operation=${input.operationId}; state=projected; credentialMaterialStored=false` })), commits: [], originOperationId: input.operationId, receipt: `provider=github-app; operation=push; installation=${this.installation.installationId}; repository=${this.installation.repository}; git=${providerReceipt}; reinspection=${reinspectionReceipt}; readAfterWriteAttempts=${readAfterWriteAttempts}; readAfterWriteRetry=${this.readAfterWriteRetry.sizingReceipt}; expiresAt=${token.expiresAt}; credentialMaterialStored=false` } };
     } catch (error) {
       return providerFailure(input.mirror, error, "push");
     }
@@ -911,12 +955,14 @@ export class NodeGitSmartHttpTransport implements GitHubSmartHttpTransport {
   private readonly sourceDirectory: string;
   private readonly maxBufferBytes: number;
   private readonly sizingReceipt: string;
+  private readonly inspectRetry: GitRetryPolicy;
 
-  constructor(input: { sourceDirectory: string; maxBufferBytes: number; sizingReceipt: string }) {
+  constructor(input: { sourceDirectory: string; maxBufferBytes: number; sizingReceipt: string; inspectRetry?: GitRetryPolicyInput }) {
     this.sourceDirectory = required(input.sourceDirectory, "sourceDirectory");
     if (!Number.isSafeInteger(input.maxBufferBytes) || input.maxBufferBytes < 1) throw new GitHubAppAdapterError({ errorCode: "github_app.git_buffer_invalid", message: "Git command output budget must be a positive measured value.", retryable: false, recoveryAction: "configure the observed Git output budget with its sizing receipt", receipt: "git.maxBuffer=invalid; transition=not-applied" });
     this.maxBufferBytes = input.maxBufferBytes;
     this.sizingReceipt = safeReceipt(input.sizingReceipt, "git.sizingReceipt");
+    this.inspectRetry = retryPolicy(input.inspectRetry, "inspectRetry");
   }
 
   private authEnv(token: string): NodeJS.ProcessEnv {
@@ -932,13 +978,22 @@ export class NodeGitSmartHttpTransport implements GitHubSmartHttpTransport {
     }
     if (repositoryUrl.protocol !== "https:" || repositoryUrl.hostname !== "github.com") throw new GitHubAppAdapterError({ errorCode: "github_app.repository_host_invalid", message: "Git Smart HTTP must use the public GitHub HTTPS host.", retryable: false, recoveryAction: "configure a github.com HTTPS repository URL", receipt: `repositoryHost=${repositoryUrl.hostname}; transition=not-applied; credentialMaterialStored=false` });
     let result: { stdout: string };
-    try {
-      result = await execFile("git", ["ls-remote", "--refs", input.repositoryUrl, ...input.refs], { cwd: this.sourceDirectory, env: this.authEnv(input.token), maxBuffer: this.maxBufferBytes });
-    } catch (error) {
-      throw gitTransportFailure(error, "inspect");
+    let retryAttempts = 0;
+    while (true) {
+      try {
+        result = await execFile("git", ["ls-remote", "--refs", input.repositoryUrl, ...input.refs], { cwd: this.sourceDirectory, env: this.authEnv(input.token), maxBuffer: this.maxBufferBytes });
+        break;
+      } catch (error) {
+        const record = error as { stderr?: unknown };
+        const stderr = typeof record.stderr === "string" ? record.stderr : "";
+        const delay = this.inspectRetry.delaysMs[retryAttempts];
+        if (delay === undefined || gitErrorClass(stderr) !== "provider-or-transport") throw gitTransportFailure(error, "inspect", retryAttempts, this.inspectRetry.sizingReceipt);
+        retryAttempts += 1;
+        await this.inspectRetry.sleep(delay);
+      }
     }
     const refs = result.stdout.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => { const [oid, name] = line.split(/\s+/); return oid && name ? { oid, name } : undefined; }).filter((ref): ref is GitRef => ref !== undefined);
-    return { generation: digest(refs), refs, receipt: `provider=github; transport=git-smart-http; refs=${refs.length}; previousGeneration=${input.knownGeneration}; credentialMaterialStored=false` };
+    return { generation: digest(refs), refs, receipt: `provider=github; transport=git-smart-http; refs=${refs.length}; previousGeneration=${input.knownGeneration}; inspectRetryAttempts=${retryAttempts}; inspectRetry=${this.inspectRetry.sizingReceipt}; credentialMaterialStored=false` };
   }
 
   async push(input: { repositoryUrl: string; token: string; expectedRefs: readonly GitRef[]; desiredRefs: readonly GitRef[]; refMappings: readonly { localRef: string; remoteRef: string }[]; operationId: string; idempotencyKey: string }): Promise<GitHubSmartHttpRefs> {

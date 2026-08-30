@@ -82,9 +82,14 @@ class FakeGit implements GitHubSmartHttpTransport {
     refs: refs([["refs/heads/main", "commit:two"]]),
     receipt: "git-smart-http=inspected; provider=github",
   };
+  staleInspectCount = 0;
   readonly pushCalls: Array<{ token: string; expectedRefs: readonly GitRef[]; desiredRefs: readonly GitRef[] }> = [];
 
   async inspect(): Promise<GitHubSmartHttpRefs> {
+    if (this.staleInspectCount > 0) {
+      this.staleInspectCount -= 1;
+      return { generation: "remote:stale", refs: refs([["refs/heads/main", "commit:one"]]), receipt: "git-smart-http=stale-readback; provider=github" };
+    }
     return { ...this.refs, refs: this.refs.refs.map((ref) => ({ ...ref })) };
   }
 
@@ -139,11 +144,11 @@ class FakeApi implements GitHubRestClient {
   }
 }
 
-function adapter(input: { git?: FakeGit; api?: FakeApi; issuer?: FakeTokenIssuer } = {}) {
+function adapter(input: { git?: FakeGit; api?: FakeApi; issuer?: FakeTokenIssuer; readAfterWriteRetry?: { delaysMs: readonly number[]; sizingReceipt: string; sleep?: (milliseconds: number) => Promise<void> } } = {}) {
   const issuer = input.issuer ?? new FakeTokenIssuer();
   const git = input.git ?? new FakeGit();
   const api = input.api ?? new FakeApi();
-  const value = new GitHubAppProjectionAdapter({ installation, issuer, git, api, queue: { maxPending: 2, sizingReceipt: "fixture=queue-capacity-measured", deliveryLedger: fixtureDeliveryLedger() } });
+  const value = new GitHubAppProjectionAdapter({ installation, issuer, git, api, ...(input.readAfterWriteRetry ? { readAfterWriteRetry: input.readAfterWriteRetry } : {}), queue: { maxPending: 2, sizingReceipt: "fixture=queue-capacity-measured", deliveryLedger: fixtureDeliveryLedger() } });
   return { value, issuer, git, api };
 }
 
@@ -286,6 +291,23 @@ test("GitHub App adapter projects canonical refs through Smart HTTP CAS and reje
   });
   assert.equal(expired.status, "failed");
   if (expired.status === "failed") assert.equal(expired.errorCode, "github_app.credential_expired");
+});
+
+test("GitHub App adapter retries a stale read-after-write before accepting exact refs", async () => {
+  const git = new FakeGit();
+  git.refs = { generation: "remote:g1", refs: refs([["refs/heads/main", "commit:one"]]), receipt: "git-smart-http=ready; provider=github" };
+  git.staleInspectCount = 1;
+  const { value } = adapter({ git, readAfterWriteRetry: { delaysMs: [0], sizingReceipt: "fixture=read-after-write-retry-measured" } });
+  const result = await value.push({
+    mirror: { protocol: "anyam.mirror/v1", id: "mirror:github", projectId: "project:video-player", sourceSpaceId: "source:community", provider: "github", remoteRepository: "acme/video-player", direction: "bidirectional", canonicalAuthority: "anyam", refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }], disclosure: "public", state: "healthy", canonicalProjectRevisionId: "project-revision:two", canonicalRefs: refs([["refs/heads/main", "commit:two"]]), remoteGeneration: "remote:g1", remoteRefs: refs([["refs/heads/main", "commit:one"]]), pendingInboundChangeIds: [], createdAt: "2026-08-13T00:00:00.000Z", updatedAt: "2026-08-13T00:00:00.000Z", receipt: "fixture=mirror; credentialFree=true" },
+    expectedGeneration: "remote:g1",
+    expectedRefs: refs([["refs/heads/main", "commit:one"]]),
+    desiredRefs: refs([["refs/heads/main", "commit:two"]]),
+    operationId: "mirror-operation:read-after-write",
+    idempotencyKey: "delivery:read-after-write",
+  });
+  assert.equal(result.status, "succeeded");
+  if (result.status === "succeeded") assert.match(result.value.receipt, /readAfterWriteAttempts=1/u);
 });
 
 test("GitHub App PR observation maps to an external proposal without copying private PR metadata", async () => {

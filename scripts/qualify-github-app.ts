@@ -344,12 +344,12 @@ async function qualifyCustomerRealmAuthority(input: {
   const projectionId = `projection:github-app-qualification-public:${suffix}`;
   const mirrorId = `mirror:github-app-qualification:${suffix}`;
   const repositoryId = `repository:github-app-qualification:${suffix}`;
-  const createdProject = await client.createProject({ projectId, name: "Anyam GitHub App qualification", referenceType: "git", sourceSpaces: [{ id: sourceSpaceId, name: "Qualification public", classification: "public", snapshotId: input.seeded.initialOid, repositoryId }], projectRevisionId }, `github-app:${input.qualificationId}:authority:project-create`);
+  const createdProject = authorityResultValue(await client.createProject({ projectId, name: "Anyam GitHub App qualification", referenceType: "git", sourceSpaces: [{ id: sourceSpaceId, name: "Qualification public", classification: "public", snapshotId: input.seeded.initialOid, repositoryId }], projectRevisionId }, `github-app:${input.qualificationId}:authority:project-create`));
   const createdCanonical = authorityObject(createdProject.canonicalRevision, "createdProject.canonicalRevision");
   if (authorityField(createdCanonical.id, "createdProject.canonicalRevision.id") !== projectRevisionId) throw new Error("customer Realm Authority created a different canonical Project Revision than requested");
   // Omit mounts so the Authority applies its canonical Source Space mount
   // default; an explicit empty array is rejected by the typed workspace route.
-  const createdWorkspace = await client.createWorkspace(projectId, { workspaceId, projectRevisionId, sourceSpaceIds: [sourceSpaceId], projectionId, classification: "public" }, `github-app:${input.qualificationId}:authority:workspace-create`);
+  const createdWorkspace = authorityResultValue(await client.createWorkspace(projectId, { workspaceId, projectRevisionId, sourceSpaceIds: [sourceSpaceId], projectionId, classification: "public" }, `github-app:${input.qualificationId}:authority:workspace-create`));
   const createdView = authorityObject(createdWorkspace.view, "createdWorkspace.view");
   const projectViewId = authorityField(createdView.id, "createdWorkspace.view.id");
   const mirrorPayload = { mirrorId, projectId, sourceSpaceId, provider: "github", remoteRepository: input.repository, refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }], disclosure: "public", state: "healthy", canonicalProjectRevisionId: projectRevisionId, canonicalRefs: [{ name: "refs/heads/main", oid: input.seeded.initialOid }], remoteGeneration: "qualification:empty", remoteRefs: [], pendingInboundChangeIds: [], receipt: "qualification=github-app-authority; setup=disposable-mirror; credentialMaterialStored=false" };

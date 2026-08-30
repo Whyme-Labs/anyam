@@ -640,6 +640,43 @@ function authorityRecoverySnapshot(body: CoordinatorRequestBody, realmId: string
   }
 }
 
+function authorityQualificationCleanupAllowed(input: { current: AuthorityPlaneSnapshot; exported: AuthorityPlaneSnapshot; qualificationId: string }): boolean {
+  const qualificationId = input.qualificationId.trim();
+  if (!qualificationId) return false;
+  const disposableMaps = [
+    "projects",
+    "sourceSpaces",
+    "projectRevisions",
+    "intents",
+    "intentComments",
+    "pullRequests",
+    "projectViews",
+    "workspaces",
+    "changes",
+    "changeRevisions",
+    "runs",
+    "runnerProfiles",
+    "runnerAttempts",
+    "evidence",
+    "artifacts",
+    "landings",
+    "releases",
+    "targets",
+    "promotions",
+    "mirrors",
+    "mirrorOperations",
+    "mirrorCheckpoints",
+    "externalProposals",
+    "mirrorDeliveries",
+    "canonicalByProject",
+  ] as const;
+  if (disposableMaps.some((field) => Object.keys(input.exported[field]).length > 0)) return false;
+  const exportedAudit = input.exported.audit;
+  if (input.current.audit.length < exportedAudit.length || exportedAudit.some((event, index) => JSON.stringify(input.current.audit[index]) !== JSON.stringify(event))) return false;
+  const exportedIdempotencyKeys = new Set(Object.keys(input.exported.idempotency));
+  return Object.keys(input.current.idempotency).every((key) => exportedIdempotencyKeys.has(key) || key.includes(qualificationId));
+}
+
 function identitySummary(identity: RealmIdentityPolicy): Record<string, unknown> {
   const snapshot = identity.getRecoverySnapshot();
   const ownerRelationships = Object.values(snapshot.relationships).filter((relationship) => relationship.role === "owner" && relationship.status === "active");
@@ -965,6 +1002,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     // sessions, and grants remain outside this recovery boundary.
     const humanSessionId = coordinatorString(body, "sessionId");
     coordinatorString(body, "idempotencyKey");
+    const qualificationId = body.qualificationId === undefined ? undefined : coordinatorString(body, "qualificationId");
     const session = this.authorityOwnerSession(humanSessionId);
     const recoveryKey = this.authorityRecoveryKey();
     const verification = await verifyAuthorityRecoveryBundle({ value: body.bundle, realmId: this.requireIdentity().realm.id, recoveryKeyId: recoveryKey.keyId, secret: recoveryKey.secret });
@@ -979,14 +1017,14 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: recoveryStatus === "quarantined" ? "recovery-quarantined" : "recovery-already-active", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: existing.snapshotVersion, recoveryStatus, credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=replay-idempotent; bundleId=${bundle.bundleId}; recoveryStatus=${recoveryStatus}; state=unchanged; credentialMaterialStored=false` });
     }
     const current = await this.authoritySnapshot();
-    if (current.version !== bundle.expectedVersion) throw new AuthorityPlaneError({ code: "stale_state", message: "Authority recovery bundle is stale for the current Authority version.", recoveryAction: "export a fresh bundle from the current Authority and retry; no snapshot was replaced", receipt: `authorityRecovery=stale; expectedVersion=${bundle.expectedVersion}; currentVersion=${current.version}; restore=not-applied` });
+    if (current.version !== bundle.expectedVersion && (qualificationId === undefined || !authorityQualificationCleanupAllowed({ current, exported: bundle.snapshot, qualificationId }))) throw new AuthorityPlaneError({ code: "stale_state", message: "Authority recovery bundle is stale for the current Authority version.", recoveryAction: "export a fresh bundle from the current Authority and retry; no snapshot was replaced", receipt: `authorityRecovery=stale; expectedVersion=${bundle.expectedVersion}; currentVersion=${current.version}; restore=not-applied` });
     const snapshot = authorityRecoverySnapshot({ snapshot: bundle.snapshot }, this.requireIdentity().realm.id);
     await this.ctx.blockConcurrencyWhile(async () => {
       await this.replaceAuthoritySnapshot(snapshot);
       await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_STATUS_KEY, "quarantined" satisfies AuthorityRecoveryStatus);
       await this.ctx.storage.put(restoreKey, { protocol: AUTHORITY_RECOVERY_PROTOCOL, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: snapshot.version, restoredAt: new Date().toISOString() } satisfies StoredAuthorityRecoveryRestore);
     });
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-quarantined", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: snapshot.version, recoveryStatus: "quarantined", credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=restored; version=${snapshot.version}; state=quarantined; auditChain=signed; credentialMaterialStored=false; canonicalWrite=false` });
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-quarantined", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: snapshot.version, recoveryStatus: "quarantined", credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=restored; version=${snapshot.version}; state=quarantined; auditChain=signed; qualificationCleanup=${qualificationId === undefined ? "false" : "authorized"}; credentialMaterialStored=false; canonicalWrite=false` });
   }
 
   private async authorityRecoveryActivate(body: CoordinatorRequestBody): Promise<Response> {

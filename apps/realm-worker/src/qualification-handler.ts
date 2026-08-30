@@ -203,7 +203,7 @@ export async function handleAnyamGitHubAppQualificationRequest(request: Request,
         result = await coordinator(env, "/authority/recovery/export/internal", { sessionId });
         break;
       case "authority.recovery.restore":
-        result = await coordinator(env, "/authority/recovery/restore/internal", { sessionId, idempotencyKey: requiredString(body.idempotencyKey, "idempotencyKey"), bundle: object(body.bundle, "bundle") });
+        result = await coordinator(env, "/authority/recovery/restore/internal", { sessionId, idempotencyKey: requiredString(body.idempotencyKey, "idempotencyKey"), bundle: object(body.bundle, "bundle"), ...(typeof body.qualificationId === "string" ? { qualificationId: body.qualificationId } : {}) });
         break;
       case "authority.recovery.activate":
         result = await coordinator(env, "/authority/recovery/activate/internal", { sessionId, idempotencyKey: requiredString(body.idempotencyKey, "idempotencyKey"), bundleId: requiredString(body.bundleId, "bundleId"), bundleDigest: requiredString(body.bundleDigest, "bundleDigest") });

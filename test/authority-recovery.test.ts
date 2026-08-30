@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { emptyAuthorityPlaneSnapshot, type AuthorityAuditEvent } from "../src/cloudflare/authority-plane.ts";
-import { createAuthorityRecoveryBundle, verifyAuthorityRecoveryBundle } from "../src/cloudflare/authority-recovery.ts";
+import { AUTHORITY_RECOVERY_SNAPSHOT_FIELDS, createAuthorityRecoveryBundle, verifyAuthorityRecoveryBundle } from "../src/cloudflare/authority-recovery.ts";
+
+test("Authority recovery field contract covers every exported snapshot field", () => {
+  const snapshotFields = Object.keys(emptyAuthorityPlaneSnapshot("realm:recovery-fields"));
+  assert.deepEqual([...AUTHORITY_RECOVERY_SNAPSHOT_FIELDS].sort(), snapshotFields.sort());
+});
 
 test("Authority recovery bundles bind the snapshot, audit chain, Realm, and recovery key", async () => {
   const snapshot = emptyAuthorityPlaneSnapshot("realm:recovery-test");

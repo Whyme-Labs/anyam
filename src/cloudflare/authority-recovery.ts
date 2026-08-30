@@ -3,6 +3,42 @@ import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "..
 
 export const AUTHORITY_RECOVERY_PROTOCOL = "anyam.authority-recovery/v1" as const;
 
+/** Every Authority Plane snapshot field is part of the signed recovery
+ * contract. Keep this list adjacent to the bundle protocol so restore
+ * validation cannot silently lag the exported snapshot shape. */
+export const AUTHORITY_RECOVERY_SNAPSHOT_FIELDS = [
+  "protocol",
+  "realmId",
+  "version",
+  "projects",
+  "sourceSpaces",
+  "projectRevisions",
+  "intents",
+  "intentComments",
+  "pullRequests",
+  "projectViews",
+  "workspaces",
+  "changes",
+  "changeRevisions",
+  "runs",
+  "runnerProfiles",
+  "runnerAttempts",
+  "evidence",
+  "artifacts",
+  "landings",
+  "releases",
+  "targets",
+  "promotions",
+  "mirrors",
+  "mirrorOperations",
+  "mirrorCheckpoints",
+  "externalProposals",
+  "mirrorDeliveries",
+  "canonicalByProject",
+  "idempotency",
+  "audit",
+] as const;
+
 export type AuthorityRecoveryBundle = {
   protocol: typeof AUTHORITY_RECOVERY_PROTOCOL;
   bundleId: string;

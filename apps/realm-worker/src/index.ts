@@ -37,7 +37,7 @@ import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } f
 import { handleAuthorityRequest } from "./authority-edge.ts";
 import { GITHUB_PRODUCER_CONTEXT_BODY_BYTES_LIMIT, GITHUB_PRODUCER_CONTEXT_BODY_SIZING_RECEIPT, handleGitHubWebhookRequest, readBoundedRequestBody } from "./github-webhook-route.ts";
 import { isMcpDeliveryOperation, mcpDeliveryScope, parseMcpDeliveryBinding, MCP_DELIVERY_OPERATIONS, type McpDeliveryOperation } from "./mcp-delivery-grant.ts";
-import { AUTHORITY_RECOVERY_PROTOCOL, createAuthorityRecoveryBundle, verifyAuthorityRecoveryBundle, type AuthorityRecoveryBundle } from "../../../src/cloudflare/authority-recovery.ts";
+import { AUTHORITY_RECOVERY_PROTOCOL, AUTHORITY_RECOVERY_SNAPSHOT_FIELDS, createAuthorityRecoveryBundle, verifyAuthorityRecoveryBundle, type AuthorityRecoveryBundle } from "../../../src/cloudflare/authority-recovery.ts";
 import { GitHubActionsBridgeAuthority, type GitHubActionsBridgeConnectionInput, type GitHubActionsEventName, type GitHubActionsBridgeOperation, type GitHubActionsBridgeSnapshot, type GitHubActionsOidcVerification } from "../../../src/portability/github-actions-bridge.ts";
 import { GitHubActionsBridgeImportCoordinator, MemoryGitHubActionsBridgeImportLedger, type GitHubActionsBridgeImportSnapshot, type GitHubActionsBridgeOwnerConfirmation, type GitHubActionsBridgeRepositoryImportReceipt } from "../../../src/portability/github-actions-bridge-import.ts";
 import { GitHubActionsBridgeOutboundCoordinator, MemoryGitHubActionsBridgeOutboundReplayLedger, type GitHubActionsBridgeOutboundSnapshot } from "../../../src/portability/github-actions-bridge-outbound.ts";
@@ -569,36 +569,6 @@ function recoverySnapshot(body: CoordinatorRequestBody): RealmRecoverySnapshot {
   return value as RealmRecoverySnapshot;
 }
 
-const AUTHORITY_RECOVERY_FIELDS = [
-  "protocol",
-  "realmId",
-  "version",
-  "projects",
-  "sourceSpaces",
-  "projectRevisions",
-  "projectViews",
-  "workspaces",
-  "changes",
-  "changeRevisions",
-  "runs",
-  "runnerProfiles",
-  "runnerAttempts",
-  "evidence",
-  "artifacts",
-  "landings",
-  "releases",
-  "targets",
-  "promotions",
-  "mirrors",
-  "mirrorOperations",
-  "mirrorCheckpoints",
-  "externalProposals",
-  "mirrorDeliveries",
-  "canonicalByProject",
-  "idempotency",
-  "audit",
-] as const;
-
 function authorityRecoveryCredentialField(value: unknown): string | undefined {
   return scanCredentialMaterial(value, "snapshot")?.path;
 }
@@ -614,7 +584,7 @@ function authorityRecoverySnapshot(body: CoordinatorRequestBody, realmId: string
     });
   }
   const raw = value as Record<string, unknown>;
-  const unknownField = Object.keys(raw).find((key) => !(AUTHORITY_RECOVERY_FIELDS as readonly string[]).includes(key));
+  const unknownField = Object.keys(raw).find((key) => !(AUTHORITY_RECOVERY_SNAPSHOT_FIELDS as readonly string[]).includes(key));
   if (unknownField) {
     throw new AuthorityPlaneError({
       code: "invalid_request",
@@ -623,7 +593,7 @@ function authorityRecoverySnapshot(body: CoordinatorRequestBody, realmId: string
       receipt: `authorityRecoverySnapshot=unsupported-field; field=${unknownField}; restore=not-applied; credentialMaterialStored=false`,
     });
   }
-  const missingField = AUTHORITY_RECOVERY_FIELDS.find((field) => !Object.prototype.hasOwnProperty.call(raw, field));
+  const missingField = AUTHORITY_RECOVERY_SNAPSHOT_FIELDS.find((field) => !Object.prototype.hasOwnProperty.call(raw, field));
   if (missingField) {
     throw new AuthorityPlaneError({
       code: "invalid_request",

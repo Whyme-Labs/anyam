@@ -976,7 +976,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     if (existing) {
       if (existing.bundleDigest !== bundle.bundleDigest) throw new AuthorityPlaneError({ code: "conflict", message: "Authority recovery bundle identity was already used with a different digest.", recoveryAction: "use a fresh export bundle identity; the existing quarantined state was not changed", receipt: `authorityRecovery=replay-conflict; bundleId=${bundle.bundleId}; restore=not-applied` });
       const recoveryStatus = await this.authorityRecoveryStatus();
-      return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: recoveryStatus === "quarantined" ? "recovery-quarantined" : "recovery-already-active", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, snapshotVersion: existing.snapshotVersion, recoveryStatus, credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=replay-idempotent; bundleId=${bundle.bundleId}; recoveryStatus=${recoveryStatus}; state=unchanged; credentialMaterialStored=false` });
+      return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: recoveryStatus === "quarantined" ? "recovery-quarantined" : "recovery-already-active", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: existing.snapshotVersion, recoveryStatus, credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=replay-idempotent; bundleId=${bundle.bundleId}; recoveryStatus=${recoveryStatus}; state=unchanged; credentialMaterialStored=false` });
     }
     const current = await this.authoritySnapshot();
     if (current.version !== bundle.expectedVersion) throw new AuthorityPlaneError({ code: "stale_state", message: "Authority recovery bundle is stale for the current Authority version.", recoveryAction: "export a fresh bundle from the current Authority and retry; no snapshot was replaced", receipt: `authorityRecovery=stale; expectedVersion=${bundle.expectedVersion}; currentVersion=${current.version}; restore=not-applied` });
@@ -986,7 +986,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_STATUS_KEY, "quarantined" satisfies AuthorityRecoveryStatus);
       await this.ctx.storage.put(restoreKey, { protocol: AUTHORITY_RECOVERY_PROTOCOL, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: snapshot.version, restoredAt: new Date().toISOString() } satisfies StoredAuthorityRecoveryRestore);
     });
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-quarantined", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, snapshotVersion: snapshot.version, recoveryStatus: "quarantined", credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=restored; version=${snapshot.version}; state=quarantined; auditChain=signed; credentialMaterialStored=false; canonicalWrite=false` });
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-quarantined", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: snapshot.version, recoveryStatus: "quarantined", credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=restored; version=${snapshot.version}; state=quarantined; auditChain=signed; credentialMaterialStored=false; canonicalWrite=false` });
   }
 
   private async authorityRecoveryActivate(body: CoordinatorRequestBody): Promise<Response> {

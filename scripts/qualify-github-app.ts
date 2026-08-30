@@ -328,6 +328,7 @@ async function qualifyCustomerRealmAuthority(input: {
   authorityClient: QualificationAuthorityClient;
   authorityConfig: AuthorityConfig;
   adapter: GitHubAppProjectionAdapter;
+  gitMaxBufferBytes: number;
   forcePush: Extract<Awaited<ReturnType<GitHubAppProjectionAdapter["push"]>>, { status: "succeeded" }>;
   reconciled: Extract<Awaited<ReturnType<MirrorCoordinator["sync"]>>, { status: "succeeded" }>;
   pullRequestNumber: number;
@@ -406,6 +407,7 @@ async function qualifyCustomerRealmAuthority(input: {
   }, `github-app:${input.qualificationId}:authority:outbound`);
   const afterOutbound = authorityMirrorFromResponse(authorityOutbound);
   if (authorityMirrorGeneration(afterOutbound) !== providerCurrent.remoteGeneration) throw new Error("customer Realm Authority outbound Mirror generation did not bind to the provider generation used by the signed producer");
+  await runGit(input.seeded.directory, ["update-ref", "refs/heads/main", input.seeded.secondOid], input.gitMaxBufferBytes);
   const providerInboundPush = await input.adapter.push({
     mirror: providerCurrent,
     expectedGeneration: providerCurrent.remoteGeneration,
@@ -728,7 +730,7 @@ async function main(): Promise<void> {
       const occupied = Object.entries(initialCounts).filter(([key, value]) => key !== "audit" && typeof value === "number" && value > 0);
       if (occupied.length > 0) throw new Error(`customer Realm Authority is not an empty disposable boundary (${occupied.map(([key, value]) => `${key}=${String(value)}`).join(", ")}); use a fresh Realm or restore its credential-free recovery snapshot before retrying`);
       authorityMutated = true;
-      authority = await qualifyCustomerRealmAuthority({ seeded, repository, installationId, qualificationId, webhookSecret, authorityClient, authorityConfig: authorityInputs, adapter, forcePush, reconciled, pullRequestNumber, observedPr: observedPr.value, proposalRevisionPush, waitForSecond: secondProposal });
+      authority = await qualifyCustomerRealmAuthority({ seeded, repository, installationId, qualificationId, webhookSecret, authorityClient, authorityConfig: authorityInputs, adapter, gitMaxBufferBytes, forcePush, reconciled, pullRequestNumber, observedPr: observedPr.value, proposalRevisionPush, waitForSecond: secondProposal });
       if (authority.status === "not-run") throw new Error("customer Realm Authority qualification did not run; set the Realm URL and owner session and retry the same disposable qualification");
     }
 

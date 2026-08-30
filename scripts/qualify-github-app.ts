@@ -364,7 +364,8 @@ async function qualifyCustomerRealmAuthority(input: {
   authorityMirrorFromResponse(configuredMirror);
   const config = { ...input.authorityConfig, projectId, sourceSpaceId, projectRevisionId, projectViewId, mirrorId };
   const state = await client.inspectState();
-  const realmId = authorityField(state.realmId, "authority.realmId");
+  const authorityState = authorityObject(state.authority, "authority state");
+  const realmId = authorityField(authorityState.realmId, "authority.realmId");
   const projectResponse = await client.inspectProject(config.projectId);
   const project = authorityObject(projectResponse.project, "project");
   const canonicalRevision = authorityObject(projectResponse.canonicalRevision, "canonicalRevision");

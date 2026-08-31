@@ -23,6 +23,7 @@ import {
 import { MirrorCoordinator, type MirrorChangeSink } from "../src/portability/mirror.ts";
 import { CONTRACT_VERSIONS, type Change, type GitRef, type RepositoryMirror } from "../src/kernel/contracts.ts";
 import { RealmAuthorityHttpClient, RealmAuthorityRequestError, type JsonObject } from "../src/portability/realm-authority-client.ts";
+import { MIRROR_HANDOFF_CLOCK_SKEW_MS, MIRROR_HANDOFF_TTL_MS, signMirrorIngestionHandoff } from "../src/portability/mirror-observation.ts";
 import { loadAnyamAuthCredential } from "../packages/create-anyam/src/auth.ts";
 import { ANYAM_GITHUB_APP_QUALIFICATION_PATH, ANYAM_GITHUB_APP_QUALIFICATION_PROTOCOL, ANYAM_GITHUB_APP_QUALIFICATION_SCOPE, type AnyamGitHubAppQualificationOperation } from "../apps/realm-worker/src/qualification-protocol.ts";
 
@@ -523,16 +524,56 @@ async function qualifyCustomerRealmAuthority(input: {
   const afterReconcile = authorityMirrorFromResponse(authorityReconciled);
 
   const proposalKey = `pr:${input.pullRequestNumber}`;
-  const prProposal = (headCommit: string, deliveryId: string): JsonObject => ({ provider: "github", installationId: input.installationId, sourceIdentity: `github-app:${input.installationId}`, remoteRepository: input.repository, proposalKind: "pull-request", proposalKey, latestHeadCommit: headCommit, baseProjectRevisionId: config.projectRevisionId, projectViewId: config.projectViewId, disclosure: "public", receipt: `qualification=github-app-authority; proposal=pull-request; head=${headCommit}; credentialMaterialStored=false`, remoteRef: `refs/heads/${input.observedPr.headRef}`, baseRef: input.observedPr.baseRef, baseCommit: input.seeded.initialOid, sourceSpaceSnapshots: { [config.sourceSpaceId]: headCommit }, status: "open" });
-  const prSync = async (headCommit: string, deliveryId: string, operationSuffix: string): Promise<JsonObject> => {
+  const prProposal = (headCommit: string, deliveryId: string): JsonObject => ({ provider: "github", installationId: input.installationId, sourceIdentity: `github-app:${input.installationId}`, remoteRepository: input.repository, proposalKind: "pull-request", proposalKey, latestHeadCommit: headCommit, baseProjectRevisionId: config.projectRevisionId, projectViewId: config.projectViewId, disclosure: "public", receipt: `qualification=github-app-authority; proposal=pull-request; head=${headCommit}; credentialMaterialStored=false`, remoteRef: `refs/pull/${input.pullRequestNumber}/head`, baseRef: `refs/heads/${input.observedPr.baseRef}`, baseCommit: input.seeded.initialOid, sourceSpaceSnapshots: { [config.sourceSpaceId]: headCommit }, status: "open" });
+  const ingestPullRequest = async (headCommit: string, deliveryId: string, operationSuffix: string): Promise<JsonObject> => {
     const currentMirrorResponse = await client.inspectMirror(config.mirrorId);
     const currentMirror = authorityMirrorFromResponse(currentMirrorResponse);
     const currentGeneration = authorityMirrorGeneration(currentMirror);
-    return client.syncMirror(config.mirrorId, { canonicalProjectRevisionId: config.projectRevisionId, canonicalRefs, expectedRemoteGeneration: currentGeneration, remoteGeneration: currentGeneration, remoteRefs: canonicalRefs, operationId: `github-app:${input.qualificationId}:authority:${operationSuffix}`, checkpointId: `checkpoint:github-app:${input.qualificationId}:authority:${operationSuffix}`, operationKind: "sync", operationState: "succeeded", mirrorState: "healthy", inboundChangeIds: [], completedInboundChangeIds: [], pendingInboundChangeIds: [], delivery: { provider: "github", installationId: input.installationId, sourceIdentity: `github-app:${input.installationId}`, remoteRepository: input.repository, deliveryId, eventType: operationSuffix === "pr-opened" ? "pull_request.opened" : "pull_request.synchronize", proposalKey }, externalProposal: prProposal(headCommit, deliveryId), receipt: `qualification=github-app-authority; operation=${operationSuffix}; credentialMaterialStored=false` }, `github-app:${input.qualificationId}:authority:${operationSuffix}`);
+    const pendingInboundChangeIds = Array.isArray(currentMirror.pendingInboundChangeIds)
+      ? currentMirror.pendingInboundChangeIds.filter((value): value is string => typeof value === "string")
+      : [];
+    const observed = await input.adapter.observeMirrorRepository({ mirror: producerMirror, repositoryId, sourceSpaceId: config.sourceSpaceId, projectViewId: config.projectViewId, proposalKey, deliveryId, symbolicRef: `refs/pull/${input.pullRequestNumber}/head`, commitOid: headCommit, baseCommitOid: input.observedPr.baseCommit });
+    if (observed.status !== "succeeded") throw new Error(`customer Realm PR RepositoryDriver observation failed: ${observed.errorCode}; ${observed.recoveryAction}`);
+    const externalProposal = prProposal(headCommit, deliveryId);
+    const delivery = { provider: "github", installationId: input.installationId, sourceIdentity: `github-app:${input.installationId}`, remoteRepository: input.repository, deliveryId, eventType: operationSuffix === "pr-opened" ? "pull_request.opened" : "pull_request.synchronize", proposalKey };
+    const command = {
+      protocol: "anyam.authority-command/v1" as const,
+      command: "mirror.sync" as const,
+      idempotencyKey: `mirror:github-app:${config.mirrorId}:${deliveryId}:${operationSuffix}`,
+      payload: {
+        mirrorId: config.mirrorId,
+        canonicalProjectRevisionId: config.projectRevisionId,
+        canonicalRefs,
+        expectedRemoteGeneration: currentGeneration,
+        remoteGeneration: currentGeneration,
+        remoteRefs: authorityMirrorRefs(currentMirror, "remoteRefs"),
+        operationId: `github-app:${input.qualificationId}:authority:${operationSuffix}`,
+        checkpointId: `checkpoint:github-app:${input.qualificationId}:authority:${operationSuffix}`,
+        operationKind: "inbound" as const,
+        operationState: "succeeded" as const,
+        mirrorState: "lagging" as const,
+        inboundChangeIds: [],
+        completedInboundChangeIds: [],
+        pendingInboundChangeIds,
+        delivery,
+        externalProposal,
+        mirrorRepositoryObservations: { [config.sourceSpaceId]: observed.value },
+        receipt: `qualification=github-app-authority; operation=${operationSuffix}; signedHandoff=true; credentialMaterialStored=false`,
+      },
+    };
+    const now = Date.now();
+    const handoff = await signMirrorIngestionHandoff({ command, keyId: input.authorityConfig.mirrorHandoffKeyId, secret: input.authorityConfig.mirrorHandoffSecret, nonce: `nonce:github-app:${digest([config.mirrorId, deliveryId, operationSuffix, headCommit])}`, realmId, installationId: input.installationId, issuer: `github-app:${input.installationId}`, provider: "github", remoteRepository: input.repository, mirrorId: config.mirrorId, deliveryId, proposalKey, issuedAt: new Date(now).toISOString(), expiresAt: new Date(now + MIRROR_HANDOFF_TTL_MS).toISOString(), now, maxLifetimeMs: MIRROR_HANDOFF_TTL_MS, clockSkewMs: MIRROR_HANDOFF_CLOCK_SKEW_MS });
+    const ingested = await createGitHubMirrorIngestionHttpTransport({ baseUrl: config.baseUrl })(handoff);
+    if (ingested.status !== "succeeded") throw new Error(`customer Realm signed PR Mirror producer did not ingest the provider delivery: ${ingested.recoveryAction ?? ingested.receipt}`);
+    const readBack = await client.inspectMirror(config.mirrorId);
+    const readBackMirror = authorityMirrorFromResponse(readBack);
+    const proposal = authorityArray(readBack.proposals, "PR proposals").find((candidate) => candidate.proposalKey === proposalKey && candidate.latestHeadCommit === headCommit);
+    if (!proposal) throw new Error(`customer Realm signed PR Mirror ingestion did not persist proposal ${proposalKey} at ${headCommit}`);
+    return { status: "succeeded", value: { mirror: readBackMirror, proposal }, receipt: `${ingested.receipt}; signedHandoff=true; operation=${operationSuffix}; credentialMaterialStored=false` };
   };
-  const authorityPrFirst = await prSync(input.observedPr.headCommit, `delivery:github-app:${input.qualificationId}:pr-opened`, "pr-opened");
-  const authorityPrSecond = await prSync(input.seeded.proposalSecondOid, `delivery:github-app:${input.qualificationId}:pr-synchronize`, "pr-synchronize");
-  const authorityPrDuplicate = await prSync(input.seeded.proposalSecondOid, `delivery:github-app:${input.qualificationId}:pr-synchronize`, "pr-synchronize-duplicate");
+  const authorityPrFirst = await ingestPullRequest(input.observedPr.headCommit, `delivery:github-app:${input.qualificationId}:pr-opened`, "pr-opened");
+  const authorityPrSecond = await ingestPullRequest(input.seeded.proposalSecondOid, `delivery:github-app:${input.qualificationId}:pr-synchronize`, "pr-synchronize");
+  const authorityPrDuplicate = await ingestPullRequest(input.seeded.proposalSecondOid, `delivery:github-app:${input.qualificationId}:pr-synchronize`, "pr-synchronize-duplicate");
   const finalMirrorResponse = await client.inspectMirror(config.mirrorId);
   const finalMirror = authorityMirrorFromResponse(finalMirrorResponse);
   const exportedDigest = digest(finalMirrorResponse);

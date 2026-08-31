@@ -538,12 +538,13 @@ test("GitHub Mirror ingestion HTTP transport accepts only a successful internal 
     baseUrl: "https://realm.example/",
     fetchImpl: async (_input, init) => {
       requestBody = String(init?.body ?? "");
-      return new Response(JSON.stringify({ status: "succeeded" }), { status: 200 });
+      return new Response(JSON.stringify({ status: "succeeded", receipt: "fixture=authority-ingest; duplicate=false; credentialMaterialStored=false" }), { status: 200 });
     },
   });
   const handoff = { protocol: "anyam.mirror-ingestion/v2", keyId: "mirror-key-v1", nonce: "nonce:test", realmId: "realm:test", installationId: "installation:github-app", audience: "anyam-realm-mirror-ingestion", issuer: "github-app:installation:github-app", provider: "github", remoteRepository: "acme/video-player", mirrorId: "mirror:github", deliveryId: "delivery:test", proposalKey: "42", issuedAt: "2026-08-27T01:00:00.000Z", expiresAt: "2026-08-27T01:05:00.000Z", command: { protocol: "anyam.authority-command/v1", command: "mirror.sync", idempotencyKey: "idempotency:test", payload: { mirrorId: "mirror:github", delivery: { provider: "github", installationId: "installation:github-app", remoteRepository: "acme/video-player", deliveryId: "delivery:test", proposalKey: "42" }, externalProposal: { provider: "github", installationId: "installation:github-app", remoteRepository: "acme/video-player", proposalKey: "42" } } }, signature: "opaque" } as const;
   const result = await transport(handoff);
   assert.equal(result.status, "succeeded");
+  assert.match(result.receipt, /authorityReceipt=fixture=authority-ingest; duplicate=false; credentialMaterialStored=false/u);
   assert.match(requestBody, /anyam\.mirror-ingestion\/v2/u);
   const rejected = createGitHubMirrorIngestionHttpTransport({ baseUrl: "https://realm.example", fetchImpl: async () => new Response(JSON.stringify({ status: "blocked" }), { status: 409 }) });
   const rejectedResult = await rejected(handoff);

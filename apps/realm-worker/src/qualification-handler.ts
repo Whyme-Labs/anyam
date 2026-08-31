@@ -81,7 +81,7 @@ async function boundedBody(request: Request): Promise<JsonObject> {
   }
 }
 
-async function coordinator(env: AnyamRealmMcpEnv, path: string, body: JsonObject): Promise<JsonObject> {
+async function coordinator(env: AnyamRealmMcpEnv, path: string, body: JsonObject, options: { allowTypedMirrorCheckpoint?: boolean } = {}): Promise<JsonObject> {
   const binding = env.REALM_COORDINATOR as { idFromName(name: string): string; get(id: string): { fetch(request: Request): Promise<Response> } } | undefined;
   if (!binding || typeof binding.idFromName !== "function") throw new Error("realm-coordinator-unavailable");
   const realmId = typeof env.ANYAM_INSTALLATION_ID === "string" && env.ANYAM_INSTALLATION_ID.trim().length > 0 ? `realm:${env.ANYAM_INSTALLATION_ID.trim()}` : undefined;
@@ -93,6 +93,9 @@ async function coordinator(env: AnyamRealmMcpEnv, path: string, body: JsonObject
   }));
   const value = await response.json().catch(() => undefined);
   const payload = object(value, "coordinator-response");
+  const payloadValue = payload.value;
+  const typedMirrorCheckpoint = payload.status === "blocked" && payloadValue !== null && typeof payloadValue === "object" && !Array.isArray(payloadValue) && Object.prototype.hasOwnProperty.call(payloadValue, "mirror");
+  if (!response.ok && options.allowTypedMirrorCheckpoint === true && response.status === 409 && typedMirrorCheckpoint) return payload;
   if (!response.ok) {
     throw new CoordinatorRejection({
       httpStatus: response.status,
@@ -196,7 +199,7 @@ export async function handleAnyamGitHubAppQualificationRequest(request: Request,
       case "authority.mirror.mutate": {
         const mirrorOperation = requiredString(body.mirrorOperation, "mirrorOperation");
         if (mirrorOperation !== "sync" && mirrorOperation !== "reconcile") throw new Error("mirrorOperation=unsupported");
-        result = await coordinator(env, "/authority/qualification/mirror/internal", { sessionId, idempotencyKey: requiredString(body.idempotencyKey, "idempotencyKey"), operation: mirrorOperation, payload: object(body.payload, "payload") });
+        result = await coordinator(env, "/authority/qualification/mirror/internal", { sessionId, idempotencyKey: requiredString(body.idempotencyKey, "idempotencyKey"), operation: mirrorOperation, payload: object(body.payload, "payload") }, { allowTypedMirrorCheckpoint: true });
         break;
       }
       case "authority.recovery.export":

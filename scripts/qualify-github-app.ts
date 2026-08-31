@@ -227,7 +227,9 @@ class OAuthQualificationAuthorityClient implements QualificationAuthorityClient 
     const value: unknown = await response.json().catch(() => undefined);
     if (value === null || typeof value !== "object" || Array.isArray(value)) throw new RealmAuthorityRequestError({ status: response.status, code: "qualification_response_invalid", recoveryAction: "inspect the customer Realm qualification capability response and retry the same immutable operation", receipt: `qualification=github-app; operation=${operation}; response=object-required; credentialMaterialStored=false` });
     const payload = value as JsonObject;
-    const typedExpectedFailure = allowStatuses.includes(response.status) && (payload.status === "blocked" || payload.status === "indeterminate");
+    const responseValue = payload.value;
+    const hasTypedMirrorValue = responseValue !== null && typeof responseValue === "object" && !Array.isArray(responseValue) && Object.prototype.hasOwnProperty.call(responseValue, "mirror");
+    const typedExpectedFailure = allowStatuses.includes(response.status) && (payload.status === "blocked" || payload.status === "indeterminate") && hasTypedMirrorValue;
     if (!response.ok && !typedExpectedFailure) throw new RealmAuthorityRequestError({ status: response.status, code: typeof payload.code === "string" ? payload.code : `http_${response.status}`, recoveryAction: typeof payload.recoveryAction === "string" ? payload.recoveryAction : "inspect the customer Realm qualification receipt and retry the same immutable operation", receipt: typeof payload.receipt === "string" ? payload.receipt : `qualification=github-app; operation=${operation}; receipt=not-returned; credentialMaterialStored=false` });
     return payload;
   }

@@ -216,7 +216,7 @@ class OAuthQualificationAuthorityClient implements QualificationAuthorityClient 
     this.endpoint = new URL(ANYAM_GITHUB_APP_QUALIFICATION_PATH, baseUrl).toString();
   }
 
-  private async request(operation: AnyamGitHubAppQualificationOperation, body: JsonObject = {}): Promise<JsonObject> {
+  private async request(operation: AnyamGitHubAppQualificationOperation, body: JsonObject = {}, allowStatuses: readonly number[] = []): Promise<JsonObject> {
     const response = await fetch(this.endpoint, {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/json", authorization: `Bearer ${this.accessToken}` },
@@ -227,7 +227,8 @@ class OAuthQualificationAuthorityClient implements QualificationAuthorityClient 
     const value: unknown = await response.json().catch(() => undefined);
     if (value === null || typeof value !== "object" || Array.isArray(value)) throw new RealmAuthorityRequestError({ status: response.status, code: "qualification_response_invalid", recoveryAction: "inspect the customer Realm qualification capability response and retry the same immutable operation", receipt: `qualification=github-app; operation=${operation}; response=object-required; credentialMaterialStored=false` });
     const payload = value as JsonObject;
-    if (!response.ok) throw new RealmAuthorityRequestError({ status: response.status, code: typeof payload.code === "string" ? payload.code : `http_${response.status}`, recoveryAction: typeof payload.recoveryAction === "string" ? payload.recoveryAction : "inspect the customer Realm qualification receipt and retry the same immutable operation", receipt: typeof payload.receipt === "string" ? payload.receipt : `qualification=github-app; operation=${operation}; receipt=not-returned; credentialMaterialStored=false` });
+    const typedExpectedFailure = allowStatuses.includes(response.status) && (payload.status === "blocked" || payload.status === "indeterminate");
+    if (!response.ok && !typedExpectedFailure) throw new RealmAuthorityRequestError({ status: response.status, code: typeof payload.code === "string" ? payload.code : `http_${response.status}`, recoveryAction: typeof payload.recoveryAction === "string" ? payload.recoveryAction : "inspect the customer Realm qualification receipt and retry the same immutable operation", receipt: typeof payload.receipt === "string" ? payload.receipt : `qualification=github-app; operation=${operation}; receipt=not-returned; credentialMaterialStored=false` });
     return payload;
   }
 
@@ -237,8 +238,8 @@ class OAuthQualificationAuthorityClient implements QualificationAuthorityClient 
   createProject(body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("authority.project.create", { payload: body, idempotencyKey }); }
   createWorkspace(projectId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("authority.workspace.create", { payload: { ...body, projectId }, idempotencyKey }); }
   configureMirror(body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("authority.mirror.configure", { payload: body, idempotencyKey }); }
-  syncMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("authority.mirror.mutate", { mirrorId, mirrorOperation: "sync", payload: { ...body, mirrorId }, idempotencyKey }); }
-  reconcileMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("authority.mirror.mutate", { mirrorId, mirrorOperation: "reconcile", payload: { ...body, mirrorId }, idempotencyKey }); }
+  syncMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("authority.mirror.mutate", { mirrorId, mirrorOperation: "sync", payload: { ...body, mirrorId }, idempotencyKey }, [409]); }
+  reconcileMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("authority.mirror.mutate", { mirrorId, mirrorOperation: "reconcile", payload: { ...body, mirrorId }, idempotencyKey }, [409]); }
   exportAuthorityRecovery(): Promise<JsonObject> { return this.request("authority.recovery.export"); }
   restoreAuthorityRecovery(bundle: JsonObject, qualificationId: string): Promise<JsonObject> { return this.request("authority.recovery.restore", { bundle, qualificationId, idempotencyKey: `qualification:${qualificationId}:authority-recovery-restore` }); }
   activateAuthorityRecovery(bundleId: string, bundleDigest: string): Promise<JsonObject> { return this.request("authority.recovery.activate", { bundleId, bundleDigest, idempotencyKey: `qualification:authority-recovery-activate:${bundleId}` }); }

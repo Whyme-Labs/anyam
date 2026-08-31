@@ -309,6 +309,22 @@ async function authorityConfig(): Promise<AuthorityConfig | undefined> {
   return { baseUrl, oauthAccessToken: oauth.accessToken, authMode: oauth.credentialStorage === "os-keychain" ? "oauth-keychain" : "oauth-process", authReceipt: oauth.receipt, mirrorHandoffKeyId, mirrorHandoffSecret };
 }
 
+function authorityClientForConfig(config: AuthorityConfig): QualificationAuthorityClient {
+  return config.authMode === "owner-cookie"
+    ? new RealmAuthorityHttpClient({ baseUrl: config.baseUrl, ownerSession: config.ownerSession! })
+    : new OAuthQualificationAuthorityClient(config.baseUrl, config.oauthAccessToken!);
+}
+
+async function preflightCustomerRealmAuthority(config: AuthorityConfig): Promise<void> {
+  const client = authorityClientForConfig(config);
+  await client.exportAuthorityRecovery();
+  const state = await client.inspectState();
+  const authority = authorityObject(state.authority, "authority preflight state");
+  const counts = authorityObject(authority.counts, "authority preflight counts");
+  const occupied = Object.entries(counts).filter(([key, value]) => key !== "audit" && typeof value === "number" && value > 0);
+  if (occupied.length > 0) throw new Error(`customer Realm Authority preflight is not an empty disposable boundary (${occupied.map(([key, value]) => `${key}=${String(value)}`).join(", ")}); restore its credential-free recovery snapshot before starting provider qualification`);
+}
+
 function refsValue(value: unknown, field: string): GitRef[] {
   return authorityArray(value, field).map((entry, index) => ({ name: authorityField(entry.name, `${field}[${index}].name`), oid: authorityField(entry.oid, `${field}[${index}].oid`) }));
 }
@@ -654,6 +670,7 @@ async function main(): Promise<void> {
   const proposalPollMs = positiveInteger("ANYAM_GITHUB_APP_PR_REVISION_POLL_MS");
   if (proposalPollMs > proposalWaitMs) throw new Error("ANYAM_GITHUB_APP_PR_REVISION_POLL_MS must not exceed ANYAM_GITHUB_APP_PR_REVISION_WAIT_MS");
   const authorityInputs = await authorityConfig();
+  if (authorityInputs) await preflightCustomerRealmAuthority(authorityInputs);
 
   const seeded = await seedRepository(gitMaxBufferBytes);
   let cleanup: CleanupReceipt | undefined;
@@ -792,9 +809,7 @@ async function main(): Promise<void> {
     }
 
     if (authorityInputs) {
-      authorityClient = authorityInputs.authMode === "owner-cookie"
-        ? new RealmAuthorityHttpClient({ baseUrl: authorityInputs.baseUrl, ownerSession: authorityInputs.ownerSession! })
-        : new OAuthQualificationAuthorityClient(authorityInputs.baseUrl, authorityInputs.oauthAccessToken!);
+      authorityClient = authorityClientForConfig(authorityInputs);
       const recovery = await authorityClient.exportAuthorityRecovery();
       authorityRecoverySnapshot = authorityObject(recovery.bundle, "authority recovery bundle");
       const recoverySnapshot = authorityObject(authorityRecoverySnapshot.snapshot, "authority recovery snapshot");

@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 
 import {
   GitHubAppInstallationTokenIssuer,
+  GitHubAppAdapterError,
   GitHubAppProjectionAdapter,
   GitHubMirrorProducer,
   cleanupGitHubAppDisposable,
@@ -257,6 +258,19 @@ class OAuthQualificationAuthorityClient implements QualificationAuthorityClient 
 }
 
 type AuthorityConfig = { baseUrl: string; ownerSession?: string; oauthAccessToken?: string; authMode: "owner-cookie" | "oauth-keychain" | "oauth-process"; authReceipt: string; mirrorHandoffKeyId: string; mirrorHandoffSecret: string };
+
+async function verifySelectedGitHubRepository(input: { http: FetchGitHubAppHttpClient; issuer: GitHubAppInstallationTokenIssuer; installationId: string; repository: string }): Promise<void> {
+  try {
+    const issued = await input.issuer.issue({ installationId: input.installationId, repository: input.repository, permissions: ["metadata:read"] });
+    const response = await input.http.request({ method: "GET", path: `/repos/${input.repository}`, token: issued.token });
+    const data = response.data as JsonObject | undefined;
+    const fullName = typeof data?.full_name === "string" ? data.full_name : undefined;
+    if (response.status !== 200 || fullName !== input.repository) throw new Error(`repository-readback-mismatch; expected=${input.repository}; observed=${fullName ?? "missing"}; ${response.receipt}`);
+  } catch (error) {
+    const receipt = error instanceof GitHubAppAdapterError ? error.receipt : `exception=${error instanceof Error ? error.name : "unknown"}`;
+    throw new Error(`GitHub App installation does not currently grant access to selected repository ${input.repository}; select that exact repository in the App installation before running qualification; ${receipt}`);
+  }
+}
 
 function authorityMirrorHandoffSecret(): string | undefined {
   const direct = optional("ANYAM_GITHUB_APP_MIRROR_HANDOFF_SECRET");
@@ -626,10 +640,13 @@ async function main(): Promise<void> {
   let http: FetchGitHubAppHttpClient | undefined;
   let issuer: GitHubAppInstallationTokenIssuer | undefined;
   let api: FetchGitHubRestClient | undefined;
+  let providerRepositoryAccessVerified = false;
   try {
     http = new FetchGitHubAppHttpClient({ baseUrl: apiBaseUrl, retry: { delaysMs: retryDelaysMs, sizingReceipt: retrySizingReceipt } });
     issuer = new GitHubAppInstallationTokenIssuer({ http, appId, privateKey: privateKey(), jwtLifetimeSeconds, clockSkewSeconds, sizingReceipt: jwtSizingReceipt, clockSkewSizingReceipt });
     api = new FetchGitHubRestClient(http);
+    await verifySelectedGitHubRepository({ http, issuer, installationId, repository });
+    providerRepositoryAccessVerified = true;
     adapter = new GitHubAppProjectionAdapter({ installation, issuer, git: new NodeGitSmartHttpTransport({ sourceDirectory: seeded.directory, maxBufferBytes: gitMaxBufferBytes, sizingReceipt: gitSizingReceipt, inspectRetry: gitRetry }), api, readAfterWriteRetry: gitRetry, queue: { maxPending: queueMaxPending, sizingReceipt: queueSizingReceipt, deliveryLedger } });
     const emptyMirror = mirror({ repository, initialGeneration: "qualification:empty" });
     const initialInspection = await adapter.inspect({ mirror: emptyMirror, knownRefs: [], knownGeneration: "qualification:empty" });
@@ -677,7 +694,12 @@ async function main(): Promise<void> {
     if (blockedReconciliation.status !== "failed" || blockedReconciliation.errorCode !== "mirror.force_push_detected") throw new Error(`force-push did not require explicit reconciliation: state=${blockedReconciliation.status}`);
     await runGit(seeded.directory, ["update-ref", "refs/heads/main", seeded.initialOid], gitMaxBufferBytes);
     const reconciled = await service.sync({ canonical: { projectRevisionId: "project-revision:github-app-qualification:one", sourceSpaceId: emptyMirror.sourceSpaceId, sourceSpaceClassification: "public", disclosure: "public", verified: true, verificationReceipt: "qualification=source-verified", refs: refs([["refs/heads/main", seeded.initialOid]]) }, idempotencyKey: "qualification:force-push-canonical-wins", reconciliation: "canonical-wins", resumeCheckpointId: blockedReconciliation.checkpoint.id, actor });
-    if (reconciled.status !== "succeeded" || reconciled.value.mirror.state !== "healthy") throw new Error(`explicit canonical-wins reconciliation did not restore a healthy Mirror: state=${reconciled.status}`);
+    if (reconciled.status !== "succeeded" || reconciled.value.mirror.state !== "healthy") {
+      const diagnostic = reconciled.status === "failed"
+        ? `errorCode=${reconciled.errorCode}; recoveryAction=${reconciled.recoveryAction}; receipt=${reconciled.receipt}; mirrorState=${reconciled.mirror.state}; remoteGeneration=${reconciled.mirror.remoteGeneration}`
+        : `mirrorState=${reconciled.value.mirror.state}; receipt=not-returned`;
+      throw new Error(`explicit canonical-wins reconciliation did not restore a healthy Mirror: state=${reconciled.status}; ${diagnostic}`);
+    }
 
     class ResumeIssuer implements GitHubAppTokenIssuer {
       calls = 0;
@@ -757,7 +779,7 @@ async function main(): Promise<void> {
     const cleanupResult = authorityCleanup ? { provider: cleanup, authority: authorityCleanup } : { provider: cleanup };
     console.log(JSON.stringify({ protocol, status: "succeeded", qualificationScope: authority ? "provider-adapter-and-customer-realm-authority" : "provider-adapter", acceptance: authority ? "qualified; provider and customer Realm/Authority boundary exercised" : "qualified; provider adapter boundary exercised; customer Realm/Authority not configured", qualificationId, repository, mappedRef: "refs/heads/main", outbound: "projected", inbound: { changeCount: changes.length }, forcePush: "classified", credentialExpiry: "rejected-and-resumed", webhook: "signed-deduplicated-and-reconciled", pullRequestSetup: { branch: seeded.proposalBranch, created: true, branchPush: proposalBranchPush.receipt, successiveRevisionPush: proposalRevisionPush.receipt }, pullRequestObservation: { proposalKey: String(pullRequestNumber), stableObservationIdentity: true, successiveHeadObserved: true, headSource: secondProposal.headSource, authorityChangeLedger: authority ? "customer-realm-recorded" : "not-run" }, gitBundleExportRestore: { bundleDigest: seeded.bundleDigest, restored: true, ...(authority ? { authorityExportRestore: "credential-free-snapshot-restored" } : { authorityExportRestore: "not-run" }) }, authority: authorityOutput, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true, cleanup: cleanupResult }, null, 2));
   } catch (error) {
-    if (!cleanup) {
+    if (!cleanup && providerRepositoryAccessVerified) {
       try {
         const cleanupHttp = http ?? new FetchGitHubAppHttpClient({ baseUrl: apiBaseUrl, retry: { delaysMs: retryDelaysMs, sizingReceipt: retrySizingReceipt } });
         const cleanupIssuer = issuer ?? new GitHubAppInstallationTokenIssuer({ http: cleanupHttp, appId, privateKey: privateKey(), jwtLifetimeSeconds, clockSkewSeconds, sizingReceipt: jwtSizingReceipt, clockSkewSizingReceipt });

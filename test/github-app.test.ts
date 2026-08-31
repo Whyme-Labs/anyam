@@ -250,16 +250,21 @@ test("GitHub App retries eventual-consistency 404s during Mirror Repository obse
   class EventuallyConsistentApi extends FakeApi {
     remainingCommit404s = 1;
 
-    override async getCommit(input: Parameters<GitHubRestClient["getCommit"]>[0]): Promise<GitHubCommitObservation> {
+    constructor() {
+      super();
+      this.commits.oid = PRODUCER_COMMIT_TWO;
+      this.commits.treeOid = PRODUCER_TREE_TWO;
+    }
+
+    override async getCommit(): Promise<GitHubCommitObservation> {
       if (this.remainingCommit404s > 0) {
         this.remainingCommit404s -= 1;
         throw new GitHubAppAdapterError({ errorCode: "github_app.http_404", message: "commit not visible yet", retryable: false, recoveryAction: "retry", receipt: "provider=github; operation=get-commit; status=404; credentialMaterialStored=false" });
       }
-      return super.getCommit(input);
+      return super.getCommit();
     }
   }
   const api = new EventuallyConsistentApi();
-  api.commits = { oid: PRODUCER_COMMIT_TWO, treeOid: PRODUCER_TREE_TWO, author: { name: "Contributor", email: "contributor@example.test" } };
   const { value } = adapter({ api, readAfterWriteRetry: { delaysMs: [0], sizingReceipt: "fixture=provider-read-retry-measured" } });
   const result = await value.observeMirrorRepository({ mirror: producerMirror(), repositoryId: "repository:producer", sourceSpaceId: "source:producer", projectViewId: "project-view:producer", proposalKey: "42", deliveryId: "delivery:observation-retry", symbolicRef: "refs/pull/42/head", commitOid: PRODUCER_COMMIT_TWO, baseCommitOid: PRODUCER_COMMIT_ONE });
   assert.equal(result.status, "succeeded");

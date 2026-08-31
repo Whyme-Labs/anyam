@@ -122,7 +122,7 @@ export type GitHubPullRequestObservation = {
 
 export type GitHubRestClient = {
   getCommit(input: { repository: string; oid: string; ref: string; token: string }): Promise<GitHubCommitObservation>;
-  compare(input: { repository: string; baseOid: string; headOid: string; token: string }): Promise<{ status: "identical" | "ahead" | "behind" | "diverged"; receipt: string }>;
+  compare(input: { repository: string; baseOid: string; headOid: string; baseRef?: string; headRef?: string; token: string }): Promise<{ status: "identical" | "ahead" | "behind" | "diverged"; receipt: string }>;
   getPullRequest(input: { repository: string; number: number; token: string }): Promise<GitHubPullRequestObservation>;
   createPullRequest(input: { repository: string; head: string; base: string; title: string; token: string }): Promise<{ number: number; receipt: string }>;
   deleteRepository(input: { repository: string; token: string }): Promise<{ receipt: string }>;
@@ -529,6 +529,8 @@ export class GitHubAppProjectionAdapter implements MirrorRemoteAdapter {
     symbolicRef: string;
     commitOid: string;
     baseCommitOid: string;
+    baseRef?: string;
+    headRef?: string;
   }): Promise<MirrorProviderResult<MirrorRepositoryObservation>> {
     try {
       this.assertMirror(input.mirror);
@@ -556,7 +558,7 @@ export class GitHubAppProjectionAdapter implements MirrorRemoteAdapter {
       };
       const commit = await retryNotFound(() => this.api.getCommit({ repository: this.installation.repository, oid: commitOid, ref: symbolicRef, token: token.token }));
       if (commit.oid !== commitOid || !commit.treeOid) throw new GitHubAppAdapterError({ errorCode: "github_app.commit_observation_invalid", message: "GitHub did not return the exact commit tree required for Mirror provenance.", retryable: false, recoveryAction: "re-inspect the selected repository commit and return its exact tree identity", receipt: `provider=github-app; operation=observe-mirror-repository; commit=${commitOid}; tree=${commit.treeOid ?? "missing"}; credentialMaterialStored=false` });
-      const comparison = await retryNotFound(() => this.api.compare({ repository: this.installation.repository, baseOid: baseCommitOid, headOid: commitOid, token: token.token }));
+      const comparison = await retryNotFound(() => this.api.compare({ repository: this.installation.repository, baseOid: baseCommitOid, headOid: commitOid, ...(input.baseRef ? { baseRef: input.baseRef } : {}), ...(input.headRef ? { headRef: input.headRef } : {}), token: token.token }));
       if (comparison.status !== "ahead" && comparison.status !== "identical") throw new GitHubAppAdapterError({ errorCode: "github_app.commit_ancestry_invalid", message: "The GitHub commit is not a descendant of the canonical Mirror base.", retryable: false, recoveryAction: "rebase or explicitly reconcile the remote proposal against the current canonical base before ingestion", receipt: `provider=github-app; operation=observe-mirror-repository; base=${baseCommitOid}; head=${commitOid}; comparison=${comparison.status}; credentialMaterialStored=false` });
       const claims = {
         protocol: "anyam.mirror-repository-observation/v1" as const,
@@ -575,7 +577,7 @@ export class GitHubAppProjectionAdapter implements MirrorRemoteAdapter {
         baseCommitOid,
         ancestryVerified: true as const,
         observedAt: new Date().toISOString(),
-        receipt: `provider=github-app; operation=observe-mirror-repository; installation=${this.installation.installationId}; repository=${this.installation.repository}; comparison=${comparison.status}; compareReceipt=${safeReceipt(comparison.receipt, "compare.receipt")}; providerReadRetryAttempts=${providerReadRetryAttempts}; providerReadRetry=${this.readAfterWriteRetry.sizingReceipt}; expiresAt=${token.expiresAt}; credentialMaterialStored=false`,
+        receipt: `provider=github-app; operation=observe-mirror-repository; installation=${this.installation.installationId}; repository=${this.installation.repository}; comparison=${comparison.status}; comparisonRefs=${input.baseRef ?? "sha"}...${input.headRef ?? "sha"}; compareReceipt=${safeReceipt(comparison.receipt, "compare.receipt")}; providerReadRetryAttempts=${providerReadRetryAttempts}; providerReadRetry=${this.readAfterWriteRetry.sizingReceipt}; expiresAt=${token.expiresAt}; credentialMaterialStored=false`,
       };
       return { status: "succeeded", value: { ...claims, manifestDigest: mirrorObservationDigest(claims) } };
     } catch (error) {
@@ -750,7 +752,7 @@ export class GitHubMirrorProducer {
       if (observedPullRequest.status !== "succeeded") return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `proposal=reinspection-failed; error=${observedPullRequest.errorCode}` }), recoveryAction: observedPullRequest.recoveryAction };
       const proposal = this.adapter.externalProposal(observedPullRequest.value, { projectViewId: this.projectViewId, baseProjectRevisionId: this.canonicalProjectRevisionId, disclosure: "public", deliveryId: task.deliveryId, sourceSpaceSnapshots: { [this.mirror.sourceSpaceId]: observedPullRequest.value.headCommit } });
       externalProposal = proposal;
-      const observed = await this.adapter.observeMirrorRepository({ mirror: this.mirror, repositoryId: this.repositoryId, sourceSpaceId: this.mirror.sourceSpaceId, projectViewId: this.projectViewId, proposalKey, deliveryId: task.deliveryId, symbolicRef: String(proposal.remoteRef), commitOid: observedPullRequest.value.headCommit, baseCommitOid: observedPullRequest.value.baseCommit });
+      const observed = await this.adapter.observeMirrorRepository({ mirror: this.mirror, repositoryId: this.repositoryId, sourceSpaceId: this.mirror.sourceSpaceId, projectViewId: this.projectViewId, proposalKey, deliveryId: task.deliveryId, symbolicRef: String(proposal.remoteRef), commitOid: observedPullRequest.value.headCommit, baseCommitOid: observedPullRequest.value.baseCommit, baseRef: observedPullRequest.value.baseRef, headRef: observedPullRequest.value.headRef });
       if (observed.status !== "succeeded") return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `proposal=observation-failed; error=${observed.errorCode}` }), recoveryAction: observed.recoveryAction };
       mirrorObservation = observed.value;
     } else {
@@ -764,7 +766,7 @@ export class GitHubMirrorProducer {
       const canonicalRef = mapping ? this.canonicalRefs.find((ref) => ref.name === mapping.localRef) : undefined;
       if (!remoteRefValue || !commit || !mapping || !canonicalRef) return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `ref=${remoteRef}; provenance=incomplete; handoff=not-created` }), recoveryAction: "reinspect the exact mapped ref, commit author, and canonical base before creating a provider handoff" };
       const proposalKey = task.proposalKey ?? `ref:${remoteRef}`;
-      const observed = await this.adapter.observeMirrorRepository({ mirror: this.mirror, repositoryId: this.repositoryId, sourceSpaceId: this.mirror.sourceSpaceId, projectViewId: this.projectViewId, proposalKey, deliveryId: task.deliveryId, symbolicRef: remoteRef, commitOid: remoteRefValue.oid, baseCommitOid: canonicalRef.oid });
+      const observed = await this.adapter.observeMirrorRepository({ mirror: this.mirror, repositoryId: this.repositoryId, sourceSpaceId: this.mirror.sourceSpaceId, projectViewId: this.projectViewId, proposalKey, deliveryId: task.deliveryId, symbolicRef: remoteRef, commitOid: remoteRefValue.oid, baseCommitOid: canonicalRef.oid, headRef: remoteRef.replace(/^refs\/heads\//u, "") });
       if (observed.status !== "succeeded") return { status: "blocked", receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `ref=${remoteRef}; observation=failed; error=${observed.errorCode}` }), recoveryAction: observed.recoveryAction };
       mirrorObservation = observed.value;
       externalProposal = { provider: "github", installationId: this.installationId, sourceIdentity: installationSourceIdentity(this.installationId), remoteRepository: this.mirror.remoteRepository, proposalKind: "ref", proposalKey, remoteRef, baseRef: remoteRef, baseCommit: canonicalRef.oid, latestHeadCommit: remoteRefValue.oid, baseProjectRevisionId: this.canonicalProjectRevisionId, projectViewId: this.projectViewId, disclosure: this.mirror.disclosure, sourceSpaceSnapshots: { [this.mirror.sourceSpaceId]: remoteRefValue.oid }, status: "open", remoteAuthor: { ...commit.author }, receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: task.deliveryId, detail: `proposal=${proposalKey}; head=${remoteRefValue.oid}; providerObservation=verified` }) };
@@ -941,8 +943,10 @@ export class FetchGitHubRestClient implements GitHubRestClient {
     return { oid: input.oid, author: { name, ...(email ? { email } : {}) }, ...(treeOid ? { treeOid } : {}) };
   }
 
-  async compare(input: { repository: string; baseOid: string; headOid: string; token: string }): Promise<{ status: "identical" | "ahead" | "behind" | "diverged"; receipt: string }> {
-    const response = await this.http.request({ method: "GET", path: `/repos/${input.repository}/compare/${encodeURIComponent(input.baseOid)}...${encodeURIComponent(input.headOid)}`, token: input.token });
+  async compare(input: { repository: string; baseOid: string; headOid: string; baseRef?: string; headRef?: string; token: string }): Promise<{ status: "identical" | "ahead" | "behind" | "diverged"; receipt: string }> {
+    const base = input.baseRef ?? input.baseOid;
+    const head = input.headRef ?? input.headOid;
+    const response = await this.http.request({ method: "GET", path: `/repos/${input.repository}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`, token: input.token });
     const status = (response.data as Record<string, unknown> | undefined)?.status;
     if (status !== "identical" && status !== "ahead" && status !== "behind" && status !== "diverged") throw new GitHubAppAdapterError({ errorCode: "github_app.compare_invalid", message: "GitHub compare returned an unrecognized status.", retryable: false, recoveryAction: "re-inspect the exact base and head commits before classifying the ref update", receipt: `provider=github-app; compare=status-invalid; credentialMaterialStored=false` });
     return { status, receipt: response.receipt };

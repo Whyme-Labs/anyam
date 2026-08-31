@@ -381,6 +381,23 @@ test("GitHub App qualification setup creates a PR through the bounded REST clien
   assert.equal(created.receipt.includes("opaque-setup-token"), false);
 });
 
+test("GitHub REST compare uses supplied refs for PR ancestry", async () => {
+  let requestedUrl = "";
+  const http = new FetchGitHubAppHttpClient({
+    baseUrl: "https://api.github.com",
+    retry: { delaysMs: [], sizingReceipt: "fixture=compare-retry-measured" },
+    fetchImpl: async (input) => {
+      requestedUrl = String(input);
+      return new Response(JSON.stringify({ status: "ahead" }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  const client = new FetchGitHubRestClient(http);
+  const result = await client.compare({ repository: "acme/video-player", baseOid: "base-sha", headOid: "head-sha", baseRef: "main", headRef: "qualification-pr", token: "opaque-token" });
+  assert.equal(result.status, "ahead");
+  assert.equal(requestedUrl, "https://api.github.com/repos/acme/video-player/compare/main...qualification-pr");
+  assert.equal(result.receipt.includes("opaque-token"), false);
+});
+
 test("GitHub App external proposals enter Authority as one stable Change with successive Revisions", async () => {
   const { value, api } = adapter();
   const observed = await value.observePullRequest({ number: 42 });

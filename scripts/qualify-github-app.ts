@@ -30,7 +30,7 @@ import { ANYAM_GITHUB_APP_QUALIFICATION_PATH, ANYAM_GITHUB_APP_QUALIFICATION_PRO
 const protocol = "anyam.github-app-qualification/v1" as const;
 const execFile = promisify(execFileCallback);
 type Json = Record<string, unknown>;
-type CleanupReceipt = { status: "succeeded" | "blocked" | "not-run"; receipt: string; recoveryAction?: string };
+type CleanupReceipt = { status: "succeeded" | "retained" | "blocked" | "not-run"; receipt: string; recoveryAction?: string };
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -64,6 +64,16 @@ function commaSeparatedIntegers(name: string): number[] {
   return values;
 }
 
+function qualificationCleanupMode(): "reuse" | "delete" {
+  const value = optional("ANYAM_GITHUB_APP_CLEANUP_MODE") ?? "reuse";
+  if (value !== "reuse" && value !== "delete") throw new Error(`ANYAM_GITHUB_APP_CLEANUP_MODE must be reuse or delete; received ${JSON.stringify(value)}`);
+  return value;
+}
+
+function qualificationBranchName(qualificationId: string): string {
+  return `qualification-pr-${digest(qualificationId).slice("sha256:".length, "sha256:".length + 16)}`;
+}
+
 function privateKey(): string {
   const file = optional("ANYAM_GITHUB_APP_PRIVATE_KEY_FILE");
   const value = file ? readFileSync(file, "utf8") : required("ANYAM_GITHUB_APP_PRIVATE_KEY");
@@ -82,7 +92,7 @@ function runGit(directory: string, args: readonly string[], maxBufferBytes: numb
   return execFile("git", [...args], { cwd: directory, maxBuffer: maxBufferBytes }).then(({ stdout }) => stdout.trim());
 }
 
-async function seedRepository(maxBufferBytes: number): Promise<{ directory: string; initialOid: string; secondOid: string; divergentOid: string; proposalBranch: string; proposalInitialOid: string; proposalSecondOid: string; bundlePath: string; bundleDigest: string }> {
+async function seedRepository(maxBufferBytes: number, proposalBranch: string): Promise<{ directory: string; initialOid: string; secondOid: string; divergentOid: string; proposalBranch: string; proposalInitialOid: string; proposalSecondOid: string; bundlePath: string; bundleDigest: string }> {
   const directory = mkdtempSync(join(tmpdir(), "anyam-github-app-qualification-"));
   await runGit(directory, ["init", "-b", "main"], maxBufferBytes);
   await runGit(directory, ["config", "user.name", "Anyam GitHub App qualification"], maxBufferBytes);
@@ -96,7 +106,6 @@ async function seedRepository(maxBufferBytes: number): Promise<{ directory: stri
   await runGit(directory, ["bundle", "verify", bundlePath], maxBufferBytes);
   const bundleDigest = digest(readFileSync(bundlePath));
 
-  const proposalBranch = "qualification-pr";
   await runGit(directory, ["checkout", "-b", proposalBranch], maxBufferBytes);
   writeFileSync(join(directory, "README.md"), "Anyam GitHub App qualification\nPull request initial revision\n");
   await runGit(directory, ["commit", "-am", "Create disposable pull request"], maxBufferBytes);
@@ -117,6 +126,21 @@ async function seedRepository(maxBufferBytes: number): Promise<{ directory: stri
   const divergentOid = await runGit(directory, ["rev-parse", "HEAD"], maxBufferBytes);
   await runGit(directory, ["update-ref", "refs/heads/main", initialOid], maxBufferBytes);
   return { directory, initialOid, secondOid, divergentOid, proposalBranch, proposalInitialOid, proposalSecondOid, bundlePath, bundleDigest };
+}
+
+async function inspectReusableQualificationRepository(input: { repositoryUrl: string; setupGit: NodeGitSmartHttpTransport; token: string }): Promise<{ refs: GitRef[]; generation: string; receipt: string }> {
+  const inspected = await input.setupGit.inspect({ repositoryUrl: input.repositoryUrl, token: input.token, refs: [], knownGeneration: "qualification=reusable" });
+  const unexpected = inspected.refs.filter((ref) => ref.name !== "refs/heads/main" && !/^refs\/heads\/qualification-pr(?:-[0-9a-f]+)?$/u.test(ref.name));
+  if (unexpected.length > 0) throw new Error(`reusable GitHub App qualification repository contains unexpected refs (${unexpected.map((ref) => ref.name).join(", ")}); refusing to mutate them`);
+  const staleQualificationRefs = inspected.refs.filter((ref) => /^refs\/heads\/qualification-pr(?:-[0-9a-f]+)?$/u.test(ref.name)).map((ref) => ref.name);
+  if (staleQualificationRefs.length > 0) {
+    await input.setupGit.deleteRefs({ repositoryUrl: input.repositoryUrl, token: input.token, refs: staleQualificationRefs });
+  }
+  const afterCleanup = staleQualificationRefs.length > 0
+    ? await input.setupGit.inspect({ repositoryUrl: input.repositoryUrl, token: input.token, refs: [], knownGeneration: inspected.generation })
+    : inspected;
+  const mappedRefs = afterCleanup.refs.filter((ref) => ref.name === "refs/heads/main").map((ref) => ({ ...ref }));
+  return { refs: mappedRefs, generation: afterCleanup.generation, receipt: `repositoryLifecycle=reuse; qualificationRefsRemoved=${staleQualificationRefs.length}; mappedRefs=${mappedRefs.length}; credentialMaterialStored=false` };
 }
 
 function mirror(input: { repository: string; initialGeneration: string; initialOid?: string }): RepositoryMirror {
@@ -713,10 +737,11 @@ async function main(): Promise<void> {
   const proposalWaitMs = positiveInteger("ANYAM_GITHUB_APP_PR_REVISION_WAIT_MS");
   const proposalPollMs = positiveInteger("ANYAM_GITHUB_APP_PR_REVISION_POLL_MS");
   if (proposalPollMs > proposalWaitMs) throw new Error("ANYAM_GITHUB_APP_PR_REVISION_POLL_MS must not exceed ANYAM_GITHUB_APP_PR_REVISION_WAIT_MS");
+  const cleanupMode = qualificationCleanupMode();
   const authorityInputs = await authorityConfig();
   if (authorityInputs) await preflightCustomerRealmAuthority(authorityInputs);
 
-  const seeded = await seedRepository(gitMaxBufferBytes);
+  const seeded = await seedRepository(gitMaxBufferBytes, qualificationBranchName(qualificationId));
   let cleanup: CleanupReceipt | undefined;
   let authorityCleanup: CleanupReceipt | undefined;
   let authorityClient: QualificationAuthorityClient | undefined;
@@ -750,16 +775,16 @@ async function main(): Promise<void> {
     await verifySelectedGitHubRepository({ http, issuer, installationId, repository });
     providerRepositoryAccessVerified = true;
     adapter = new GitHubAppProjectionAdapter({ installation, issuer, git: new NodeGitSmartHttpTransport({ sourceDirectory: seeded.directory, maxBufferBytes: gitMaxBufferBytes, sizingReceipt: gitSizingReceipt, inspectRetry: gitRetry }), api, readAfterWriteRetry: gitRetry, queue: { maxPending: queueMaxPending, sizingReceipt: queueSizingReceipt, deliveryLedger } });
-    const emptyMirror = mirror({ repository, initialGeneration: "qualification:empty" });
-    const initialInspection = await adapter.inspect({ mirror: emptyMirror, knownRefs: [], knownGeneration: "qualification:empty" });
+    const setupToken = await issuer.issue({ installationId, repository, permissions: ["contents:write", "metadata:read", "pull_requests:write"] });
+    if (!setupToken.token.trim() || !Number.isFinite(Date.parse(setupToken.expiresAt)) || Date.parse(setupToken.expiresAt) <= Date.now()) throw new Error("GitHub App qualification setup credential was missing or expired");
+    const setupGit = new NodeGitSmartHttpTransport({ sourceDirectory: seeded.directory, maxBufferBytes: gitMaxBufferBytes, sizingReceipt: gitSizingReceipt, inspectRetry: gitRetry });
+    const reusable = await inspectReusableQualificationRepository({ repositoryUrl, setupGit, token: setupToken.token });
+    const emptyMirror = mirror({ repository, initialGeneration: reusable.generation });
+    const initialInspection = await adapter.inspect({ mirror: emptyMirror, knownRefs: reusable.refs, knownGeneration: reusable.generation });
     if (initialInspection.status !== "succeeded") throw new Error(`initial GitHub ref inspection failed: ${initialInspection.errorCode}; ${initialInspection.recoveryAction}`);
-    if (initialInspection.value.refs.length !== 0) throw new Error(`disposable repository is not empty; observed ${initialInspection.value.refs.length} mapped refs`);
-    // The provider's verified empty generation is authoritative. Seeding the
-    // Mirror with the local placeholder would make the first canonical
-    // projection look like a remote-and-canonical divergence before any
-    // provider mutation occurred.
     emptyMirror.remoteGeneration = initialInspection.value.generation;
-    emptyMirror.receipt = `${emptyMirror.receipt}; remoteGeneration=verified-empty; providerReceipt=${initialInspection.value.receipt}`;
+    emptyMirror.remoteRefs = initialInspection.value.refs.map((ref) => ({ ...ref }));
+    emptyMirror.receipt = `${emptyMirror.receipt}; ${reusable.receipt}; remoteGeneration=verified; providerReceipt=${initialInspection.value.receipt}`;
 
     const changes: Change[] = [];
     const service = new MirrorCoordinator({ mirror: emptyMirror, remote: adapter, changeSink: changeSink(changes), sourceSpaceClassification: "public" });
@@ -767,9 +792,6 @@ async function main(): Promise<void> {
     const outbound = await service.sync({ canonical: { projectRevisionId: "project-revision:github-app-qualification:one", sourceSpaceId: emptyMirror.sourceSpaceId, sourceSpaceClassification: "public", disclosure: "public", verified: true, verificationReceipt: "qualification=source-verified", refs: refs([["refs/heads/main", seeded.initialOid]]) }, idempotencyKey: "qualification:outbound", actor });
     if (outbound.status !== "succeeded") throw new Error(`outbound projection failed: ${outbound.errorCode}; ${outbound.recoveryAction}; receipt=${outbound.receipt}`);
 
-    const setupToken = await issuer.issue({ installationId, repository, permissions: ["contents:write", "metadata:read", "pull_requests:write"] });
-    if (!setupToken.token.trim() || !Number.isFinite(Date.parse(setupToken.expiresAt)) || Date.parse(setupToken.expiresAt) <= Date.now()) throw new Error("GitHub App qualification setup credential was missing or expired");
-    const setupGit = new NodeGitSmartHttpTransport({ sourceDirectory: seeded.directory, maxBufferBytes: gitMaxBufferBytes, sizingReceipt: gitSizingReceipt, inspectRetry: gitRetry });
     await runGit(seeded.directory, ["update-ref", `refs/heads/${seeded.proposalBranch}`, seeded.proposalInitialOid], gitMaxBufferBytes);
     const proposalBranchPush = await setupGit.push({ repositoryUrl, token: setupToken.token, expectedRefs: [], desiredRefs: [{ name: `refs/heads/${seeded.proposalBranch}`, oid: seeded.proposalInitialOid }], refMappings: [{ localRef: `refs/heads/${seeded.proposalBranch}`, remoteRef: `refs/heads/${seeded.proposalBranch}` }], operationId: "github:qualification:pr-branch", idempotencyKey: "github:qualification:pr-branch" });
     const pullRequest = await api.createPullRequest({ repository, head: seeded.proposalBranch, base: "main", title: "Anyam disposable projection qualification", token: setupToken.token });
@@ -868,8 +890,10 @@ async function main(): Promise<void> {
       if (authority.status === "not-run") throw new Error("customer Realm Authority qualification did not run; set the Realm URL and owner session and retry the same disposable qualification");
     }
 
-    cleanup = await cleanupGitHubAppDisposable({ installation, issuer, api, repositoryPrefix: repository, qualificationId, disposableRepository });
-    if (cleanup.status !== "succeeded") throw new Error(`provider cleanup failed: ${cleanup.recoveryAction ?? cleanup.receipt}`);
+    cleanup = cleanupMode === "delete"
+      ? await cleanupGitHubAppDisposable({ installation, issuer, api, repositoryPrefix: repository, qualificationId, disposableRepository })
+      : { status: "retained", receipt: `provider=github-app; cleanup=retained; repository=${repository}; qualification=${qualificationId}; repositoryLifecycle=reuse; credentialMaterialStored=false`, recoveryAction: "reuse this selected disposable repository for the next bounded qualification, or rerun with ANYAM_GITHUB_APP_CLEANUP_MODE=delete after reviewing the final receipt" };
+    if (cleanupMode === "delete" && cleanup.status !== "succeeded") throw new Error(`provider cleanup failed: ${cleanup.recoveryAction ?? cleanup.receipt}`);
     if (authorityClient && authorityRecoverySnapshot) {
       authorityCleanup = await restoreAuthorityRecovery(authorityClient, authorityRecoverySnapshot, qualificationId);
       if (authorityCleanup.status !== "succeeded") throw new Error(`customer Realm Authority cleanup failed: ${authorityCleanup.recoveryAction ?? authorityCleanup.receipt}`);
@@ -879,7 +903,7 @@ async function main(): Promise<void> {
     const cleanupResult = authorityCleanup ? { provider: cleanup, authority: authorityCleanup } : { provider: cleanup };
     console.log(JSON.stringify({ protocol, status: "succeeded", qualificationScope: authority ? "provider-adapter-and-customer-realm-authority" : "provider-adapter", acceptance: authority ? "qualified; provider and customer Realm/Authority boundary exercised" : "qualified; provider adapter boundary exercised; customer Realm/Authority not configured", qualificationId, repository, mappedRef: "refs/heads/main", outbound: "projected", inbound: { changeCount: changes.length }, forcePush: "classified", credentialExpiry: "rejected-and-resumed", webhook: "signed-deduplicated-and-reconciled", pullRequestSetup: { branch: seeded.proposalBranch, created: true, branchPush: proposalBranchPush.receipt, successiveRevisionPush: proposalRevisionPush.receipt }, pullRequestObservation: { proposalKey: String(pullRequestNumber), stableObservationIdentity: true, successiveHeadObserved: true, headSource: secondProposal.headSource, authorityChangeLedger: authority ? "customer-realm-recorded" : "not-run" }, gitBundleExportRestore: { bundleDigest: seeded.bundleDigest, restored: true, ...(authority ? { authorityExportRestore: "credential-free-snapshot-restored" } : { authorityExportRestore: "not-run" }) }, authority: authorityOutput, credentialValues: "not-printed", canonicalWrite: false, providerFactsAreNotAnyamLimits: true, cleanup: cleanupResult }, null, 2));
   } catch (error) {
-    if (!cleanup && providerRepositoryAccessVerified) {
+    if (!cleanup && providerRepositoryAccessVerified && cleanupMode === "delete") {
       try {
         const cleanupHttp = http ?? new FetchGitHubAppHttpClient({ baseUrl: apiBaseUrl, retry: { delaysMs: retryDelaysMs, sizingReceipt: retrySizingReceipt } });
         const cleanupIssuer = issuer ?? new GitHubAppInstallationTokenIssuer({ http: cleanupHttp, appId, privateKey: privateKey(), jwtLifetimeSeconds, clockSkewSeconds, sizingReceipt: jwtSizingReceipt, clockSkewSizingReceipt });
@@ -889,6 +913,7 @@ async function main(): Promise<void> {
         cleanup = { status: "blocked", receipt: `cleanup=blocked; repository=${repository}; exception=${cleanupError instanceof Error ? cleanupError.name : "unknown"}; credentialMaterialStored=false`, recoveryAction: "restore the GitHub App credential authority, then retry exact disposable-repository cleanup" };
       }
     }
+    if (!cleanup && providerRepositoryAccessVerified && cleanupMode === "reuse") cleanup = { status: "retained", receipt: `provider=github-app; cleanup=retained-after-failure; repository=${repository}; qualification=${qualificationId}; repositoryLifecycle=reuse; credentialMaterialStored=false`, recoveryAction: "inspect the retained disposable repository state and rerun the same qualification after the fix" };
     if (!authorityCleanup && authorityMutated && authorityClient && authorityRecoverySnapshot) authorityCleanup = await restoreAuthorityRecovery(authorityClient, authorityRecoverySnapshot, qualificationId);
     const cleanupReceipt = [cleanup?.receipt, authorityCleanup?.receipt].filter((receipt): receipt is string => receipt !== undefined).join("; ") || "cleanup=not-run; adapter-not-qualified";
     throw new Error(`${error instanceof Error ? error.message : "GitHub App qualification failed"}; cleanup=${cleanupReceipt}`);

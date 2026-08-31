@@ -3,6 +3,9 @@
 `npm run qualification:github-app` is a bounded provider qualification for the
 GitHub App projection adapter. It is not a production-support claim. Anyam
 remains canonical; GitHub is an external projection and contribution surface.
+The qualification target is reusable: retries retain the selected repository,
+remove only prior `qualification-pr` refs, and use a new run-scoped PR branch.
+This keeps App selection stable while preserving a clean mapped `main` boundary.
 
 The qualification requires a customer-operated GitHub App installation with
 selected-repository access. The runtime adapter uses `Contents: write`,
@@ -12,7 +15,12 @@ PR head deterministically; this setup permission is not required by the
 production observation path. `Administration: write` is used only for the
 explicit disposable-repository cleanup step. Subscribe the App to exactly
 `push` and `pull_request` events. The qualification repository must be
-disposable and must equal the explicit cleanup target.
+disposable and must equal the explicit cleanup target. By default the
+qualification retains that repository after a run so a failure can be inspected
+and retried without recreating the App installation selection. Set
+`ANYAM_GITHUB_APP_CLEANUP_MODE=delete` only for an explicit final teardown; that
+mode requires the App's `Administration: write` permission and deletes the
+repository.
 
 ## Webhook ingress
 
@@ -127,6 +135,7 @@ ANYAM_GITHUB_APP_GIT_MAX_BUFFER_BYTES
 ANYAM_GITHUB_APP_GIT_SIZING_RECEIPT
 ANYAM_GITHUB_APP_PR_REVISION_WAIT_MS
 ANYAM_GITHUB_APP_PR_REVISION_POLL_MS
+ANYAM_GITHUB_APP_CLEANUP_MODE=reuse (default) or delete
 ```
 
 ## Customer setup checklist
@@ -134,9 +143,9 @@ ANYAM_GITHUB_APP_PR_REVISION_POLL_MS
 1. Create a GitHub App in the customer GitHub account and install it on one
    disposable repository. Grant `Contents: write`, `Metadata: read`, and
    `Pull requests: write` for this qualification. Grant `Administration: write`
-   only because the final cleanup deletes that explicitly disposable
-   repository. Subscribe the App to exactly `push` and `pull_request`, and set
-   the App Webhook URL to the deployed Realm `POST /webhooks/github` endpoint.
+   only if you intend to run the explicit `delete` cleanup mode. Subscribe the
+   App to exactly `push` and `pull_request`, and set the App Webhook URL to the
+   deployed Realm `POST /webhooks/github` endpoint.
 2. Generate the App's private key and keep the PEM in a local file readable
    only by the operator. Record the App ID and installation ID; do not paste
    the private key, webhook secret, or installation token into chat or commit
@@ -152,9 +161,10 @@ ANYAM_GITHUB_APP_PR_REVISION_POLL_MS
    qualifier loads or refreshes that credential in process memory and never
    writes a session file. Do not copy an HttpOnly browser cookie.
 5. Run the qualification from the same terminal that contains the non-secret
-   IDs, sizing receipts, and file paths. A successful receipt must show both
-   provider and Authority cleanup success; otherwise the named disposable
-   resources remain an operator-owned recovery task.
+   IDs, sizing receipts, and file paths. A successful receipt reports either
+   `cleanup=retained` (the default reusable target) or
+   `cleanup=repository-deleted` (explicit teardown). A blocked receipt keeps
+   the selected repository for inspection and names the exact recovery action.
 
 To extend the provider qualification into the customer-operated Authority
 boundary, set the following additional inputs. The OAuth credential is loaded

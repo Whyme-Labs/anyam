@@ -1037,4 +1037,23 @@ export class NodeGitSmartHttpTransport implements GitHubSmartHttpTransport {
     const refs = input.refMappings.flatMap((mapping) => { const oid = desired.get(mapping.remoteRef); return oid ? [{ name: mapping.remoteRef, oid }] : []; });
     return { generation: digest(refs), refs, originOperationId: input.operationId, receipt: `provider=github; transport=git-smart-http; operation=${input.operationId}; idempotency=${digest(input.idempotencyKey)}; refs=${refs.length}; credentialMaterialStored=false` };
   }
+
+  /** Delete only explicitly named qualification refs from a reusable target. */
+  async deleteRefs(input: { repositoryUrl: string; token: string; refs: readonly string[] }): Promise<void> {
+    if (input.refs.length === 0) return;
+    let repositoryUrl: URL;
+    try {
+      repositoryUrl = new URL(input.repositoryUrl);
+    } catch {
+      throw new GitHubAppAdapterError({ errorCode: "github_app.repository_url_invalid", message: "Git Smart HTTP repository URL is malformed.", retryable: false, recoveryAction: "configure a valid https://github.com owner/name repository URL", receipt: "repositoryUrl=invalid; transition=not-applied; credentialMaterialStored=false" });
+    }
+    if (repositoryUrl.protocol !== "https:" || repositoryUrl.hostname !== "github.com") throw new GitHubAppAdapterError({ errorCode: "github_app.repository_host_invalid", message: "Git Smart HTTP must use the public GitHub HTTPS host.", retryable: false, recoveryAction: "configure a valid https://github.com owner/name repository URL", receipt: `repositoryHost=${repositoryUrl.hostname}; transition=not-applied; credentialMaterialStored=false` });
+    const refs = input.refs.map((ref) => ref.trim());
+    if (refs.some((ref) => !/^refs\/heads\/qualification-pr(?:-[0-9a-f]+)?$/u.test(ref))) throw new GitHubAppAdapterError({ errorCode: "github_app.ref_delete_scope_invalid", message: "Reusable qualification cleanup may delete only qualification pull-request refs.", retryable: false, recoveryAction: "pass only refs/heads/qualification-pr or refs/heads/qualification-pr-<digest> refs to reusable cleanup", receipt: "refDelete=qualification-scope-required; transition=not-applied; credentialMaterialStored=false" });
+    try {
+      await execFile("git", ["push", "--atomic", input.repositoryUrl, ...refs.map((ref) => `:${ref}`)], { cwd: this.sourceDirectory, env: this.authEnv(input.token), maxBuffer: this.maxBufferBytes });
+    } catch (error) {
+      throw gitTransportFailure(error, "push");
+    }
+  }
 }

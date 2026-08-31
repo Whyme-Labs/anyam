@@ -718,7 +718,7 @@ export class GitHubMirrorProducer {
     if (webhook.status === "blocked") return { status: "blocked", webhook, receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: webhook.deliveryId, detail: "webhook=blocked" }), ...(webhook.recoveryAction ? { recoveryAction: webhook.recoveryAction } : {}) };
     if (webhook.status === "ignored") return { status: "succeeded", webhook, receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: webhook.deliveryId, detail: "webhook=ignored; providerReinspection=false" }) };
     const drained = await this.adapter.drainReconciliation({ limit: 1, reinspect: (task) => this.reinspect(task) });
-    if (drained.status === "blocked") return { status: "blocked", webhook, ...(drained.value ? { drained: drained.value } : {}), receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: webhook.deliveryId, detail: `webhook=${webhook.status}; queue=blocked` }), ...(drained.recoveryAction ? { recoveryAction: drained.recoveryAction } : {}) };
+    if (drained.status === "blocked") return { status: "blocked", webhook, ...(drained.value ? { drained: drained.value } : {}), receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: webhook.deliveryId, detail: `webhook=${webhook.status}; queue=blocked; queueReceipt=${safeReceipt(drained.receipt, "queue.receipt")}` }), ...(drained.recoveryAction ? { recoveryAction: drained.recoveryAction } : {}) };
     return { status: "succeeded", webhook, ...(drained.value ? { drained: drained.value } : {}), receipt: producerReceipt({ mirrorId: this.mirror.id, deliveryId: webhook.deliveryId, detail: `webhook=${webhook.status}; queue=drained` }) };
   }
 

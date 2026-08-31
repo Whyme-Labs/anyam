@@ -230,7 +230,16 @@ class OAuthQualificationAuthorityClient implements QualificationAuthorityClient 
     const responseValue = payload.value;
     const hasTypedMirrorValue = responseValue !== null && typeof responseValue === "object" && !Array.isArray(responseValue) && Object.prototype.hasOwnProperty.call(responseValue, "mirror");
     const typedExpectedFailure = allowStatuses.includes(response.status) && (payload.status === "blocked" || payload.status === "indeterminate") && hasTypedMirrorValue;
-    if (!response.ok && !typedExpectedFailure) throw new RealmAuthorityRequestError({ status: response.status, code: typeof payload.code === "string" ? payload.code : `http_${response.status}`, recoveryAction: typeof payload.recoveryAction === "string" ? payload.recoveryAction : "inspect the customer Realm qualification receipt and retry the same immutable operation", receipt: typeof payload.receipt === "string" ? payload.receipt : `qualification=github-app; operation=${operation}; receipt=not-returned; credentialMaterialStored=false` });
+    if (!response.ok && !typedExpectedFailure) {
+      const coordinator = payload.coordinator !== null && typeof payload.coordinator === "object" && !Array.isArray(payload.coordinator) ? payload.coordinator as JsonObject : undefined;
+      const coordinatorReceipt = coordinator ? [
+        typeof coordinator.httpStatus === "number" ? `coordinatorStatus=${coordinator.httpStatus}` : undefined,
+        typeof coordinator.code === "string" ? `coordinatorCode=${coordinator.code}` : undefined,
+        typeof coordinator.recoveryAction === "string" ? `coordinatorRecoveryAction=${coordinator.recoveryAction}` : undefined,
+        typeof coordinator.receipt === "string" ? `coordinatorReceipt=${coordinator.receipt}` : undefined,
+      ].filter((part): part is string => part !== undefined).join("; ") : "";
+      throw new RealmAuthorityRequestError({ status: response.status, code: typeof payload.code === "string" ? payload.code : `http_${response.status}`, recoveryAction: typeof payload.recoveryAction === "string" ? payload.recoveryAction : "inspect the customer Realm qualification receipt and retry the same immutable operation", receipt: `${typeof payload.receipt === "string" ? payload.receipt : `qualification=github-app; operation=${operation}; receipt=not-returned; credentialMaterialStored=false`}${coordinatorReceipt ? `; ${coordinatorReceipt}` : ""}` });
+    }
     return payload;
   }
 

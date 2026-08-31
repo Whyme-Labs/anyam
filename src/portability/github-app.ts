@@ -541,9 +541,22 @@ export class GitHubAppProjectionAdapter implements MirrorRemoteAdapter {
       const commitOid = required(input.commitOid, "commitOid");
       const baseCommitOid = required(input.baseCommitOid, "baseCommitOid");
       const token = await this.token("read");
-      const commit = await this.api.getCommit({ repository: this.installation.repository, oid: commitOid, ref: symbolicRef, token: token.token });
+      let providerReadRetryAttempts = 0;
+      const retryNotFound = async <T>(read: () => Promise<T>): Promise<T> => {
+        while (true) {
+          try {
+            return await read();
+          } catch (error) {
+            const delay = this.readAfterWriteRetry.delaysMs[providerReadRetryAttempts];
+            if (!(error instanceof GitHubAppAdapterError) || error.errorCode !== "github_app.http_404" || delay === undefined) throw error;
+            providerReadRetryAttempts += 1;
+            await this.readAfterWriteRetry.sleep(delay);
+          }
+        }
+      };
+      const commit = await retryNotFound(() => this.api.getCommit({ repository: this.installation.repository, oid: commitOid, ref: symbolicRef, token: token.token }));
       if (commit.oid !== commitOid || !commit.treeOid) throw new GitHubAppAdapterError({ errorCode: "github_app.commit_observation_invalid", message: "GitHub did not return the exact commit tree required for Mirror provenance.", retryable: false, recoveryAction: "re-inspect the selected repository commit and return its exact tree identity", receipt: `provider=github-app; operation=observe-mirror-repository; commit=${commitOid}; tree=${commit.treeOid ?? "missing"}; credentialMaterialStored=false` });
-      const comparison = await this.api.compare({ repository: this.installation.repository, baseOid: baseCommitOid, headOid: commitOid, token: token.token });
+      const comparison = await retryNotFound(() => this.api.compare({ repository: this.installation.repository, baseOid: baseCommitOid, headOid: commitOid, token: token.token }));
       if (comparison.status !== "ahead" && comparison.status !== "identical") throw new GitHubAppAdapterError({ errorCode: "github_app.commit_ancestry_invalid", message: "The GitHub commit is not a descendant of the canonical Mirror base.", retryable: false, recoveryAction: "rebase or explicitly reconcile the remote proposal against the current canonical base before ingestion", receipt: `provider=github-app; operation=observe-mirror-repository; base=${baseCommitOid}; head=${commitOid}; comparison=${comparison.status}; credentialMaterialStored=false` });
       const claims = {
         protocol: "anyam.mirror-repository-observation/v1" as const,
@@ -562,7 +575,7 @@ export class GitHubAppProjectionAdapter implements MirrorRemoteAdapter {
         baseCommitOid,
         ancestryVerified: true as const,
         observedAt: new Date().toISOString(),
-        receipt: `provider=github-app; operation=observe-mirror-repository; installation=${this.installation.installationId}; repository=${this.installation.repository}; comparison=${comparison.status}; compareReceipt=${safeReceipt(comparison.receipt, "compare.receipt")}; expiresAt=${token.expiresAt}; credentialMaterialStored=false`,
+        receipt: `provider=github-app; operation=observe-mirror-repository; installation=${this.installation.installationId}; repository=${this.installation.repository}; comparison=${comparison.status}; compareReceipt=${safeReceipt(comparison.receipt, "compare.receipt")}; providerReadRetryAttempts=${providerReadRetryAttempts}; providerReadRetry=${this.readAfterWriteRetry.sizingReceipt}; expiresAt=${token.expiresAt}; credentialMaterialStored=false`,
       };
       return { status: "succeeded", value: { ...claims, manifestDigest: mirrorObservationDigest(claims) } };
     } catch (error) {

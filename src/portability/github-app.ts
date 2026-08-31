@@ -799,9 +799,15 @@ export function createGitHubMirrorIngestionHttpTransport(input: { baseUrl: strin
       return { status: "blocked", receipt: `provider=anyam-realm; ingestion=transport-unavailable; handoffNonceDigest=${digest(handoff.nonce)}; credentialMaterialStored=false`, recoveryAction: "retry the same signed Mirror handoff after the customer Realm internal route is reachable" };
     }
     const value: unknown = await response.json().catch(() => undefined);
-    const bodyStatus = value !== null && typeof value === "object" && !Array.isArray(value) && (value as Record<string, unknown>).status === "succeeded" ? "succeeded" : "blocked";
-    if (response.status >= 200 && response.status < 300 && bodyStatus === "succeeded") return { status: "succeeded", receipt: `provider=anyam-realm; ingestion=accepted; httpStatus=${response.status}; handoffNonceDigest=${digest(handoff.nonce)}; credentialMaterialStored=false` };
-    return { status: "blocked", receipt: `provider=anyam-realm; ingestion=rejected; httpStatus=${response.status}; handoffNonceDigest=${digest(handoff.nonce)}; credentialMaterialStored=false`, recoveryAction: "inspect the customer Realm Mirror checkpoint and retry the same signed handoff only after reconciling its response" };
+    const body = value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+    let authorityReceipt: string | undefined;
+    if (typeof body?.receipt === "string") {
+      try { authorityReceipt = safeReceipt(body.receipt, "ingestion.authorityReceipt"); } catch { authorityReceipt = undefined; }
+    }
+    const authorityReceiptSuffix = authorityReceipt ? `; authorityReceipt=${authorityReceipt}` : "";
+    const bodyStatus = body?.status === "succeeded" ? "succeeded" : "blocked";
+    if (response.status >= 200 && response.status < 300 && bodyStatus === "succeeded") return { status: "succeeded", receipt: `provider=anyam-realm; ingestion=accepted; httpStatus=${response.status}; handoffNonceDigest=${digest(handoff.nonce)}${authorityReceiptSuffix}; credentialMaterialStored=false` };
+    return { status: "blocked", receipt: `provider=anyam-realm; ingestion=rejected; httpStatus=${response.status}; handoffNonceDigest=${digest(handoff.nonce)}${authorityReceiptSuffix}; credentialMaterialStored=false`, recoveryAction: "inspect the customer Realm Mirror checkpoint and retry the same signed handoff only after reconciling its response" };
   };
 }
 

@@ -586,8 +586,14 @@ async function qualifyCustomerRealmAuthority(input: {
     const pendingInboundChangeIds = Array.isArray(currentMirror.pendingInboundChangeIds)
       ? currentMirror.pendingInboundChangeIds.filter((value): value is string => typeof value === "string")
       : [];
-    const observed = await input.adapter.observeMirrorRepository({ mirror: producerMirror, repositoryId, sourceSpaceId: config.sourceSpaceId, projectViewId: config.projectViewId, proposalKey, deliveryId, symbolicRef: `refs/pull/${input.pullRequestNumber}/head`, commitOid: headCommit, baseCommitOid: input.observedPr.baseCommit, baseRef: input.observedPr.baseRef, headRef: input.observedPr.headRef });
-    if (observed.status !== "succeeded") throw new Error(`customer Realm PR RepositoryDriver observation failed: operation=${operationSuffix}; commit=${headCommit}; base=${input.observedPr.baseCommit}; error=${observed.errorCode}; ${observed.recoveryAction}; receipt=${observed.receipt}`);
+    // GitHub's pull-request REST object may lag briefly after a base-branch
+    // rewrite. Bind provenance to the verified canonical Source Space commit,
+    // while the RepositoryDriver still compares the live base/head refs. This
+    // prevents a stale API base.sha from producing an observation that cannot
+    // match the proposal Authority will ingest.
+    const canonicalBaseCommit = input.seeded.initialOid;
+    const observed = await input.adapter.observeMirrorRepository({ mirror: producerMirror, repositoryId, sourceSpaceId: config.sourceSpaceId, projectViewId: config.projectViewId, proposalKey, deliveryId, symbolicRef: `refs/pull/${input.pullRequestNumber}/head`, commitOid: headCommit, baseCommitOid: canonicalBaseCommit, baseRef: input.observedPr.baseRef, headRef: input.observedPr.headRef });
+    if (observed.status !== "succeeded") throw new Error(`customer Realm PR RepositoryDriver observation failed: operation=${operationSuffix}; commit=${headCommit}; base=${canonicalBaseCommit}; error=${observed.errorCode}; ${observed.recoveryAction}; receipt=${observed.receipt}`);
     const externalProposal = prProposal(headCommit, deliveryId);
     const delivery = { provider: "github", installationId: input.installationId, sourceIdentity: `github-app:${input.installationId}`, remoteRepository: input.repository, deliveryId, eventType: operationSuffix === "pr-opened" ? "pull_request.opened" : "pull_request.synchronize", proposalKey };
     const command = {

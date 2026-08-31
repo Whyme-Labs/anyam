@@ -372,7 +372,6 @@ async function qualifyCustomerRealmAuthority(input: {
   authorityConfig: AuthorityConfig;
   adapter: GitHubAppProjectionAdapter;
   gitMaxBufferBytes: number;
-  forcePush: Extract<Awaited<ReturnType<GitHubAppProjectionAdapter["push"]>>, { status: "succeeded" }>;
   reconciled: Extract<Awaited<ReturnType<MirrorCoordinator["sync"]>>, { status: "succeeded" }>;
   pullRequestNumber: number;
   observedPr: GitHubPullRequestObservation;
@@ -501,11 +500,34 @@ async function qualifyCustomerRealmAuthority(input: {
   const authorityInboundRevisionIds = authorityInboundProposal.changeRevisionIds;
   if (!Array.isArray(authorityInboundRevisionIds) || authorityInboundRevisionIds.length !== 1 || authorityMirrorGeneration(authorityInboundMirror) !== providerInboundPush.value.generation) throw new Error("customer Realm signed Mirror ingestion did not persist the exact provider generation and one inbound Change Revision");
 
+  // The Authority reconciliation below records a provider operation; it must
+  // not claim that the remote was restored while GitHub still serves the
+  // forced rewrite. Execute both provider-side transitions through the same
+  // RepositoryDriver first, then submit the exact generations and refs to the
+  // Authority. The local transport source ref is deliberately moved before
+  // each push because gitPushArguments reads the source ref from the
+  // qualification worktree.
+  const authorityProviderMirror: RepositoryMirror = {
+    ...producerMirror,
+    remoteGeneration: providerInboundPush.value.generation,
+    remoteRefs: providerInboundPush.value.refs.map((ref) => ({ ...ref })),
+  };
+  await runGit(input.seeded.directory, ["update-ref", "refs/heads/main", input.seeded.divergentOid], input.gitMaxBufferBytes);
+  const authorityForceProviderPush = await input.adapter.push({
+    mirror: authorityProviderMirror,
+    expectedGeneration: providerInboundPush.value.generation,
+    expectedRefs: providerInboundPush.value.refs,
+    desiredRefs: [{ name: "refs/heads/main", oid: input.seeded.divergentOid }],
+    operationId: `github-app:${input.qualificationId}:authority:provider-force-push`,
+    idempotencyKey: `github-app:${input.qualificationId}:authority:provider-force-push`,
+  });
+  if (authorityForceProviderPush.status !== "succeeded") throw new Error(`customer Realm provider force-push seed failed: ${authorityForceProviderPush.errorCode}; ${authorityForceProviderPush.recoveryAction}; receipt=${authorityForceProviderPush.receipt}`);
+
   const authorityForcePush = await client.syncMirror(config.mirrorId, {
     canonicalProjectRevisionId: config.projectRevisionId,
     canonicalRefs,
     expectedRemoteGeneration: authorityMirrorGeneration(authorityInboundMirror),
-    remoteGeneration: input.forcePush.value.generation,
+    remoteGeneration: authorityForceProviderPush.value.generation,
     remoteRefs: [{ name: "refs/heads/main", oid: input.seeded.divergentOid }],
     operationId: `github-app:${input.qualificationId}:authority:force-push`,
     checkpointId: `checkpoint:github-app:${input.qualificationId}:authority:force-push`,
@@ -519,11 +541,27 @@ async function qualifyCustomerRealmAuthority(input: {
     receipt: "qualification=github-app-authority; operation=force-push; provider=github-app; credentialMaterialStored=false",
   }, `github-app:${input.qualificationId}:authority:force-push`);
   const forceMirror = authorityMirrorFromResponse(authorityForcePush);
+
+  await runGit(input.seeded.directory, ["update-ref", "refs/heads/main", input.seeded.initialOid], input.gitMaxBufferBytes);
+  const authorityCanonicalProviderPush = await input.adapter.push({
+    mirror: {
+      ...authorityProviderMirror,
+      remoteGeneration: authorityForceProviderPush.value.generation,
+      remoteRefs: authorityForceProviderPush.value.refs.map((ref) => ({ ...ref })),
+    },
+    expectedGeneration: authorityForceProviderPush.value.generation,
+    expectedRefs: authorityForceProviderPush.value.refs,
+    desiredRefs: canonicalRefs,
+    operationId: `github-app:${input.qualificationId}:authority:provider-canonical-wins`,
+    idempotencyKey: `github-app:${input.qualificationId}:authority:provider-canonical-wins`,
+  });
+  if (authorityCanonicalProviderPush.status !== "succeeded") throw new Error(`customer Realm provider canonical-wins restoration failed: ${authorityCanonicalProviderPush.errorCode}; ${authorityCanonicalProviderPush.recoveryAction}; receipt=${authorityCanonicalProviderPush.receipt}`);
+
   const authorityReconciled = await client.reconcileMirror(config.mirrorId, {
     canonicalProjectRevisionId: config.projectRevisionId,
     canonicalRefs,
     expectedRemoteGeneration: authorityMirrorGeneration(forceMirror),
-    remoteGeneration: input.reconciled.value.mirror.remoteGeneration,
+    remoteGeneration: authorityCanonicalProviderPush.value.generation,
     remoteRefs: canonicalRefs,
     operationId: `github-app:${input.qualificationId}:authority:canonical-wins`,
     checkpointId: `checkpoint:github-app:${input.qualificationId}:authority:canonical-wins`,
@@ -820,7 +858,7 @@ async function main(): Promise<void> {
       const occupied = Object.entries(initialCounts).filter(([key, value]) => key !== "audit" && typeof value === "number" && value > 0);
       if (occupied.length > 0) throw new Error(`customer Realm Authority is not an empty disposable boundary (${occupied.map(([key, value]) => `${key}=${String(value)}`).join(", ")}); use a fresh Realm or restore its credential-free recovery snapshot before retrying`);
       authorityMutated = true;
-      authority = await qualifyCustomerRealmAuthority({ seeded, repository, installationId, qualificationId, webhookSecret, authorityClient, authorityConfig: authorityInputs, adapter, gitMaxBufferBytes, forcePush, reconciled, pullRequestNumber, observedPr: observedPr.value, proposalRevisionPush, waitForSecond: secondProposal });
+      authority = await qualifyCustomerRealmAuthority({ seeded, repository, installationId, qualificationId, webhookSecret, authorityClient, authorityConfig: authorityInputs, adapter, gitMaxBufferBytes, reconciled, pullRequestNumber, observedPr: observedPr.value, proposalRevisionPush, waitForSecond: secondProposal });
       if (authority.status === "not-run") throw new Error("customer Realm Authority qualification did not run; set the Realm URL and owner session and retry the same disposable qualification");
     }
 

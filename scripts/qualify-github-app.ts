@@ -488,7 +488,7 @@ async function qualifyCustomerRealmAuthority(input: {
   const producerWebhookBody = JSON.stringify({ ref: "refs/heads/main", before: input.seeded.initialOid, after: input.seeded.secondOid, forced: false, deleted: false, repository: { full_name: input.repository }, installation: { id: input.installationId } });
   const producerWebhook = { body: producerWebhookBody, event: "push", deliveryId: authorityInboundDeliveryId, signature: signed(producerWebhookBody, input.webhookSecret), secret: input.webhookSecret, mirrorId: config.mirrorId, mappedRemoteRefs: ["refs/heads/main"] } as const;
   const authorityInbound = await producer.processWebhook(producerWebhook);
-  if (authorityInbound.status !== "succeeded") throw new Error(`customer Realm signed Mirror producer did not ingest the provider delivery: ${authorityInbound.recoveryAction ?? authorityInbound.receipt}`);
+  if (authorityInbound.status !== "succeeded") throw new Error(`customer Realm signed Mirror producer did not ingest the provider delivery: ${authorityInbound.recoveryAction ?? "no recovery action"}; receipt=${authorityInbound.receipt}`);
   const authorityInboundDuplicate = await producer.processWebhook(producerWebhook);
   if (authorityInboundDuplicate.status !== "succeeded" || authorityInboundDuplicate.webhook.status !== "duplicate") throw new Error(`customer Realm signed Mirror producer did not deduplicate the redelivered provider delivery: state=${authorityInboundDuplicate.status}; webhook=${authorityInboundDuplicate.webhook.status}`);
   const authorityInboundReadBack = await client.inspectMirror(config.mirrorId);
@@ -618,7 +618,7 @@ async function qualifyCustomerRealmAuthority(input: {
     const now = Date.now();
     const handoff = await signMirrorIngestionHandoff({ command, keyId: input.authorityConfig.mirrorHandoffKeyId, secret: input.authorityConfig.mirrorHandoffSecret, nonce: `nonce:github-app:${digest([config.mirrorId, deliveryId, operationSuffix, headCommit])}`, realmId, installationId: input.installationId, issuer: `github-app:${input.installationId}`, provider: "github", remoteRepository: input.repository, mirrorId: config.mirrorId, deliveryId, proposalKey, issuedAt: new Date(now).toISOString(), expiresAt: new Date(now + MIRROR_HANDOFF_TTL_MS).toISOString(), now, maxLifetimeMs: MIRROR_HANDOFF_TTL_MS, clockSkewMs: MIRROR_HANDOFF_CLOCK_SKEW_MS });
     const ingested = await createGitHubMirrorIngestionHttpTransport({ baseUrl: config.baseUrl })(handoff);
-    if (ingested.status !== "succeeded") throw new Error(`customer Realm signed PR Mirror producer did not ingest the provider delivery: ${ingested.recoveryAction ?? ingested.receipt}`);
+    if (ingested.status !== "succeeded") throw new Error(`customer Realm signed PR Mirror producer did not ingest the provider delivery: ${ingested.recoveryAction ?? "no recovery action"}; receipt=${ingested.receipt}`);
     const readBack = await client.inspectMirror(config.mirrorId);
     const readBackMirror = authorityMirrorFromResponse(readBack);
     const proposal = authorityArray(readBack.proposals, "PR proposals").find((candidate) => candidate.proposalKey === proposalKey && candidate.latestHeadCommit === headCommit);

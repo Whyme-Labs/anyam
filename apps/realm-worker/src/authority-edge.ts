@@ -438,7 +438,7 @@ async function mirrorIngestionMutation(request: Request, env: AnyamRealmOAuthEnv
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
     const status = detail.includes("not_found") ? 404 : detail.includes("conflict") || detail.includes("replay") ? 409 : detail.includes("invalid_request") ? 422 : 503;
-    return mirrorError(status, status === 404 ? "mirror_not_found" : status === 409 ? "mirror_conflict" : status === 422 ? "invalid_request" : "authority_coordinator_rejected", status === 404 ? "Configure the named Mirror before sending a provider handoff." : status === 409 ? "Inspect the Mirror checkpoint and request a fresh signed handoff only when safe." : "Inspect the signed Mirror handoff receipt and retry only the same immutable request when safe.", `authority=mirror-ingestion-rejected; errorClass=${status}; signedHandoff=true`);
+    return mirrorError(status, status === 404 ? "mirror_not_found" : status === 409 ? "mirror_conflict" : status === 422 ? "invalid_request" : "authority_coordinator_rejected", status === 404 ? "Configure the named Mirror before sending a provider handoff." : status === 409 ? "Inspect the Mirror checkpoint and request a fresh signed handoff only when safe." : "Inspect the signed Mirror handoff receipt and retry only the same immutable request when safe.", `authority=mirror-ingestion-rejected; errorClass=${status}; ${coordinatorDetailReceipt(error)}; signedHandoff=true`);
   }
 }
 

@@ -19,6 +19,7 @@ import {
   type GitHubSmartHttpTransport,
   FetchGitHubAppHttpClient,
   FetchGitHubRestClient,
+  NodeGitSmartHttpTransport,
   gitInstallationAuthorizationHeader,
   gitPushArguments,
   gitTransportFailure,
@@ -64,6 +65,14 @@ test("Git Smart HTTP transport failures expose a redacted diagnostic receipt", (
 
 test("Git Smart HTTP push places the repository before refspecs", () => {
   assert.deepEqual(gitPushArguments({ repositoryUrl: "https://github.com/acme/video-player.git", expectedRefs: [], refMappings: [{ localRef: "refs/heads/main", remoteRef: "refs/heads/main" }] }), ["push", "--atomic", "--force-with-lease=refs/heads/main:", "https://github.com/acme/video-player.git", "refs/heads/main:refs/heads/main"]);
+});
+
+test("reusable qualification cleanup refuses non-qualification refs", async () => {
+  const transport = new NodeGitSmartHttpTransport({ sourceDirectory: process.cwd(), maxBufferBytes: 1024, sizingReceipt: "fixture=git-buffer-measured" });
+  await assert.rejects(
+    transport.deleteRefs({ repositoryUrl: "https://github.com/acme/video-player.git", token: "opaque-token", refs: ["refs/heads/main"] }),
+    (error: unknown) => error instanceof GitHubAppAdapterError && error.errorCode === "github_app.ref_delete_scope_invalid" && error.receipt.includes("refDelete=qualification-scope-required"),
+  );
 });
 
 class FakeTokenIssuer implements GitHubAppTokenIssuer {

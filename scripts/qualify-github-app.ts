@@ -130,7 +130,11 @@ async function seedRepository(maxBufferBytes: number, proposalBranch: string): P
 
 async function inspectReusableQualificationRepository(input: { repositoryUrl: string; setupGit: NodeGitSmartHttpTransport; token: string }): Promise<{ refs: GitRef[]; generation: string; receipt: string }> {
   const inspected = await input.setupGit.inspect({ repositoryUrl: input.repositoryUrl, token: input.token, refs: [], knownGeneration: "qualification=reusable" });
-  const unexpected = inspected.refs.filter((ref) => ref.name !== "refs/heads/main" && !/^refs\/heads\/qualification-pr(?:-[0-9a-f]+)?$/u.test(ref.name));
+  // GitHub exposes immutable pull-request refs alongside heads. They are
+  // provider-generated observations, not writable qualification state, and
+  // must remain untouched by repository reuse.
+  const providerPullRequestRef = /^refs\/pull\/[0-9]+\/(?:head|merge)$/u;
+  const unexpected = inspected.refs.filter((ref) => ref.name !== "refs/heads/main" && !/^refs\/heads\/qualification-pr(?:-[0-9a-f]+)?$/u.test(ref.name) && !providerPullRequestRef.test(ref.name));
   if (unexpected.length > 0) throw new Error(`reusable GitHub App qualification repository contains unexpected refs (${unexpected.map((ref) => ref.name).join(", ")}); refusing to mutate them`);
   const staleQualificationRefs = inspected.refs.filter((ref) => /^refs\/heads\/qualification-pr(?:-[0-9a-f]+)?$/u.test(ref.name)).map((ref) => ref.name);
   if (staleQualificationRefs.length > 0) {

@@ -84,6 +84,7 @@ export type LocalCapabilityGrant = {
   subjectId: string;
   resource: AgentResource;
   actions: readonly AgentCapability[];
+  authorizedActionIds?: readonly string[];
   deniedActions: readonly string[];
   canonicalWrite: false;
   issuedAt: string;
@@ -319,6 +320,19 @@ export type LocalAgentManagerOptions = {
   credentialLifetimeMs?: number;
   sessionLifetimeMs?: number;
   now?: () => Date;
+  resourceLimits?: WorkspaceResourceLimits;
+};
+
+export type LocalAgentSessionOptions = {
+  agent: string;
+  changeId?: string;
+  parallel?: boolean;
+  mode?: WorkspaceBoundaryMode;
+  authorizedPaths?: readonly string[];
+  authorizedActionIds?: readonly string[];
+  network?: readonly string[];
+  executablePaths?: readonly string[];
+  workspaceDirectory?: string;
   resourceLimits?: WorkspaceResourceLimits;
 };
 
@@ -1041,12 +1055,15 @@ export class LocalAgentManager {
     return { state, session: active.session, grant: active.grant, context: active.context };
   }
 
-  private async startSessionUnlocked(input: { agent: string; changeId?: string; parallel?: boolean; mode?: WorkspaceBoundaryMode; authorizedPaths?: readonly string[]; network?: readonly string[]; executablePaths?: readonly string[]; workspaceDirectory?: string; resourceLimits?: WorkspaceResourceLimits }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+  private async startSessionUnlocked(input: LocalAgentSessionOptions): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
     const agent = ensureAgent(input.agent);
     const mode = input.mode ?? "supervised";
     const resourceLimits = input.resourceLimits ?? this.resourceLimits;
     const project = await this.projectMetadata();
     const change = await this.changeMetadata();
+    const authorizedActionIds = input.authorizedActionIds ? [...new Set(input.authorizedActionIds)] : project.actions.map(action => action.id);
+    const unknownActions = authorizedActionIds.filter(id => !project.actions.some(action => action.id === id));
+    if (unknownActions.length > 0) throw new LocalAgentError({ code: "agent.action_scope_invalid", message: `Requested Action scope is not declared by the Project: ${unknownActions.join(", ")}.`, recoveryAction: "select only declared Action IDs", receipt: "session=not-started; action-scope=invalid" });
     if (change.projectId !== project.id) throw new LocalAgentError({ code: "change.project_mismatch", message: `Change ${change.id} belongs to ${change.projectId}, not ${project.id}.`, affectedObject: change.id, recoveryAction: "start the agent from the Change's Project directory", receipt: `manifest-project=${project.id}; change-project=${change.projectId}` });
     if (input.changeId && input.changeId !== change.id) throw new LocalAgentError({ code: "change.not_active", message: `Requested Change ${input.changeId} is not the local active Change ${change.id}.`, affectedObject: input.changeId, recoveryAction: "switch to the Change Workspace before starting the agent", receipt: `active-change=${change.id}` });
 
@@ -1100,6 +1117,7 @@ export class LocalAgentManager {
       subjectId: actorId,
       resource,
       actions: AGENT_CAPABILITIES,
+      authorizedActionIds,
       deniedActions: PROHIBITED_OPERATIONS,
       canonicalWrite: false,
       issuedAt: startedAt,
@@ -1120,8 +1138,8 @@ export class LocalAgentManager {
       grantId,
       capabilities: AGENT_CAPABILITIES,
       prohibitedOperations: PROHIBITED_OPERATIONS,
-      actions: project.actions.map((action) => action.id),
-      verifiers: project.verifiers.map((verifier) => verifier.id),
+      actions: authorizedActionIds,
+      verifiers: project.verifiers.filter(verifier => authorizedActionIds.includes(verifier.actionId)).map(verifier => verifier.id),
       authorizationEpoch: state.authorizationEpoch,
       disclosure: "local-owner",
       createdAt: startedAt,
@@ -1167,7 +1185,7 @@ export class LocalAgentManager {
     return { session, grant, context };
   }
 
-  async startSession(input: { agent: string; changeId?: string; parallel?: boolean; mode?: WorkspaceBoundaryMode; authorizedPaths?: readonly string[]; network?: readonly string[]; executablePaths?: readonly string[]; workspaceDirectory?: string; resourceLimits?: WorkspaceResourceLimits }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+  async startSession(input: LocalAgentSessionOptions): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
     return this.withStateLock(() => this.startSessionUnlocked(input));
   }
 
@@ -1181,6 +1199,15 @@ export class LocalAgentManager {
         return { session: clone(active.session), grant: clone(active.grant), context: clone(active.context) };
       }
       return this.startSessionUnlocked({ agent: requested });
+    });
+  }
+
+  async bindSession(sessionId: string, agent: string): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+    return this.withStateLock(async () => {
+      const active = await this.requireActiveSessionUnlocked(sessionId);
+      if (active.session.agent !== ensureAgent(agent)) throw new LocalAgentError({ code: "agent.session.agent_mismatch", message: "The selected session belongs to another agent; no binding was created.", recoveryAction: "select the session belonging to this agent", receipt: `session=${sessionId}; binding=denied` });
+      if (!this.boundaries.has(sessionId)) throw new LocalAgentError({ code: "workspace.boundary_missing", message: "The selected session has no live boundary in this broker process; no replacement session was created.", recoveryAction: "revoke the interrupted session and explicitly start a fresh scoped broker", receipt: `session=${sessionId}; boundary=missing; fallback=false` });
+      return { session: clone(active.session), grant: clone(active.grant), context: clone(active.context) };
     });
   }
 
@@ -1405,6 +1432,7 @@ export class LocalAgentManager {
       const actionId = stringField(args.actionId, "");
       const action = project.actions.find((candidate) => candidate.id === actionId);
       if (!action) throw new LocalAgentError({ code: "run.action_unknown", message: `Action ${actionId || "missing"} is not declared by the Project; no run was started.`, affectedObject: actionId || "action:missing", recoveryAction: `choose one of ${project.actions.map((candidate) => candidate.id).join(", ") || "the actions in anyam.json"}`, receipt: `declared-actions=${project.actions.map((candidate) => candidate.id).join(",")}` });
+      if (active.grant.authorizedActionIds && !active.grant.authorizedActionIds.includes(action.id)) throw new LocalAgentError({ code: "run.action_denied", message: `Action ${action.id} is outside this session's granted scope; no run was started.`, affectedObject: action.id, recoveryAction: "use an Action granted to this session or request a separately scoped session", receipt: `session=${active.session.id}; action=${action.id}; execution=not-started` });
       const requestedVerifierId = stringField(args.verifierId, "");
       const verifier = requestedVerifierId
         ? project.verifiers.find((candidate) => candidate.id === requestedVerifierId)
@@ -1574,7 +1602,7 @@ export class LocalAgentManager {
     }
     if (name === "workspace.inspect") {
       await this.appendToolAudit(active, name);
-      return { workspace: active.grant.resource, sessionId: active.session.id, contextId: active.context.id, capabilities: active.grant.actions, prohibitedOperations: active.grant.deniedActions, canonicalWrite: false };
+      return { workspace: active.grant.resource, sessionId: active.session.id, contextId: active.context.id, capabilities: active.grant.actions, authorizedActionIds: active.grant.authorizedActionIds ?? active.context.actions, prohibitedOperations: active.grant.deniedActions, canonicalWrite: false };
     }
     if (name === "run.start") {
       const actionId = stringField(args.actionId, "");
@@ -1822,16 +1850,35 @@ export type McpStdioOptions = {
   input: Readable;
   output: Writable;
   manager?: LocalAgentManager;
+  sessionId?: string;
+  sessionOptions?: Omit<LocalAgentSessionOptions, "agent" | "parallel">;
 };
 
 export class LocalMcpBroker {
   private readonly manager: LocalAgentManager;
   private readonly agent: AgentKind;
-  private sessionId: string | null = null;
+  private binding: Promise<string> | null = null;
+  private readonly selectedSessionId: string | undefined;
+  private readonly sessionOptions: Omit<LocalAgentSessionOptions, "agent" | "parallel"> | undefined;
 
-  constructor(input: { manager: LocalAgentManager; agent: string }) {
+  constructor(input: { manager: LocalAgentManager; agent: string; sessionId?: string; sessionOptions?: Omit<LocalAgentSessionOptions, "agent" | "parallel"> }) {
     this.manager = input.manager;
     this.agent = ensureAgent(input.agent);
+    this.selectedSessionId = input.sessionId;
+    this.sessionOptions = input.sessionOptions;
+    if (input.sessionId && input.sessionOptions) throw new Error("select an existing session or create a fresh scoped session, not both");
+  }
+
+  private bind(): Promise<string> {
+    this.binding ??= (async () => {
+      const selected = this.selectedSessionId
+        ? await this.manager.bindSession(this.selectedSessionId, this.agent)
+        : this.sessionOptions
+          ? await this.manager.startSession({ ...this.sessionOptions, agent: this.agent, parallel: true })
+          : await this.manager.ensureActiveSession(this.agent);
+      return selected.session.id;
+    })();
+    return this.binding;
   }
 
   async handle(request: Record<string, unknown>): Promise<Record<string, unknown> | null> {
@@ -1839,15 +1886,20 @@ export class LocalMcpBroker {
     const method = typeof request.method === "string" ? request.method : "";
     if (method === "notifications/initialized") return null;
     if (method === "initialize") {
-      if (this.sessionId) return { jsonrpc: "2.0", id, error: { code: -32600, message: "This MCP broker is already bound to a session. Open a new connection to initialize another session." } };
-      const session = await this.manager.ensureActiveSession(this.agent);
-      if (this.sessionId) return { jsonrpc: "2.0", id, error: { code: -32600, message: "This MCP broker is already bound to a session. Open a new connection to initialize another session." } };
-      this.sessionId = session.session.id;
+      if (this.binding) return { jsonrpc: "2.0", id, error: { code: -32600, message: "This MCP broker is already bound or initializing. Open a new connection to initialize another session." } };
+      try {
+        await this.bind();
+      } catch (error) {
+        return { jsonrpc: "2.0", id, error: { code: -32000, message: error instanceof Error ? error.message : String(error), data: error instanceof LocalAgentError ? error.toJSON() : undefined } };
+      }
       return { jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "anyam", version: "0.0.0" }, instructions: "Anyam MCP is a semantic Change broker. Git transfers source objects; canonical writes, secret reads, approvals, and production promotion are not available to this local session." } };
     }
-    if (!this.sessionId) {
-      const session = await this.manager.ensureActiveSession(this.agent);
-      this.sessionId ??= session.session.id;
+    let boundSessionId: string;
+    try {
+      boundSessionId = await this.bind();
+    } catch (error) {
+      const detail = error instanceof LocalAgentError ? error.toJSON() : { code: "agent.broker.error", message: error instanceof Error ? error.message : String(error) };
+      return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(detail) }], structuredContent: { error: detail }, isError: true } };
     }
     if (method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: LOCAL_MCP_TOOLS } };
     if (method === "tools/call") {
@@ -1855,7 +1907,7 @@ export class LocalMcpBroker {
       const name = typeof params.name === "string" ? params.name : "";
       const args = isRecord(params.arguments) ? params.arguments : {};
       try {
-        const result = await this.manager.invokeTool(name, args, this.sessionId);
+        const result = await this.manager.invokeTool(name, args, boundSessionId);
         return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result, isError: false } };
       } catch (error) {
         const detail = error instanceof LocalAgentError ? error.toJSON() : { code: "agent.broker.error", message: error instanceof Error ? error.message : String(error) };
@@ -1868,7 +1920,7 @@ export class LocalMcpBroker {
 
 export async function runMcpStdio(options: McpStdioOptions): Promise<void> {
   const manager = options.manager ?? new LocalAgentManager({ directory: options.directory });
-  const broker = new LocalMcpBroker({ manager, agent: options.agent });
+  const broker = new LocalMcpBroker({ manager, agent: options.agent, ...(options.sessionId ? { sessionId: options.sessionId } : {}), ...(options.sessionOptions ? { sessionOptions: options.sessionOptions } : {}) });
   const lines = createInterface({ input: options.input, crlfDelay: Infinity });
   for await (const line of lines) {
     if (!line.trim()) continue;

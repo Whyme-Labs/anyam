@@ -63,6 +63,48 @@ anyam init --dry-run --type worker --name demo
 The local workflow uses familiar Git vocabulary. Anyam adds the Project
 manifest, checks, and Change metadata without replacing normal Git editing.
 
+## Start a scoped local MCP broker
+
+Run the broker as a trusted host-side process. Each CLI broker connection
+creates its own session; its declared Actions run in the selected Workspace
+boundary. For a Project with `src/` and a declared `action:check`:
+
+```bash
+anyam mcp serve --stdio --agent codex --mode enforceable \
+  --allow-path src --allow-path package.json --allow-path tsconfig.json \
+  --allow-action action:check
+```
+
+Repeat `--allow-path` and `--allow-action` for explicitly permitted inputs and
+Actions. The Project manifest is common metadata in every projection. Ensure
+the selected projection contains the Action's declared inputs and runtime
+dependencies. File entry points may need their package metadata. Omitting an
+Action allowlist permits all declared Project Actions; omitting path selection
+clones the full source. `--mode supervised` remains non-enforcing and refuses
+path restrictions. An enforceable Linux backend still requires its separately
+qualified resource policy; this command does not bypass that requirement.
+
+Capture the session ID from `workspace.inspect` and revoke that exact session
+when it is no longer needed:
+
+```bash
+anyam agent revoke --session '<session ID>'
+```
+
+Closing or interrupting a broker does not establish successful Evidence or
+automatic cleanup. After interruption, explicitly revoke its session and start
+a fresh broker with the intended scopes. `mcp serve --session '<session ID>'`
+fails closed when this process has no live boundary for that session; it never
+borrows the current peer session or silently recreates a boundary. Repeated
+initialization on one connection is rejected.
+
+The local process tests use synthetic Commands through real CLI/MCP stdio and
+macOS sandbox execution. They qualify source projection, peer-read denial,
+Action allowlists, attribution, revocation, expiry and interrupted restart.
+They do not qualify real Codex/Claude model execution, connecting those clients
+from inside a sandbox, restricted metadata disclosure, Linux execution, or
+provider readiness. No native agent or paid model is run by these tests.
+
 ## Use the hosted Intent lifecycle
 
 Issues are represented by a first-class hosted Intent. The Intent identity is

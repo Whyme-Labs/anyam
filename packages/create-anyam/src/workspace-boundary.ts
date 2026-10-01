@@ -433,6 +433,13 @@ function sandboxProfile(input: { workspaceDirectory: string; stateDirectory: str
     lines.push(`(deny file-write* (subpath ${quoteProfile(path)}))`);
   }
   for (const root of runtimeRoots) lines.push(`(allow file-read* (subpath ${quoteProfile(root)}))`);
+  // File entry points resolve their real path before Node loads them. Permit
+  // metadata traversal of this workspace's ancestors, not directory contents
+  // or sibling source. Inline-only probes did not exercise this boundary.
+  for (let ancestor = dirname(input.workspaceDirectory); ; ancestor = dirname(ancestor)) {
+    lines.push(`(allow file-read-metadata (literal ${quoteProfile(ancestor)}))`);
+    if (dirname(ancestor) === ancestor) break;
+  }
   lines.push(`(allow file-read* (subpath ${quoteProfile(input.workspaceDirectory)}))`);
   lines.push(`(allow file-write* (subpath ${quoteProfile(input.workspaceDirectory)}))`);
   if (input.protectGitMetadata) lines.push(`(deny file-write* (subpath ${quoteProfile(join(input.workspaceDirectory, ".git"))}))`);

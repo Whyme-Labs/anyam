@@ -34,7 +34,7 @@ function kindFrom(args: readonly string[]): ProjectTemplateKind {
 
 function positionalArgs(args: readonly string[], command: string): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
+  const valueFlags = new Set(["--allow-path", "--allow-action", "--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -49,7 +49,7 @@ function positionalArgs(args: readonly string[], command: string): readonly stri
 
 function subcommandPositionals(args: readonly string[]): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
+  const valueFlags = new Set(["--allow-path", "--allow-action", "--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
   for (let index = 2; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -358,7 +358,9 @@ export async function main(args: readonly string[], cwd = process.cwd(), input: 
   }
 
   if ((command === "agent" && subcommand === "revoke") || (command === "auth" && subcommand === "revoke")) {
-    const result = await new LocalAgentManager({ directory: agentDirectory(args, cwd) }).revoke(positionalArgs(args, subcommand ?? "revoke")[0]);
+    const selectedSession = valueAfter(args, "--session");
+    if (args.includes("--session") && (!selectedSession?.trim() || selectedSession.startsWith("--"))) throw new Error("revoke --session requires an explicit session ID; no session was revoked.");
+    const result = await new LocalAgentManager({ directory: valueAfter(args, "--directory") ?? cwd }).revoke(selectedSession ?? subcommandPositionals(args)[0]);
     printResult(result, json, result.status === "revoked" ? `Revoked agent session ${result.sessionId} and Grant ${result.grantId}.` : "No local agent session was active.");
     return 0;
   }
@@ -384,8 +386,23 @@ export async function main(args: readonly string[], cwd = process.cwd(), input: 
 
   if (command === "mcp" && subcommand === "serve") {
     if (!args.includes("--stdio")) throw new Error("mcp serve currently requires --stdio; use anyam mcp serve --stdio --agent <agent>.");
+    for (let index = 0; index < args.length; index += 1) {
+      if (["--session", "--mode", "--allow-path", "--allow-action"].includes(args[index] ?? "")) {
+        const value = args[index + 1];
+        if (!value?.trim() || value.startsWith("--")) throw new Error(`MCP ${args[index]} requires an explicit value; no session was selected or started.`);
+      }
+    }
     const agent = agentValue(args, "cli");
-    await runMcpStdio({ directory: valueAfter(args, "--directory") ?? cwd, agent, input: process.stdin, output: process.stdout });
+    const selectedSessionId = valueAfter(args, "--session");
+    const mode = valueAfter(args, "--mode") ?? "supervised";
+    if (mode !== "enforceable" && mode !== "supervised") throw new Error("MCP --mode must be enforceable or supervised.");
+    const authorizedPaths = valuesAfter(args, "--allow-path");
+    const authorizedActionIds = valuesAfter(args, "--allow-action");
+    if (selectedSessionId && (valueAfter(args, "--mode") || authorizedPaths.length || authorizedActionIds.length)) throw new Error("MCP --session cannot be combined with new-session scope options.");
+    if (authorizedPaths.length && mode !== "enforceable") throw new Error("MCP path restrictions require --mode enforceable; supervised mode cannot claim source isolation.");
+    await runMcpStdio({ directory: valueAfter(args, "--directory") ?? cwd, agent, input: process.stdin, output: process.stdout,
+      ...(selectedSessionId ? { sessionId: selectedSessionId } : { sessionOptions: { mode, ...(authorizedPaths.length ? { authorizedPaths } : {}), ...(authorizedActionIds.length ? { authorizedActionIds } : {}) } }),
+    });
     return 0;
   }
 

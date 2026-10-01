@@ -1503,10 +1503,18 @@ export class LocalAgentManager {
       const state = await this.readState();
       const session = state.sessions[prepared.session.id];
       const grant = session ? state.grants[session.grantId] : undefined;
-      const revokedDuringRun = !session || !grant || session.status !== "active" || grant.status !== "active";
-      const status = revokedDuringRun ? "blocked" : failureReason ? "failed" : "passed";
       const completedAt = nowIso(this.now);
-      const finalReason = revokedDuringRun ? "session-revoked-during-run" : failureReason;
+      const completionClock = () => new Date(completedAt);
+      const revokedDuringRun = !session || !grant || session.status === "revoked" || grant.status === "revoked";
+      const expiredDuringRun = !!session && !!grant && !revokedDuringRun
+        && (session.status === "expired" || grant.status === "expired" || isExpired(session.expiresAt, completionClock) || isExpired(grant.expiresAt, completionClock));
+      if (expiredDuringRun && session && grant) {
+        session.status = "expired";
+        grant.status = "expired";
+        if (state.currentSessionId === session.id) state.currentSessionId = null;
+      }
+      const status = revokedDuringRun || expiredDuringRun ? "blocked" : failureReason ? "failed" : "passed";
+      const finalReason = revokedDuringRun ? "session-revoked-during-run" : expiredDuringRun ? "session-expired-during-run" : failureReason;
       const evidenceDigest = digest({ actionId: prepared.action.id, verifierId: prepared.verifier?.id ?? "verifier:missing", sourceRevision: gitCommitIdentity(prepared.source.commitId), sourceSnapshot: `git:snapshot:${prepared.source.commitId}`, inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, status, sourceMutated, actorId: prepared.session.actorId, grantId: prepared.grant.id });
       const observation: LocalRunObservation = {
         id: prepared.runId,
@@ -1831,13 +1839,15 @@ export class LocalMcpBroker {
     const method = typeof request.method === "string" ? request.method : "";
     if (method === "notifications/initialized") return null;
     if (method === "initialize") {
+      if (this.sessionId) return { jsonrpc: "2.0", id, error: { code: -32600, message: "This MCP broker is already bound to a session. Open a new connection to initialize another session." } };
       const session = await this.manager.ensureActiveSession(this.agent);
+      if (this.sessionId) return { jsonrpc: "2.0", id, error: { code: -32600, message: "This MCP broker is already bound to a session. Open a new connection to initialize another session." } };
       this.sessionId = session.session.id;
       return { jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "anyam", version: "0.0.0" }, instructions: "Anyam MCP is a semantic Change broker. Git transfers source objects; canonical writes, secret reads, approvals, and production promotion are not available to this local session." } };
     }
     if (!this.sessionId) {
       const session = await this.manager.ensureActiveSession(this.agent);
-      this.sessionId = session.session.id;
+      this.sessionId ??= session.session.id;
     }
     if (method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: LOCAL_MCP_TOOLS } };
     if (method === "tools/call") {

@@ -162,6 +162,19 @@ async function brokerCall(broker: LocalMcpBroker, name: string, args: Record<str
   return response.result as { isError: boolean; structuredContent: Record<string, unknown> };
 }
 
+async function waitForActionFile(directory: string, filename: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (true) {
+    try {
+      await access(join(directory, ".anyam", filename));
+      return;
+    } catch {
+      assert.ok(Date.now() < deadline, "fixture Action did not signal startup");
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 20));
+    }
+  }
+}
+
 test("interleaved MCP brokers retain their initialized session, context, finding actor, and audit identity", async () => {
   const directory = await projectDirectory();
   try {
@@ -282,16 +295,7 @@ test("revoking a broker during its Action keeps blocked Evidence bound to it and
     assert.ok(first);
     sessionId = first.id;
     const running = brokerCall(codex, "run.start", { actionId: "action:check" });
-    const deadline = Date.now() + 5_000;
-    while (true) {
-      try {
-        await access(join(directory, ".anyam", "action-started"));
-        break;
-      } catch {
-        assert.ok(Date.now() < deadline, "fixture Action did not signal startup");
-        await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 20));
-      }
-    }
+    await waitForActionFile(directory, "action-started");
     const second = await agentManager.startSession({ agent: "claude", parallel: true });
     const claude = new LocalMcpBroker({ manager: agentManager, agent: "claude" });
     await claude.handle({ jsonrpc: "2.0", id: 2, method: "initialize" });
@@ -309,6 +313,71 @@ test("revoking a broker during its Action keeps blocked Evidence bound to it and
     const allowed = await brokerCall(claude, "workspace.inspect");
     assert.equal(allowed.isError, false);
     assert.equal(allowed.structuredContent.sessionId, second.session.id);
+  } finally {
+    if (sessionId) await agentManager.revoke(sessionId);
+    await rm(join(directory, ".."), { recursive: true, force: true });
+  }
+});
+
+test("a revoked MCP broker cannot reinitialize into a newer session of the same agent", async () => {
+  const directory = await projectDirectory();
+  try {
+    const agentManager = manager(directory);
+    const firstBroker = new LocalMcpBroker({ manager: agentManager, agent: "codex" });
+    await firstBroker.handle({ jsonrpc: "2.0", id: 1, method: "initialize" });
+    const first = (await agentManager.status()).session;
+    assert.ok(first);
+    const second = await agentManager.startSession({ agent: "codex", parallel: true });
+    const secondBroker = new LocalMcpBroker({ manager: agentManager, agent: "codex" });
+    await secondBroker.handle({ jsonrpc: "2.0", id: 2, method: "initialize" });
+    await agentManager.revoke(first.id);
+    const initializedAgain = await firstBroker.handle({ jsonrpc: "2.0", id: 3, method: "initialize" });
+    assert.equal((initializedAgain?.error as Record<string, unknown> | undefined)?.code, -32600);
+    const denied = await brokerCall(firstBroker, "workspace.inspect");
+    assert.equal(denied.isError, true);
+    const allowed = await brokerCall(secondBroker, "workspace.inspect");
+    assert.equal(allowed.isError, false);
+    assert.equal(allowed.structuredContent.sessionId, second.session.id);
+  } finally {
+    await rm(join(directory, ".."), { recursive: true, force: true });
+  }
+});
+
+test("an Action completing after its bound session expires records blocked Evidence without expiring a newer session", async () => {
+  const directory = await projectDirectory();
+  let clock = Date.parse("2026-08-03T00:00:00.000Z");
+  const agentManager = manager(directory, { now: () => new Date(clock), sessionLifetimeMs: 60_000 });
+  let sessionId: string | undefined;
+  try {
+    await replaceCheckAction(directory, { command: "node -e \"const fs=require('node:fs');fs.writeFileSync('.anyam/action-started','ready');const timer=setInterval(()=>{if(fs.existsSync('.anyam/action-finish'))clearInterval(timer)},20)\"", inputs: ["anyam.json"], outputs: [] });
+    const codex = new LocalMcpBroker({ manager: agentManager, agent: "codex" });
+    await codex.handle({ jsonrpc: "2.0", id: 1, method: "initialize" });
+    const first = (await agentManager.status()).session;
+    assert.ok(first);
+    sessionId = first.id;
+    const running = brokerCall(codex, "run.start", { actionId: "action:check" });
+    await waitForActionFile(directory, "action-started");
+    clock += 30_000;
+    const second = await agentManager.startSession({ agent: "claude", parallel: true });
+    clock += 30_001;
+    await writeFile(join(directory, ".anyam", "action-finish"), "finish");
+    const completed = await running;
+    assert.equal(completed.isError, false);
+    const run = completed.structuredContent.run as Record<string, unknown>;
+    const evidence = completed.structuredContent.evidence as Record<string, unknown>;
+    assert.equal(run.status, "blocked");
+    assert.equal(run.actorId, first.actorId);
+    assert.equal(run.taskId, first.taskId);
+    assert.equal(evidence.status, "blocked");
+    assert.equal(evidence.actorId, first.actorId);
+    assert.equal(evidence.grantId, first.grantId);
+    assert.match(String(evidence.receipt), /session-expired-during-run/);
+    assert.ok(Date.parse(String(run.completedAt)) > Date.parse(first.expiresAt));
+    const state = JSON.parse(await readFile(agentManager.statePathname, "utf8")) as { sessions: Record<string, { status: string }>; grants: Record<string, { status: string }> };
+    assert.equal(state.sessions[first.id]?.status, "expired");
+    assert.equal(state.grants[first.grantId]?.status, "expired");
+    assert.equal((await agentManager.invokeTool("workspace.inspect")).sessionId, second.session.id);
+    assert.equal((await brokerCall(codex, "workspace.inspect")).isError, true);
   } finally {
     if (sessionId) await agentManager.revoke(sessionId);
     await rm(join(directory, ".."), { recursive: true, force: true });

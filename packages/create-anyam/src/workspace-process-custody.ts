@@ -17,15 +17,22 @@ control.on('data', data => {
   started = true;
   const child = spawn(executable, args, {stdio: 'inherit', detached: false});
   child.once('error', error => {
-    process.stderr.write('Workspace command spawn failed: ' + error.message + '\n');
-    fs.writeSync(3, JSON.stringify({exitCode: 1}) + '\n');
-    terminateOwnGroup();
+    try {
+      process.stderr.write('Workspace command spawn failed: ' + error.message + '\n');
+      fs.writeSync(3, JSON.stringify({exitCode: 1}) + '\n');
+    } finally {
+      terminateOwnGroup();
+    }
   });
   child.once('exit', (exitCode, signal) => {
     // Send the actual child result before removing the complete owned group,
     // including background descendants. Only the trusted custodian owns fd 3.
-    fs.writeSync(3, JSON.stringify({exitCode, signal}) + '\n');
-    terminateOwnGroup();
+    try {
+      fs.writeSync(3, JSON.stringify({exitCode, signal}) + '\n');
+    } finally {
+      // Reporting can race parent EOF and throw EPIPE. Cleanup is unconditional.
+      terminateOwnGroup();
+    }
   });
 });
 `;

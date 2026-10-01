@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import { spawn, execFile as execFileCallback, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
+import type { Duplex } from "node:stream";
 import test from "node:test";
 import { localAgentStatePath, LocalAgentManager, LocalMcpBroker, type LocalAgentSession, type LocalCapabilityGrant } from "../packages/create-anyam/src/agent.ts";
 import { scaffoldProject, startChange } from "../packages/create-anyam/src/scaffold.ts";
+import { WORKSPACE_PROCESS_CUSTODY_SCRIPT } from "../packages/create-anyam/src/workspace-process-custody.ts";
+import { createWorkspaceBoundary, removeWorkspaceBoundary, runWorkspaceCommand } from "../packages/create-anyam/src/workspace-boundary.ts";
 
 const execFile = promisify(execFileCallback);
 const entrypoint = resolve("packages/create-anyam/src/anyam.ts");
@@ -307,6 +310,77 @@ test("revocation before durable registration refuses command release and leaves 
     if (groupId && workspace) await cleanupFixtureGroup(groupId, workspace);
     await f.cleanup();
   }
+});
+
+test("command completion racing broker-pipe closure still removes background group members", platform, async () => {
+  const f = await fixture();
+  const workspace = await realpath(f.root);
+  let custodian: ReturnType<typeof spawn> | undefined;
+  try {
+    const reporting = join(f.root, "reporting");
+    const reportingFailure = join(f.root, "reporting-failure");
+    const backgroundPid = join(f.root, "background-pid");
+    const preload = join(f.root, "completion-fault.cjs");
+    const command = join(f.root, "background-command.cjs");
+    // This preload affects only the fixture custodian. Stop immediately before
+    // its result write, then close its peer pipe before resuming the exact child.
+    await writeFile(preload, `const fs=require('node:fs');const write=fs.writeSync;fs.writeSync=function(fd,...args){if(fd===3){fs.writeFileSync(${JSON.stringify(reporting)},'ready');process.kill(process.pid,'SIGSTOP')}try{return write.call(this,fd,...args)}catch(error){if(fd===3)fs.writeFileSync(${JSON.stringify(reportingFailure)},error.code);throw error}};`);
+    await writeFile(command, `const fs=require('node:fs');const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});fs.writeFileSync(${JSON.stringify(backgroundPid)},String(child.pid));child.unref();`);
+    custodian = spawn(process.execPath, ["--require", preload, "-e", WORKSPACE_PROCESS_CUSTODY_SCRIPT, JSON.stringify([process.execPath, command])], { cwd: workspace, env: f.environment, stdio: ["ignore", "ignore", "ignore", "pipe"], detached: true });
+    assert.ok(custodian.pid);
+    const closed = new Promise<void>(resolveClose => custodian!.once("close", () => resolveClose()));
+    const control = custodian.stdio[3] as Duplex;
+    control.write("start");
+    await waitFor(reporting);
+    const descendant = Number(await readFile(backgroundPid, "utf8"));
+    assert.ok((await groupMembers(custodian.pid)).includes(descendant), "fixture background child must share custody group");
+    const pipeClosed = new Promise<void>(resolveClose => control.once("close", () => resolveClose()));
+    control.destroy(); await pipeClosed;
+    custodian.kill("SIGCONT"); // Only the exact custodian spawned by this test.
+    await closed;
+    assert.equal(await readFile(reportingFailure, "utf8"), "EPIPE", "fault must exercise a failed completion write");
+    const deadline = Date.now() + 2_000; // Isolated cleanup assertion deadline.
+    while ((await groupMembers(custodian.pid)).length && Date.now() < deadline) await new Promise<void>(r => setTimeout(r, 20));
+    assert.deepEqual(await groupMembers(custodian.pid), [], "result pipe failure must not bypass owned group termination");
+  } finally {
+    if (custodian?.pid) {
+      if (custodian.exitCode === null && custodian.signalCode === null) custodian.kill("SIGKILL");
+      await cleanupFixtureGroup(custodian.pid, workspace);
+    }
+    await f.cleanup();
+  }
+});
+
+test("custody protocol and stream failures preserve fixed nonsecret diagnostic reasons", platform, async () => {
+  const f = await fixture();
+  const boundary = await createWorkspaceBoundary({ sourceDirectory: f.directory, stateDirectory: f.stateDirectory, projectId: "project:fixture", changeId: "change:fixture", workspaceId: "workspace:fixture", mode: "enforceable", authorizedPaths: ["a", "package.json"] });
+  try {
+    const preload = join(boundary.workspaceDirectory, ".anyam", "malformed-report.cjs");
+    await mkdir(join(boundary.workspaceDirectory, ".anyam"), { recursive: true });
+    await writeFile(preload, `const fs=require('node:fs');const write=fs.writeSync;fs.writeSync=function(fd,data,...args){return write.call(this,fd,fd===3&&typeof data==='string'&&data.startsWith('{"exitCode":')?'fixture-private-detail\\n':data,...args)};`);
+    const malformed = await runWorkspaceCommand({ boundary: { ...boundary, environment: { ...boundary.environment, NODE_OPTIONS: `--require ${preload}` } }, command: "node a/action.cjs", shell: true });
+    assert.equal(malformed.status, "failed"); assert.equal(malformed.exitCode, undefined);
+    assert.match(malformed.receipt, /custody-failure=invalid-result/);
+    assert.match(malformed.stderr, /Workspace custody failed: invalid-result/);
+    assert.doesNotMatch(malformed.receipt + malformed.stderr, /fixture-private-detail/);
+    const runningMarker = join(boundary.workspaceDirectory, ".anyam", "stream-running");
+    const command = join(boundary.workspaceDirectory, ".anyam", "stream-command.cjs");
+    await writeFile(command, `require('node:fs').writeFileSync(${JSON.stringify(runningMarker)},'ready');setInterval(()=>{},1000);`);
+    let groupId: number | undefined; let fault: Promise<void> | undefined;
+    let stream: Awaited<ReturnType<typeof runWorkspaceCommand>>;
+    try {
+      stream = await runWorkspaceCommand({ boundary, command: "node .anyam/stream-command.cjs", shell: true, onProcess: child => {
+        groupId = child.pid;
+        fault = waitFor(runningMarker).then(() => { (child.stdio[3] as Duplex).emit("error", new Error("fixture-private-detail")); });
+      } });
+      await fault;
+      assert.deepEqual(await groupMembers(groupId!), [], "stream failure must remove the released workload, not only its custodian");
+    } finally { if (groupId) await cleanupFixtureGroup(groupId, boundary.workspaceDirectory); }
+    assert.equal(stream.status, "failed"); assert.equal(stream.exitCode, undefined);
+    assert.match(stream.receipt, /custody-failure=stream-error/);
+    assert.match(stream.stderr, /Workspace custody failed: stream-error/);
+    assert.doesNotMatch(stream.receipt + stream.stderr, /fixture-private-detail/);
+  } finally { await removeWorkspaceBoundary(boundary); await f.cleanup(); }
 });
 
 

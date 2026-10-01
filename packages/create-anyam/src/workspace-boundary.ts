@@ -599,6 +599,7 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
     : spawn(executable, executableArgs, { cwd: input.boundary.workspaceDirectory, env: input.boundary.environment, stdio: ["inherit", "pipe", "pipe"], detached: false });
   const custody = detached ? child.stdio[3] as Duplex : undefined;
   let custodyResult: { exitCode?: number; signal?: string } | undefined;
+  let custodyFailureReason: "invalid-result" | "stream-error" | "completion-missing" | undefined;
   let custodyMessage = "";
   custody?.on("data", (chunk: Buffer) => {
     custodyMessage += chunk.toString();
@@ -607,17 +608,20 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
       const observed = JSON.parse(custodyMessage) as { exitCode?: unknown; signal?: unknown };
       if ((observed.exitCode === null || typeof observed.exitCode === "number") && (observed.signal === undefined || observed.signal === null || typeof observed.signal === "string")) {
         custodyResult = { ...(typeof observed.exitCode === "number" ? { exitCode: observed.exitCode } : {}), ...(typeof observed.signal === "string" ? { signal: observed.signal } : {}) };
-      }
-    } catch { /* An invalid custody result never qualifies successful execution. */ }
+      } else custodyFailureReason = "invalid-result";
+    } catch { custodyFailureReason = "invalid-result"; }
   });
-  custody?.on("error", () => child.kill("SIGKILL"));
+  custody?.on("error", () => { custodyFailureReason = "stream-error"; terminate("SIGKILL"); });
   let registrationError: unknown;
   // Registration may block or fail. The custodian cannot release the workload
   // until it succeeds, and pipe EOF kills its own group if this broker dies.
-  const registration = Promise.resolve().then(() => input.onProcess?.(child)).then(() => custody?.write("start"), error => {
+  const registration = Promise.resolve().then(() => input.onProcess?.(child)).then(() => {
+    if (custodyFailureReason) custody?.destroy();
+    else custody?.write("start");
+  }, error => {
     registrationError = error;
     custody?.destroy();
-    child.kill("SIGKILL");
+    terminate("SIGKILL");
   });
   const terminate = (signal: NodeJS.Signals): void => {
     if (child.pid && detached) {
@@ -711,6 +715,13 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
   });
   await registration;
   if (registrationError) throw registrationError;
+  if (detached && !custodyResult) custodyFailureReason ??= "completion-missing";
+  if (custodyFailureReason) {
+    delete result.exitCode;
+    // Fixed diagnostic vocabulary only: never reflect transport contents or
+    // arbitrary error messages from the control channel into owner receipts.
+    stderr += `Workspace custody failed: ${custodyFailureReason}.\n`;
+  }
   if (workspaceMonitor) {
     clearInterval(workspaceMonitor);
     await monitorWorkspaceUsage();
@@ -733,7 +744,7 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
     stderrDigest: digest(stderr),
     ...(result.timedOut ? { timedOut: true } : {}),
     ...(child.pid ? { processId: child.pid, ...(detached ? { processGroupId: child.pid } : {}) } : {}),
-    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=${input.boundary.enforcement}; custody=${detached ? "parent-pipe; command-release=after-registration" : "supervised-host"};${input.boundary.enforcement === "linux-bwrap" ? ` containment=${LINUX_BWRAP_CONTAINMENT_RECEIPT};` : ""} networkEnforcement=${input.boundary.networkEnforcement}; gitMetadata=${protectGitMetadata ? "read-only" : "workspace-writable"}; status=${status};${result.timedOut ? ` budget=workspace.command; limit=${timeoutMs}ms; asked=timeout;` : ""}${outputLimitExceeded ? ` budget=workspace.output; limit=${WORKSPACE_BOUNDARY_POLICY.maxOutputBytes}bytes; asked=output-exceeded;` : ""}${resourceReceipt}`,
+    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=${input.boundary.enforcement}; custody=${detached ? "parent-pipe; command-release=after-registration" : "supervised-host"};${custodyFailureReason ? ` custody-failure=${custodyFailureReason};` : ""}${input.boundary.enforcement === "linux-bwrap" ? ` containment=${LINUX_BWRAP_CONTAINMENT_RECEIPT};` : ""} networkEnforcement=${input.boundary.networkEnforcement}; gitMetadata=${protectGitMetadata ? "read-only" : "workspace-writable"}; status=${status};${result.timedOut ? ` budget=workspace.command; limit=${timeoutMs}ms; asked=timeout;` : ""}${outputLimitExceeded ? ` budget=workspace.output; limit=${WORKSPACE_BOUNDARY_POLICY.maxOutputBytes}bytes; asked=output-exceeded;` : ""}${resourceReceipt}`,
   };
 }
 

@@ -1,0 +1,16 @@
+{
+  "name": "@anyam/example-worker-app",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "npm run typecheck && npm run build && npm test",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261001.1",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@anyam/example-hybrid-video-player",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "npm run typecheck && npm run build && npm test",
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts/build-public.mjs",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -3,6 +3,9 @@
 Package-manager-neutral TypeScript scaffolding for Anyam Projects, with the
 local `anyam` command for inspection and Changes.
 
+Start with the [Anyam Quickstart](https://github.com/Whyme-Labs/anyam/blob/main/docs/guides/quickstart.md). Read the
+[documentation index](https://github.com/Whyme-Labs/anyam/blob/main/docs/README.md) for the design, Realm, and example guides.
+
 ## Scaffold a Project
 
 All of these forms use the same package and produce the same local template:
@@ -221,6 +224,10 @@ owned by the logged-in npm publisher. Confirm that identity and enable account
 2FA before the first live publish; a package name and version are immutable
 once published.
 
+This checkout retains version `0.0.0`. Select and approve a release version and
+signed tag separately after the repository gate passes. No package publication
+is implied by building these examples.
+
 ### First-time npm account setup
 
 Configure a new second factor from the npm website, not by trying to enroll a
@@ -243,7 +250,7 @@ for:
 
 ```text
 Provider:       GitHub Actions
-Owner:          wms2537
+Owner:          Whyme-Labs
 Repository:     anyam
 Workflow:       publish-create-anyam.yml
 Environment:    npm-publish

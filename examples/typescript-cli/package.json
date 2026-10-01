@@ -1,0 +1,19 @@
+{
+  "name": "@anyam/example-typescript-cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "anyam-example": "dist/cli.js"
+  },
+  "scripts": {
+    "check": "npm run typecheck && npm run build && npm test",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

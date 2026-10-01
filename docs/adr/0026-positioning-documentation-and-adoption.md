@@ -150,6 +150,11 @@ the normal path, hidden authority boundary, failure behavior, and next command.
 Advanced surfaces appear when a Project, Change, Target, or Governance Profile
 requires them.
 
+The repository implements this first navigation in [`docs/README.md`](../README.md),
+with tutorial, how-to, explanation, reference, and example pages. The public
+site builds the same path as static routes and keeps the repository Markdown as
+the canonical source.
+
 ### Terminology migration
 
 Use Git words whenever they name exact Git objects or operations: repository,

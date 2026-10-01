@@ -423,8 +423,7 @@ test("trusted Git inspection disables repository fsmonitor execution", async () 
   await assert.rejects(access(marker));
 });
 
-test("agent Change publication inspects an isolated Git metadata copy after a hostile agent mutates .git", async () => {
-  if (process.platform !== "darwin") return;
+test("agent Change publication inspects an isolated Git metadata copy after a hostile agent mutates .git", { skip: process.platform !== "darwin" ? "requires macOS enforceable Workspace support" : false }, async () => {
   const directory = await projectDirectory();
   const marker = join(directory, "host-git-executed");
   const agentManager = manager(directory);
@@ -444,8 +443,7 @@ test("agent Change publication inspects an isolated Git metadata copy after a ho
   await agentManager.revoke(launched.session.id);
 });
 
-test("agent Change publication rebuilds the trusted index instead of trusting skip-worktree metadata", async () => {
-  if (process.platform !== "darwin") return;
+test("agent Change publication rebuilds the trusted index instead of trusting skip-worktree metadata", { skip: process.platform !== "darwin" ? "requires macOS enforceable Workspace support" : false }, async () => {
   const directory = await projectDirectory();
   const agentManager = manager(directory);
   const script = [
@@ -595,8 +593,7 @@ test("CLI configures and starts an agent without creating Realm credentials", as
   assert.doesNotMatch(state, /password/i);
 });
 
-test("CLI agent exec defaults to the enforceable Workspace lane", async () => {
-  if (process.platform !== "darwin") return;
+test("CLI agent exec defaults to the enforceable Workspace lane", { skip: process.platform !== "darwin" ? "requires macOS enforceable Workspace support" : false }, async () => {
   const directory = await projectDirectory();
   const previousStateHome = process.env.ANYAM_STATE_HOME;
   process.env.ANYAM_STATE_HOME = agentStateDirectory(directory);
@@ -666,8 +663,7 @@ test("Git credential protocol rejects malformed, duplicate, and write operations
   );
 });
 
-test("enforceable Workspace hides unauthorized source, strips ambient credentials, and protects canonical refs", async () => {
-  if (process.platform !== "darwin") return;
+test("enforceable Workspace hides unauthorized source, strips ambient credentials, and protects canonical refs", { skip: process.platform !== "darwin" ? "requires macOS enforceable Workspace support" : false }, async () => {
   const directory = await projectDirectory();
   await mkdir(join(directory, "private"), { recursive: true });
   await writeFile(join(directory, "private", "codec.ts"), "export const privateCodec = true;\n", "utf8");
@@ -698,8 +694,7 @@ test("enforceable Workspace hides unauthorized source, strips ambient credential
   await assert.rejects(access(result.boundary.workspaceDirectory));
 });
 
-test("run.start uses the enforceable Workspace Runner and allows only declared outputs", async () => {
-  if (process.platform !== "darwin") return;
+test("run.start uses the enforceable Workspace Runner and allows only declared outputs", { skip: process.platform !== "darwin" ? "requires macOS enforceable Workspace support" : false }, async () => {
   const directory = await projectDirectory();
   await replaceCheckAction(directory, {
     command: [
@@ -740,8 +735,7 @@ test("run.start rejects Action outputs that overlap tracked source or trusted me
   await agentManager.revoke(started.session.id);
 });
 
-test("enforceable Workspace rejects tracked symlink projections", async () => {
-  if (process.platform !== "darwin") return;
+test("enforceable Workspace rejects tracked symlink projections", { skip: process.platform !== "darwin" ? "requires macOS enforceable Workspace support" : false }, async () => {
   const directory = await projectDirectory();
   const outside = join(directory, "..", "outside-secret.txt");
   await writeFile(outside, "not source", "utf8");
@@ -756,8 +750,7 @@ test("enforceable Workspace rejects tracked symlink projections", async () => {
   await rm(outside, { force: true });
 });
 
-test("Linux enforceable Workspace refuses an unproxied host allowlist", async () => {
-  if (process.platform !== "linux") return;
+test("Linux enforceable Workspace refuses an unproxied host allowlist", { skip: process.platform !== "linux" ? "requires Linux enforceable Workspace support" : false }, async () => {
   const directory = await projectDirectory();
   const agentManager = manager(directory);
   await assert.rejects(
@@ -783,8 +776,7 @@ test("revoking a running run.start prevents a successful result", async () => {
   assert.notEqual((result.run as Record<string, unknown>).status, "passed");
 });
 
-test("a separate broker process can revoke an enforceable run and clean its Workspace", async () => {
-  if (process.platform !== "darwin") return;
+test("a separate broker process can revoke an enforceable run and clean its Workspace", { skip: process.platform !== "darwin" ? "requires macOS enforceable Workspace support" : false }, async () => {
   const directory = await projectDirectory();
   await replaceCheckAction(directory, { command: "node -e \"setTimeout(() => {}, 10000)\"", inputs: ["anyam.json"], outputs: [] });
   const stateDirectory = agentStateDirectory(directory);
@@ -823,8 +815,7 @@ test("supervised local Workspace is labelled non-enforcing", async () => {
   assert.match(started.context.receipt, /credentials=ambient-host-not-enforced/);
 });
 
-test("revoking an enforceable Workspace terminates the running agent and removes its disposable Workspace", async () => {
-  if (process.platform !== "darwin") return;
+test("revoking an enforceable Workspace terminates the running agent and removes its disposable Workspace", { skip: process.platform !== "darwin" ? "requires macOS enforceable Workspace support" : false }, async () => {
   const directory = await projectDirectory();
   const agentManager = manager(directory);
   const running = agentManager.launchAgent({ agent: "cli", mode: "enforceable", command: process.execPath, args: ["-e", "setTimeout(() => {}, 10000)"] });

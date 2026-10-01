@@ -678,7 +678,7 @@ type LocalActionCommandResult = {
   outputLimitExceeded: boolean;
 };
 
-async function executeDeclaredAction(boundary: WorkspaceBoundary, command: string, onProcess?: (process: ChildProcess) => void): Promise<LocalActionCommandResult> {
+async function executeDeclaredAction(boundary: WorkspaceBoundary, command: string, onProcess?: (process: ChildProcess) => void | Promise<void>): Promise<LocalActionCommandResult> {
   try {
     const result = await runWorkspaceCommand({
       boundary,
@@ -1272,6 +1272,18 @@ export class LocalAgentManager {
     return this.withStateLock(() => this.revokeUnlocked(sessionId));
   }
 
+  /** Durable process custody; subclasses may pause here in isolated fault tests. */
+  protected async registerWorkspaceProcess(sessionId: string, child: ChildProcess): Promise<void> {
+    await this.withStateLock(async () => {
+      const active = await this.requireActiveSessionUnlocked(sessionId);
+      if (child.pid) {
+        active.session.processPid = child.pid;
+        active.session.processGroupId = child.pid;
+        await this.writeState(active.state);
+      }
+    });
+  }
+
   async launchAgent(input: AgentLaunchInput): Promise<AgentLaunchResult> {
     const mode = input.mode ?? "enforceable";
     const started = input.sessionId
@@ -1303,15 +1315,7 @@ export class LocalAgentManager {
         ...(input.args ? { args: input.args } : {}),
         onProcess: (child) => {
           this.runningProcesses.set(started.session.id, child);
-          void this.withStateLock(async () => {
-            const state = await this.readState();
-            const session = state.sessions[started.session.id];
-            if (session && child.pid) {
-              session.processPid = child.pid;
-              session.processGroupId = child.pid;
-              await this.writeState(state);
-            }
-          });
+          return this.registerWorkspaceProcess(started.session.id, child);
         },
       });
     } finally {
@@ -1496,15 +1500,8 @@ export class LocalAgentManager {
       commandResult = prepared.inputs.missing.length === 0
         ? await executeDeclaredAction(prepared.boundary, prepared.action.command, (child) => {
           this.runningProcesses.set(prepared.session.id, child);
-          processRegistration = this.withStateLock(async () => {
-            const state = await this.readState();
-            const session = state.sessions[prepared.session.id];
-            if (session && child.pid) {
-              session.processPid = child.pid;
-              session.processGroupId = child.pid;
-              await this.writeState(state);
-            }
-          });
+          processRegistration = this.registerWorkspaceProcess(prepared.session.id, child);
+          return processRegistration;
         })
         : { exitCode: undefined, stdout: "", stderr: "", timedOut: false, outputLimitExceeded: false };
       if (processRegistration) await processRegistration;

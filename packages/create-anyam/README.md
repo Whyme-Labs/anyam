@@ -91,8 +91,15 @@ when it is no longer needed:
 anyam agent revoke --session '<session ID>'
 ```
 
+Enforceable commands use a trusted host-side process custodian. It waits for
+durable session process registration before releasing the sandboxed command.
+An exclusive parent pipe ties the owned process group to the broker's lifetime,
+including interruption before registration. The workload does not inherit this
+control pipe. Only the actual command's completion can establish passed Evidence.
+
 Closing or interrupting a broker does not establish successful Evidence or
-automatic cleanup. After interruption, explicitly revoke its session and start
+remove session metadata and disposable Workspace files. After interruption,
+explicitly revoke its session and start
 a fresh broker with the intended scopes. `mcp serve --session '<session ID>'`
 fails closed when this process has no live boundary for that session; it never
 borrows the current peer session or silently recreates a boundary. Repeated
@@ -100,10 +107,14 @@ initialization on one connection is rejected.
 
 The local process tests use synthetic Commands through real CLI/MCP stdio and
 macOS sandbox execution. They qualify source projection, peer-read denial,
-Action allowlists, attribution, revocation, expiry and interrupted restart.
+Action allowlists, attribution, revocation, expiry and interrupted restart,
+including broker death and revocation before durable process registration.
 They do not qualify real Codex/Claude model execution, connecting those clients
 from inside a sandbox, restricted metadata disclosure, Linux execution, or
-provider readiness. No native agent or paid model is run by these tests.
+provider readiness, hostile process-group escape, or independent custodian
+failure. The custodian changes process and resource overhead; Linux resource
+qualification must be rerun before claiming Linux readiness. No native agent
+or paid model is run by these tests.
 
 ## Use the hosted Intent lifecycle
 

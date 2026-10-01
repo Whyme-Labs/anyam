@@ -21,8 +21,8 @@ class Broker {
   private sequence = 0;
   private readonly pending = new Map<number, { resolve: (value: Json) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private stderr = "";
-  constructor(readonly fixture: Fixture, agent: string, side: string, sessionId?: string) {
-    const args = ["--import", "tsx", entrypoint, "mcp", "serve", "--stdio", "--agent", agent, "--directory", fixture.directory,
+  constructor(readonly fixture: Fixture, agent: string, side: string, sessionId?: string, driver?: string) {
+    const args = ["--import", "tsx", driver ?? entrypoint, "mcp", "serve", "--stdio", "--agent", agent, "--directory", fixture.directory,
       ...(sessionId ? ["--session", sessionId] : ["--mode", "enforceable", "--allow-path", side, "--allow-path", "package.json", "--allow-action", `action:${side}`])];
     this.process = spawn(process.execPath, args, { cwd: process.cwd(), env: fixture.environment, stdio: "pipe" });
     this.process.stderr.on("data", chunk => { this.stderr += String(chunk); });
@@ -213,6 +213,100 @@ test("interrupted broker restart fails closed for the old boundary and starts fr
     assertAttribution(await replacement.call("run.start", { actionId: "action:a" }), replacementSession, "passed");
     assertAttribution(await b.call("run.start", { actionId: "action:b" }), sb, "passed");
   } finally { await f.cleanup(); }
+});
+
+async function groupMembers(groupId: number): Promise<number[]> {
+  const listing = await execFile("ps", ["-axo", "pid=,pgid="]);
+  return listing.stdout.trim().split("\n").map(line => line.trim().split(/\s+/).map(Number)).filter(([, group]) => group === groupId).map(([pid]) => pid!);
+}
+
+async function cleanupFixtureGroup(groupId: number, workspace: string): Promise<void> {
+  // No broad process search or unvalidated group signal: verify each remaining
+  // member's group and exact disposable cwd immediately before signalling it.
+  for (const pid of await groupMembers(groupId)) {
+    let cwd: string;
+    try { cwd = (await execFile("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"])).stdout; }
+    catch { continue; }
+    assert.ok(cwd.split("\n").includes(`n${workspace}`), `refuse cleanup of process ${pid} outside fixture Workspace`);
+    if (!(await groupMembers(groupId)).includes(pid)) continue;
+    try { process.kill(pid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+  }
+}
+
+async function registrationFaultDriver(f: Fixture): Promise<{ driver: string; spawnedPath: string }> {
+    const driver = join(f.root, "registration-fault.mts");
+    const spawnedPath = join(f.root, "spawned.json");
+    await writeFile(driver, `import {writeFileSync} from 'node:fs';
+import {LocalAgentManager,runMcpStdio} from ${JSON.stringify(new URL("../packages/create-anyam/src/agent.ts", import.meta.url).href)};
+class FaultManager extends LocalAgentManager {
+  async registerWorkspaceProcess(sessionId, child) {
+    writeFileSync(${JSON.stringify(spawnedPath)}, JSON.stringify({sessionId,pid:child.pid}));
+    process.kill(process.pid,'SIGSTOP');
+    return super.registerWorkspaceProcess(sessionId,child);
+  }
+}
+await runMcpStdio({manager:new FaultManager({directory:${JSON.stringify(f.directory)},stateDirectory:${JSON.stringify(f.stateDirectory)}}),directory:${JSON.stringify(f.directory)},agent:'codex',sessionOptions:{mode:'enforceable',authorizedPaths:['a','package.json'],authorizedActionIds:['action:a']},input:process.stdin,output:process.stdout});
+`);
+    return { driver, spawnedPath };
+}
+
+test("broker death before durable registration leaves no live process and restart remains fail closed", platform, async () => {
+  const f = await fixture();
+  let groupId: number | undefined; let workspace: string | undefined;
+  try {
+    const { driver, spawnedPath } = await registrationFaultDriver(f);
+    const a = new Broker(f, "codex", "a", undefined, driver); await a.initialize(); const sa = await f.session(a); workspace = sa.workspaceDirectory!;
+    const b = new Broker(f, "claude", "b"); await b.initialize(); const sb = await f.session(b);
+    await writeFile(join(workspace, ".anyam/wait"), "fixture barrier");
+    const running = a.call("run.start", { actionId: "action:a" });
+    const outcome = running.then(() => false, error => /broker exited/.test(String(error)));
+    await waitFor(spawnedPath);
+    const spawned = JSON.parse(await readFile(spawnedPath, "utf8")) as { sessionId: string; pid: number };
+    assert.equal(spawned.sessionId, sa.id); groupId = spawned.pid;
+    assert.equal((await f.state()).sessions[sa.id]!.processGroupId, undefined, "fault must occur before durable registration");
+    await a.stop(); assert.equal(await outcome, true);
+    const deadline = Date.now() + 2_000; // Isolated cleanup assertion deadline.
+    while ((await groupMembers(groupId)).length && Date.now() < deadline) await new Promise<void>(r => setTimeout(r, 20));
+    assert.deepEqual(await groupMembers(groupId), [], "spawned group survived broker death before durable registration");
+    const restarted = new Broker(f, "codex", "a", sa.id);
+    const denied = await restarted.request("initialize");
+    assert.equal(((denied.error as Json).data as Json).code, "workspace.boundary_missing");
+    await f.revoke(sa.id);
+    assert.equal(Object.values((await f.state()).runs).some(run => run.actorId === sa.actorId && run.status === "passed"), false);
+    const fresh = new Broker(f, "codex", "a"); await fresh.initialize(); const replacement = await f.session(fresh);
+    assert.notEqual(replacement.id, sa.id);
+    assertAttribution(await fresh.call("run.start", { actionId: "action:a" }), replacement, "passed");
+    assertAttribution(await b.call("run.start", { actionId: "action:b" }), sb, "passed");
+  } finally {
+    for (const broker of f.brokers) await broker.stop();
+    if (groupId && workspace) await cleanupFixtureGroup(groupId, workspace);
+    await f.cleanup();
+  }
+});
+
+test("revocation before durable registration refuses command release and leaves its peer usable", platform, async () => {
+  const f = await fixture();
+  let groupId: number | undefined; let workspace: string | undefined;
+  try {
+    const { driver, spawnedPath } = await registrationFaultDriver(f);
+    const a = new Broker(f, "codex", "a", undefined, driver); await a.initialize(); const sa = await f.session(a); workspace = sa.workspaceDirectory!;
+    const b = new Broker(f, "claude", "b"); await b.initialize(); const sb = await f.session(b);
+    const running = a.call("run.start", { actionId: "action:a" });
+    await waitFor(spawnedPath); groupId = (JSON.parse(await readFile(spawnedPath, "utf8")) as { pid: number }).pid;
+    assert.equal((await f.state()).sessions[sa.id]!.processGroupId, undefined);
+    await assert.rejects(access(join(workspace, ".anyam/started")), "workload must wait for durable registration");
+    await f.revoke(sa.id);
+    a.process.kill("SIGCONT"); // Resume only this known fixture-owned broker.
+    assert.equal((await running).isError, true, "revoked registration cannot release the command");
+    assert.equal((await f.state()).sessions[sa.id]!.processGroupId, undefined, "revocation cannot acquire a stale process registration");
+    assert.deepEqual(await groupMembers(groupId), []);
+    assert.equal(Object.values((await f.state()).runs).some(run => run.actorId === sa.actorId && run.status === "passed"), false);
+    assertAttribution(await b.call("run.start", { actionId: "action:b" }), sb, "passed");
+  } finally {
+    for (const broker of f.brokers) await broker.stop();
+    if (groupId && workspace) await cleanupFixtureGroup(groupId, workspace);
+    await f.cleanup();
+  }
 });
 
 

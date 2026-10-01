@@ -115,6 +115,7 @@ export type LocalAgentSession = {
   workspaceBoundaryId?: string;
   workspaceEnforcement?: WorkspaceBoundaryEnforcement;
   workspaceTemporary?: boolean;
+  workspaceScope?: Pick<LocalAgentSessionOptions, "authorizedPaths" | "network" | "executablePaths" | "workspaceDirectory" | "resourceLimits">;
   processPid?: number;
   processGroupId?: number;
   revokedAt?: string;
@@ -1079,6 +1080,18 @@ export class LocalAgentManager {
       if (existing.session.agent !== agent) throw new LocalAgentError({ code: "agent.session.busy", message: `Change ${change.id} already has an active ${existing.session.agent} session; hand it off before starting ${agent}.`, affectedObject: existing.session.id, recoveryAction: `run anyam agent handoff ${agent}`, receipt: `active-session=${existing.session.id}` });
       const existingMode = existing.session.workspaceMode ?? "supervised";
       if (existingMode !== mode) throw new LocalAgentError({ code: "agent.session.mode_mismatch", message: `Change ${change.id} already has an active ${existingMode} session; it cannot be reused as ${mode}.`, affectedObject: existing.session.id, recoveryAction: "revoke the current session and start a new session with the requested Workspace mode", receipt: `active-mode=${existingMode}; requested-mode=${mode}` });
+      // Omitted options retain the existing session contract. Explicit options
+      // must match it; returning an old, wider Grant would ignore owner intent.
+      const sameSet = (left: readonly string[], right: readonly string[]) => JSON.stringify([...new Set(left)].sort()) === JSON.stringify([...new Set(right)].sort());
+      const mismatches: string[] = [];
+      if (input.authorizedActionIds !== undefined && (!existing.grant.authorizedActionIds || !sameSet(authorizedActionIds, existing.grant.authorizedActionIds))) mismatches.push("authorizedActionIds");
+      const scope = existing.session.workspaceScope;
+      for (const key of ["authorizedPaths", "network", "executablePaths"] as const) {
+        if (input[key] !== undefined && (!scope || !sameSet(input[key], scope[key] ?? []))) mismatches.push(key);
+      }
+      if (input.workspaceDirectory !== undefined && (!scope || resolve(input.workspaceDirectory) !== resolve(scope.workspaceDirectory ?? existing.session.workspaceDirectory ?? this.directory))) mismatches.push("workspaceDirectory");
+      if (input.resourceLimits !== undefined && (!scope?.resourceLimits || Object.keys(input.resourceLimits).some(key => input.resourceLimits![key as keyof WorkspaceResourceLimits] !== scope.resourceLimits![key as keyof WorkspaceResourceLimits]))) mismatches.push("resourceLimits");
+      if (mismatches.length) throw new LocalAgentError({ code: "agent.session.scope_mismatch", message: `Change ${change.id} already has an active session with a different ${mismatches.join(", ")} scope; it cannot be reused with the requested scope.`, affectedObject: existing.session.id, recoveryAction: "revoke the current session or explicitly start a parallel session with the requested scope", receipt: `active-session=${existing.session.id}; scope-mismatch=${mismatches.join(",")}` });
       await this.writeState(state);
       return { session: clone(existing.session), grant: clone(existing.grant), context: clone(existing.context) };
     }
@@ -1174,6 +1187,13 @@ export class LocalAgentManager {
       } : {
         workspaceEnforcement: boundary.enforcement,
       }),
+      workspaceScope: {
+        ...(input.authorizedPaths ? { authorizedPaths: [...input.authorizedPaths] } : {}),
+        network: [...(input.network ?? [])],
+        executablePaths: [...(input.executablePaths ?? [])],
+        ...(input.workspaceDirectory ? { workspaceDirectory: resolve(input.workspaceDirectory) } : {}),
+        ...(resourceLimits ? { resourceLimits: clone(resourceLimits) } : {}),
+      },
     };
     state.sessions[sessionId] = session;
     state.grants[grantId] = grant;

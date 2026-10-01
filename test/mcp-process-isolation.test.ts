@@ -247,6 +247,52 @@ test("CLI revoke selects the named session and keeps its peer active", async () 
   } finally { await f.cleanup(); }
 });
 
+test("manager reuse rejects a differing explicit Action scope without returning a wider Grant", async () => {
+  const f = await fixture();
+  try {
+    const manager = new LocalAgentManager({ directory: f.directory, stateDirectory: f.stateDirectory });
+    const original = await manager.startSession({ agent: "codex" });
+    assert.deepEqual(original.grant.authorizedActionIds, ["action:a", "action:b"]);
+    await assert.rejects(manager.startSession({ agent: "codex", authorizedActionIds: ["action:a"] }), /scope.*cannot be reused/);
+    assert.equal(Object.keys((await f.state()).sessions).length, 1);
+    const reused = await manager.startSession({ agent: "codex", authorizedActionIds: ["action:b", "action:a", "action:a"] });
+    assert.equal(reused.session.id, original.session.id);
+    const fresh = await manager.startSession({ agent: "codex", authorizedActionIds: ["action:a"], parallel: true });
+    assert.notEqual(fresh.session.id, original.session.id);
+    assert.deepEqual(fresh.grant.authorizedActionIds, ["action:a"]);
+    await f.revoke(fresh.session.id);
+    await f.revoke(original.session.id);
+    const restricted = await manager.startSession({ agent: "codex", authorizedActionIds: ["action:a"] });
+    assert.equal((await manager.startSession({ agent: "codex" })).session.id, restricted.session.id);
+    await assert.rejects(manager.startSession({ agent: "codex", authorizedActionIds: ["action:a", "action:b"] }), /scope.*cannot be reused/);
+    await assert.rejects(manager.invokeTool("run.start", { actionId: "action:b" }, restricted.session.id), /outside this session's granted scope/);
+    assert.equal(Object.keys((await f.state()).runs).length, 0);
+    await assert.rejects(manager.startSession({ agent: "codex", mode: "enforceable" }), /cannot be reused/);
+    // Legacy metadata cannot prove an explicit scope matches live authority.
+    const legacy = await f.state(); delete legacy.grants[restricted.grant.id]!.authorizedActionIds;
+    await writeFile(f.statePath, JSON.stringify(legacy));
+    await assert.rejects(manager.startSession({ agent: "codex", authorizedActionIds: ["action:a"] }), /scope.*cannot be reused/);
+  } finally { await f.cleanup(); }
+});
+
+test("manager reuse requires matching explicit Workspace scope options", platform, async () => {
+  const f = await fixture();
+  try {
+    const manager = new LocalAgentManager({ directory: f.directory, stateDirectory: f.stateDirectory });
+    const original = await manager.startSession({ agent: "codex", mode: "enforceable", authorizedPaths: ["a", "package.json"], network: [] });
+    const reused = await manager.startSession({ agent: "codex", mode: "enforceable", authorizedPaths: ["package.json", "a", "a"], network: [] });
+    assert.equal(reused.session.id, original.session.id);
+    for (const options of [{ authorizedPaths: ["b"] }, { authorizedPaths: [] }, { network: ["example.invalid"] }, { executablePaths: ["/bin/sh"] }, { workspaceDirectory: join(f.root, "other") }]) {
+      await assert.rejects(manager.startSession({ agent: "codex", mode: "enforceable", ...options }), /scope.*cannot be reused/);
+    }
+    assert.equal(Object.keys((await f.state()).sessions).length, 1);
+    await assert.rejects(access(join(original.session.workspaceDirectory!, "b/input.txt")));
+    const legacy = await f.state(); delete legacy.sessions[original.session.id]!.workspaceScope;
+    await writeFile(f.statePath, JSON.stringify(legacy));
+    await assert.rejects(manager.startSession({ agent: "codex", mode: "enforceable", authorizedPaths: ["a", "package.json"] }), /scope.*cannot be reused/);
+  } finally { await f.cleanup(); }
+});
+
 test("concurrent initialization and implicit calls create only one fresh scoped binding", async () => {
   const f = await fixture();
   try {

@@ -1033,7 +1033,7 @@ export class LocalAgentManager {
     const active = this.activeSession(state, sessionId);
     if (!active) throw new LocalAgentError({ code: "agent.session.missing", message: `No active local agent session is available for ${sessionId ?? "the selected Project"}.`, recoveryAction: sessionId ? "inspect anyam workspace list and select an active Workspace session" : "run anyam agent start <codex|claude|cursor|cli>", receipt: `session=${sessionId ?? "current"}; active=false` });
     if (this.expireIfNeeded(state, active.session, active.grant)) {
-      state.currentSessionId = null;
+      if (state.currentSessionId === active.session.id) state.currentSessionId = null;
       await this.writeState(state);
       throw new LocalAgentError({ code: "agent.session.expired", message: `Agent session ${active.session.id} expired; no operation was performed.`, affectedObject: active.session.id, recoveryAction: "start a new agent session and retry", receipt: `session-expiry=${active.session.expiresAt}` });
     }
@@ -1379,7 +1379,7 @@ export class LocalAgentManager {
     await this.writeState(active.state);
   }
 
-  private async prepareRunStart(args: Record<string, unknown>): Promise<{
+  private async prepareRunStart(args: Record<string, unknown>, sessionId?: string): Promise<{
     session: LocalAgentSession;
     grant: LocalCapabilityGrant;
     project: ProjectMetadata;
@@ -1396,7 +1396,7 @@ export class LocalAgentManager {
     evidenceId: string;
   }> {
     return this.withStateLock(async () => {
-      const active = await this.requireActiveSessionUnlocked();
+      const active = await this.requireActiveSessionUnlocked(sessionId);
       if (!LOCAL_MCP_TOOLS.some((entry) => entry.name === "run.start")) return this.denial(active, "run.start");
       const project = await this.projectMetadata();
       const change = await this.changeMetadata();
@@ -1440,8 +1440,8 @@ export class LocalAgentManager {
     });
   }
 
-  private async invokeRunStart(args: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const prepared = await this.prepareRunStart(args);
+  private async invokeRunStart(args: Record<string, unknown>, sessionId?: string): Promise<Record<string, unknown>> {
+    const prepared = await this.prepareRunStart(args, sessionId);
     let processRegistration: Promise<void> | undefined;
     let commandResult: LocalActionCommandResult;
     try {
@@ -1547,8 +1547,8 @@ export class LocalAgentManager {
     });
   }
 
-  private async invokeToolUnlocked(name: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
-    const active = await this.requireActiveSessionUnlocked();
+  private async invokeToolUnlocked(name: string, args: Record<string, unknown>, sessionId?: string): Promise<Record<string, unknown>> {
+    const active = await this.requireActiveSessionUnlocked(sessionId);
     if (!LOCAL_MCP_TOOLS.some((entry) => entry.name === name)) return this.denial(active, name);
     const project = await this.projectMetadata();
     const change = await this.changeMetadata();
@@ -1802,9 +1802,9 @@ export class LocalAgentManager {
     return this.denial(active, name);
   }
 
-  async invokeTool(name: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
-    if (name === "run.start") return this.invokeRunStart(args);
-    return this.withStateLock(() => this.invokeToolUnlocked(name, args));
+  async invokeTool(name: string, args: Record<string, unknown> = {}, sessionId?: string): Promise<Record<string, unknown>> {
+    if (name === "run.start") return this.invokeRunStart(args, sessionId);
+    return this.withStateLock(() => this.invokeToolUnlocked(name, args, sessionId));
   }
 }
 
@@ -1845,7 +1845,7 @@ export class LocalMcpBroker {
       const name = typeof params.name === "string" ? params.name : "";
       const args = isRecord(params.arguments) ? params.arguments : {};
       try {
-        const result = await this.manager.invokeTool(name, args);
+        const result = await this.manager.invokeTool(name, args, this.sessionId);
         return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result, isError: false } };
       } catch (error) {
         const detail = error instanceof LocalAgentError ? error.toJSON() : { code: "agent.broker.error", message: error instanceof Error ? error.message : String(error) };

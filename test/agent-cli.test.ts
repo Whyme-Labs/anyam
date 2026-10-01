@@ -156,6 +156,165 @@ test("MCP exposes semantic Change tools and keeps canonical writes outside the b
   await access(join(directory, ".anyam", "change.json"));
 });
 
+async function brokerCall(broker: LocalMcpBroker, name: string, args: Record<string, unknown> = {}): Promise<{ isError: boolean; structuredContent: Record<string, unknown> }> {
+  const response = await broker.handle({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
+  assert.ok(response);
+  return response.result as { isError: boolean; structuredContent: Record<string, unknown> };
+}
+
+test("interleaved MCP brokers retain their initialized session, context, finding actor, and audit identity", async () => {
+  const directory = await projectDirectory();
+  try {
+    const agentManager = manager(directory);
+    const codex = new LocalMcpBroker({ manager: agentManager, agent: "codex" });
+    await codex.handle({ jsonrpc: "2.0", id: 1, method: "initialize" });
+    const first = await agentManager.status();
+    assert.ok(first.session);
+    const second = await agentManager.startSession({ agent: "claude", parallel: true });
+    const claude = new LocalMcpBroker({ manager: agentManager, agent: "claude" });
+    await claude.handle({ jsonrpc: "2.0", id: 2, method: "initialize" });
+
+    for (const [broker, session] of [[codex, first.session], [claude, second.session], [codex, first.session]] as const) {
+      const inspected = await brokerCall(broker, "workspace.inspect", { sessionId: second.session.id });
+      assert.equal(inspected.isError, false);
+      assert.equal(inspected.structuredContent.sessionId, session.id);
+      assert.equal(inspected.structuredContent.contextId, `context:${session.id}`);
+      const result = await brokerCall(broker, "review.submit_finding", { severity: "warning", summary: session.agent });
+      assert.equal(result.isError, false);
+      assert.equal((result.structuredContent.finding as Record<string, unknown>).actorId, session.actorId);
+    }
+    const state = JSON.parse(await readFile(agentManager.statePathname, "utf8")) as { audit: Array<{ operation: string; sessionId: string; actorId: string; grantId: string; taskId: string; details: { tool?: string } }> };
+    const findings = state.audit.filter((event) => event.operation === "tool.invoked" && event.details.tool === "review.submit_finding");
+    assert.deepEqual(findings.map((event) => [event.sessionId, event.actorId, event.grantId, event.taskId]), [first.session, second.session, first.session].map((session) => [session.id, session.actorId, session.grantId, session.taskId]));
+  } finally {
+    await rm(join(directory, ".."), { recursive: true, force: true });
+  }
+});
+
+test("a revoked MCP broker cannot use another active session for inspection or mutations", async () => {
+  const directory = await projectDirectory();
+  try {
+    const agentManager = manager(directory);
+    const codex = new LocalMcpBroker({ manager: agentManager, agent: "codex" });
+    await codex.handle({ jsonrpc: "2.0", id: 1, method: "initialize" });
+    const first = (await agentManager.status()).session;
+    assert.ok(first);
+    const second = await agentManager.startSession({ agent: "claude", parallel: true });
+    const claude = new LocalMcpBroker({ manager: agentManager, agent: "claude" });
+    await claude.handle({ jsonrpc: "2.0", id: 2, method: "initialize" });
+    await agentManager.revoke(first.id);
+
+    for (const name of ["workspace.inspect", "review.submit_finding", "run.start", "change.publish_revision"]) {
+      const denied = await brokerCall(codex, name, { severity: "warning", summary: "revoked", actionId: "action:check", declaredEffects: ["source.modify"], sessionId: second.session.id });
+      assert.equal(denied.isError, true, name);
+      assert.equal((denied.structuredContent.error as Record<string, unknown>).code, "agent.session.expired", name);
+    }
+    const allowed = await brokerCall(claude, "review.submit_finding", { severity: "info", summary: "still active" });
+    assert.equal(allowed.isError, false);
+    assert.equal((allowed.structuredContent.finding as Record<string, unknown>).actorId, second.session.actorId);
+    const state = JSON.parse(await readFile(agentManager.statePathname, "utf8")) as { findings: Record<string, unknown>; runs: Record<string, unknown>; revisions: Record<string, unknown> };
+    assert.equal(Object.keys(state.findings).length, 1);
+    assert.equal(Object.keys(state.runs).length, 0);
+    assert.equal(Object.keys(state.revisions).length, 0);
+  } finally {
+    await rm(join(directory, ".."), { recursive: true, force: true });
+  }
+});
+
+test("expiry of a broker-bound session does not deselect a newer active session", async () => {
+  const directory = await projectDirectory();
+  try {
+    let clock = Date.parse("2026-08-03T00:00:00.000Z");
+    const agentManager = manager(directory, { now: () => new Date(clock), sessionLifetimeMs: 60_000 });
+    const codex = new LocalMcpBroker({ manager: agentManager, agent: "codex" });
+    await codex.handle({ jsonrpc: "2.0", id: 1, method: "initialize" });
+    clock += 30_000;
+    const second = await agentManager.startSession({ agent: "claude", parallel: true });
+    clock += 30_001;
+    const denied = await brokerCall(codex, "workspace.inspect");
+    assert.equal(denied.isError, true);
+    assert.equal((denied.structuredContent.error as Record<string, unknown>).code, "agent.session.expired");
+    const current = await agentManager.invokeTool("workspace.inspect");
+    assert.equal(current.sessionId, second.session.id);
+  } finally {
+    await rm(join(directory, ".."), { recursive: true, force: true });
+  }
+});
+
+test("MCP run and Change publication use the bound actor after a second session starts", async () => {
+  const directory = await projectDirectory();
+  try {
+    await replaceCheckAction(directory, { command: "node -e \"process.stdout.write('session-bound action')\"", inputs: ["anyam.json"], outputs: [] });
+    const agentManager = manager(directory);
+    const codex = new LocalMcpBroker({ manager: agentManager, agent: "codex" });
+    await codex.handle({ jsonrpc: "2.0", id: 1, method: "initialize" });
+    const first = (await agentManager.status()).session;
+    assert.ok(first);
+    await agentManager.startSession({ agent: "claude", parallel: true });
+    const executed = await brokerCall(codex, "run.start", { actionId: "action:check" });
+    assert.equal(executed.isError, false);
+    const run = executed.structuredContent.run as Record<string, unknown>;
+    const evidence = executed.structuredContent.evidence as Record<string, unknown>;
+    assert.equal(run.status, "passed");
+    assert.equal(run.actorId, first.actorId);
+    assert.equal(run.taskId, first.taskId);
+    assert.equal(evidence.actorId, first.actorId);
+    assert.equal(evidence.grantId, first.grantId);
+    const published = await brokerCall(codex, "change.publish_revision", { declaredEffects: ["source.modify"] });
+    assert.equal(published.isError, false);
+    const state = JSON.parse(await readFile(agentManager.statePathname, "utf8")) as { audit: Array<{ operation: string; sessionId: string; actorId: string }> };
+    assert.ok(state.audit.some((event) => event.operation === "tool.invoked" && event.sessionId === first.id));
+    assert.ok(state.audit.filter((event) => event.operation === "tool.invoked" || event.operation === "run.completed").every((event) => event.sessionId === first.id && event.actorId === first.actorId));
+  } finally {
+    await rm(join(directory, ".."), { recursive: true, force: true });
+  }
+});
+
+test("revoking a broker during its Action keeps blocked Evidence bound to it and leaves the other broker active", async () => {
+  const directory = await projectDirectory();
+  const agentManager = manager(directory);
+  let sessionId: string | undefined;
+  try {
+    await replaceCheckAction(directory, { command: "node -e \"require('node:fs').writeFileSync('.anyam/action-started', 'ready'); setTimeout(() => {}, 10000)\"", inputs: ["anyam.json"], outputs: [] });
+    const codex = new LocalMcpBroker({ manager: agentManager, agent: "codex" });
+    await codex.handle({ jsonrpc: "2.0", id: 1, method: "initialize" });
+    const first = (await agentManager.status()).session;
+    assert.ok(first);
+    sessionId = first.id;
+    const running = brokerCall(codex, "run.start", { actionId: "action:check" });
+    const deadline = Date.now() + 5_000;
+    while (true) {
+      try {
+        await access(join(directory, ".anyam", "action-started"));
+        break;
+      } catch {
+        assert.ok(Date.now() < deadline, "fixture Action did not signal startup");
+        await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 20));
+      }
+    }
+    const second = await agentManager.startSession({ agent: "claude", parallel: true });
+    const claude = new LocalMcpBroker({ manager: agentManager, agent: "claude" });
+    await claude.handle({ jsonrpc: "2.0", id: 2, method: "initialize" });
+    await agentManager.revoke(first.id);
+    const completed = await running;
+    assert.equal(completed.isError, false);
+    const run = completed.structuredContent.run as Record<string, unknown>;
+    const evidence = completed.structuredContent.evidence as Record<string, unknown>;
+    assert.equal(run.status, "blocked");
+    assert.equal(run.actorId, first.actorId);
+    assert.equal(run.taskId, first.taskId);
+    assert.equal(evidence.status, "blocked");
+    assert.equal(evidence.actorId, first.actorId);
+    assert.equal(evidence.grantId, first.grantId);
+    const allowed = await brokerCall(claude, "workspace.inspect");
+    assert.equal(allowed.isError, false);
+    assert.equal(allowed.structuredContent.sessionId, second.session.id);
+  } finally {
+    if (sessionId) await agentManager.revoke(sessionId);
+    await rm(join(directory, ".."), { recursive: true, force: true });
+  }
+});
+
 test("Change revisions use stable Git identities and reject dirty source", async () => {
   const directory = await projectDirectory();
   const agentManager = manager(directory, { credentialLifetimeMs: 10_000, sessionLifetimeMs: 60_000 });

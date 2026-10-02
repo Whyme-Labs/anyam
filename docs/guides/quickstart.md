@@ -36,9 +36,12 @@ and `fix` fields. The error names the boundary that needs attention.
 
 ## Start a Change
 
-Create a stable Change before editing the next feature:
+Commit the checked scaffold, then create a stable Change before editing the next
+feature. Publishing and verification require an exact committed source revision:
 
 ```bash
+git add .
+git commit -m "Initial checked Project"
 npx create-anyam change start "Add a health route"
 git status
 ```
@@ -46,6 +49,14 @@ git status
 Edit the files with your preferred editor or coding agent. Use ordinary Git for
 the source edits. Use the Anyam CLI or MCP boundary when you publish a Change,
 request review, run a verifier, create a Release, or promote a Target.
+
+The title is stored as entered. Calling `change start` without a title fails
+before creating Change metadata or starting an agent.
+
+For a credential-free local review packet, follow the
+[CLI and MCP walkthrough](../qualification/local-cli-review-packet.md). It uses
+a fresh supervised broker and ordinary Git; it does not perform shared review
+or canonical Landing.
 
 ## Connect a Realm later
 

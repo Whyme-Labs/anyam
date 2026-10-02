@@ -831,3 +831,55 @@ test("revoking an enforceable Workspace terminates the running agent and removes
   assert.equal(result.command.status, "failed");
   await assert.rejects(access(workspace!));
 });
+
+test("change.inspect summarizes exact local candidate Evidence and exposes unknown review inputs", async () => {
+  const directory = await projectDirectory();
+  const agentManager = manager(directory);
+  try {
+    await replaceCheckAction(directory, { command: "node -e \"process.exit(0)\"", inputs: ["anyam.json"], outputs: [] });
+    const first = await agentManager.startSession({ agent: "codex" });
+    type Packet = ReturnType<typeof import("../packages/create-anyam/src/review-packet.ts").localReviewPacket>;
+    const inspect = async () => (await agentManager.invokeTool("change.inspect", {}, first.session.id)).reviewPacket as Packet;
+    let packet = await inspect();
+    assert.equal(packet.candidate, null);
+    assert.equal(packet.checks.find((check) => check.actionId === "action:check")?.status, "missing");
+    assert.equal(packet.rationale.status, "unknown");
+    assert.equal(packet.behaviorExample.status, "unknown");
+    assert.equal(packet.decisionsRequired.status, "unknown");
+    const published = await agentManager.invokeTool("change.publish_revision", { declaredEffects: ["source.modify"] }, first.session.id);
+    const result = await agentManager.invokeTool("run.start", { actionId: "action:check" }, first.session.id);
+    const run = result.run as { id: string; evidenceId: string; sourceRevision: string };
+    packet = await inspect();
+    assert.equal(packet.candidate?.id, (published.revision as { id: string }).id);
+    const check = packet.checks.find((record) => record.actionId === "action:check")!;
+    assert.equal(check.status, "passed");
+    assert.equal(check.runId, run.id);
+    assert.equal(check.evidenceId, run.evidenceId);
+    assert.equal(check.testedSourceRevision, packet.candidate?.sourceRevision);
+    assert.equal(check.changeRevisionBinding, "not-recorded");
+    assert.equal(packet.diff.status, "not-recorded");
+    assert.equal(packet.canonicalWrite, false);
+    await replaceCheckAction(directory, { command: "node -e \"process.exit(1)\"" });
+    await agentManager.invokeTool("change.publish_revision", { declaredEffects: ["source.modify"] }, first.session.id);
+    assert.equal((await inspect()).checks.find((record) => record.actionId === "action:check")?.status, "stale");
+    await agentManager.invokeTool("run.start", { actionId: "action:check" }, first.session.id);
+    assert.equal((await inspect()).checks.find((record) => record.actionId === "action:check")?.status, "failed");
+    const peer = await agentManager.startSession({ agent: "claude", parallel: true });
+    await agentManager.invokeTool("review.submit_finding", { severity: "error", summary: "peer fixture note" }, peer.session.id);
+    await agentManager.invokeTool("change.publish_revision", { declaredEffects: ["peer.modify"] }, peer.session.id);
+    packet = await inspect();
+    assert.equal(packet.findings.some((finding) => finding.summary === "peer fixture note"), false);
+    assert.deepEqual(packet.candidate?.declaredEffects, ["source.modify"]);
+    const before = await readFile(localAgentStatePath(directory, agentStateDirectory(directory)), "utf8");
+    await inspect();
+    const after = await readFile(localAgentStatePath(directory, agentStateDirectory(directory)), "utf8");
+    const beforeState = JSON.parse(before) as { revisions: unknown; runs: unknown; findings: unknown };
+    const afterState = JSON.parse(after) as typeof beforeState;
+    assert.deepEqual(afterState.revisions, beforeState.revisions);
+    assert.deepEqual(afterState.runs, beforeState.runs);
+    assert.deepEqual(afterState.findings, beforeState.findings);
+  } finally {
+    for (const item of await agentManager.listSessions()) await agentManager.revoke(item.session.id);
+    await rm(join(directory, ".."), { recursive: true, force: true });
+  }
+});

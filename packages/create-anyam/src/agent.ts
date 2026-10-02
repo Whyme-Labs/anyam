@@ -1,3 +1,4 @@
+import { localReviewPacket } from "./review-packet.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { access, lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -1615,7 +1616,11 @@ export class LocalAgentManager {
     if (name === "change.inspect") {
       await this.appendToolAudit(active, name);
       const state = active.state;
-      return { change: { id: change.id, projectId: change.projectId, title: change.title, baseProjectRevisionId: change.baseProjectRevisionId, workspaceId: change.workspaceId }, latestRevision: Object.values(state.revisions).filter((revision) => revision.changeId === change.id).at(-1) ?? null, findings: Object.values(state.findings), runs: Object.values(state.runs), canonicalWrite: false };
+      const authorizedActions = new Set(active.grant.authorizedActionIds ?? active.context.actions);
+      const reviewPacket = localReviewPacket({ change, session: active.session,
+        revisions: Object.values(state.revisions), runs: Object.values(state.runs), findings: Object.values(state.findings),
+        actions: project.actions.filter((action) => authorizedActions.has(action.id)), verifiers: project.verifiers });
+      return { change: { id: change.id, projectId: change.projectId, title: change.title, baseProjectRevisionId: change.baseProjectRevisionId, workspaceId: change.workspaceId }, latestRevision: Object.values(state.revisions).filter((revision) => revision.changeId === change.id).at(-1) ?? null, findings: Object.values(state.findings), runs: Object.values(state.runs), reviewPacket, canonicalWrite: false };
     }
     if (name === "workspace.inspect") {
       await this.appendToolAudit(active, name);

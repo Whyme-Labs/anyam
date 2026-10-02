@@ -249,6 +249,23 @@ does not put a token in `.mcp.json`, `AGENTS.md`, Git config, or the Project.
 The broker exposes semantic Project, Change, Workspace, run, evidence, review,
 and revision tools over stdio MCP. Git remains the source-object transport.
 
+`change.inspect` includes an additive `reviewPacket` summary for the selected
+session. It shows the recorded candidate commit/tree and declared effects,
+scoped Run/Evidence references, and missing, stale, failed, blocked, or passed
+local Action observations. A result matches the candidate's source and current
+Action/Verifier contracts; it is not a complete Evidence validity or Landing
+policy decision. Local Runs identify Git commits without recording a Change
+Revision or declared-effect binding; the packet exposes that limitation.
+Peer-session records are excluded from the packet. The
+existing raw inspection fields retain their prior owner-local behavior.
+
+Rationale, concrete behavior examples, diff contents, authoritative decisions,
+and current working-tree/provider state are explicitly unknown or not recorded
+when no corresponding artifact exists. Local findings have no immutable
+revision binding, so the packet labels them accordingly. Inspecting the packet
+changes only the existing tool audit; it does not publish, approve, Land,
+recover, or run an Action.
+
 The agent receives a task-scoped capability tied to the active Workspace and
 Change. Its Git credential is short-lived and Workspace-only; canonical source
 write, secret-value reads, Change approval, policy administration, and

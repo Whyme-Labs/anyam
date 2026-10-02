@@ -102,3 +102,23 @@ test("Artifacts observation rechecks ref, provider identity and authority after 
   }
   assert.deepEqual(outcomes, ["ref-moved:failed", "uuid-recreated:failed", "grant-revoked:failed", "caller-mutated:succeeded", "provider-error:failed"]);
 });
+
+test("Artifacts observation snapshots provider head metadata before asynchronous graph reads", async () => {
+  const { fixture, control, graph, reads, request } = await observationFixture();
+  const sharedHead = graph.get(request.expectedCommitOid)!;
+  const get = fixture.binding.get.bind(fixture.binding);
+  fixture.binding.get = async name => {
+    const repo = await get(name);
+    return { ...repo, async readCommit(oid) {
+      const commit = await repo.readCommit(oid);
+      if (oid === "3".repeat(40)) {
+        sharedHead.hash = "7".repeat(40);
+        sharedHead.treeHash = "8".repeat(40);
+      }
+      return commit;
+    } };
+  };
+  const result = await control.observeRepository(request);
+  assert.equal(result.status, "failed", "a reused mutable provider object must not authorize an untraversed candidate");
+  assert.equal(reads.includes("7".repeat(40)), false);
+});

@@ -100,7 +100,7 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
       }
       const selection = context.selection;
       const symbolicRef = request.expectedSymbolicRef;
-      const oid = (value: unknown) => typeof value === "string" && /^[0-9a-f]{40}$/u.test(value);
+      const oid = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{40}$/u.test(value);
       if (!symbolicRef?.startsWith("refs/heads/") || symbolicRef.endsWith(".") || symbolicRef.includes("..") || symbolicRef.includes("@{") ||
           /[\x00-\x20\x7f~^:?*[\]\\]/u.test(symbolicRef) || symbolicRef.split("/").some(part => !part || part.startsWith(".") || part.endsWith(".lock")) ||
           (request.expectedObjectFormat !== undefined && request.expectedObjectFormat !== "sha1") || !oid(request.expectedCommitOid) || !oid(request.expectedBaseCommitOid) ||
@@ -111,8 +111,8 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
       using repo = await this.options.artifacts.get(selection.targetName);
       this.validateInfo(selection, await repo.info(), context.repository, "none");
       const heads = await repo.log({ ref: symbolicRef, limit: 1 });
-      const head = heads[0];
-      if (heads.length !== 1 || head?.hash !== request.expectedCommitOid || (request.expectedTreeOid !== undefined && head.treeHash !== request.expectedTreeOid)) {
+      const head = { hash: heads[0]?.hash, treeHash: heads[0]?.treeHash };
+      if (heads.length !== 1 || head.hash !== request.expectedCommitOid || !oid(head.treeHash) || (request.expectedTreeOid !== undefined && head.treeHash !== request.expectedTreeOid)) {
         throw this.error(selection, "artifacts.observation_candidate_mismatch", "none", "fresh branch head must match the exact expected commit and tree");
       }
       const commits = new Set<string>();

@@ -83,9 +83,12 @@ test("durable cohort rejects stale Evidence/members and commits exact members wi
     assert.deepEqual(packet.evidence.map((record) => [record.id, record.changeRevisionId]), [["evidence:a", "change-revision:a"], ["evidence:b", "change-revision:b"]]);
     assert.equal(packet.approvals.length, 2);
     assert.ok(packet.approvals.every((approval) => approval.id && approval.policyVersion === "policy:fixture"));
+    assert.deepEqual(after.audit.at(-1)!.collaboration!.map((event) => [event.projectId, event.cohortId, event.changeRevisionId, event.role, event.policyVersion, event.disclosure]), request.members.map((member) => [projectId, request.cohortId, member.changeRevisionId, "landing", "policy:fixture", "project"]));
     assert.deepEqual(authority.landCohort(request), landing);
     assert.deepEqual(store.load(session.realmId), after);
     assert.throws(() => authority.landCohort({ ...request, members: [request.members[0]!] }), /cohort identity reused/);
+    assert.throws(() => authority.landCohort({ ...request, cohortId: "cohort:later", expectedCanonicalProjectRevisionId: landing.projectRevisionId }), /later Landing requires qualified canonical-ref reconciliation/);
+    assert.deepEqual(store.load(session.realmId), after, "later Landing cannot bypass the reconciliation boundary");
   } finally { database.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -176,9 +179,13 @@ test("committed cohort projects to real Git refs after partial repair, with read
       const created = await driver.createRepository({ sourceSpaceId: `source:${space}`, directory });
       if (created.status !== "succeeded") throw new Error(created.message);
       const git = (...args: string[]) => execFileSync("git", args, { cwd: directory, encoding: "utf8" }).trim();
-      git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "base");
+      writeFileSync(join(directory, "source.txt"), `${space} base\n`);
+      git("add", "source.txt");
+      git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "base");
       bases[space] = git("rev-parse", "HEAD");
-      git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "candidate");
+      writeFileSync(join(directory, "source.txt"), `${space} candidate\n`);
+      git("add", "source.txt");
+      git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "candidate");
       candidates[space] = git("rev-parse", "HEAD");
       git("update-ref", "refs/heads/canonical", bases[space]);
       repositories.push({ space, handle: created.value, directory });
@@ -216,4 +223,3 @@ test("committed cohort projects to real Git refs after partial repair, with read
     assert.equal(store.load(session.realmId)!.canonicalByProject[projectId], landing.projectRevisionId);
   } finally { database.close(); rmSync(root, { recursive: true, force: true }); }
 });
-

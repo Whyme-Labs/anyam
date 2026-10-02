@@ -29,6 +29,7 @@ export class SQLiteCohortLandingAuthority implements LandingAuthority {
   }) {}
 
   landCohort(request: CohortRequest): Landing {
+    request = structuredClone(request);
     const { store, session, projectId } = this.input;
     const previous = store.load(session.realmId);
     if (!previous) blocked("not_found", "Authority snapshot missing");
@@ -47,6 +48,10 @@ export class SQLiteCohortLandingAuthority implements LandingAuthority {
     const canonical = previous.projectRevisions[actual];
     const project = previous.projects[projectId];
     if (!project || !canonical || canonical.projectId !== projectId) blocked("indeterminate", "canonical Project lineage incomplete");
+    // ADR 0002 serializes later Landing until canonical refs are reconciled.
+    // This offline slice has no qualified durable completion/fencing receipt.
+    // Historical replay above remains available without opening a new write.
+    if (canonical.landedChangeRevisionId || canonical.landedChangeRevisionIds?.length || canonical.landingCohortId) blocked("indeterminate", "later Landing requires qualified canonical-ref reconciliation; this adapter cannot certify completion");
     const snapshots = { ...canonical.sourceSpaceSnapshots };
     const updates = new Map<string, string>();
     for (const member of request.members) {
@@ -99,7 +104,9 @@ export class SQLiteCohortLandingAuthority implements LandingAuthority {
     next.version += 1;
     const result: AuthorityCommandResult = { protocol: AUTHORITY_PLANE_PROTOCOL, command: "landing.apply", status: "succeeded", version: next.version, value: { landing, canonicalRevision: nextRevision, reviewPacket: { cohortId: request.cohortId, members: structuredClone(request.members), explanation: decision, evidence, approvals: review.approvals ?? [], approvalArtifactCoverage: review.approvals === undefined ? "not-supplied" : "gate-supplied-artifacts", gitProjection: "requires-read-back-and-reconciliation", recoveryLimits: "SQLite selection is atomic; external repositories are repaired separately; provider epoch fencing is unqualified" } }, receipt: landing.receipt };
     next.idempotency[key] = { fingerprint, result };
-    next.audit.push({ id: opaqueId("authority-audit"), command: "landing.apply", idempotencyKey: key, actor: { principalId: session.principalId, actorId: session.actorId, sessionId: session.sessionId, clientId: session.clientId }, outcome: "succeeded", stateVersion: next.version, occurredAt: new Date().toISOString(), ...(session.taskId ? { taskId: session.taskId } : {}), ...(session.capabilityGrantId ? { capabilityGrantId: session.capabilityGrantId } : {}), ...(session.delegatedBySessionId ? { delegatedBySessionId: session.delegatedBySessionId } : {}), ...(session.modelProvider ? { modelProvider: session.modelProvider } : {}), receipt: landing.receipt });
+    const actor = { principalId: session.principalId, actorId: session.actorId, sessionId: session.sessionId, clientId: session.clientId };
+    const occurredAt = new Date().toISOString();
+    next.audit.push({ id: opaqueId("authority-audit"), command: "landing.apply", idempotencyKey: key, actor, outcome: "succeeded", stateVersion: next.version, occurredAt, ...(session.taskId ? { taskId: session.taskId } : {}), ...(session.capabilityGrantId ? { capabilityGrantId: session.capabilityGrantId } : {}), ...(session.delegatedBySessionId ? { delegatedBySessionId: session.delegatedBySessionId } : {}), ...(session.modelProvider ? { modelProvider: session.modelProvider } : {}), collaboration: request.members.map((member) => ({ protocol: CONTRACT_VERSIONS.collaborationAudit, id: opaqueId("collaboration-audit"), projectId, cohortId: request.cohortId, changeId: member.changeId, changeRevisionId: member.changeRevisionId, role: "landing", action: "landing.completed", outcome: "succeeded", actor, policyVersion: decision.policyVersion, disclosure: "project", occurredAt, receipt: landing.receipt })), receipt: landing.receipt });
     store.commit(previous, next);
     return structuredClone(landing);
   }

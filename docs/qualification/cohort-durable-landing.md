@@ -23,6 +23,19 @@ snapshot carried by a member's composed View does not overwrite another
 member's update. Differing updates to the same Source Space block composition.
 No Git repository is written during canonical selection.
 
+The durable Authority audit event embeds existing typed collaboration events
+for every exact member, including Project, Cohort, Actor, Landing role, policy
+version, disclosure, and receipt. A crash after commit cannot lose that context
+while waiting for an in-memory collaboration event.
+
+ADR 0002 requires later Landing to wait for canonical-ref reconciliation.
+This adapter rejects a new Landing when the current canonical revision has
+Landing lineage, because it cannot yet certify durable, fenced reconciliation
+completion. Historical replay remains allowed. A read-only plan whose supplied
+refs are current does not remove this gate; completing that lifecycle is a
+separate qualification gap. The qualified slice is the initial offline Cohort
+selection and its projection-recovery experiment, not repeated hosted Landing.
+
 The idempotency key is `landing.cohort:<cohortId>` and binds the Project, ordered
 exact members, and expected base. Reuse with different inputs fails. Replaying
 a committed request returns its historical Landing before today's policy gate;

@@ -21,9 +21,11 @@ async function openQualification() {
   const path = join(directory, "qualification.sqlite");
   let database = new DatabaseSync(path);
   let writeFailure: string | undefined;
+  let ledgerWritesUnavailable = false;
   const host: AuthoritySqlHost = {
     sql: { exec<T extends Record<string, unknown>>(query: string, ...bindings: unknown[]) {
       const rows = database.prepare(query).all(...bindings as SQLInputValue[]) as unknown as readonly T[];
+      if (ledgerWritesUnavailable && query.startsWith("UPDATE anyam_artifacts_qualification_runs")) throw new Error("persistent ledger failure contains usable-secret");
       if (writeFailure && query.includes(writeFailure)) { writeFailure = undefined; throw new Error("qualification database failure contains usable-secret"); }
       return { toArray: () => rows };
     } },
@@ -67,7 +69,7 @@ async function openQualification() {
   function control(overrides: Partial<ArtifactsQualificationOptions> = {}) {
     return new module.ArtifactsWorkspaceQualification({ artifacts, accountId: "account-a", namespace: "private", authorizeRun: async () => {}, authorize: fixture.authorize, now: () => fixture.now, store: new SQLiteArtifactsWorkspaceStore(host), ledger: new module.SQLiteArtifactsQualificationLedger(host), deleteOwned, ...overrides });
   }
-  return { fixture, deleted, control, artifacts, failWriteOnce: (query: string) => { writeFailure = query; }, record: (runId: string) => new module.SQLiteArtifactsQualificationLedger(host).read(runId), metadata: () => JSON.stringify({ runs: database.prepare("SELECT payload FROM anyam_artifacts_qualification_runs").all(), custody: database.prepare("SELECT payload FROM anyam_artifacts_workspaces").all() }), reopen: () => { database.close(); database = new DatabaseSync(path); }, close: async () => { database.close(); await rm(directory, { recursive: true, force: true }); } };
+  return { fixture, deleted, control, artifacts, blockLedgerWrites: (blocked: boolean) => { ledgerWritesUnavailable = blocked; }, failWriteOnce: (query: string) => { writeFailure = query; }, record: (runId: string) => new module.SQLiteArtifactsQualificationLedger(host).read(runId), metadata: () => JSON.stringify({ runs: database.prepare("SELECT payload FROM anyam_artifacts_qualification_runs").all(), custody: database.prepare("SELECT payload FROM anyam_artifacts_workspaces").all() }), reopen: () => { database.close(); database = new DatabaseSync(path); }, close: async () => { database.close(); await rm(directory, { recursive: true, force: true }); } };
 }
 
 test("Artifacts one-shot qualification persists a redacted resource/token ledger and confirms owned cleanup", async () => {
@@ -342,4 +344,83 @@ test("Artifacts cleanup rechecks owner and account scope and never retries an un
     });
   }
   assert.deepEqual(outcomes, ["account:required:deletes=0", "account:providerCalls=0", "namespace:required:deletes=0", "namespace:providerCalls=0", "owner-denied:required:deletes=0", "owner-denied:providerCalls=0", "lost-delete:required:deletes=0", "lost-delete:attempts=1", "missing-delete:required:deletes=0"]);
+});
+
+test("Artifacts complete inventory reconciles a completed token retirement whose reply was lost", async () => {
+  await qualificationFixture(async ({ fixture, control, artifacts, deleted, metadata, record, reopen }) => {
+    const get = artifacts.get.bind(artifacts);
+    let lost = false;
+    const provider = { async get(name: string) {
+      const repo = await get(name);
+      return { ...repo, async revokeToken(id: string) {
+        const retired = await repo.revokeToken(id);
+        if (id === "token-id-0" && !lost) { lost = true; throw new Error("lost completed retirement reply contains usable-secret"); }
+        return retired;
+      } };
+    } };
+    const runId = "qualification:lost-revoke";
+    const result = await control({ artifacts: provider }).run({ runId, execution: "local-fixture", selections: [artifactsSelection], credentialExpiresAt: new Date(fixture.now + 120_000).toISOString() });
+    assert.equal(result.bindingContract, "blocked", "lost replies do not retroactively qualify the original operation");
+    assert.equal(result.cleanup, "confirmed", "fresh complete inventories must reconcile inactive known token IDs");
+    assert.deepEqual(deleted, ["workspace-a"]);
+    assert.equal(fixture.activeTokens.size, 0);
+    assert.deepEqual(new Set(result.resources[0]?.retiredTokenIds), new Set(["token-id-0", "token-id-1"]));
+    reopen();
+    assert.deepEqual(record(runId)?.resources[0]?.tokenIds, []);
+    assert.equal(await control({ artifacts: provider }).cleanup(runId), "confirmed");
+    assert.doesNotMatch(metadata() + JSON.stringify(result), /usable-secret|initial-secret|provider-extra-secret/);
+  });
+});
+
+test("Artifacts redaction rejects plaintext in branch metadata and persists alias protection across SQLite restart", async () => {
+  const leaks: string[] = [];
+  const outcomes: string[] = [];
+  for (const condition of ["branch", "branch-substring", "restart-id", "restart-substring-id"] as const) {
+    await qualificationFixture(async ({ fixture, control, artifacts, metadata, reopen, deleted }) => {
+      const get = artifacts.get.bind(artifacts);
+      const branch = condition === "branch" ? "initial-secret-workspace-a" : "feature/initial-secret-workspace-a";
+      if (condition.startsWith("branch")) fixture.infos.get("source")!.defaultBranch = branch;
+      const provider = { async get(name: string) {
+        const repo = await get(name);
+        return { ...repo, async fork(target: string, options: { readOnly: boolean; defaultBranchOnly: boolean }) {
+          const reply = await repo.fork(target, options);
+          fixture.infos.get(target)!.defaultBranch = branch;
+          return { ...reply, defaultBranch: branch };
+        } };
+      } };
+      const runId = `qualification:durable-redaction-${condition}`;
+      const result = await control({ artifacts: condition.startsWith("branch") ? provider : artifacts, deleteOwned: undefined }).run({ runId, execution: "local-fixture", selections: [artifactsSelection], credentialExpiresAt: new Date(fixture.now + 120_000).toISOString() });
+      if (condition.startsWith("branch")) assert.equal(result.bindingContract, "blocked");
+      else {
+        reopen();
+        const malicious = { async get(name: string) {
+          const repo = await get(name);
+          return { ...repo, async listTokens() { return { tokens: [{ id: `${condition === "restart-substring-id" ? "metadata-" : ""}usable-secret-token-id-0`, state: "active" as const }], total: 1 }; } };
+        } };
+        assert.equal(await control({ artifacts: malicious }).cleanup(runId), "required");
+      }
+      if (/usable-secret|initial-secret|provider-extra-secret/u.test(metadata() + JSON.stringify(result))) leaks.push(condition);
+      outcomes.push(`${condition}:deletes=${deleted.length}`);
+    });
+  }
+  assert.deepEqual({ leaks, outcomes }, { leaks: [], outcomes: ["branch:deletes=0", "branch-substring:deletes=0", "restart-id:deletes=0", "restart-substring-id:deletes=0"] });
+});
+
+test("Artifacts restarted cleanup refuses an unfinished credential redaction journal before provider access", async () => {
+  await qualificationFixture(async ({ fixture, control, deleted, metadata, reopen, blockLedgerWrites }) => {
+    fixture.afterMint = () => blockLedgerWrites(true);
+    const runId = "qualification:unfinished-redaction";
+    const result = await control().run({ runId, execution: "local-fixture", selections: [artifactsSelection], credentialExpiresAt: new Date(fixture.now + 120_000).toISOString() });
+    assert.equal(result.status, "blocked");
+    assert.equal(result.cleanup, "required");
+    assert.equal(result.resources[0]?.credentialGuardPending, true);
+    blockLedgerWrites(false);
+    reopen();
+    const events = fixture.events.length;
+    assert.equal(await control().cleanup(runId), "required");
+    assert.equal(fixture.events.length, events, "unknown redaction custody must not adopt fresh provider metadata after restart");
+    assert.deepEqual(deleted, []);
+    assert.match(metadata(), /qualification.credential_redaction_pending/);
+    assert.doesNotMatch(metadata() + JSON.stringify(result), /usable-secret|initial-secret|provider-extra-secret/);
+  });
 });

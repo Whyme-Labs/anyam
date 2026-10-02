@@ -24,6 +24,7 @@ type QualificationResource = {
   tokenIds: string[];
   retiredTokenIds: string[];
   mintPending: boolean;
+  credentialGuardPending: boolean;
   observation?: RepositoryObservation;
   recovery?: string;
 };
@@ -35,6 +36,7 @@ export type ArtifactsQualificationRun = {
   cleanup: "pending" | "confirmed" | "required";
   operations: string[];
   resources: QualificationResource[];
+  credentialFingerprints: { digest: string; length: number }[];
   failure?: string;
 };
 
@@ -93,6 +95,7 @@ export class ArtifactsWorkspaceQualification {
   async run(input: ArtifactsQualificationInput) {
     const request = Object.freeze({ runId: input.runId, execution: input.execution, credentialExpiresAt: input.credentialExpiresAt, selections: Object.freeze(input.selections.map(immutableArtifactsWorkspaceSelection)) });
     const knownPlaintext = new Set<string>();
+    const pendingPlaintext = new Map<string, string>();
     let reserved = false;
     let passed = false;
     let failure = "qualification.scope_invalid";
@@ -105,7 +108,7 @@ export class ArtifactsWorkspaceQualification {
       failure = "qualification.authorization_denied";
       await this.options.authorizeRun(request);
       failure = "qualification.ledger_unavailable";
-      reserved = this.custody(() => this.options.ledger.reserve({ input: request, accountId: this.options.accountId, namespace: this.options.namespace, qualification: "running", cleanup: "pending", operations: [], resources: request.selections.map(selection => ({ selection, state: "reserved", initialToken: "none", tokenIds: [], retiredTokenIds: [], mintPending: false })) }));
+      reserved = this.custody(() => this.options.ledger.reserve({ input: request, accountId: this.options.accountId, namespace: this.options.namespace, qualification: "running", cleanup: "pending", operations: [], credentialFingerprints: [], resources: request.selections.map(selection => ({ selection, state: "reserved", initialToken: "none", tokenIds: [], retiredTokenIds: [], mintPending: false, credentialGuardPending: false })) }));
       if (!reserved) return this.receipt(request, false, "required", "qualification.run_already_recorded", false);
       failure = "qualification.target_unavailable";
       for (const selection of request.selections) {
@@ -119,7 +122,7 @@ export class ArtifactsWorkspaceQualification {
       }
       failure = "qualification.binding_failed";
       for (const selection of request.selections) {
-        const namespace = this.trackedNamespace(request.runId, selection, knownPlaintext, () => { failure = "qualification.ledger_unavailable"; });
+        const namespace = this.trackedNamespace(request.runId, selection, knownPlaintext, pendingPlaintext, () => { failure = "qualification.ledger_unavailable"; });
         const control = new ArtifactsWorkspaceAdapter({ artifacts: namespace, accountId: this.options.accountId, namespace: this.options.namespace, authorize: this.options.authorize, store: this.options.store, ...(this.options.now ? { now: this.options.now } : {}) });
         const context = await control.forkWorkspace(selection);
         using target = await namespace.get(selection.targetName);
@@ -136,15 +139,15 @@ export class ArtifactsWorkspaceQualification {
       if (error instanceof QualificationFailure) failure = error.code;
       if (reserved) { try { this.custody(() => this.options.ledger.change(request.runId, run => { run.qualification = "blocked"; run.failure = failure; })); } catch { /* The durable pending record remains the reconciliation boundary. */ } }
     }
-    const cleanup = reserved ? await this.cleanupOwned(request.runId, knownPlaintext) : "required";
+    const cleanup = reserved ? await this.cleanupOwned(request.runId, knownPlaintext, pendingPlaintext) : "required";
     return this.receipt(request, passed, cleanup, passed ? cleanup === "confirmed" ? "qualification.completed" : "qualification.cleanup_required" : failure, reserved);
   }
 
   async cleanup(runId: string): Promise<"confirmed" | "required"> {
-    return this.cleanupOwned(runId, new Set());
+    return this.cleanupOwned(runId, new Set(), new Map());
   }
 
-  private async cleanupOwned(runId: string, knownPlaintext: ReadonlySet<string>): Promise<"confirmed" | "required"> {
+  private async cleanupOwned(runId: string, knownPlaintext: ReadonlySet<string>, pendingPlaintext: Map<string, string>): Promise<"confirmed" | "required"> {
     try {
       const run = this.custody(() => this.options.ledger.read(runId));
       if (!run || run.accountId !== this.options.accountId || run.namespace !== this.options.namespace) return "required";
@@ -155,6 +158,12 @@ export class ArtifactsWorkspaceQualification {
         try {
           if (resource.state === "delete-pending") throw new QualificationFailure("qualification.deletion_outcome_unknown");
           if (!resource.repositoryId) throw new QualificationFailure("qualification.repository_identity_unknown");
+          if (resource.credentialGuardPending) {
+            const plaintext = pendingPlaintext.get(resource.selection.targetName);
+            if (plaintext === undefined) throw new QualificationFailure("qualification.credential_redaction_pending");
+            await this.rememberCredential(runId, resource.selection.targetName, plaintext);
+            pendingPlaintext.delete(resource.selection.targetName);
+          }
           this.operation(runId, "cleanup:get");
           using repo = await this.options.artifacts.get(resource.selection.targetName);
           this.operation(runId, "cleanup:info");
@@ -162,8 +171,7 @@ export class ArtifactsWorkspaceQualification {
           if (info.id !== resource.repositoryId) throw new QualificationFailure("qualification.repository_identity_changed");
           for (const id of resource.tokenIds) {
             this.operation(runId, "cleanup:revokeToken");
-            if (!await repo.revokeToken(id)) throw new QualificationFailure("qualification.token_retirement_unconfirmed");
-            this.retiredToken(runId, resource.selection.targetName, id);
+            if (await repo.revokeToken(id)) this.retiredToken(runId, resource.selection.targetName, id);
           }
           const inventory = await this.tokenInventory(runId, repo, resource.repositoryId, knownPlaintext);
           for (const token of inventory) {
@@ -174,7 +182,13 @@ export class ArtifactsWorkspaceQualification {
             this.retiredToken(runId, resource.selection.targetName, token.id);
           }
           if ((await this.tokenInventory(runId, repo, resource.repositoryId, knownPlaintext)).some(token => token.state === "active")) throw new QualificationFailure("qualification.active_tokens_remain");
-          this.resource(runId, resource.selection.targetName, entry => { entry.initialToken = "retired"; entry.mintPending = false; });
+          // A false/not-found revoke is insufficient alone. Only the fresh,
+          // complete inactive inventory reconciles these originally known IDs.
+          for (const id of resource.tokenIds) this.retiredToken(runId, resource.selection.targetName, id);
+          this.resource(runId, resource.selection.targetName, entry => {
+            if (entry.tokenIds.length || entry.mintPending !== resource.mintPending) throw new QualificationFailure("qualification.token_inventory_changed");
+            entry.initialToken = "retired"; entry.mintPending = false;
+          });
           if (!this.options.deleteOwned) throw new QualificationFailure("qualification.guarded_delete_unqualified");
           this.resource(runId, resource.selection.targetName, entry => {
             if (entry.state !== "owned") throw new QualificationFailure("qualification.deletion_outcome_unknown");
@@ -205,6 +219,7 @@ export class ArtifactsWorkspaceQualification {
     if (!Number.isSafeInteger(inventory.total) || inventory.total < 0 || !Array.isArray(inventory.tokens) || inventory.tokens.length !== inventory.total ||
         inventory.tokens.some(token => !this.metadataId(token.id, undefined, knownPlaintext) || !["active", "expired", "revoked"].includes(token.state)) || new Set(inventory.tokens.map(token => token.id)).size !== inventory.total) throw new QualificationFailure("qualification.token_inventory_unqualified");
     const tokens = inventory.tokens.map(token => ({ id: token.id, state: token.state }));
+    await this.assertMetadata(runId, tokens.map(token => token.id), knownPlaintext);
     this.operation(runId, "cleanup:info");
     if ((await repo.info()).id !== repositoryId) throw new QualificationFailure("qualification.repository_identity_changed");
     return tokens;
@@ -223,7 +238,7 @@ export class ArtifactsWorkspaceQualification {
       operationIntents: [...(run?.operations ?? [])], ledgerAvailable: Boolean(run),
       resources: (run?.resources ?? []).map(resource => ({
         targetName: resource.selection.targetName, workspaceId: resource.selection.workspaceId, sourceSpaceId: resource.selection.sourceSpaceId,
-        state: resource.state, repositoryId: resource.repositoryId, initialToken: resource.initialToken, tokenIds: [...resource.tokenIds], retiredTokenIds: [...resource.retiredTokenIds], mintPending: resource.mintPending,
+        state: resource.state, repositoryId: resource.repositoryId, initialToken: resource.initialToken, tokenIds: [...resource.tokenIds], retiredTokenIds: [...resource.retiredTokenIds], mintPending: resource.mintPending, credentialGuardPending: resource.credentialGuardPending,
         observation: resource.observation && { ...resource.observation },
         recovery: resource.state === "reserved" || resource.state === "deleted" ? "none" : resource.recovery ?? "qualification.cleanup_required",
       })),
@@ -258,7 +273,7 @@ export class ArtifactsWorkspaceQualification {
     this.custody(() => this.options.ledger.change(runId, run => { run.operations.push(name); }));
   }
 
-  private trackedNamespace(runId: string, selection: ArtifactsWorkspaceSelection, knownPlaintext: Set<string>, onLedgerFailure: () => void): ArtifactsNamespace {
+  private trackedNamespace(runId: string, selection: ArtifactsWorkspaceSelection, knownPlaintext: Set<string>, pendingPlaintext: Map<string, string>, onLedgerFailure: () => void): ArtifactsNamespace {
     let initialToken: string | undefined;
     const capture = <T>(readOrWrite: () => T): T => {
       try { return readOrWrite(); }
@@ -266,33 +281,65 @@ export class ArtifactsWorkspaceQualification {
     };
     const operation = (name: string) => capture(() => this.operation(runId, name));
     const change = (name: string, update: (resource: QualificationResource) => void) => capture(() => this.resource(runId, name, update));
+    const remember = async (name: string, plaintext: string) => {
+      try { await this.rememberCredential(runId, name, plaintext); pendingPlaintext.delete(name); }
+      catch (error) { if (error instanceof QualificationFailure && error.code === "qualification.ledger_unavailable") onLedgerFailure(); throw error; }
+    };
     return { get: async name => {
       operation("get");
       const repo = await this.options.artifacts.get(name);
       return {
         [Symbol.dispose]() { repo[Symbol.dispose](); },
-        info: async () => { operation("info"); return repo.info(); },
-        log: async input => { operation("log"); return repo.log(input); },
-        readCommit: async oid => { operation("readCommit"); return repo.readCommit(oid); },
+        info: async () => {
+          operation("info");
+          const reply = await repo.info();
+          const info = { id: reply.id, name: reply.name, remote: reply.remote, defaultBranch: reply.defaultBranch, readOnly: reply.readOnly };
+          await this.assertMetadata(runId, [info.id, info.name, info.remote, info.defaultBranch], knownPlaintext);
+          return info;
+        },
+        log: async input => {
+          operation("log");
+          const commits = (await repo.log(input)).map(commit => ({ hash: commit.hash, treeHash: commit.treeHash, ...(Array.isArray(commit.parents) ? { parents: [...commit.parents] } : {}) }));
+          await this.assertMetadata(runId, commits.flatMap(commit => [commit.hash, commit.treeHash, ...commit.parents ?? []]), knownPlaintext);
+          return commits;
+        },
+        readCommit: async oid => {
+          operation("readCommit");
+          const reply = await repo.readCommit(oid);
+          if (!reply) return null;
+          const commit = { hash: reply.hash, treeHash: reply.treeHash, ...(Array.isArray(reply.parents) ? { parents: [...reply.parents] } : {}) };
+          await this.assertMetadata(runId, [commit.hash, commit.treeHash, ...commit.parents ?? []], knownPlaintext);
+          return commit;
+        },
         fork: async (target, options) => {
-          change(target, resource => { resource.state = "fork-pending"; });
+          change(target, resource => { resource.state = "fork-pending"; resource.credentialGuardPending = true; });
           operation("fork");
-          const reply = await repo.fork(target, options);
+          const raw = await repo.fork(target, options);
+          const reply = { id: raw.id, name: raw.name, remote: raw.remote, defaultBranch: raw.defaultBranch, token: raw.token };
           if (typeof reply.token === "string") knownPlaintext.add(reply.token);
+          pendingPlaintext.set(target, reply.token);
+          this.assertCurrentMetadata([reply.id, reply.name, reply.remote, reply.defaultBranch], knownPlaintext);
           const resources = capture(() => this.custody(() => this.options.ledger.read(runId)?.resources));
           if (!resources || !this.metadataId(reply.id, reply.token, knownPlaintext) || resources.some(resource => resource.selection.sourceRepository.repositoryId === reply.id || resource.repositoryId === reply.id) || reply.name !== target ||
               reply.remote !== `https://${this.options.accountId}.artifacts.cloudflare.net/git/${this.options.namespace}/${target}.git`) throw new Error("fork identity reply is unqualified");
           change(target, resource => { resource.repositoryId = reply.id; resource.state = "owned"; resource.initialToken = "pending"; });
+          await remember(target, reply.token);
           initialToken = reply.token;
           return { id: reply.id, name: reply.name, remote: reply.remote, defaultBranch: reply.defaultBranch, token: reply.token };
         },
         createToken: async (scope, ttl) => {
-          change(selection.targetName, resource => { resource.mintPending = true; });
+          change(selection.targetName, resource => { resource.mintPending = true; resource.credentialGuardPending = true; });
           operation("createToken");
-          const reply = await repo.createToken(scope, ttl);
+          let raw: Awaited<ReturnType<ArtifactsRepository["createToken"]>>;
+          try { raw = await repo.createToken(scope, ttl); }
+          catch (error) { change(selection.targetName, resource => { resource.credentialGuardPending = false; }); throw error; }
+          const reply = { id: raw.id, plaintext: raw.plaintext, scope: raw.scope, expiresAt: raw.expiresAt };
           if (typeof reply.plaintext === "string") knownPlaintext.add(reply.plaintext);
+          pendingPlaintext.set(selection.targetName, reply.plaintext);
+          this.assertCurrentMetadata([reply.id, reply.scope, reply.expiresAt], knownPlaintext);
           if (!this.metadataId(reply.id, reply.plaintext, knownPlaintext)) throw new Error("token identity reply is unqualified");
           change(selection.targetName, resource => { resource.tokenIds.push(reply.id); resource.mintPending = false; });
+          await remember(selection.targetName, reply.plaintext);
           return { id: reply.id, plaintext: reply.plaintext, scope: reply.scope, expiresAt: reply.expiresAt };
         },
         revokeToken: async tokenOrId => {
@@ -311,6 +358,39 @@ export class ArtifactsWorkspaceQualification {
   }
 
   private metadataId(value: unknown, plaintext: unknown, knownPlaintext: ReadonlySet<string>): value is string {
-    return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(value) && value !== plaintext && !knownPlaintext.has(value);
+    return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(value) && value !== plaintext && ![...knownPlaintext].some(secret => secret && value.includes(secret));
+  }
+
+  private assertCurrentMetadata(values: readonly unknown[], knownPlaintext: ReadonlySet<string>): void {
+    if (values.some(value => typeof value === "string" && [...knownPlaintext].some(secret => secret && value.includes(secret)))) throw new QualificationFailure("qualification.metadata_contains_credential");
+  }
+
+  private async fingerprint(value: string): Promise<string> {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+    return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  private async rememberCredential(runId: string, name: string, plaintext: string): Promise<void> {
+    const digest = await this.fingerprint(plaintext);
+    this.custody(() => this.options.ledger.change(runId, run => {
+      const resource = run.resources.find(entry => entry.selection.targetName === name);
+      if (!resource) throw new QualificationFailure("qualification.scope_invalid");
+      if (plaintext.length && !run.credentialFingerprints.some(entry => entry.digest === digest)) run.credentialFingerprints.push({ digest, length: plaintext.length });
+      resource.credentialGuardPending = false;
+    }));
+  }
+
+  private async assertMetadata(runId: string, values: readonly unknown[], knownPlaintext: ReadonlySet<string>): Promise<void> {
+    this.assertCurrentMetadata(values, knownPlaintext);
+    const fingerprints = this.custody(() => this.options.ledger.read(runId)?.credentialFingerprints);
+    if (!fingerprints) throw new QualificationFailure("qualification.credential_redaction_pending");
+    for (const value of new Set(values)) {
+      if (typeof value !== "string") continue;
+      for (const credential of fingerprints) {
+        for (let offset = 0; offset + credential.length <= value.length; offset++) {
+          if (await this.fingerprint(value.slice(offset, offset + credential.length)) === credential.digest) throw new QualificationFailure("qualification.metadata_contains_credential");
+        }
+      }
+    }
   }
 }

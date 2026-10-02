@@ -128,3 +128,9 @@ live Artifacts, native coding harnesses, live verifier proofs, hosted membership
 or capability journeys, durable collaboration-state recovery, live provider
 epoch fencing, or atomic distributed Git writes. A reopened new Landing still
 requires the trusted caller to restore and freshly evaluate its policy gate.
+
+The separate [local verifier qualification](cohort-local-verifier.md) replaces
+synthetic recorded Evidence with actual enforceable local verifier processes
+and signed Runner completion for its named reference workflow. The durability
+tests above retain their synthetic fixtures, and production/provider claims
+remain separately unqualified.

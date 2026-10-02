@@ -107,3 +107,20 @@ test("retained replay uses first accepted scope before reporting changed input",
   assert.equal(replay.replay, true); assert.equal(replay.requestConflict, true); assert.deepEqual(replay.sourceSpaceIds, ["source:public"]);
   assert.equal(replay.resource.workspaceId, "workspace:raw-replay");
 });
+
+test("old exact fingerprints with server-generated Workspace, Change and Run IDs retain replay compatibility", () => {
+  const f = disclosureFixture(); const c = context(f); const coordinator = new AuthorityPlaneCoordinator(f.state);
+  const replay = (command: Parameters<typeof coordinator.execute>[0], kind: "workspace" | "change" | "run") => {
+    const accepted = coordinator.execute(command, c.session); f.state = coordinator.snapshot();
+    const value = accepted.value as Record<string, { id: string }>;
+    const prepared = prepareRawSourceCommand({ snapshot: f.state, command, session: c.session, actorPrincipal: id => f.identity.actors[id]?.principalId });
+    assert.equal(prepared.replay, true); assert.equal(prepared.requestConflict, false); assert.deepEqual(prepared.command, command);
+    assert.equal(prepared.resource[`${kind}Id`], value[kind]!.id);
+    assert.deepEqual(coordinator.execute(prepared.command, c.session), accepted);
+    return value[kind]!.id;
+  };
+  const workspaceId = replay({ protocol: "anyam.authority-command/v1", command: "workspace.create", idempotencyKey: "old-generated-workspace", payload: { projectId: "project:fixture", projectRevisionId: "canonical:base", sourceSpaceIds: ["source:public"] } }, "workspace");
+  replay({ protocol: "anyam.authority-command/v1", command: "change.create", idempotencyKey: "old-generated-change", payload: { projectId: "project:fixture", workspaceId, baseProjectRevisionId: "canonical:base", intentId: "intent:collaboration" } }, "change");
+  const revision = f.state.changeRevisions["revision:public"]!;
+  replay({ protocol: "anyam.authority-command/v1", command: "run.request", idempotencyKey: "old-generated-run", payload: { projectId: "project:fixture", changeRevisionId: revision.id, projectRevisionId: revision.projectRevisionId, projectViewId: revision.projectViewId, actionId: "action:test", policyVersion: f.identity.realm.policyVersion, capabilityGrantId: "grant:synthetic-legacy" } }, "run");
+});

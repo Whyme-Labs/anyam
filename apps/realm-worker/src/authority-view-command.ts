@@ -69,6 +69,12 @@ export function prepareRawSourceCommand(input: {
   } else command = { ...requested, idempotencyKey: key, payload: { ...requested.payload, rawSourceCommand: { principalId: session.principalId, actorId: session.actorId, requestDigest } } };
 
   const p = command.payload; const allocateId = input.allocateId ?? opaqueId;
+  const acceptedId = (kind: "workspace" | "change" | "run"): string => {
+    const value = saved?.result.value;
+    const record = value && typeof value === "object" ? (value as Record<string, unknown>)[kind] : undefined;
+    if (!record || typeof record !== "object" || Array.isArray(record) || typeof (record as Record<string, unknown>).id !== "string") disclosedCommandError();
+    return string((record as Record<string, unknown>).id);
+  };
   const projectId = string(p.projectId); const project = state.projects[projectId];
   if (!project) disclosedCommandError();
   let resource: ResourceRef = { realmId: state.realmId, projectId };
@@ -78,28 +84,37 @@ export function prepareRawSourceCommand(input: {
   };
   if (commandName === "workspace.create") {
     if (!saved) p.workspaceId = p.workspaceId === undefined ? allocateId("workspace") : string(p.workspaceId);
-    resource = { ...resource, workspaceId: string(p.workspaceId) };
+    resource = { ...resource, workspaceId: p.workspaceId === undefined && saved ? acceptedId("workspace") : string(p.workspaceId) };
     const workspace = saved ? state.workspaces[resource.workspaceId!] : undefined;
     if (saved && (!workspace || workspace.projectId !== projectId)) disclosedCommandError();
     if (workspace?.changeId) resource = { ...resource, changeId: workspace.changeId };
     sourceSpaceIds = workspace ? state.projectViews[workspace.projectViewId]?.visibleSourceSpaceIds ?? [] : p.sourceSpaceIds === undefined ? project.sourceSpaceIds : strings(p.sourceSpaceIds);
   } else if (commandName === "change.create") {
-    const workspaceId = p.workspaceId === undefined ? undefined : string(p.workspaceId);
+    const changeId = p.changeId === undefined ? saved ? acceptedId("change") : allocateId("change") : string(p.changeId);
+    if (!saved) p.changeId = changeId;
+    const existingChange = saved ? state.changes[changeId] : undefined;
+    if (saved && (!existingChange || existingChange.projectId !== projectId)) disclosedCommandError();
+    const workspaceId = existingChange?.workspaceId ?? (p.workspaceId === undefined ? undefined : string(p.workspaceId));
+    binding(p.workspaceId, workspaceId);
     const workspace = workspaceId ? state.workspaces[workspaceId] : undefined;
     if (workspaceId && (!workspace || workspace.projectId !== projectId)) disclosedCommandError();
-    if (!saved) p.changeId = p.changeId === undefined ? allocateId("change") : string(p.changeId);
-    const changeId = string(p.changeId);
     if (saved && (!state.changes[changeId] || state.changes[changeId]!.projectId !== projectId || state.changes[changeId]!.workspaceId !== workspaceId)) disclosedCommandError();
     resource = { ...resource, ...(workspaceId ? { workspaceId } : {}), changeId };
     viewId = workspace?.projectViewId ?? (p.projectViewId === undefined ? undefined : string(p.projectViewId));
     binding(p.projectViewId, viewId);
+    if (!viewId) {
+      const baseId = existingChange?.baseProjectRevisionId ?? (p.baseProjectRevisionId === undefined ? state.canonicalByProject[projectId] : string(p.baseProjectRevisionId));
+      const base = baseId && state.projectRevisions[baseId];
+      if (!base || base.projectId !== projectId) disclosedCommandError();
+      sourceSpaceIds = Object.keys(base.sourceSpaceSnapshots);
+    }
   } else if (commandName === "revision.publish") {
     const change = state.changes[string(p.changeId)];
     if (!change || change.projectId !== projectId) disclosedCommandError();
     const workspaceId = change.workspaceId; const workspace = workspaceId && state.workspaces[workspaceId];
     if (!workspace || workspace.projectId !== projectId || workspace.changeId !== change.id) disclosedCommandError();
     binding(p.workspaceId, workspace.id); binding(p.projectViewId, workspace.projectViewId);
-    p.workspaceId = workspace.id; p.projectViewId = workspace.projectViewId;
+    if (!saved) { p.workspaceId = workspace.id; p.projectViewId = workspace.projectViewId; }
     resource = { ...resource, workspaceId: workspace.id, changeId: change.id }; viewId = workspace.projectViewId;
   } else {
     const revision = p.changeRevisionId === undefined ? undefined : state.changeRevisions[string(p.changeRevisionId)];
@@ -113,13 +128,12 @@ export function prepareRawSourceCommand(input: {
     binding(p.workspaceId, workspaceId); binding(p.changeId, changeId);
     viewId = revision?.projectViewId ?? workspace?.projectViewId ?? (p.projectViewId === undefined ? undefined : string(p.projectViewId));
     binding(p.projectViewId, viewId);
-    if (!saved) p.runId = p.runId === undefined ? allocateId("run") : string(p.runId);
-    if (saved && !state.runs[string(p.runId)]) disclosedCommandError();
-    if (workspaceId) p.workspaceId = workspaceId;
-    if (changeId) p.changeId = changeId;
-    resource = { ...resource, ...(workspaceId ? { workspaceId } : {}), ...(changeId ? { changeId } : {}), runId: string(p.runId), ...(p.targetId === undefined ? {} : { targetId: string(p.targetId) }) };
+    const runId = p.runId === undefined ? saved ? acceptedId("run") : allocateId("run") : string(p.runId);
+    if (saved && !state.runs[runId]) disclosedCommandError();
+    if (!saved) { p.runId = runId; if (workspaceId) p.workspaceId = workspaceId; if (changeId) p.changeId = changeId; }
+    resource = { ...resource, ...(workspaceId ? { workspaceId } : {}), ...(changeId ? { changeId } : {}), runId, ...(p.targetId === undefined ? {} : { targetId: string(p.targetId) }) };
   }
-  if (commandName !== "workspace.create") {
+  if (commandName !== "workspace.create" && viewId) {
     const view = viewId && state.projectViews[viewId];
     if (!view || view.projectId !== projectId) disclosedCommandError();
     sourceSpaceIds = view.visibleSourceSpaceIds;

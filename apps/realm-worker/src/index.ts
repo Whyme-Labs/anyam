@@ -52,7 +52,7 @@ import { prepareHostedRevisionPublish, type HostedRevisionObservationInput } fro
 import { assertAuthoritySnapshotEquivalent, AuthoritySQLiteStore, type AuthoritySqlHost } from "../../../src/cloudflare/authority-sqlite.ts";
 import { MIRROR_HANDOFF_AUDIENCE, MIRROR_INGESTION_PROTOCOL, verifyMirrorIngestionHandoff, type MirrorHandoffKey, type MirrorIngestionHandoff } from "../../../src/portability/mirror-observation.ts";
 import { GITHUB_WEBHOOK_INGRESS_PROTOCOL, type GitHubWebhookIngressEnvelope } from "../../../src/portability/github-webhook.ts";
-import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial, containsKnownTextMaterial } from "../../../src/security/credential-material.ts";
 import { isAnyamOAuthPath } from "../../../src/cloudflare/oauth-path.ts";
 import { RealmArtifactsQualification, type RealmArtifactsQualificationRequest, type ArtifactsRealmAuthorization } from "./artifacts-qualification.ts";
 
@@ -1398,12 +1398,12 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         if (!value || !current.ownerDetails() || !current.run(coordinatorString(body, "runId"))) this.authorityReadNotFound();
         // Typed identifiers/digests are still caller-controlled strings. A
         // signed alias must not turn a credential-free DTO into a Session leak.
-        const metadata = JSON.stringify(value);
         const identity = this.requireIdentity().getRecoverySnapshot();
         const protectedHandles = [...Object.keys(identity.sessions), ...Object.keys(identity.grants),
           ...Object.keys(identity.passkeys),
           ...Object.values(snapshot.runnerAttempts).flatMap(attempt => attempt.jobCredentialDigest ? [attempt.jobCredentialDigest] : [])];
-        if (scanCredentialMaterial(value, "runDetail") || this.requireIdentity().containsKnownCredentialMaterial(value) || protectedHandles.some(handle => metadata.includes(handle))) this.authorityReadNotFound();
+        if (scanCredentialMaterial(value, "runDetail") || this.requireIdentity().containsKnownCredentialMaterial(value)
+          || containsKnownTextMaterial(value, text => protectedHandles.some(handle => text.includes(handle)))) this.authorityReadNotFound();
         return coordinatorJson(value);
       } catch (error) {
         if (!(error instanceof RealmIdentityError) && !(error instanceof AuthorityPlaneError && error.code === "not_found")) return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "detail_unavailable", recoveryAction: "ask the Realm operator to restore detail verification or storage, then retry", receipt: "runDetail=unavailable; details=not-disclosed" }, 503);

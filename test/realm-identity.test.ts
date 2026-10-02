@@ -96,7 +96,11 @@ test("known opaque credential matching is pure and covers string, key and encode
   const { realm, passkeySession } = createRealm(); const { task, grant } = taskAndGrant(realm, passkeySession);
   const issued = realm.issueCredential({ class: "realm-api", principalId: passkeySession.principalId, actorId: passkeySession.actorId, clientId: passkeySession.clientId, sessionId: passkeySession.id, taskId: task.id, grantId: grant.id, resource: grant.resource });
   const before = realm.snapshot();
-  const aliases: unknown[] = [issued.token, `input=${issued.token}`, `prefix${issued.token}suffix`, { [issued.token]: "alias-key" }, Buffer.from(issued.token).toString("base64"), [...issued.token].map(character => `%${character.charCodeAt(0).toString(16)}`).join("")];
+  const encodedAliases = ["base64", "base64url"].flatMap(encoding => ["", "p", "pr", "pre", "prefix"].flatMap(prefix => {
+    const encoded = prefix + Buffer.from(issued.token).toString(encoding as "base64" | "base64url") + "suffix";
+    return [encoded, { [encoded]: "encoded-key" }];
+  }));
+  const aliases: unknown[] = [...encodedAliases, issued.token, `input=${issued.token}`, `prefix${issued.token}suffix`, { [issued.token]: "alias-key" }, Buffer.from(issued.token).toString("base64"), [...issued.token].map(character => `%${character.charCodeAt(0).toString(16)}`).join("")];
   for (const alias of aliases) assert.equal(realm.containsKnownCredentialMaterial(alias), true);
   for (const value of [issued.tokenDigest, "sha256:" + "a".repeat(64), "action:ordinary", "b".repeat(43), { output: "ordinary metadata" }]) assert.equal(realm.containsKnownCredentialMaterial(value), false);
   assert.deepEqual(realm.snapshot(), before, "checking never validates, audits or revokes credentials");

@@ -154,6 +154,36 @@ export function scanCredentialMaterial(value: unknown, rootPath = "value"): Cred
   return scan(value, rootPath, new WeakSet<object>());
 }
 
+/** Match known material without returning it. Visit JSON strings and keys,
+ * plus one URI or Base64 decoding layer. A Base64 substring can begin at any
+ * of its four character alignments inside a larger alphabet run. */
+export function containsKnownTextMaterial(value: unknown, matchesText: (text: string) => boolean): boolean {
+  const matches = (text: string): boolean => {
+    if (matchesText(text)) return true;
+    try { const decoded = decodeURIComponent(text); if (decoded !== text && matchesText(decoded)) return true; } catch { /* malformed URI text */ }
+    for (const match of text.matchAll(/[A-Za-z0-9+/_-]+={0,2}/gu)) {
+      const candidate = match[0].replace(/=+$/u, "").replaceAll("-", "+").replaceAll("_", "/");
+      for (let alignment = 0; alignment < 4 && alignment < candidate.length; alignment++) {
+        const aligned = candidate.slice(alignment);
+        try {
+          const binary = atob(aligned + "=".repeat((4 - aligned.length % 4) % 4));
+          const decoded = new TextDecoder().decode(Uint8Array.from(binary, character => character.charCodeAt(0)));
+          if (matchesText(decoded)) return true;
+        } catch { /* malformed Base64 text */ }
+      }
+    }
+    return false;
+  };
+  const seen = new WeakSet<object>();
+  const contains = (entry: unknown): boolean => {
+    if (typeof entry === "string") return matches(entry);
+    if (!entry || typeof entry !== "object" || seen.has(entry)) return false;
+    seen.add(entry);
+    return Object.entries(entry).some(([key, nested]) => matches(key) || contains(nested));
+  };
+  return contains(value);
+}
+
 export function isCredentialFree(value: unknown): boolean {
   return scanCredentialMaterial(value) === undefined;
 }

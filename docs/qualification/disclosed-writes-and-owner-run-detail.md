@@ -66,7 +66,7 @@ credential material before accepted proof is stored and before detail is
 projected. The Coordinator also matches known opaque Realm token aliases before
 request/proof persistence and detail projection without validating or modifying
 those credentials. Unknown arbitrary secret strings cannot be recognized by
-these checks. Aliases of known Session handles in
+these checks. Direct, embedded and single URI/base64-layer aliases of known Session handles in
 otherwise typed strings are denied as well, including known Grant/passkey
 handles and Runner credential digests. Ordinary REST/MCP Run reads remain
 coarse even when an accepted detail exists.
@@ -86,6 +86,8 @@ repository observation. The first accepted prepared command and original
 request digest are retained. Older unmarked fingerprints cannot prove an
 unnormalized pre-observation request; only their exact prepared envelope is
 replayable, otherwise a safe conflict requires a fresh request. This
+exact replay derives older generated Workspace/Change/Run IDs from the accepted
+result while retaining the original fingerprint unchanged. This
 qualification does not claim disclosure-safe output for every legacy mutation.
 Signed recovery includes the new proof collection. Previously signed snapshots
 that lack that additive collection verify unchanged before normalization to an

@@ -8,8 +8,8 @@ export type Env = {
 
 /** Compile-time conformance to the official Workers binding, with the Realm
  * authorization callback supplied by a trusted caller. No HTTP token route. */
-export function createArtifactsWorkspaceControl(env: Env, authorize: ArtifactsWorkspaceOptions["authorize"]): ArtifactsWorkspaceAdapter {
-  return new ArtifactsWorkspaceAdapter({ artifacts: env.ARTIFACTS, accountId: env.ARTIFACTS_ACCOUNT_ID, namespace: env.ARTIFACTS_NAMESPACE, authorize });
+export function createArtifactsWorkspaceControl(env: Env, authorize: ArtifactsWorkspaceOptions["authorize"], store?: ArtifactsWorkspaceOptions["store"]): ArtifactsWorkspaceAdapter {
+  return new ArtifactsWorkspaceAdapter({ artifacts: env.ARTIFACTS, accountId: env.ARTIFACTS_ACCOUNT_ID, namespace: env.ARTIFACTS_NAMESPACE, authorize, ...(store ? { store } : {}) });
 }
 
 export default {

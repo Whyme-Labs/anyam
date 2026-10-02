@@ -172,10 +172,12 @@ test("Artifacts blocks further issuance after an unknown mint until named token 
 test("Artifacts revocation during a mint withholds and retires the new credential", async () => {
   const { fixture, workspace } = adapter();
   const context = await workspace.forkWorkspace(artifactsSelection);
-  let revocation: Promise<void> | undefined;
-  fixture.afterMint = () => { revocation = workspace.revokeWorkspace({ workspaceId: "workspace:a", sourceSpaceId: "source:app" }); };
+  let revocation: Promise<unknown> | undefined;
+  fixture.afterMint = () => { revocation = workspace.revokeWorkspace({ workspaceId: "workspace:a", sourceSpaceId: "source:app" }).catch(error => error); };
   await assert.rejects(workspace.issue({ repositoryId: context.binding.repositoryId, sourceSpaceId: "source:app", operation: "read", expiresAt: new Date(fixture.now + 120_000).toISOString() }), { code: "artifacts.authorization_denied" });
-  await revocation;
+  const outcome = await revocation;
+  if (outcome !== undefined) assert.equal((outcome as { code: string }).code, "artifacts.workspace_token_inventory_unknown", "an in-flight mint cannot certify complete retirement until its reply settles");
+  await workspace.revokeWorkspace({ workspaceId: "workspace:a", sourceSpaceId: "source:app" });
   assert.equal(fixture.activeTokens.size, 0);
 });
 

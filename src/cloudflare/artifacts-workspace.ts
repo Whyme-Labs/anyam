@@ -1,6 +1,7 @@
 import type { SmartHttpRemoteRepositoryBinding } from "../portability/smart-http-driver.ts";
 import type { SmartHttpCredential, SmartHttpCredentialIssuer } from "../portability/smart-http.ts";
 import { SMART_HTTP_GIT_AUDIENCE } from "../portability/smart-http.ts";
+import { MemoryArtifactsWorkspaceStore, type ArtifactsWorkspaceStore } from "./artifacts-workspace-store.ts";
 
 /** Structural subset checked against the pinned Workers Artifacts types. */
 export type ArtifactsRepositoryInfo = { id: string; name: string; defaultBranch: string; remote: string; readOnly: boolean };
@@ -31,7 +32,7 @@ export type ArtifactsWorkspaceContext = {
   selection: ArtifactsWorkspaceSelection;
   repository: ArtifactsRepositoryIdentity & { remote: string };
   binding: SmartHttpRemoteRepositoryBinding;
-  storage: "process-local-contract";
+  storage: ArtifactsWorkspaceStore["storage"];
   canonicalPublication: "unqualified";
 };
 export type ArtifactsWorkspaceOptions = {
@@ -41,6 +42,7 @@ export type ArtifactsWorkspaceOptions = {
   /** Trusted Realm caller rechecks its current grant and throws on denial. */
   authorize(selection: Readonly<ArtifactsWorkspaceSelection>): Promise<{ expiresAt: string }>;
   now?: () => number;
+  store?: ArtifactsWorkspaceStore;
 };
 
 type ProviderEffect = "none" | "unknown" | "fork-created" | "token-created";
@@ -52,10 +54,6 @@ export class ArtifactsWorkspaceError extends Error {
   }
 }
 
-function workspaceKey(selection: ArtifactsWorkspaceSelection): string {
-  return JSON.stringify([selection.workspaceId, selection.sourceSpaceId]);
-}
-
 function repositoryId(identity: ArtifactsRepositoryIdentity): string {
   return `repository:artifacts:${[identity.accountId, identity.namespace, identity.repositoryId].map(encodeURIComponent).join(":")}`;
 }
@@ -64,34 +62,41 @@ function expectedRemote(identity: ArtifactsRepositoryIdentity): string {
   return `https://${identity.accountId}.artifacts.cloudflare.net/git/${identity.namespace}/${identity.name}.git`;
 }
 
+function immutableSelection(input: ArtifactsWorkspaceSelection): ArtifactsWorkspaceSelection {
+  const source = input.sourceRepository;
+  return Object.freeze({
+    projectId: input.projectId, projectRevisionId: input.projectRevisionId, projectViewId: input.projectViewId,
+    workspaceId: input.workspaceId, sourceSpaceId: input.sourceSpaceId, targetName: input.targetName,
+    baseCommitOid: input.baseCommitOid, baseTreeOid: input.baseTreeOid,
+    sourceRepository: Object.freeze({ accountId: source.accountId, namespace: source.namespace, repositoryId: source.repositoryId, name: source.name }),
+  });
+}
+
 /** Internal, injected control adapter. The trusted caller owns Realm policy.
- * Assignments and token custody are process-local; hosted durability and live
- * service conformance must be qualified before exposing this to agents. */
+ * The default store is process-local. Injected SQLite custody is qualified
+ * locally; hosted durability and live service conformance remain separate. */
 export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
   private readonly options: ArtifactsWorkspaceOptions;
-  private readonly reservedWorkspaces = new Set<string>();
-  private readonly reservedNames = new Set<string>();
-  private readonly contexts = new Map<string, ArtifactsWorkspaceContext>();
-  private readonly tokenIds = new Map<string, Set<string>>();
-  private readonly revokedWorkspaces = new Set<string>();
-  private readonly unknownTokenInventories = new Set<string>();
+  private readonly store: ArtifactsWorkspaceStore;
   private readonly now: () => number;
 
   constructor(options: ArtifactsWorkspaceOptions) {
     this.options = { ...options };
+    this.store = options.store ?? new MemoryArtifactsWorkspaceStore();
     this.now = options.now ?? Date.now;
   }
 
   async issue(input: Parameters<SmartHttpCredentialIssuer["issue"]>[0]): Promise<SmartHttpCredential> {
     const request = { ...input };
-    const context = this.contexts.get(request.repositoryId);
-    if (!context || request.sourceSpaceId !== context.selection.sourceSpaceId ||
+    const context = this.custody("unenrolled", () => this.store.repository(request.repositoryId)?.context);
+    if (!context || context.repository.accountId !== this.options.accountId || context.repository.namespace !== this.options.namespace || request.sourceSpaceId !== context.selection.sourceSpaceId ||
         (request.workspaceId !== undefined && request.workspaceId !== context.selection.workspaceId) ||
         (request.operation === "write" && request.workspaceId !== context.selection.workspaceId)) {
       throw new ArtifactsWorkspaceError("artifacts.credential_context_denied", "unenrolled", "none", "tokens are available only for the exact enrolled Workspace repository and Source Space");
     }
     try {
       await this.authorize(context.selection, "none");
+      if (this.store.read(context.selection)!.pendingOperation !== "none") throw this.error(context.selection, "artifacts.workspace_operation_pending", "unknown", "a prior provider operation remains pending; reconcile its effect before issuing another credential");
       using repo = await this.options.artifacts.get(context.selection.targetName);
       return await this.issueInRepository(request, context, repo);
     } catch (error) {
@@ -105,6 +110,7 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
     const requestedDeadline = Date.parse(request.expiresAt);
     let effect: ProviderEffect = "none";
     let minted: Awaited<ReturnType<ArtifactsRepository["createToken"]>> | undefined;
+    let tokenRecorded = false;
     try {
       await this.authorize(selection, effect);
       this.validateInfo(selection, await repo.info(), context.repository, effect);
@@ -114,9 +120,15 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
       // workers-types 5.20261001.1 createToken TTL min=60, max=31536000 seconds.
       const ttl = Math.min(31_536_000, Math.floor((deadline - this.now()) / 1000));
       if (!Number.isFinite(deadline) || ttl < 60) throw this.error(selection, "artifacts.token_ttl_denied", effect, `provider token ttl_min=60s; requested remaining=${ttl}s; request expiry must fit the current Workspace grant`);
+      this.store.change(selection, record => {
+        if (record.blocked) throw this.error(selection, "artifacts.authorization_denied", "none", "Workspace issuance has been revoked");
+        if (record.pendingOperation !== "none") throw this.error(selection, "artifacts.workspace_operation_pending", "unknown", "a prior mint remains pending; reconcile its effect before retrying");
+        record.pendingOperation = "mint";
+      });
       effect = "unknown";
       minted = await repo.createToken(request.operation, ttl);
       effect = "token-created";
+      if (minted.id) { this.store.change(selection, record => { record.tokenIds.push(minted!.id); }); tokenRecorded = true; }
       this.validateInfo(selection, await repo.info(), context.repository, effect);
       const expiresAt = Date.parse(minted.expiresAt);
       if (!minted.id || !minted.plaintext || minted.scope !== request.operation || !Number.isFinite(expiresAt) || expiresAt <= this.now() || expiresAt > deadline) throw this.error(selection, "artifacts.token_result_mismatch", effect, "provider token scope and expiry must fit the exact requested authority");
@@ -124,7 +136,10 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
       const finalDeadline = await this.authorize(selection, effect);
       if (expiresAt > finalDeadline || expiresAt <= this.now()) throw this.error(selection, "artifacts.token_result_mismatch", effect, "the minted token exceeds the current grant or has expired");
       const tokenDigest = `sha256:${Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("")}`;
-      this.tokenIds.get(request.repositoryId)!.add(minted.id);
+      this.store.change(selection, record => {
+        if (record.blocked) throw this.error(selection, "artifacts.authorization_denied", effect, "Workspace issuance has been revoked");
+        record.pendingOperation = "none";
+      });
       return {
         id: minted.id, audience: SMART_HTTP_GIT_AUDIENCE, repositoryId: request.repositoryId, sourceSpaceId: selection.sourceSpaceId, workspaceId: selection.workspaceId,
         operations: request.operation === "write" ? ["read", "write"] : ["read"], canonicalWrite: false,
@@ -133,17 +148,21 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
     } catch (error) {
       if (minted) {
         try {
-          if (!await repo.revokeToken(minted.id || minted.plaintext)) throw new Error("retirement unconfirmed");
+          const alreadyRetired = tokenRecorded && !this.store.read(selection)!.tokenIds.includes(minted.id);
+          if (!alreadyRetired && !await repo.revokeToken(minted.id || minted.plaintext)) throw new Error("retirement unconfirmed");
+          this.store.change(selection, record => { record.tokenIds = record.tokenIds.filter(id => id !== minted!.id); record.pendingOperation = "none"; });
         } catch {
-          this.revokedWorkspaces.add(workspaceKey(selection));
-          if (minted.id) this.tokenIds.get(context.binding.repositoryId)!.add(minted.id);
-          else this.unknownTokenInventories.add(workspaceKey(selection));
+          this.store.change(selection, record => {
+            record.blocked = true;
+            record.pendingOperation = "none";
+            if (minted!.id && !record.tokenIds.includes(minted!.id)) record.tokenIds.push(minted!.id);
+            if (!minted!.id) record.unknownTokenInventory = true;
+          });
           throw this.error(selection, "artifacts.rejected_token_unretired", effect, "rejected token retirement was not confirmed; no credential is released");
         }
       }
       if (!minted && effect === "unknown") {
-        this.revokedWorkspaces.add(workspaceKey(selection));
-        this.unknownTokenInventories.add(workspaceKey(selection));
+        this.store.change(selection, record => { record.blocked = true; record.unknownTokenInventory = true; });
       }
       if (error instanceof ArtifactsWorkspaceError) throw error;
       throw this.error(selection, "artifacts.provider_effect_unqualified", effect, "token provider operation failed; reconcile token metadata before retrying an unknown mint");
@@ -152,19 +171,21 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
 
   /** Trusted caller only. Stop issuance before awaiting provider retirement. */
   async revokeWorkspace(input: { workspaceId: string; sourceSpaceId: string }): Promise<void> {
-    const context = [...this.contexts.values()].find(candidate => candidate.selection.workspaceId === input.workspaceId && candidate.selection.sourceSpaceId === input.sourceSpaceId);
+    const selectionKey = { workspaceId: input.workspaceId, sourceSpaceId: input.sourceSpaceId, sourceRepository: { accountId: this.options.accountId, namespace: this.options.namespace } };
+    const context = this.custody("unenrolled", () => this.store.read(selectionKey)?.context);
     if (!context) throw new ArtifactsWorkspaceError("artifacts.workspace_unknown", "unenrolled", "none", "resolve the exact registered Workspace and Source Space before revocation");
     const selection = context.selection;
-    this.revokedWorkspaces.add(workspaceKey(selection));
+    this.custody(selection.targetName, () => this.store.change(selection, record => { record.blocked = true; }));
     try {
       using repo = await this.options.artifacts.get(selection.targetName);
       this.validateInfo(selection, await repo.info(), context.repository, "unknown");
-      const ids = this.tokenIds.get(context.binding.repositoryId)!;
+      const ids = this.store.read(selection)!.tokenIds;
       for (const id of ids) {
         if (!await repo.revokeToken(id)) throw this.error(selection, "artifacts.workspace_token_unretired", "unknown", "Workspace issuance is blocked but provider token retirement was not confirmed");
-        ids.delete(id);
+        this.store.change(selection, record => { record.tokenIds = record.tokenIds.filter(candidate => candidate !== id); });
       }
-      if (this.unknownTokenInventories.has(workspaceKey(selection))) throw this.error(selection, "artifacts.workspace_token_inventory_unknown", "unknown", "a lost mint reply left an unknown token inventory; reconcile provider token metadata rather than claiming complete revocation");
+      const current = this.store.read(selection)!;
+      if (current.unknownTokenInventory || current.pendingOperation !== "none") throw this.error(selection, "artifacts.workspace_token_inventory_unknown", "unknown", "a pending or lost mint reply left an unknown token inventory; reconcile provider token metadata rather than claiming complete revocation");
     } catch (error) {
       if (error instanceof ArtifactsWorkspaceError) throw error;
       throw this.error(selection, "artifacts.workspace_token_unretired", "unknown", "Workspace issuance is blocked; reconcile its token metadata and retirement");
@@ -175,11 +196,16 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
     return new ArtifactsWorkspaceError(code, selection.targetName, effect, detail);
   }
 
+  private custody<T>(targetName: string, operation: () => T): T {
+    try { return operation(); }
+    catch { throw new ArtifactsWorkspaceError("artifacts.custody_unavailable", targetName, "none", "Workspace custody could not be read or committed; no provider operation was started; inspect the trusted store before retrying"); }
+  }
+
   private async authorize(selection: ArtifactsWorkspaceSelection, effect: ProviderEffect): Promise<number> {
     try {
-      const grant = await this.options.authorize(selection);
+      const grant = await this.options.authorize(immutableSelection(selection));
       const deadline = Date.parse(grant.expiresAt);
-      if (this.revokedWorkspaces.has(workspaceKey(selection)) || !Number.isFinite(deadline) || deadline <= this.now()) throw new Error("grant is revoked or expired");
+      if (this.store.read(selection)?.blocked || !Number.isFinite(deadline) || deadline <= this.now()) throw new Error("grant is revoked or expired");
       return deadline;
     } catch {
       throw this.error(selection, "artifacts.authorization_denied", effect, "current Workspace grant is unavailable, denied or expired");
@@ -212,12 +238,10 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
   }
 
   async forkWorkspace(input: ArtifactsWorkspaceSelection): Promise<ArtifactsWorkspaceContext> {
-    const selection = Object.freeze({ ...input, sourceRepository: Object.freeze({ ...input.sourceRepository }) });
+    const selection = immutableSelection(input);
     this.validateSelection(selection);
-    const key = workspaceKey(selection);
-    if (this.reservedWorkspaces.has(key) || this.reservedNames.has(selection.targetName)) throw this.error(selection, "artifacts.workspace_already_bound", "none", "this Workspace/Source Space or target name is already assigned or requires reconciliation");
-    this.reservedWorkspaces.add(key);
-    this.reservedNames.add(selection.targetName);
+    const reserved = this.custody(selection.targetName, () => this.store.reserve(selection));
+    if (!reserved) throw this.error(selection, "artifacts.workspace_already_bound", "none", "this Workspace/Source Space or target name is already assigned or requires reconciliation");
     let effect: ProviderEffect = "none";
     try {
       await this.authorize(selection, effect);
@@ -228,6 +252,7 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
       await this.authorize(selection, effect);
       // The documented fork API has no pinned-commit argument. Check its
       // actual result instead of assuming that it copied a stable snapshot.
+      this.store.change(selection, record => { record.pendingOperation = "fork"; });
       effect = "unknown";
       const forked = await source.fork(selection.targetName, { readOnly: false, defaultBranchOnly: false });
       effect = "fork-created";
@@ -243,13 +268,12 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
         selection,
         repository: Object.freeze({ ...identity, remote: targetInfo.remote }),
         binding: Object.freeze({ source: targetInfo.remote, repositoryId: repositoryId(identity), sourceSpaceId: selection.sourceSpaceId, workspaceId: selection.workspaceId }),
-        storage: "process-local-contract", canonicalPublication: "unqualified",
+        storage: this.store.storage, canonicalPublication: "unqualified",
       });
-      this.contexts.set(context.binding.repositoryId, context);
-      this.tokenIds.set(context.binding.repositoryId, new Set());
+      this.store.change(selection, record => { record.context = context; record.pendingOperation = "none"; });
       return context;
     } catch (error) {
-      if (effect === "none") { this.reservedWorkspaces.delete(key); this.reservedNames.delete(selection.targetName); }
+      if (effect === "none") this.store.release(selection);
       if (error instanceof ArtifactsWorkspaceError) throw error;
       throw this.error(selection, "artifacts.provider_effect_unqualified", effect, "provider operation failed; its response is withheld from credential-free errors");
     }

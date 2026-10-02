@@ -29,6 +29,8 @@ Workers types and bundles with an Artifacts binding. It does not execute the
 binding or deploy anything. Its HTTP handler always returns 404; no credential
 or repository mutation route is exposed. `createArtifactsWorkspaceControl`
 requires a trusted caller to supply the current Realm authorization callback.
+Its optional third argument injects the metadata store; omitting it retains the
+explicit process-local contract. No durable binding is provisioned by this app.
 
 The Workspace tests inject fake Artifacts responses. They concurrently provision
 two distinct forks, retire their initial tokens, check source and fork UUIDs,
@@ -87,13 +89,30 @@ retired. Errors name the target and uncertain effect, withholding provider error
 text that might contain credentials. Reconcile the named repository and token
 inventory before retrying; the adapter never broadly deletes repositories.
 
-Assignments, reservations and token IDs are **process-local**. Successful
-contexts explicitly report `process-local-contract` and unqualified canonical
-publication. Restart restoration, cross-isolate custody, durable grant epochs,
-distributed reservation/idempotency and orphan cleanup are not qualified. Do not
-use a new adapter instance to adopt a failed target automatically. Production
-must durably bind the same selection/provider UUID and reconcile uncertain
-effects before exposing this seam to agents.
+The default metadata store is **process-local**. A trusted caller can inject
+`SQLiteArtifactsWorkspaceStore` using the synchronous SQL host already used by
+Realm Authority. Local qualification opens actual disposable SQLite files,
+replaces the database connection/store/adapter, and verifies exact enrollment,
+name/Workspace reservations, token IDs and revocation survive. These contexts
+report `sqlite-contract`; canonical publication stays unqualified. Stored
+selection grants no authority: the current callback and provider UUID are checked
+again after restart. Only declared selection fields enter custody, and current
+authorization receives an immutable copy.
+
+Each fork and mint commits a pending marker before its provider effect. A
+concurrent adapter cannot start another mint while that marker remains. Known
+token IDs are committed before later asynchronous checks or credential release;
+plaintext is never stored. Revocation commits its block before provider access,
+then removes IDs only after confirmed retirement. Pending/lost mint replies
+cannot certify complete revocation. Failed writes roll back, withhold credentials
+and prevent unjournaled provider effects. Unknown operations retain reservations
+and require named reconciliation rather than automatic adoption or broad deletion.
+
+This qualifies local SQLite metadata custody, not a deployed Durable Object,
+cross-region authority, durable grant epochs, complete provider token inventory,
+an adoption/reopen/delete workflow or orphan cleanup. Production must supply and
+qualify its actual Realm storage/routing and reconciliation before exposing this
+seam to agents.
 
 Smart HTTP remote observation now fails with
 `repository.remote_observation_unqualified`: local checkout HEAD/ref/ancestry

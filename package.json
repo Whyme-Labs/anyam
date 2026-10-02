@@ -6,7 +6,7 @@
   "workspaces": ["packages/create-anyam", "apps/realm-worker", "apps/github-mirror-producer", "apps/public-gateway-worker", "apps/hosted-saas-qualification", "apps/promotion-executor", "apps/linux-egress-qualification", "apps/repository-observer", "apps/repository-driver", "apps/site", "examples/worker-app", "examples/typescript-cli", "examples/hybrid-video-player"],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test \"test/**/*.test.ts\" test/artifacts-realm-runtime.test.mjs",
+    "test": "tsx --test \"test/**/*.test.ts\" test/artifacts-realm-runtime.test.mjs test/authority-disclosure-runtime.test.mjs",
     "harness": "tsx src/harness/cli.ts",
     "qualification:external-runner": "tsx scripts/qualify-external-runner.ts",
     "qualification:provider-feed": "tsx scripts/qualify-provider-feed.ts",
@@ -71,6 +71,7 @@
     "check": "npm run check:ci-hygiene && npm run check:dependencies && npm run typecheck && npm run typecheck:scripts && npm run typecheck:qualification-worker && npm run typecheck:provider-target && npm run typecheck:hosted-saas && npm run typecheck:replay-archive-workload && npm run typecheck:promotion-executor && npm run typecheck:linux-egress && npm run typecheck:repository-observer && npm run typecheck:repository-driver && npm run typecheck:artifacts-workspaces && npm run typecheck:github-mirror-producer && npm run typecheck:repository-observer-qualification && npm run typecheck:repository-driver-qualification && npm run typecheck:worker-tests && npm run typecheck:site && npm run verify:docs && npm run qualification:worker-test-boundary && npm run qualification:authority-sqlite && npm run qualification:repository-observer && npm run qualification:repository-driver && npm test && npm run verify:package && npm run verify:examples && npm run verify:site && npm run verify:workers",
     "qualification:artifacts-workspaces": "tsx --test test/artifacts-workspace.test.ts test/artifacts-workspace-custody.test.ts test/artifacts-workspace-observation.test.ts test/artifacts-workspace-qualification.test.ts test/smart-http-repository.test.ts test/smart-http-state-model.test.ts",
     "qualification:artifacts-realm-local": "tsx --test test/artifacts-realm-runtime.test.mjs",
+    "qualification:disclosure-local": "tsx --test test/authority-disclosure.test.ts test/authority-disclosure-runtime.test.mjs",
     "qualification:scm-credential-model": "tsx scripts/qualify-scm-credential-model.ts",
     "typecheck:artifacts-workspaces": "tsc -p apps/artifacts-workspace-contract/tsconfig.json --noEmit",
     "build:artifacts-workspaces": "npm run typecheck:artifacts-workspaces && wrangler deploy --dry-run --config apps/artifacts-workspace-contract/wrangler.qualification.jsonc --outdir=dist/artifacts-workspace-contract"

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptsDirectory = dirname(fileURLToPath(import.meta.url));
 const repository = dirname(scriptsDirectory);
-const sources = ["test/pull-request-rest.test.ts", "test/fixtures/artifacts-realm-runtime.ts"];
+const sources = ["test/pull-request-rest.test.ts", "test/fixtures/artifacts-realm-runtime.ts", "test/fixtures/authority-disclosure-runtime.ts"];
 const probes = [];
 
 function runTypeScript(configPath) {
@@ -28,6 +28,9 @@ for (const sourcePath of sources) {
     await writeFile(join(temporaryDirectory, probeName), `${source}\nconst __intentionalWorkerTestBoundaryError: string = __missingWorkerTestBoundaryValue;\n`, "utf8");
     if (sourcePath === "test/fixtures/artifacts-realm-runtime.ts") {
       await writeFile(join(temporaryDirectory, "artifacts-binding.ts"), await readFile(join(repository, "test/fixtures/artifacts-binding.ts"), "utf8"), "utf8");
+    }
+    if (sourcePath === "test/fixtures/authority-disclosure-runtime.ts") {
+      await writeFile(join(temporaryDirectory, "authority-disclosure-state.ts"), await readFile(join(repository, "test/fixtures/authority-disclosure-state.ts"), "utf8"), "utf8");
     }
     const configPath = join(temporaryDirectory, "tsconfig.json");
     await writeFile(configPath, JSON.stringify({ extends: join(repository, "tsconfig.worker-tests.json"), compilerOptions: { noEmit: true }, include: [probeName] }, null, 2), "utf8");

@@ -260,7 +260,7 @@ async function mcpProjectInspect(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProp
     protocol: ANYAM_MCP_PROTOCOL,
     status: "ready",
     project: result.project,
-    canonicalRevision: result.canonicalRevision,
+    ...(result.projectViewRevision ? { projectViewRevision: result.projectViewRevision } : {}),
     sourceSpaces: result.sourceSpaces,
     counts: result.counts,
     receipt: `${typeof result.receipt === "string" ? result.receipt : "authority=coordinator; operation=project.inspect"}; oauth=audience-validated; mcp=read-only; credentialFree=true; canonicalWrite=false`,

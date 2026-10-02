@@ -518,14 +518,14 @@ export class RealmIdentityError extends Error {
 }
 
 const ROLE_CAPABILITIES: Readonly<Record<RealmRole, readonly Capability[]>> = {
-  viewer: ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "pullRequest.inspect", "evidence.read", "target.read"],
-  contributor: ["project.inspect", "source.read", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "run.invoke", "evidence.read", "target.read", "agent.delegate"],
-  reviewer: ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "evidence.read", "target.read"],
-  maintainer: ["project.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "landing.request", "target.read", "extension.install", "extension.manage", "extension.invoke", "governance.profile.evaluate", "agent.delegate"],
-  "release-manager": ["project.inspect", "source.read", "change.inspect", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "evidence.read", "target.read", "target.promote", "landing.request", "release.create", "promotion.request", "extension.invoke"],
-  "security-reviewer": ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "target.read", "governance.profile.evaluate"],
-  moderator: ["project.inspect", "change.inspect", "pullRequest.inspect", "evidence.read", "public.moderate"],
-  owner: ["project.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "secret.use", "landing.request", "release.create", "target.configure", "promotion.request", "target.read", "target.promote", "extension.install", "extension.manage", "extension.invoke", "governance.profile.manage", "governance.profile.evaluate", "agent.delegate", "policy.manage", "identity.manage"],
+  viewer: ["project.inspect", "intent.inspect", "source.read", "workspace.inspect", "change.inspect", "pullRequest.inspect", "evidence.read", "target.read"],
+  contributor: ["project.inspect", "intent.inspect", "source.read", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "run.invoke", "evidence.read", "target.read", "agent.delegate"],
+  reviewer: ["project.inspect", "intent.inspect", "source.read", "workspace.inspect", "change.inspect", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "evidence.read", "target.read"],
+  maintainer: ["project.inspect", "intent.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "landing.request", "target.read", "extension.install", "extension.manage", "extension.invoke", "governance.profile.evaluate", "agent.delegate"],
+  "release-manager": ["project.inspect", "intent.inspect", "source.read", "change.inspect", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "evidence.read", "target.read", "target.promote", "landing.request", "release.create", "promotion.request", "extension.invoke"],
+  "security-reviewer": ["project.inspect", "intent.inspect", "source.read", "workspace.inspect", "change.inspect", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "target.read", "governance.profile.evaluate"],
+  moderator: ["project.inspect", "intent.inspect", "change.inspect", "pullRequest.inspect", "evidence.read", "public.moderate"],
+  owner: ["project.inspect", "intent.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "secret.use", "landing.request", "release.create", "target.configure", "promotion.request", "target.read", "target.promote", "extension.install", "extension.manage", "extension.invoke", "governance.profile.manage", "governance.profile.evaluate", "agent.delegate", "policy.manage", "identity.manage"],
 };
 
 function clone<T>(value: T): T {
@@ -691,6 +691,20 @@ export class RealmIdentityPolicy {
       for (const capability of relationship.deniedCapabilities) denied.add(capability);
     }
     return [...allowed].filter((capability) => !denied.has(capability)).sort();
+  }
+
+  /** Current disclosure observation for authenticated human read adapters.
+   * This does not mint a Task/Grant or authorize source transfer or effects. */
+  canReadSourceSpaceMetadata(input: { sessionId: string; resource: ResourceRef; classification: SourceSpacePolicy["classification"] }): boolean {
+    const session = this.validateSession(input.sessionId);
+    const actor = this.state.actors[session.actorId];
+    const sourceId = input.resource.sourceSpaceId;
+    const policy = sourceId ? this.state.sourceSpacePolicies[sourceId] : undefined;
+    if (!actor || actor.kind !== "human" || input.resource.realmId !== this.realm.id || !policy || policy.classification !== input.classification || policy.policyVersion !== this.realm.policyVersion) return false;
+    if (!this.activeCapabilitiesForPrincipal({ principalId: session.principalId, resource: input.resource }).includes("source.read")) return false;
+    return policy.allowedCapabilities.includes("source.read") && !policy.deniedCapabilities.includes("source.read")
+      && (policy.discoverable || policy.readerPrincipalIds.includes(session.principalId))
+      && (policy.readerPrincipalIds.length === 0 || policy.readerPrincipalIds.includes(session.principalId));
   }
 
   getRecoverySnapshot(): RealmRecoverySnapshot {

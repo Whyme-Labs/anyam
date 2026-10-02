@@ -3,7 +3,7 @@ import { handleAuthorityRequest } from "../../apps/realm-worker/src/authority-ed
 import { handleAnyamRealmMcpRequest } from "../../apps/realm-worker/src/mcp-handler.ts";
 import type { AnyamRealmOAuthEnv } from "../../apps/realm-worker/src/oauth-provider.ts";
 import { AuthoritySQLiteStore, type AuthoritySqlHost } from "../../src/cloudflare/authority-sqlite.ts";
-import { emptyAuthorityPlaneSnapshot, normalizeAuthorityPlaneSnapshot } from "../../src/cloudflare/authority-plane.ts";
+import { emptyAuthorityPlaneSnapshot, normalizeAuthorityPlaneSnapshot, type AuthorityPlaneSnapshot } from "../../src/cloudflare/authority-plane.ts";
 import { RealmIdentityPolicy } from "../../src/identity/realm.ts";
 import { disclosureClock, type disclosureFixture } from "./authority-disclosure-state.ts";
 
@@ -23,6 +23,11 @@ export class LocalDisclosureRealm extends AnyamRealmCoordinator {
     store.replace(fixture.state);
     await this.ctx.storage.put("fixture-members", fixture.members);
     return { seeded: true };
+  }
+  async replaceAuthority(state: AuthorityPlaneSnapshot) {
+    const store = new AuthoritySQLiteStore(this.ctx.storage as unknown as AuthoritySqlHost, { empty: emptyAuthorityPlaneSnapshot, normalize: normalizeAuthorityPlaneSnapshot });
+    store.replace(state);
+    return { replaced: true };
   }
   async members() { return await this.ctx.storage.get<Fixture["members"]>("fixture-members"); }
   async checkpoint() {
@@ -66,6 +71,7 @@ export default { async fetch(request: Request, bindings: { REALM_COORDINATOR: Du
   const url = new URL(request.url);
   const realm = bindings.REALM_COORDINATOR.get(bindings.REALM_COORDINATOR.idFromName("realm:disclosure-local"));
   if (url.pathname === "/fixture/seed") return Response.json(await realm.seed(await request.json() as Fixture));
+  if (url.pathname === "/fixture/replace-authority") return Response.json(await realm.replaceAuthority(await request.json() as AuthorityPlaneSnapshot));
   if (url.pathname === "/fixture/revoke") return Response.json(await realm.revoke((await request.json() as { sessionId: string }).sessionId));
   if (url.pathname === "/fixture/checkpoint") return Response.json(await realm.checkpoint());
   if (url.pathname === "/fixture/fail-identity-write-once") return Response.json(await realm.failIdentityWriteOnce());

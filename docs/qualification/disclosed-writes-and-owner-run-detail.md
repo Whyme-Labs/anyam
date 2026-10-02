@@ -11,6 +11,8 @@ checks again. A restricted human does not need an owner recovery export.
 Send `{command, idempotencyKey, payload}`. The host Session comes from the
 authenticated cookie. The optional `protocol` is `anyam.authority-command/v1`.
 Creation IDs are server-assigned. Incoming Source writes are credential-scanned
+and matched against retained Realm token digests, including opaque string/key
+aliases and one URI/base64 encoding layer,
 after current authorization and before persistence. Canonical/View IDs, `expectedVersion`, caller
 Task/Grant IDs and unknown fields are rejected. The supported payload fields are:
 
@@ -61,7 +63,10 @@ verified result digest. Actor/Session/Grant/credential handles, public key,
 unsigned environment/dependency/toolchain metadata, raw logs, provider receipts
 and network-boundary receipt are omitted. The common credential scanner rejects
 credential material before accepted proof is stored and before detail is
-projected. Aliases of known Session handles in
+projected. The Coordinator also matches known opaque Realm token aliases before
+request/proof persistence and detail projection without validating or modifying
+those credentials. Unknown arbitrary secret strings cannot be recognized by
+these checks. Aliases of known Session handles in
 otherwise typed strings are denied as well, including known Grant/passkey
 handles and Runner credential digests. Ordinary REST/MCP Run reads remain
 coarse even when an accepted detail exists.
@@ -72,9 +77,15 @@ process/network sandbox, publish a Sealed Verifier, implement external
 invocation/opt-in/appeal, or approve a private Intent/Mirror/Promotion projection.
 Public Sealed Verifier contracts from ADR 0004/0032 remain a separate product
 gap. Raw legacy commands for the four Source operations are owner-only and now
-also require current per-Source kernel read/write authorization. Their first
+also require current per-Source kernel read/write authorization over the full
+Project/Workspace/Change/Run context derived from Authority records. Omitting a
+caller binding never removes a scoped deny. Their first
 acceptance commits identity and SQL together, and cached results are checked
-under current permissions without persisting a new Task/Grant. This
+under current permissions without persisting a new Task/Grant or repeating
+repository observation. The first accepted prepared command and original
+request digest are retained. Older unmarked fingerprints cannot prove an
+unnormalized pre-observation request; only their exact prepared envelope is
+replayable, otherwise a safe conflict requires a fresh request. This
 qualification does not claim disclosure-safe output for every legacy mutation.
 Signed recovery includes the new proof collection. Previously signed snapshots
 that lack that additive collection verify unchanged before normalization to an
@@ -98,7 +109,9 @@ real Ed25519 signatures, synthetic Runner results, denied outbound requests and
 disabled telemetry. It verifies a public single-Source lifecycle inside a
 two-Source Project, accepted retries after hidden canonical activity, denied
 cached writes, rollback after actual SQL/KV writes, owner detail revocation,
-proof tampering, credential strings, signed protected-handle aliases, retention
+proof tampering, credential strings and known opaque request/signed-proof aliases,
+scoped denies with caller IDs omitted, timestamp-changing legacy publication
+retries, signed protected-handle aliases, retention
 of unrelated live credential digests, signed current/legacy recovery and
 authorized multi-Source Workspace
 creation with public observation unchanged. Node orchestration `.mjs` is run,

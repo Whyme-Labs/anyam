@@ -1493,6 +1493,36 @@ export class RealmIdentityPolicy {
     return { valid: true, credential: clone(record) };
   }
 
+  /** Recognize our opaque tokens in arbitrary JSON strings/keys without
+   * validating, auditing, exposing, or changing credential records. Issuance
+   * uses 32 random bytes, encoded as exactly 43 base64url characters. Retained
+   * expired/revoked digests are also protected from accidental persistence. */
+  containsKnownCredentialMaterial(value: unknown): boolean {
+    const known = new Set(Object.values(this.state.credentials).map(record => record.tokenDigest));
+    if (!known.size) return false;
+    const textContains = (text: string, decode: boolean): boolean => {
+      for (const match of text.matchAll(/[A-Za-z0-9_-]{43,}/gu)) {
+        const candidate = match[0];
+        for (let start = 0; start + 43 <= candidate.length; start++) if (known.has(tokenDigest(candidate.slice(start, start + 43)))) return true;
+      }
+      if (decode) {
+        try { const decoded = decodeURIComponent(text); if (decoded !== text && textContains(decoded, false)) return true; } catch { /* malformed URI text is not a credential */ }
+        for (const match of text.matchAll(/[A-Za-z0-9+/_-]{16,}={0,2}/gu)) {
+          try { if (textContains(Buffer.from(match[0], "base64").toString("utf8"), false)) return true; } catch { /* malformed base64 text is not a credential */ }
+        }
+      }
+      return false;
+    };
+    const seen = new WeakSet<object>();
+    const contains = (entry: unknown): boolean => {
+      if (typeof entry === "string") return textContains(entry, true);
+      if (!entry || typeof entry !== "object" || seen.has(entry)) return false;
+      seen.add(entry);
+      return Object.entries(entry).some(([key, nested]) => textContains(key, true) || contains(nested));
+    };
+    return contains(value);
+  }
+
   activatePolicy(policyVersion: string): Realm {
     if (!policyVersion.trim()) throw new RealmIdentityError({ code: "policy.version_invalid", message: "Policy version must not be empty.", recoveryAction: "activate an immutable, named policy version", receipt: "policy version validation" });
     this.state.realm.policyVersion = policyVersion;

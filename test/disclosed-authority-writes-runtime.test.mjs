@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { isDeepStrictEqual } from "node:util";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,6 +9,8 @@ import { build } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { disclosureFixture } from "./fixtures/authority-disclosure-state.ts";
 import { repositoryObservationDigest } from "../src/portability/repository-observation.ts";
+import { RealmIdentityPolicy } from "../src/identity/realm.ts";
+import { runnerResultDigest } from "../src/execution/runner-proof.ts";
 import { CONTRACT_VERSIONS } from "../src/kernel/contracts.ts";
 import { ExternalRunnerCoordinator, runnerResultContext, runnerResultMessage } from "../src/execution/runner.ts";
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "../apps/realm-worker/src/coordinator-protocol.ts";
@@ -20,7 +23,7 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
     let observationCalls = 0;
     const observer = async request => {
       observationCalls++; const body = await request.json();
-      const claims = { protocol: "anyam.repository-observation/v1", repositoryId: body.repositoryId, sourceSpaceId: body.sourceSpaceId, workspaceId: body.workspaceId, projectViewId: body.projectViewId, objectFormat: "sha1", symbolicRef: body.expectedSymbolicRef ?? "refs/heads/candidate", commitOid: body.expectedCommitOid, treeOid: "c".repeat(40), baseCommitOid: body.expectedBaseCommitOid, ancestryVerified: true, observedAt: "2026-10-02T12:00:00.000Z", receipt: "synthetic RepositoryDriver readback; no real Git provider" };
+      const claims = { protocol: "anyam.repository-observation/v1", repositoryId: body.repositoryId, sourceSpaceId: body.sourceSpaceId, workspaceId: body.workspaceId, projectViewId: body.projectViewId, objectFormat: "sha1", symbolicRef: body.expectedSymbolicRef ?? "refs/heads/candidate", commitOid: body.expectedCommitOid, treeOid: "c".repeat(40), baseCommitOid: body.expectedBaseCommitOid, ancestryVerified: true, observedAt: new Date(Date.parse("2026-10-02T12:00:00.000Z") + observationCalls).toISOString(), receipt: "synthetic RepositoryDriver readback; no real Git provider" };
       return Response.json({ protocol: claims.protocol, status: "succeeded", observation: { ...claims, manifestDigest: await repositoryObservationDigest(claims) }, receipt: "fixture=synthetic-observer; providerClaim=false" });
     };
     const options = convertV4MiniflareOptions({ name: "disclosed-writes-owned-local", modules: true, script: bundle.outputFiles[0].text, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], bindings: { ANYAM_AUTHORITY_RECOVERY_KEY_ID: "key:synthetic-runtime-only", ANYAM_AUTHORITY_RECOVERY_SECRET: "synthetic-runtime-recovery-only" }, durableObjects: { REALM_COORDINATOR: { className: "LocalDisclosureRealm", useSQLite: true } }, serviceBindings: { ANYAM_REPOSITORY_OBSERVER: observer }, outboundService: () => new Response("outbound disabled", { status: 403 }) });
@@ -76,6 +79,12 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
     const credential = (await invoke("/fixture/issue-synthetic-credential", {})).value;
     assert.equal((await invoke("/fixture/validate-synthetic-credential", { token: credential.token })).value.valid, true);
     const credentialBefore = (await invoke("/fixture/checkpoint", {})).value;
+    for (const alias of [credential.token, `input=${credential.token}`, `prefix${credential.token}suffix`, Buffer.from(credential.token).toString("base64")]) {
+      const before = (await invoke("/fixture/checkpoint", {})).value;
+      assert.equal((await command("run.request", "opaque-credential-input", { ...runPayload, inputDigests: [alias] })).status, 422, "known opaque credential alias is rejected before persistence");
+      assert.ok(isDeepStrictEqual((await invoke("/fixture/checkpoint", {})).value, before), "opaque rejection preserves all state without printing material");
+    }
+
     assert.deepEqual(await command("run.request", "fresh-run", runPayload), run);
     assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, credentialBefore, "accepted replay retains unrelated credential digest records");
     assert.equal((await invoke("/fixture/validate-synthetic-credential", { token: credential.token })).value.valid, true);
@@ -117,7 +126,7 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
     runner.activateRunner(profile.id, input.actor);
     const enrolled = runner.getRunner(profile.id);
     assert.equal((await invoke("/authority/runner-profile/internal", { runnerProfile: enrolled })).status, 200);
-    const complete = async (runId, suffix, outputDigest = "sha256:synthetic-output") => {
+    const complete = async (runId, suffix, outputDigest = "sha256:synthetic-output", expectedStatus = 200) => {
       const current = (await invoke("/fixture/checkpoint", {})).value.authority.runs[runId];
       const actionInput = { ...input, capabilityGrantId: current.capabilityGrantId, policyVersion: current.policyVersion, actor: current.actor };
       const job = runner.enqueue({ runId, idempotencyKey: `synthetic-job:${suffix}`, actionInput, runnerRequirements: ["os:linux", "arch:amd64", "isolation:container"], outputLocations: { logs: "synthetic/logs", artifacts: "synthetic/artifacts", evidence: "synthetic/evidence" }, leaseExpiresAt: "2026-10-02T13:00:00.000Z" });
@@ -127,8 +136,11 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
       const result = { context, status: "succeeded", output: { status: "succeeded", exitCode: 0, inputDigests: [...job.job.inputDigests], outputDigests: [`result.txt=${outputDigest}`], outputDigest, stdoutDigest: "sha256:synthetic-stdout", stderrDigest: "sha256:synthetic-stderr" }, outputs: [] };
       result.signature = signMessage(runnerResultMessage(result));
       const completion = runner.submit({ credential: lease.credential, result });
+      const beforeAcceptance = (await invoke("/fixture/checkpoint", {})).value;
       const accepted = await invoke("/authority/runner-complete/internal", { idempotencyKey: `synthetic-completion:${suffix}`, completion });
-      assert.equal(accepted.status, 200, JSON.stringify(accepted)); return completion;
+      assert.equal(accepted.status, expectedStatus);
+      if (expectedStatus !== 200) assert.ok(isDeepStrictEqual((await invoke("/fixture/checkpoint", {})).value, beforeAcceptance), "rejected signed credential alias persists no proof or state");
+      return completion;
     };
     const completion = await complete(queuedRun.id, "first");
     const path = `/api/authority/run-details/${encodeURIComponent(queuedRun.id)}`;
@@ -136,6 +148,25 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
     assert.equal(rich.value.proof.signatureVerified, true); assert.equal(rich.value.proof.resultDigest, completion.resultDigest);
     assert.deepEqual(rich.value.context.sourceSpaceSnapshots, { "source:public": candidateOid });
     assert.doesNotMatch(JSON.stringify(rich), /sessionId|capabilityGrantId|publicKey|privateKey|credentialId|unsigned-|source:hidden|PRIVATE-|projectRevisionId|projectViewId|networkBoundaryReceipt/u);
+    const knownProofCredential = (await invoke("/fixture/issue-synthetic-credential", {})).value;
+    const opaqueRun = await command("run.request", "opaque-proof-run", runPayload); assert.equal(opaqueRun.status, 200);
+    await complete(opaqueRun.value.value.run.id, "opaque-proof", knownProofCredential.token, 422);
+    assert.equal((await invoke(`/api/authority/run-details/${encodeURIComponent(opaqueRun.value.value.run.id)}`, undefined, "owner")).status, 404);
+    const aliasState = structuredClone((await invoke("/fixture/checkpoint", {})).value.authority);
+    const aliasDetail = aliasState.runDetails[queuedRun.id];
+    aliasDetail.result.output.outputDigest = knownProofCredential.token;
+    aliasDetail.result.output.outputDigests = [`result.txt=${knownProofCredential.token}`];
+    aliasDetail.result.signature = signMessage(runnerResultMessage(aliasDetail.result));
+    aliasDetail.resultDigest = await runnerResultDigest({ jobId: aliasDetail.job.id, attemptId: aliasDetail.attempt.id, result: aliasDetail.result });
+    aliasDetail.attempt.resultDigest = aliasDetail.resultDigest;
+    aliasState.runnerAttempts[aliasDetail.attempt.id].resultDigest = aliasDetail.resultDigest;
+    aliasState.runs[queuedRun.id].outputDigest = aliasDetail.result.output.outputDigest;
+    aliasState.runs[queuedRun.id].outputDigests = aliasDetail.result.output.outputDigests;
+    const proofState = (await invoke("/fixture/checkpoint", {})).value.authority;
+    await invoke("/fixture/replace-authority", aliasState);
+    assert.equal((await invoke(path, undefined, "owner")).status, 404, "otherwise valid signed proof cannot project a known opaque credential");
+    await invoke("/fixture/replace-authority", proofState);
+    assert.equal((await invoke("/fixture/validate-synthetic-credential", { token: knownProofCredential.token })).value.valid, true);
     const sealedCheckpoint = (await invoke("/fixture/checkpoint", {})).value;
     assert.equal(sealedCheckpoint.authority.runDetails[queuedRun.id].resultDigest, completion.resultDigest, "accepted proof persisted in actual SQLite");
     const exported = await invoke("/authority/recovery/export/internal", { sessionId: fixture.members.owner.session.id }); assert.equal(exported.status, 200);
@@ -232,6 +263,47 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
       assert.equal((await invoke("/api/authority/command", { command: name, idempotencyKey: `legacy-denied:${name}`, payload }, "owner")).status, 404, name);
       assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, before, name);
     }
+
+    // The retained owner route must derive omitted binding IDs from records.
+    // Current scoped denies outrank caller payload omissions and cached intent.
+    for (const [name, capability, scoped, payload] of [
+      ["run.request", "run.invoke", { changeId: "change:public" }, { projectId: "project:fixture", workspaceId: "workspace:public", projectViewId: legacyViewId, projectRevisionId: "candidate:public", changeRevisionId: "revision:public", actionId: "action:derived-context", policyVersion: multiDeniedCheckpoint.identity.realm.policyVersion, capabilityGrantId: "synthetic-caller-grant" }],
+      ["revision.publish", "change.publish_revision", { workspaceId: "workspace:public" }, { projectId: "project:fixture", changeId: "change:public", projectViewId: legacyViewId, sourceSpaceSnapshots: { "source:public": candidateOid } }],
+    ]) {
+      const scopedPolicy = new RealmIdentityPolicy({ realmId: fixture.identity.realm.id, relyingPartyId: fixture.identity.realm.relyingPartyId, now: () => new Date("2026-10-02T12:00:00.000Z") });
+      scopedPolicy.restoreOperationalSnapshot(multiDeniedCheckpoint.identity);
+      scopedPolicy.addRelationship({ principalId: fixture.members.owner.principal.id, kind: "organization-member", subjectId: "synthetic-scoped-deny", role: "owner", resource: { realmId: fixture.identity.realm.id, projectId: "project:fixture", ...scoped }, deniedCapabilities: [capability] });
+      await reseed(multiDeniedCheckpoint.authority, scopedPolicy.getRecoverySnapshot());
+      const before = (await invoke("/fixture/checkpoint", {})).value; const observationsBefore = observationCalls;
+      assert.equal((await invoke("/api/authority/command", { command: name, idempotencyKey: `derived-deny:${name}`, payload }, "owner")).status, 404, name);
+      assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, before);
+      assert.equal(observationCalls, observationsBefore, "a scoped deny precedes repository observation");
+    }
+    await reseed(multiDeniedCheckpoint.authority, multiDeniedCheckpoint.identity);
+    const rawPublish = { command: "revision.publish", idempotencyKey: "raw-dynamic-observation", payload: { projectId: "project:fixture", changeId: "change:public", sourceSpaceSnapshots: { "source:public": candidateOid } } };
+    const observationsBefore = observationCalls;
+    const rawPublished = await invoke("/api/authority/command", rawPublish, "owner"); assert.equal(rawPublished.status, 200, JSON.stringify(rawPublished));
+    assert.equal(observationCalls, observationsBefore + 1);
+    const rawCredential = (await invoke("/fixture/issue-synthetic-credential", {})).value;
+    const rawBeforeRetry = (await invoke("/fixture/checkpoint", {})).value;
+    for (let attempt = 0; attempt < 2; attempt++) assert.deepEqual(await invoke("/api/authority/command", rawPublish, "owner"), rawPublished);
+    assert.equal(observationCalls, observationsBefore + 1, "timestamp-changing observer is not called by accepted legacy retries");
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, rawBeforeRetry);
+    const changedRaw = { ...rawPublish, payload: { ...rawPublish.payload, kind: "review" } };
+    assert.equal((await invoke("/api/authority/command", changedRaw, "owner")).status, 409);
+    assert.equal(observationCalls, observationsBefore + 1);
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, rawBeforeRetry);
+    const rawOpaque = { command: "run.request", idempotencyKey: "raw-opaque-input", payload: { projectId: "project:fixture", workspaceId: "workspace:public", projectViewId: legacyViewId, projectRevisionId: "candidate:public", changeRevisionId: "revision:public", actionId: "action:opaque", inputDigests: [`input=${rawCredential.token}`] } };
+    assert.equal((await invoke("/api/authority/command", rawOpaque, "owner")).status, 422);
+    assert.ok(isDeepStrictEqual((await invoke("/fixture/checkpoint", {})).value, rawBeforeRetry));
+    assert.equal((await invoke("/fixture/validate-synthetic-credential", { token: rawCredential.token })).value.valid, true);
+    const rawRevoked = (await invoke("/fixture/checkpoint", {})).value;
+    rawRevoked.identity.sourceSpacePolicies["source:public"].deniedCapabilities = ["change.publish_revision"];
+    await reseed(rawRevoked.authority, rawRevoked.identity);
+    const rawRevokedBefore = (await invoke("/fixture/checkpoint", {})).value;
+    assert.equal((await invoke("/api/authority/command", changedRaw, "owner")).status, 404, "original scope revocation outranks a changed accepted payload");
+    assert.equal(observationCalls, observationsBefore + 1);
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, rawRevokedBefore);
 
   } finally { await runtime?.dispose(); await rm(directory, { recursive: true, force: true }); }
 });

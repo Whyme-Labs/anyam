@@ -37,6 +37,97 @@ export type PreparedViewCommand = {
   requestConflict: boolean;
 };
 
+/** Retained owner API: close the resource over Authority records before policy
+ * evaluation. A caller's omitted binding cannot remove a scoped explicit deny.
+ * Accepted prepared commands are replayed only after current authorization. */
+export function prepareRawSourceCommand(input: {
+  snapshot: AuthorityPlaneSnapshot; command: AuthorityCommand; session: AuthoritySession;
+  actorPrincipal: (actorId: string) => string | undefined; allocateId?: (kind: string) => string;
+}): PreparedViewCommand {
+  const { snapshot: state, session } = input;
+  const requested = input.command;
+  if (!Object.hasOwn(capabilities, requested.command) || Object.hasOwn(requested.payload, "rawSourceCommand") || Object.hasOwn(requested.payload, "disclosedCommand")) disclosedCommandError("invalid_request");
+  const commandName = requested.command as ViewCommandName;
+  const key = string(requested.idempotencyKey); const saved = state.idempotency[key];
+  const requestDigest = digest(requested); let command: AuthorityCommand; let requestConflict = false;
+  if (saved) {
+    let parsed: unknown; try { parsed = JSON.parse(saved.fingerprint); } catch { disclosedCommandError(); }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) disclosedCommandError();
+    command = parsed as AuthorityCommand;
+    if (!command.payload || command.protocol !== AUTHORITY_COMMAND_PROTOCOL || command.command !== commandName || command.idempotencyKey !== key) disclosedCommandError();
+    const marker = command.payload.rawSourceCommand;
+    if (marker && typeof marker === "object" && !Array.isArray(marker)) {
+      const binding = marker as Record<string, unknown>;
+      if (binding.principalId !== session.principalId || input.actorPrincipal(string(binding.actorId)) !== session.principalId) disclosedCommandError();
+      requestConflict = binding.requestDigest !== requestDigest;
+    } else {
+      // Older fingerprints did not retain original pre-observation intent.
+      // Only an exact prepared envelope can prove such a replay; never observe
+      // again or guess which caller fields were overwritten by preparation.
+      requestConflict = !equal(command, { ...requested, idempotencyKey: key });
+    }
+  } else command = { ...requested, idempotencyKey: key, payload: { ...requested.payload, rawSourceCommand: { principalId: session.principalId, actorId: session.actorId, requestDigest } } };
+
+  const p = command.payload; const allocateId = input.allocateId ?? opaqueId;
+  const projectId = string(p.projectId); const project = state.projects[projectId];
+  if (!project) disclosedCommandError();
+  let resource: ResourceRef = { realmId: state.realmId, projectId };
+  let viewId: string | undefined; let sourceSpaceIds: readonly string[] = [];
+  const binding = (value: unknown, actual: string | undefined) => {
+    if (value !== undefined && string(value) !== actual) disclosedCommandError();
+  };
+  if (commandName === "workspace.create") {
+    if (!saved) p.workspaceId = p.workspaceId === undefined ? allocateId("workspace") : string(p.workspaceId);
+    resource = { ...resource, workspaceId: string(p.workspaceId) };
+    const workspace = saved ? state.workspaces[resource.workspaceId!] : undefined;
+    if (saved && (!workspace || workspace.projectId !== projectId)) disclosedCommandError();
+    if (workspace?.changeId) resource = { ...resource, changeId: workspace.changeId };
+    sourceSpaceIds = workspace ? state.projectViews[workspace.projectViewId]?.visibleSourceSpaceIds ?? [] : p.sourceSpaceIds === undefined ? project.sourceSpaceIds : strings(p.sourceSpaceIds);
+  } else if (commandName === "change.create") {
+    const workspaceId = p.workspaceId === undefined ? undefined : string(p.workspaceId);
+    const workspace = workspaceId ? state.workspaces[workspaceId] : undefined;
+    if (workspaceId && (!workspace || workspace.projectId !== projectId)) disclosedCommandError();
+    if (!saved) p.changeId = p.changeId === undefined ? allocateId("change") : string(p.changeId);
+    const changeId = string(p.changeId);
+    if (saved && (!state.changes[changeId] || state.changes[changeId]!.projectId !== projectId || state.changes[changeId]!.workspaceId !== workspaceId)) disclosedCommandError();
+    resource = { ...resource, ...(workspaceId ? { workspaceId } : {}), changeId };
+    viewId = workspace?.projectViewId ?? (p.projectViewId === undefined ? undefined : string(p.projectViewId));
+    binding(p.projectViewId, viewId);
+  } else if (commandName === "revision.publish") {
+    const change = state.changes[string(p.changeId)];
+    if (!change || change.projectId !== projectId) disclosedCommandError();
+    const workspaceId = change.workspaceId; const workspace = workspaceId && state.workspaces[workspaceId];
+    if (!workspace || workspace.projectId !== projectId || workspace.changeId !== change.id) disclosedCommandError();
+    binding(p.workspaceId, workspace.id); binding(p.projectViewId, workspace.projectViewId);
+    p.workspaceId = workspace.id; p.projectViewId = workspace.projectViewId;
+    resource = { ...resource, workspaceId: workspace.id, changeId: change.id }; viewId = workspace.projectViewId;
+  } else {
+    const revision = p.changeRevisionId === undefined ? undefined : state.changeRevisions[string(p.changeRevisionId)];
+    if (p.changeRevisionId !== undefined && !revision) disclosedCommandError();
+    const change = revision ? state.changes[revision.changeId] : undefined;
+    if (revision && (!change || change.projectId !== projectId)) disclosedCommandError();
+    const workspaceId = revision?.workspaceId ?? change?.workspaceId ?? (p.workspaceId === undefined ? undefined : string(p.workspaceId));
+    const workspace = workspaceId ? state.workspaces[workspaceId] : undefined;
+    if (workspaceId && (!workspace || workspace.projectId !== projectId || change && workspace.changeId !== change.id)) disclosedCommandError();
+    const changeId = change?.id ?? workspace?.changeId;
+    binding(p.workspaceId, workspaceId); binding(p.changeId, changeId);
+    viewId = revision?.projectViewId ?? workspace?.projectViewId ?? (p.projectViewId === undefined ? undefined : string(p.projectViewId));
+    binding(p.projectViewId, viewId);
+    if (!saved) p.runId = p.runId === undefined ? allocateId("run") : string(p.runId);
+    if (saved && !state.runs[string(p.runId)]) disclosedCommandError();
+    if (workspaceId) p.workspaceId = workspaceId;
+    if (changeId) p.changeId = changeId;
+    resource = { ...resource, ...(workspaceId ? { workspaceId } : {}), ...(changeId ? { changeId } : {}), runId: string(p.runId), ...(p.targetId === undefined ? {} : { targetId: string(p.targetId) }) };
+  }
+  if (commandName !== "workspace.create") {
+    const view = viewId && state.projectViews[viewId];
+    if (!view || view.projectId !== projectId) disclosedCommandError();
+    sourceSpaceIds = view.visibleSourceSpaceIds;
+  }
+  if (!sourceSpaceIds.length || new Set(sourceSpaceIds).size !== sourceSpaceIds.length || sourceSpaceIds.some(id => !state.sourceSpaces[id] || !project.sourceSpaceIds.includes(id))) disclosedCommandError();
+  return { command, capability: capabilities[commandName], resource, sourceSpaceIds: [...sourceSpaceIds], replay: !!saved, requestConflict };
+}
+
 /** Resolves selectors only. Authority comes from the current kernel Task/Grant,
  * never from the selector, stored request, or previously accepted result. */
 export function prepareDisclosedCommand(input: {

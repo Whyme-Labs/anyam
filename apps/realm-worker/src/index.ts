@@ -1,5 +1,5 @@
 import { AuthorityDisclosure } from "./authority-disclosure.ts";
-import { prepareDisclosedCommand, disclosedCommandResult, disclosedCommandError, disclosedCommandFailure } from "./authority-view-command.ts";
+import { prepareDisclosedCommand, prepareRawSourceCommand, disclosedCommandResult, disclosedCommandError, disclosedCommandFailure } from "./authority-view-command.ts";
 import { acceptedOwnerRunDetail } from "./accepted-run-detail.ts";
 /// <reference types="@cloudflare/workers-types" />
 
@@ -1403,7 +1403,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         const protectedHandles = [...Object.keys(identity.sessions), ...Object.keys(identity.grants),
           ...Object.keys(identity.passkeys),
           ...Object.values(snapshot.runnerAttempts).flatMap(attempt => attempt.jobCredentialDigest ? [attempt.jobCredentialDigest] : [])];
-        if (scanCredentialMaterial(value, "runDetail") || protectedHandles.some(handle => metadata.includes(handle))) this.authorityReadNotFound();
+        if (scanCredentialMaterial(value, "runDetail") || this.requireIdentity().containsKnownCredentialMaterial(value) || protectedHandles.some(handle => metadata.includes(handle))) this.authorityReadNotFound();
         return coordinatorJson(value);
       } catch (error) {
         if (!(error instanceof RealmIdentityError) && !(error instanceof AuthorityPlaneError && error.code === "not_found")) return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "detail_unavailable", recoveryAction: "ask the Realm operator to restore detail verification or storage, then retry", receipt: "runDetail=unavailable; details=not-disclosed" }, 503);
@@ -1438,11 +1438,12 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
             });
           };
           authorize();
-          if (scanCredentialMaterial(body, "viewCommand")) disclosedCommandError("invalid_request");
+          if (scanCredentialMaterial(body, "viewCommand") || identity.containsKnownCredentialMaterial(body)) disclosedCommandError("invalid_request");
           if (prepared.requestConflict) disclosedCommandError("conflict");
           let command = prepared.command;
           if (!prepared.replay && command.command === "run.request") command = { ...command, payload: { ...command.payload, policyVersion: identity.realm.policyVersion, capabilityGrantId: issued.grant.id } };
           if (!prepared.replay && command.command === "revision.publish") command = await this.prepareHostedRevision(current, command);
+          if (scanCredentialMaterial(command, "preparedCommand") || identity.containsKnownCredentialMaterial(command)) disclosedCommandError("invalid_request");
           authorize();
           const coordinator = new AuthorityPlaneCoordinator(current);
           const accepted = coordinator.execute(command, { ...authenticated, taskId: issued.task.id, capabilityGrantId: issued.grant.id });
@@ -1498,7 +1499,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       ...(typeof body.expectedVersion === "number" ? { expectedVersion: body.expectedVersion } : {}),
       payload: payloadRecord,
     };
-    if (rawSourceCommand) return await this.authorityRawSourceCommand(envelope, session, resource, capability!);
+    if (rawSourceCommand) return await this.authorityRawSourceCommand(envelope, session);
     return await this.ctx.blockConcurrencyWhile(async () => {
       const current = await this.authoritySnapshot();
       const coordinator = new AuthorityPlaneCoordinator(current);
@@ -1511,7 +1512,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
 
   /** Retained exact-selector compatibility API. Full owner disclosure is not
    * a write grant: every contributing Source still requires the current kernel. */
-  private async authorityRawSourceCommand(command: AuthorityCommand, session: AuthoritySession, resource: ResourceRef, capability: Capability): Promise<Response> {
+  private async authorityRawSourceCommand(command: AuthorityCommand, session: AuthoritySession): Promise<Response> {
     return await this.ctx.blockConcurrencyWhile(async () => {
       const identity = this.requireIdentity(); const rollback = identity.captureOperationalRollback();
       try {
@@ -1519,14 +1520,10 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
           const current = await this.authoritySnapshot();
           const owner = this.authorityOwnerSession(session.sessionId);
           if (!this.authorityDisclosure(current, owner).completeRealm()) disclosedCommandError();
-          const p = command.payload; const project = typeof p.projectId === "string" && current.projects[p.projectId];
-          if (!project) disclosedCommandError();
-          const workspace = typeof p.workspaceId === "string" ? current.workspaces[p.workspaceId] : undefined;
-          const viewId = workspace?.projectViewId ?? (typeof p.projectViewId === "string" ? p.projectViewId : undefined);
-          const view = viewId && current.projectViews[viewId];
-          const selected = command.command === "workspace.create" ? p.sourceSpaceIds ?? project.sourceSpaceIds : view && view.projectId === project.id ? view.visibleSourceSpaceIds : undefined;
-          if (!Array.isArray(selected) || !selected.length || selected.some(id => typeof id !== "string" || !current.sourceSpaces[id] || !project.sourceSpaceIds.includes(id)) || new Set(selected).size !== selected.length) disclosedCommandError();
-          const sourceSpaceIds = selected as string[];
+          const prepared = prepareRawSourceCommand({ snapshot: current, command, session: owner,
+            actorPrincipal: actorId => identity.getRecoverySnapshot().actors[actorId]?.principalId });
+          const { resource, sourceSpaceIds, capability } = prepared;
+          const p = prepared.command.payload;
           const effects = command.command === "revision.publish" ? p.declaredEffects ?? [] : [];
           if (!Array.isArray(effects) || effects.some(effect => typeof effect !== "string" || !effect.trim())) disclosedCommandError("invalid_request");
           const live = identity.validateSession(owner.sessionId);
@@ -1535,13 +1532,16 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
             for (const sourceSpaceId of sourceSpaceIds) for (const action of ["source.read", capability] as const) identity.authorize({ operation: command.command, capability: action, principalId: live.principalId, actorId: live.actorId, clientId: live.clientId, sessionId: live.id, taskId: issued.task.id, grantId: issued.grant.id, resource: { ...resource, sourceSpaceId }, sourceSpaceId, protected: true });
           };
           authorize();
-          if (scanCredentialMaterial(command, "sourceCommand")) disclosedCommandError("invalid_request");
-          const replay = Object.hasOwn(current.idempotency, command.idempotencyKey);
-          const prepared = command.command === "revision.publish" ? await this.prepareHostedRevision(current, command) : command;
+          if (scanCredentialMaterial(command, "sourceCommand") || identity.containsKnownCredentialMaterial(command)) disclosedCommandError("invalid_request");
+          if (prepared.requestConflict) disclosedCommandError("conflict");
+          let acceptedCommand = prepared.command;
+          if (!prepared.replay && acceptedCommand.command === "run.request") acceptedCommand = { ...acceptedCommand, payload: { ...acceptedCommand.payload, policyVersion: identity.realm.policyVersion, capabilityGrantId: issued.grant.id } };
+          if (!prepared.replay && acceptedCommand.command === "revision.publish") acceptedCommand = await this.prepareHostedRevision(current, acceptedCommand);
+          if (scanCredentialMaterial(acceptedCommand, "preparedCommand") || identity.containsKnownCredentialMaterial(acceptedCommand)) disclosedCommandError("invalid_request");
           authorize();
           const coordinator = new AuthorityPlaneCoordinator(current);
-          const result = coordinator.execute(prepared, { ...owner, taskId: issued.task.id, capabilityGrantId: issued.grant.id });
-          if (replay) rollback();
+          const result = coordinator.execute(acceptedCommand, { ...owner, taskId: issued.task.id, capabilityGrantId: issued.grant.id });
+          if (prepared.replay) rollback();
           else { await this.persistAuthoritySnapshot(current, coordinator.snapshot()); await this.persistIdentity(); }
           return coordinatorJson({ ...result, credentialFree: true, canonicalWrite: false }, result.status === "succeeded" ? 200 : 409);
         });
@@ -1592,6 +1592,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return await this.ctx.blockConcurrencyWhile(async () => {
       const current = await this.authoritySnapshot();
       const coordinator = new AuthorityPlaneCoordinator(current);
+      if (this.requireIdentity().containsKnownCredentialMaterial(completionValue)) return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "invalid_request", receipt: "runnerCompletion=not-accepted; details=not-disclosed; credentialMaterialStored=false" }, 422);
       const result = await coordinator.completeRunner(command, session);
       await this.persistAuthoritySnapshot(current, coordinator.snapshot());
       return coordinatorJson({ ...result, provenance: { runnerId, clientId: session.clientId, sessionId: session.sessionId, authorizationEpoch: session.authorizationEpoch }, credentialFree: true, canonicalWrite: false, receipt: `${result.receipt}; authority=runner-completion; runner=${runnerId}; canonicalWrite=false` }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);

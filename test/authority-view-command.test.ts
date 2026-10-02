@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AuthorityDisclosure } from "../apps/realm-worker/src/authority-disclosure.ts";
-import { prepareDisclosedCommand, disclosedCommandResult } from "../apps/realm-worker/src/authority-view-command.ts";
+import { prepareDisclosedCommand, prepareRawSourceCommand, disclosedCommandResult } from "../apps/realm-worker/src/authority-view-command.ts";
 import { AuthorityPlaneCoordinator, AuthorityPlaneError, type AuthoritySession } from "../src/cloudflare/authority-plane.ts";
 import { RealmIdentityPolicy } from "../src/identity/realm.ts";
 import { disclosureFixture, disclosureClock } from "./fixtures/authority-disclosure-state.ts";
@@ -85,4 +85,25 @@ test("revocation gates a previously accepted request and a forged cached actor c
   const key = first.prepared.command.idempotencyKey; const fingerprint = JSON.parse(f.state.idempotency[key]!.fingerprint) as typeof first.prepared.command;
   (fingerprint.payload.disclosedCommand as Record<string, unknown>).actorId = f.members.owner!.session.actorId;
   f.state.idempotency[key]!.fingerprint = JSON.stringify(fingerprint); assert.throws(() => prepare(f, body), error("not_found"));
+});
+
+test("retained Source commands derive Workspace and Change scope from published records", () => {
+  const f = disclosureFixture(); const c = context(f);
+  const revision = f.state.changeRevisions["revision:public"]!;
+  const run = prepareRawSourceCommand({ snapshot: f.state, command: { protocol: "anyam.authority-command/v1", command: "run.request", idempotencyKey: "raw-derived", payload: { projectId: "project:fixture", changeRevisionId: revision.id, projectRevisionId: revision.projectRevisionId, projectViewId: revision.projectViewId, actionId: "action:test" } }, session: c.session, actorPrincipal: id => f.identity.actors[id]?.principalId, allocateId: kind => `${kind}:derived` });
+  assert.deepEqual(run.resource, { realmId: f.state.realmId, projectId: "project:fixture", workspaceId: "workspace:public", changeId: "change:public", runId: "run:derived" });
+  const publish = prepareRawSourceCommand({ snapshot: f.state, command: { protocol: "anyam.authority-command/v1", command: "revision.publish", idempotencyKey: "raw-publish", payload: { projectId: "project:fixture", changeId: "change:public", sourceSpaceSnapshots: { "source:public": "b".repeat(40) } } }, session: c.session, actorPrincipal: id => f.identity.actors[id]?.principalId });
+  assert.equal(publish.resource.workspaceId, "workspace:public"); assert.equal(publish.resource.changeId, "change:public");
+  assert.equal(publish.command.payload.projectViewId, revision.projectViewId);
+});
+
+test("retained replay uses first accepted scope before reporting changed input", () => {
+  const f = disclosureFixture(); const c = context(f);
+  const request = { protocol: "anyam.authority-command/v1" as const, command: "workspace.create" as const, idempotencyKey: "raw-replay", payload: { projectId: "project:fixture", projectRevisionId: "canonical:base", sourceSpaceIds: ["source:public"] } };
+  const options = { snapshot: f.state, session: c.session, actorPrincipal: (id: string) => f.identity.actors[id]?.principalId, allocateId: (kind: string) => `${kind}:raw-replay` };
+  const prepared = prepareRawSourceCommand({ ...options, command: request });
+  const coordinator = new AuthorityPlaneCoordinator(f.state); coordinator.execute(prepared.command, c.session); f.state = coordinator.snapshot();
+  const replay = prepareRawSourceCommand({ ...options, snapshot: f.state, command: { ...request, payload: { ...request.payload, sourceSpaceIds: ["source:hidden"] } } });
+  assert.equal(replay.replay, true); assert.equal(replay.requestConflict, true); assert.deepEqual(replay.sourceSpaceIds, ["source:public"]);
+  assert.equal(replay.resource.workspaceId, "workspace:raw-replay");
 });

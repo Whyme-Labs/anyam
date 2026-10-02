@@ -16,6 +16,14 @@ export type ArtifactsQualificationInput = {
   selections: readonly ArtifactsWorkspaceSelection[];
   credentialExpiresAt: string;
 };
+
+/** Shared pre-effect validation for the invoker and its trusted host. */
+export function assertArtifactsQualificationInput(input: Readonly<ArtifactsQualificationInput>, accountId: string, namespace: string): void {
+  const names = new Set(input.selections.map(selection => selection.targetName));
+  const assignments = new Set(input.selections.map(selection => JSON.stringify([selection.workspaceId, selection.sourceSpaceId])));
+  if (typeof input.runId !== "string" || !input.runId.trim() || !["local-fixture", "live-approved"].includes(input.execution) || !input.selections.length || names.size !== input.selections.length || assignments.size !== input.selections.length) throw new Error("qualification scope is invalid");
+  for (const selection of input.selections) assertArtifactsWorkspaceSelection(selection, accountId, namespace);
+}
 type QualificationResource = {
   selection: ArtifactsWorkspaceSelection;
   repositoryId?: string;
@@ -53,13 +61,15 @@ export type ArtifactsQualificationLedger = {
 
 /** Credential-free run custody; synchronous writes precede provider effects. */
 export class SQLiteArtifactsQualificationLedger implements ArtifactsQualificationLedger {
-  constructor(private readonly host: AuthoritySqlHost) {
-    host.transactionSync(() => host.sql.exec("CREATE TABLE IF NOT EXISTS anyam_artifacts_qualification_runs (run_id TEXT PRIMARY KEY, payload TEXT NOT NULL)"));
-  }
+  constructor(private readonly host: AuthoritySqlHost) {}
   reserve(run: ArtifactsQualificationRun): boolean {
-    return this.host.transactionSync(() => this.host.sql.exec("INSERT INTO anyam_artifacts_qualification_runs (run_id, payload) VALUES (?, ?) ON CONFLICT DO NOTHING RETURNING run_id", run.input.runId, JSON.stringify(run)).toArray().length === 1);
+    return this.host.transactionSync(() => {
+      this.host.sql.exec("CREATE TABLE IF NOT EXISTS anyam_artifacts_qualification_runs (run_id TEXT PRIMARY KEY, payload TEXT NOT NULL)");
+      return this.host.sql.exec("INSERT INTO anyam_artifacts_qualification_runs (run_id, payload) VALUES (?, ?) ON CONFLICT DO NOTHING RETURNING run_id", run.input.runId, JSON.stringify(run)).toArray().length === 1;
+    });
   }
   read(runId: string): ArtifactsQualificationRun | undefined {
+    if (!this.host.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'anyam_artifacts_qualification_runs'").toArray().length) return undefined;
     const row = this.host.sql.exec<{ payload: string }>("SELECT payload FROM anyam_artifacts_qualification_runs WHERE run_id = ?", runId).toArray()[0];
     return row ? JSON.parse(row.payload) as ArtifactsQualificationRun : undefined;
   }
@@ -102,11 +112,7 @@ export class ArtifactsWorkspaceQualification {
     let failure = "qualification.scope_invalid";
     let inputDigest: string | undefined;
     try {
-      const names = new Set(request.selections.map(selection => selection.targetName));
-      const assignments = new Set(request.selections.map(selection => JSON.stringify([selection.workspaceId, selection.sourceSpaceId])));
-      if (!request.runId.trim() || !["local-fixture", "live-approved"].includes(request.execution) || !request.selections.length ||
-          names.size !== request.selections.length || assignments.size !== request.selections.length) throw new Error("qualification scope is invalid");
-      for (const selection of request.selections) assertArtifactsWorkspaceSelection(selection, this.options.accountId, this.options.namespace);
+      assertArtifactsQualificationInput(request, this.options.accountId, this.options.namespace);
       const boundInputDigest = `sha256:${await this.fingerprint(JSON.stringify({ protocol: "anyam.artifacts-qualification-input/v1", accountId: this.options.accountId, namespace: this.options.namespace, input: request }))}`;
       inputDigest = boundInputDigest;
       failure = "qualification.authorization_denied";

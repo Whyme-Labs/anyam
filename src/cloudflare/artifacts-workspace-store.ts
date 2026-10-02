@@ -53,14 +53,15 @@ export class MemoryArtifactsWorkspaceStore implements ArtifactsWorkspaceStore {
  * A Realm must supply and qualify the actual durable host; this is no deployment. */
 export class SQLiteArtifactsWorkspaceStore implements ArtifactsWorkspaceStore {
   readonly storage = "sqlite-contract";
-  constructor(private readonly host: AuthoritySqlHost) {
-    host.transactionSync(() => host.sql.exec("CREATE TABLE IF NOT EXISTS anyam_artifacts_workspaces (row_key TEXT PRIMARY KEY, account_id TEXT NOT NULL, namespace TEXT NOT NULL, target_name TEXT NOT NULL, repository_id TEXT UNIQUE, payload TEXT NOT NULL, UNIQUE(account_id, namespace, target_name))"));
-  }
+  constructor(private readonly host: AuthoritySqlHost) {}
   reserve(selection: ArtifactsWorkspaceSelection): boolean {
-    return this.host.transactionSync(() => this.host.sql.exec(
-      "INSERT INTO anyam_artifacts_workspaces (row_key, account_id, namespace, target_name, payload) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING RETURNING row_key",
-      key(selection), selection.sourceRepository.accountId, selection.sourceRepository.namespace, selection.targetName, JSON.stringify({ selection, tokenIds: [], blocked: false, unknownTokenInventory: false, pendingOperation: "none" }),
-    ).toArray().length === 1);
+    return this.host.transactionSync(() => {
+      this.host.sql.exec("CREATE TABLE IF NOT EXISTS anyam_artifacts_workspaces (row_key TEXT PRIMARY KEY, account_id TEXT NOT NULL, namespace TEXT NOT NULL, target_name TEXT NOT NULL, repository_id TEXT UNIQUE, payload TEXT NOT NULL, UNIQUE(account_id, namespace, target_name))");
+      return this.host.sql.exec(
+        "INSERT INTO anyam_artifacts_workspaces (row_key, account_id, namespace, target_name, payload) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING RETURNING row_key",
+        key(selection), selection.sourceRepository.accountId, selection.sourceRepository.namespace, selection.targetName, JSON.stringify({ selection, tokenIds: [], blocked: false, unknownTokenInventory: false, pendingOperation: "none" }),
+      ).toArray().length === 1;
+    });
   }
   read(selection: ArtifactsWorkspaceKey): ArtifactsWorkspaceRecord | undefined { return this.load("row_key", key(selection)); }
   repository(repositoryId: string): ArtifactsWorkspaceRecord | undefined { return this.load("repository_id", repositoryId); }
@@ -73,12 +74,17 @@ export class SQLiteArtifactsWorkspaceStore implements ArtifactsWorkspaceStore {
     });
   }
   release(selection: ArtifactsWorkspaceSelection): void {
+    if (!this.hasTable()) return;
     this.host.transactionSync(() => {
       if (!this.read(selection)?.blocked) this.host.sql.exec("DELETE FROM anyam_artifacts_workspaces WHERE row_key = ?", key(selection));
     });
   }
   private load(column: "row_key" | "repository_id", value: string): ArtifactsWorkspaceRecord | undefined {
+    if (!this.hasTable()) return undefined;
     const row = this.host.sql.exec<{ payload: string }>(`SELECT payload FROM anyam_artifacts_workspaces WHERE ${column} = ?`, value).toArray()[0];
     return row ? JSON.parse(row.payload) as ArtifactsWorkspaceRecord : undefined;
+  }
+  private hasTable(): boolean {
+    return this.host.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'anyam_artifacts_workspaces'").toArray().length > 0;
   }
 }

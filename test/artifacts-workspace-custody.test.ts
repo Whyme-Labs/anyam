@@ -31,7 +31,7 @@ async function withCustody(run: (input: { fixture: ReturnType<typeof artifactsBi
     };
     return new ArtifactsWorkspaceAdapter({ artifacts: fixture.binding, accountId: "account-a", namespace: "private", authorize: fixture.authorize, now: () => fixture.now, ...options, store: new SQLiteArtifactsWorkspaceStore(host) });
   }
-  try { await run({ fixture, control, reopen: () => { database.close(); database = new DatabaseSync(path); }, metadata: () => JSON.stringify(database.prepare("SELECT payload FROM anyam_artifacts_workspaces").all()), failWriteOnce: pattern => { writeFailure = pattern; } }); }
+  try { await run({ fixture, control, reopen: () => { database.close(); database = new DatabaseSync(path); }, metadata: () => JSON.stringify(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'anyam_artifacts_workspaces'").get() ? database.prepare("SELECT payload FROM anyam_artifacts_workspaces").all() : []), failWriteOnce: pattern => { writeFailure = pattern; } }); }
   finally { database.close(); await rm(directory, { recursive: true, force: true }); }
 }
 

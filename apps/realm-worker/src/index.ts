@@ -51,8 +51,13 @@ import { MIRROR_HANDOFF_AUDIENCE, MIRROR_INGESTION_PROTOCOL, verifyMirrorIngesti
 import { GITHUB_WEBHOOK_INGRESS_PROTOCOL, type GitHubWebhookIngressEnvelope } from "../../../src/portability/github-webhook.ts";
 import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
 import { isAnyamOAuthPath } from "../../../src/cloudflare/oauth-path.ts";
+import { RealmArtifactsQualification, type RealmArtifactsQualificationRequest, type ArtifactsRealmAuthorization } from "./artifacts-qualification.ts";
 
-export type Env = AnyamRealmOAuthEnv;
+export type Env = AnyamRealmOAuthEnv & {
+  ANYAM_ARTIFACTS?: Artifacts;
+  ANYAM_ARTIFACTS_ACCOUNT_ID?: string;
+  ANYAM_ARTIFACTS_NAMESPACE?: string;
+};
 
 const REALM_IDENTITY_SNAPSHOT_KEY = "anyam/realm-identity/snapshot/v1";
 const REALM_RECOVERY_STATUS_KEY = "anyam/realm-identity/recovery-status/v1";
@@ -748,6 +753,34 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   private requireIdentity(): RealmIdentityPolicy {
     if (!this.identity) throw new Error("realm identity is not hydrated");
     return this.identity;
+  }
+
+  /** Private namespace RPC only; the public HTTP router exposes no Artifacts
+   * mutation or credential path. Current owner/Task/Grant checks occur inside. */
+  async qualifyArtifacts(request: RealmArtifactsQualificationRequest) {
+    await this.initialized;
+    const qualifier = this.artifactsQualifier();
+    return qualifier ? qualifier.run(request) : { status: "blocked", code: "artifacts.binding_unconfigured", liveQualified: false };
+  }
+
+  async cleanupArtifacts(request: ArtifactsRealmAuthorization & { runId: string }) {
+    await this.initialized;
+    const qualifier = this.artifactsQualifier();
+    return qualifier ? qualifier.cleanup(request) : { status: "blocked", code: "artifacts.binding_unconfigured", liveQualified: false };
+  }
+
+  private artifactsQualifier(): RealmArtifactsQualification | undefined {
+    const artifacts = this.env.ANYAM_ARTIFACTS;
+    const accountId = this.env.ANYAM_ARTIFACTS_ACCOUNT_ID?.trim();
+    const namespace = this.env.ANYAM_ARTIFACTS_NAMESPACE?.trim();
+    if (!artifacts || !accountId || !namespace) return undefined;
+    return new RealmArtifactsQualification({ artifacts, accountId, namespace, sql: this.ctx.storage as unknown as AuthoritySqlHost, current: async () => {
+      const recoveryActive = this.recoveryStatus === "active" && await this.authorityRecoveryStatus() === "active";
+      const identity = this.requireIdentity();
+      const authority = this.authoritySqliteStore().readExisting(identity.realm.id);
+      if (!authority) throw new Error("artifacts.authority_unconfigured");
+      return { identity, authority, active: recoveryActive };
+    } });
   }
 
   private requireGitHubActionsBridge(): GitHubActionsBridgeAuthority {
@@ -1498,7 +1531,8 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const handoffValue = body.handoff;
     const handoffCredentialFinding = scanCredentialMaterial(handoffValue, "mirrorHandoff");
     if (handoffCredentialFinding) throw new AuthorityPlaneError({ code: "invalid_request", message: "The signed Mirror handoff contains credential material.", recoveryAction: "remove provider credentials from the handoff and submit only typed identities, digests, and receipts", receipt: `mirrorIngestion=credential-material; field=${handoffCredentialFinding.path}; providerInvocation=false; transition=not-applied` });
-    const candidateMirrorId = handoffValue !== null && typeof handoffValue === "object" && !Array.isArray(handoffValue) && typeof (handoffValue as Record<string, unknown>).mirrorId === "string" ? (handoffValue as Record<string, unknown>).mirrorId.trim() : "";
+    const candidateMirrorValue = handoffValue !== null && typeof handoffValue === "object" && !Array.isArray(handoffValue) ? (handoffValue as Record<string, unknown>).mirrorId : undefined;
+    const candidateMirrorId = typeof candidateMirrorValue === "string" ? candidateMirrorValue.trim() : "";
     const current = await this.authoritySnapshot();
     const mirror = candidateMirrorId ? current.mirrors[candidateMirrorId] : undefined;
     if (!mirror) throw new AuthorityPlaneError({ code: "not_found", message: "The signed Mirror handoff names an unavailable Mirror.", recoveryAction: "configure the Mirror in this Realm and request a fresh signed handoff", receipt: `mirror=${candidateMirrorId || "missing"}; mirrorIngestion=not-found; providerInvocation=false; transition=not-applied` });

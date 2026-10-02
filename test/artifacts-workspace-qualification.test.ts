@@ -70,7 +70,10 @@ async function openQualification() {
   function control(overrides: Partial<ArtifactsQualificationOptions> = {}) {
     return new module.ArtifactsWorkspaceQualification({ artifacts, accountId: "account-a", namespace: "private", authorizeRun: async () => {}, authorize: fixture.authorize, now: () => fixture.now, store: new SQLiteArtifactsWorkspaceStore(host), ledger: new module.SQLiteArtifactsQualificationLedger(host), deleteOwned, ...overrides });
   }
-  return { fixture, deleted, control, artifacts, blockLedgerWrites: (blocked: boolean) => { ledgerWritesUnavailable = blocked; }, failWriteOnce: (query: string) => { writeFailure = query; }, record: (runId: string) => new module.SQLiteArtifactsQualificationLedger(host).read(runId), metadata: () => JSON.stringify({ runs: database.prepare("SELECT payload FROM anyam_artifacts_qualification_runs").all(), custody: database.prepare("SELECT payload FROM anyam_artifacts_workspaces").all() }), reopen: () => { database.close(); database = new DatabaseSync(path); }, close: async () => { database.close(); await rm(directory, { recursive: true, force: true }); } };
+  function metadataRows(table: "anyam_artifacts_qualification_runs" | "anyam_artifacts_workspaces") {
+    return database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) ? database.prepare(`SELECT payload FROM ${table}`).all() : [];
+  }
+  return { fixture, deleted, control, artifacts, blockLedgerWrites: (blocked: boolean) => { ledgerWritesUnavailable = blocked; }, failWriteOnce: (query: string) => { writeFailure = query; }, record: (runId: string) => new module.SQLiteArtifactsQualificationLedger(host).read(runId), metadata: () => JSON.stringify({ runs: metadataRows("anyam_artifacts_qualification_runs"), custody: metadataRows("anyam_artifacts_workspaces") }), reopen: () => { database.close(); database = new DatabaseSync(path); }, close: async () => { database.close(); await rm(directory, { recursive: true, force: true }); } };
 }
 
 test("Artifacts one-shot qualification persists a redacted resource/token ledger and confirms owned cleanup", async () => {

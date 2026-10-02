@@ -115,6 +115,42 @@ prove arbitrary histories, concurrent writes, liveness, full SCM refinement,
 provider behavior or the whole product. Earlier recollections attributed to
 Anyam #184/#194 are not evidence of a shipped formal model.
 
+## Local Realm composition
+
+`npm run qualification:artifacts-realm-local` executes the production qualification
+composition in local workerd with actual Durable Object SQLite and an explicitly
+fake Artifacts provider. It checks current human owner Session/Task/Grant chains,
+Source Space policy and exact authoritative Project/Revision/View/Workspace/base
+bindings. Selected Workspaces must have a human creator belonging to the current
+owner Principal; delegated-agent Workspaces remain a separate qualification gate.
+Fresh owner Sessions and Task/Grants can reconcile the recorded scope after the
+original Session is revoked, preserving its Workspace Actor and input digest.
+Input receipts carry a SHA-256
+digest of the exact allowlisted run envelope. Session handles known to the current
+Realm cannot be copied into this metadata. This is a literal known-handle guard, not a detector
+for arbitrary unknown or encoded credentials.
+
+The actual `AnyamRealmCoordinator` exposes private namespace RPC methods
+`qualifyArtifacts` and `cleanupArtifacts`. There is no corresponding public HTTP
+route. Local tests exercise their absent-Authority denial through actual workerd
+RPC and verify no provider access or schema initialization. The authorized path
+is tested through the production composition using actual identity/Authority
+objects and durable storage; full hosted ingress and owner ceremony remain
+unqualified. The fixture pins its clock and fake passkey verification explicitly.
+
+Custody constructors and reads do not create schemas. Schema initialization and
+reservation share a synchronous transaction after current authorization. The
+runtime suite checks initial and renewed denials, session-handle aliases, exact
+restart custody, duplicate runs, revocation and recreated repository UUIDs.
+This composition supplies no deletion port: known-token retirement can pass while
+repository cleanup remains required. No name-only deletion is substituted.
+
+The Node runtime harness is `.mjs` because the pinned Miniflare alpha's published
+type declarations reference unavailable internal packages. Its Worker fixture is
+covered by the strict Worker-test project and intentional-error inclusion probe.
+The harness is included in `npm test`. No live Artifacts, provider Git, real token
+timing, hosted authorization/storage or native coding-harness evidence is claimed.
+
 ## Adapter boundary
 
 `ArtifactsWorkspaceSelection` pins Project, Project Revision, Project View,

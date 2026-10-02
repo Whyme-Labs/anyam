@@ -29,7 +29,21 @@ export class LocalDisclosureRealm extends AnyamRealmCoordinator {
     const identity: unknown = Reflect.get(this, "identity");
     if (!(identity instanceof RealmIdentityPolicy)) throw new Error("missing current identity");
     const store = new AuthoritySQLiteStore(this.ctx.storage as unknown as AuthoritySqlHost, { empty: emptyAuthorityPlaneSnapshot, normalize: normalizeAuthorityPlaneSnapshot });
-    return { identity: identity.getRecoverySnapshot(), authority: store.load(identity.realm.id), keys: Object.fromEntries(await this.ctx.storage.list()) };
+    return { identity: identity.getRecoverySnapshot(), operationalCredentialRecords: identity.snapshot().credentials, authority: store.load(identity.realm.id), keys: Object.fromEntries(await this.ctx.storage.list()) };
+  }
+  async issueSyntheticCredential() {
+    const identity: unknown = Reflect.get(this, "identity");
+    if (!(identity instanceof RealmIdentityPolicy)) throw new Error("missing current identity");
+    const member = (await this.members())!.owner!; const session = member.session;
+    const resource = { realmId: identity.realm.id, projectId: "project:fixture", sourceSpaceId: "source:public" };
+    const task = identity.createTask({ principalId: session.principalId, actorId: session.actorId, sessionId: session.id, purpose: "synthetic unrelated credential regression" });
+    const grant = identity.createCapabilityGrant({ principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, taskId: task.id, resource, sourceSpaceIds: ["source:public"], actions: ["source.read"], effects: [], allowedCredentialClasses: ["realm-api"] });
+    return identity.issueCredential({ class: "realm-api", principalId: session.principalId, actorId: session.actorId, clientId: session.clientId, sessionId: session.id, taskId: task.id, grantId: grant.id, resource });
+  }
+  async validateSyntheticCredential(token: string) {
+    const identity: unknown = Reflect.get(this, "identity");
+    if (!(identity instanceof RealmIdentityPolicy)) throw new Error("missing current identity");
+    return { valid: identity.validateCredential(token, { class: "realm-api" }).valid };
   }
   async failIdentityWriteOnce() {
     const original: unknown = Reflect.get(this, "persistIdentity");
@@ -55,6 +69,8 @@ export default { async fetch(request: Request, bindings: { REALM_COORDINATOR: Du
   if (url.pathname === "/fixture/revoke") return Response.json(await realm.revoke((await request.json() as { sessionId: string }).sessionId));
   if (url.pathname === "/fixture/checkpoint") return Response.json(await realm.checkpoint());
   if (url.pathname === "/fixture/fail-identity-write-once") return Response.json(await realm.failIdentityWriteOnce());
+  if (url.pathname === "/fixture/issue-synthetic-credential") return Response.json(await realm.issueSyntheticCredential());
+  if (url.pathname === "/fixture/validate-synthetic-credential") return Response.json(await realm.validateSyntheticCredential((await request.json() as { token: string }).token));
   if (url.pathname.startsWith("/authority/")) return realm.fetch(request);
   const name = request.headers.get("x-fixture-member") ?? "public";
   const member = (await realm.members())?.[name];

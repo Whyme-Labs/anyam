@@ -114,7 +114,7 @@ export function prepareDisclosedCommand(input: {
         if (!c || !d.change(c.id) || c.workspaceId !== workspaceId || c.projectId !== projectId || c.baseProjectRevisionId !== p.baseProjectRevisionId || c.author?.actorId !== (p.disclosedCommand as Record<string, unknown>).actorId) disclosedCommandError();
       } else {
         if (w.changeId || w.state !== "active") disclosedCommandError("conflict");
-        if (p.intentId !== undefined && !d.intent(string(p.intentId))) disclosedCommandError();
+        if (!d.intent(string(p.intentId))) disclosedCommandError();
         p.changeId = allocateId("change"); p.baseProjectRevisionId = w.projectRevisionId;
       }
     } else {

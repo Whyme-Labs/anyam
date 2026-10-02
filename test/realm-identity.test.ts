@@ -212,6 +212,17 @@ test("returns a disclosure-safe not_found explanation for hidden Source Spaces",
   }), (error: unknown) => error instanceof RealmIdentityError && error.code === "not_found" && !JSON.stringify(error).includes("private-codec"));
 });
 
+test("operational rollback preserves credential digests while recovery snapshots remain credential-free", () => {
+  const { realm, passkeySession } = createRealm(); const { task, grant } = taskAndGrant(realm, passkeySession);
+  const credential = realm.issueCredential({ class: "git", principalId: passkeySession.principalId, actorId: passkeySession.actorId, clientId: passkeySession.clientId, sessionId: passkeySession.id, taskId: task.id, grantId: grant.id, resource: grant.resource });
+  const before = realm.snapshot(); const rollback = realm.captureOperationalRollback();
+  realm.revokeCredential(credential.id); assert.equal(realm.validateCredential(credential.token).valid, false);
+  rollback(); assert.deepEqual(realm.snapshot(), before); assert.equal(realm.validateCredential(credential.token).valid, true);
+  const recovery = realm.getRecoverySnapshot(); assert.equal(Object.hasOwn(recovery, "credentials"), false);
+  assert.equal(JSON.stringify(before).includes(credential.token), false);
+  assert.equal(typeof rollback, "function"); assert.equal(JSON.stringify({ rollback }), "{}");
+});
+
 test("issues separate audience credentials and revokes each path independently", () => {
   const { realm, passkeySession } = createRealm();
   const brokerSession = realm.authenticatePasskey({ credentialId: "passkey:wei", challenge: "broker-challenge", verified: true, clientId: "client:test-broker" });

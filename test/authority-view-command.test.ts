@@ -44,6 +44,15 @@ test("32 hidden-only canonical replacements preserve the public command identity
   }
 });
 
+test("fresh Change requires a disclosed Intent and never infers private or missing Intent authority", () => {
+  const f = disclosureFixture(); const workspace = accept(f, workspaceRequest(f));
+  const body = { command: "change.create", idempotencyKey: "change-intent", payload: { projectId: "project:fixture", workspaceId: "workspace:new-visible", baseProjectViewRevisionId: (workspace.response.value as { workspace: { projectViewRevisionId: string } }).workspace.projectViewRevisionId } };
+  assert.throws(() => prepare(f, body), error("invalid_request"));
+  for (const intentId of ["intent:PRIVATE-absent", "intent:restricted"]) assert.throws(() => prepare(f, { ...body, payload: { ...body.payload, intentId } }), error("not_found"));
+  const prepared = prepare(f, { ...body, payload: { ...body.payload, intentId: "intent:collaboration" } });
+  assert.equal(prepared.command.payload.intentId, "intent:collaboration");
+});
+
 test("idempotent retry retains the first accepted exact resolution after hidden canonical activity", () => {
   const f = disclosureFixture(); const body = workspaceRequest(f); const first = accept(f, body);
   f.state.projectRevisions["PRIVATE-new-canonical"] = { ...f.state.projectRevisions["canonical:base"]!, id: "PRIVATE-new-canonical", sourceSpaceSnapshots: { ...f.state.projectRevisions["canonical:base"]!.sourceSpaceSnapshots, "source:hidden": "PRIVATE-next" } };

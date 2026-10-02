@@ -21,6 +21,7 @@ import {
 import type { NormalizedActionInput, NormalizedActionOutput } from "../src/execution/local.ts";
 import { AuthorityDisclosure } from "../apps/realm-worker/src/authority-disclosure.ts";
 import { acceptedOwnerRunDetail } from "../apps/realm-worker/src/accepted-run-detail.ts";
+import { createAuthorityRecoveryBundle, verifyAuthorityRecoveryBundle } from "../src/cloudflare/authority-recovery.ts";
 
 const realmId = "realm:runner-authority-completion";
 const projectId = "project:runner-authority-completion";
@@ -206,6 +207,10 @@ test("Authority consumes one signed Runner completion atomically and idempotentl
   assert.ok(detail); assert.equal(detail.proof.signatureVerified, true); assert.equal(detail.proof.resultDigest, completion.resultDigest);
   assert.equal(detail.context.inputManifestDigest, completion.job.inputManifestDigest);
   assert.doesNotMatch(JSON.stringify(detail), /sessionId|capabilityGrantId|publicKey|privateKey|credentialId|networkBoundaryReceipt|toolchainDigest|environmentDigest|dependencyDigest|"receipt":.*enrollment/u);
+  const bundle = await createAuthorityRecoveryBundle({ snapshot, bundleId: "bundle:accepted-proof", recoveryKeyId: "key:synthetic", secret: "synthetic-recovery-only" });
+  const verified = await verifyAuthorityRecoveryBundle({ value: bundle, realmId, recoveryKeyId: "key:synthetic", secret: "synthetic-recovery-only" });
+  assert.equal(verified.valid, true);
+  if (verified.valid) assert.deepEqual(verified.bundle.snapshot.runDetails[fixture.runId], snapshot.runDetails[fixture.runId]);
   const replay = await fixture.authority.completeRunner(command, runnerSession);
   assert.deepEqual(replay, accepted);
   assert.equal(fixture.authority.snapshot().version, 7);
@@ -239,6 +244,22 @@ test("an enrolled signed Runner cannot add an undeclared Source to the accepted 
   const before = fixture.authority.snapshot();
   await assert.rejects(() => fixture.authority.completeRunner({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "runner.complete", idempotencyKey: "unbound-source", payload: { completion } }, runnerSession), /exact producing View and Revision/u);
   assert.deepEqual(fixture.authority.snapshot(), before);
+});
+
+test("signed credential output and unsigned credential metadata cannot enter accepted Run detail persistence", async () => {
+  for (const mode of ["signed-output", "unsigned-job"] as const) {
+    const fixture = setup(); const runnerFixture = makeRunner(fixture.input, fixture.runId);
+    fixture.authority.registerRunnerProfile(runnerFixture.profile, runnerSession);
+    if (mode === "signed-output") {
+      const output = { ...runnerFixture.result.output, outputDigest: "Bearer SYNTHETIC-TEST-ONLY", outputDigests: ["dist/result.txt=Bearer SYNTHETIC-TEST-ONLY"] };
+      runnerFixture.result = signedResult(runnerFixture.lease, runnerFixture.keys.privateKey, output);
+    }
+    const completion = runnerFixture.runner.submit({ credential: runnerFixture.lease.credential, result: runnerFixture.result });
+    if (mode === "unsigned-job") Object.assign(completion.job, { providerToken: "SYNTHETIC-TEST-ONLY" });
+    const before = fixture.authority.snapshot();
+    await assert.rejects(() => fixture.authority.completeRunner({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "runner.complete", idempotencyKey: `credential:${mode}`, payload: { completion } }, runnerSession), /credential-free/u);
+    assert.deepEqual(fixture.authority.snapshot(), before);
+  }
 });
 
 test("Authority rejects a signed completion through a human session and leaves queued state untouched", async () => {

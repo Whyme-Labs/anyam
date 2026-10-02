@@ -868,6 +868,7 @@ export class AuthorityPlaneCoordinator {
   private async applyRunnerCompletion(next: AuthorityPlaneSnapshot, command: AuthorityCommand, session: AuthoritySession): Promise<AuthorityCommandResult> {
     const payload = command.payload;
     const completionValue = record(payload.completion, "completion");
+    if (scanCredentialMaterial(completionValue, "completion")) throw new AuthorityPlaneError({ code: "invalid_request", message: "Runner completion must be credential-free.", recoveryAction: "remove credential material before forwarding the signed completion; no state was changed", receipt: "runnerCompletion=credential-material-rejected; transition=not-applied" });
     const result = record(completionValue.result, "completion.result") as unknown as RunnerResult;
     const job = completionValue.job as unknown as RunnerJob;
     const attempt = completionValue.attempt as unknown as RunnerAttempt;

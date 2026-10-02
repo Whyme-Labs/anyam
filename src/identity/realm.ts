@@ -733,6 +733,14 @@ export class RealmIdentityPolicy {
     };
   }
 
+  /** In-memory rollback only. Recovery/hydration intentionally omit live
+   * credential digests; an operational no-op must retain them. This closure
+   * cannot be serialized as a recovery export or persisted as a credential. */
+  captureOperationalRollback(): () => void {
+    const before = clone(this.state);
+    return () => { Object.assign(this.state, clone(before)); };
+  }
+
   restoreRecoverySnapshot(snapshot: RealmRecoverySnapshot): Realm {
     if (snapshot.credentialFree !== true) throw new RealmIdentityError({ code: "recovery.credentials_present", message: "Realm recovery snapshots must not contain active credential material.", recoveryAction: "create a credential-free recovery export and retry verification", receipt: "credentialFree=true required" });
     if (snapshot.realm.id !== this.state.realm.id) throw new RealmIdentityError({ code: "recovery.realm_mismatch", message: "Recovery snapshot belongs to another Realm.", recoveryAction: "restore the snapshot into an installation with the same Realm identity or start a deliberate Realm migration", receipt: `expected=${this.state.realm.id}; actual=${snapshot.realm.id}` });

@@ -10,13 +10,14 @@ checks again. A restricted human does not need an owner recovery export.
 
 Send `{command, idempotencyKey, payload}`. The host Session comes from the
 authenticated cookie. The optional `protocol` is `anyam.authority-command/v1`.
-Creation IDs are server-assigned. Canonical/View IDs, `expectedVersion`, caller
+Creation IDs are server-assigned. Incoming Source writes are credential-scanned
+after current authorization and before persistence. Canonical/View IDs, `expectedVersion`, caller
 Task/Grant IDs and unknown fields are rejected. The supported payload fields are:
 
 | Command | Required selectors | Optional inputs | Capability |
 | --- | --- | --- | --- |
 | `workspace.create` | `projectId`, `projectViewRevisionId` from Project read | `sourceSpaceIds` (defaults to readable Sources), `mounts`, `classification` | `workspace.write` |
-| `change.create` | `projectId`, `workspaceId`, `baseProjectViewRevisionId` from Workspace read | currently disclosed `intentId` | `change.publish_revision` |
+| `change.create` | `projectId`, `workspaceId`, `baseProjectViewRevisionId` from Workspace read, currently disclosed `intentId` | none | `change.publish_revision` |
 | `revision.publish` | `projectId`, `workspaceId`, `changeId`, `baseProjectViewRevisionId`, exact selected `sourceSpaceSnapshots` map | `declaredEffects`, `kind`, `expectedSymbolicRef` | `change.publish_revision` |
 | `run.request` | `projectId`, `workspaceId`, `changeRevisionId`, `projectViewRevisionId` from the published Revision, `actionId` | `actionContractDigest`, `verifierId`, `verifierContractDigest`, `inputDigests`, `effectDigests`, `dependencyDigest`, `toolchainDigest`, `environmentDigest` | `run.invoke` |
 
@@ -38,7 +39,8 @@ appear. Revocation always takes precedence over a prior acceptance. Caller
 idempotency keys are internally scoped to principal, operation, Project,
 Workspace, visible Source scope and incoming selector. Denied writes cannot
 probe payload conflicts. SQL, identity KV and in-memory policy roll back on a
-failed first acceptance.
+failed first acceptance. In-memory rollback retains unrelated live credential
+digests; credential-free recovery exports remain a distinct hydration boundary.
 
 `GET /api/authority/run-details/{encodedRunId}` has a fixed versioned
 `anyam.owner-run-detail/v1` contract. Its audience is an active human Realm-wide
@@ -57,8 +59,11 @@ signed action/verifier identities and contracts, Job/Attempt/Runner identity,
 input-manifest digest reference, Source snapshots, input/output digests and
 verified result digest. Actor/Session/Grant/credential handles, public key,
 unsigned environment/dependency/toolchain metadata, raw logs, provider receipts
-and network-boundary receipt are omitted. Aliases of known Session handles in
-otherwise typed strings are denied as well. Ordinary REST/MCP Run reads remain
+and network-boundary receipt are omitted. The common credential scanner rejects
+credential material before accepted proof is stored and before detail is
+projected. Aliases of known Session handles in
+otherwise typed strings are denied as well, including known Grant/passkey
+handles and Runner credential digests. Ordinary REST/MCP Run reads remain
 coarse even when an accepted detail exists.
 
 This is accepted signed context for an owner. It does not recompute the body
@@ -66,8 +71,14 @@ behind the opaque input-manifest digest, prove artifact bytes, attest a real
 process/network sandbox, publish a Sealed Verifier, implement external
 invocation/opt-in/appeal, or approve a private Intent/Mirror/Promotion projection.
 Public Sealed Verifier contracts from ADR 0004/0032 remain a separate product
-gap. Raw legacy commands for the four Source operations are owner-only; this
+gap. Raw legacy commands for the four Source operations are owner-only and now
+also require current per-Source kernel read/write authorization. Their first
+acceptance commits identity and SQL together, and cached results are checked
+under current permissions without persisting a new Task/Grant. This
 qualification does not claim disclosure-safe output for every legacy mutation.
+Signed recovery includes the new proof collection. Previously signed snapshots
+that lack that additive collection verify unchanged before normalization to an
+empty collection; this does not fabricate proof for older Runs.
 
 ## Local qualification
 
@@ -87,7 +98,9 @@ real Ed25519 signatures, synthetic Runner results, denied outbound requests and
 disabled telemetry. It verifies a public single-Source lifecycle inside a
 two-Source Project, accepted retries after hidden canonical activity, denied
 cached writes, rollback after actual SQL/KV writes, owner detail revocation,
-proof tampering, signed Session aliases and authorized multi-Source Workspace
+proof tampering, credential strings, signed protected-handle aliases, retention
+of unrelated live credential digests, signed current/legacy recovery and
+authorized multi-Source Workspace
 creation with public observation unchanged. Node orchestration `.mjs` is run,
 not covered by Worker TypeScript. No live credential ceremony, Git provider,
 paid model, deployment or production write is qualified by this fixture.

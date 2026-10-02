@@ -1,6 +1,7 @@
 import type { AuthorityPlaneSnapshot } from "../../../src/cloudflare/authority-plane.ts";
 import { runnerResultContextClaims, runnerResultDigest, runnerResultMessage, verifyRunnerResultSignature } from "../../../src/execution/runner-proof.ts";
 import { AuthorityDisclosure } from "./authority-disclosure.ts";
+import { scanCredentialMaterial } from "../../../src/security/credential-material.ts";
 
 const same = (a: unknown, b: unknown): boolean => {
   const normalize = (value: unknown): unknown => Array.isArray(value) ? value.map(normalize) : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, entry]) => [key, normalize(entry)])) : value;
@@ -33,11 +34,12 @@ export async function acceptedOwnerRunDetail(state: AuthorityPlaneSnapshot, disc
       || !same(job.inputDigests, result.output.inputDigests) || !same(result.context, runnerResultContextClaims({ job, attempt }))) return undefined;
     const message = runnerResultMessage({ context: result.context, status: result.status, output: result.output, outputs: result.outputs, ...(result.recoveryAction ? { recoveryAction: result.recoveryAction } : {}) });
     if (!await verifyRunnerResultSignature({ publicKey: enrolled.publicKey, message, signature: result.signature }) || await runnerResultDigest({ jobId: job.id, attemptId: attempt.id, result }) !== detail.resultDigest) return undefined;
-    return { protocol: "anyam.owner-run-detail/v1", audience: "realm-owner", disclosure: "authorized-detail", run: visibleRun,
+    const value = { protocol: "anyam.owner-run-detail/v1", audience: "realm-owner", disclosure: "authorized-detail", run: visibleRun,
       context: { jobId: job.id, attemptId: attempt.id, runnerId: runnerProfile.id, actionId: job.actionId, actionContractDigest: job.actionContractDigest,
         ...(job.verifierId ? { verifierId: job.verifierId } : {}), ...(job.verifierContractDigest ? { verifierContractDigest: job.verifierContractDigest } : {}),
         inputManifestDigest: job.inputManifestDigest, sourceSpaceSnapshots: { ...job.sourceSpaceSnapshots }, inputDigests: [...result.output.inputDigests], outputDigests: [...result.output.outputDigests], outputDigest: result.output.outputDigest },
       proof: { resultDigest: detail.resultDigest, signatureVerified: true }, receipt: "authority=coordinator; detail=accepted-signed-context; audience=realm-owner; currentSourcePolicy=required; rawLogs=not-disclosed; inputManifestBody=not-qualified" };
+    return scanCredentialMaterial(value, "runDetail") ? undefined : value;
   } catch (error) {
     // Malformed stored proof is unavailable; operational failures propagate
     // to the endpoint's distinct, coordinate-free 503 response.

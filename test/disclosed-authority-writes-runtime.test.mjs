@@ -11,6 +11,7 @@ import { repositoryObservationDigest } from "../src/portability/repository-obser
 import { CONTRACT_VERSIONS } from "../src/kernel/contracts.ts";
 import { ExternalRunnerCoordinator, runnerResultContext, runnerResultMessage } from "../src/execution/runner.ts";
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "../apps/realm-worker/src/coordinator-protocol.ts";
+import { createAuthorityRecoveryBundle } from "../src/cloudflare/authority-recovery.ts";
 
 test("public disclosed write lifecycle, atomic retries and sealed owner detail use actual local Coordinator SQLite and current kernel policy", async () => {
   const directory = await mkdtemp(join(tmpdir(), "anyam-disclosed-writes-runtime-")); let runtime;
@@ -22,7 +23,7 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
       const claims = { protocol: "anyam.repository-observation/v1", repositoryId: body.repositoryId, sourceSpaceId: body.sourceSpaceId, workspaceId: body.workspaceId, projectViewId: body.projectViewId, objectFormat: "sha1", symbolicRef: body.expectedSymbolicRef ?? "refs/heads/candidate", commitOid: body.expectedCommitOid, treeOid: "c".repeat(40), baseCommitOid: body.expectedBaseCommitOid, ancestryVerified: true, observedAt: "2026-10-02T12:00:00.000Z", receipt: "synthetic RepositoryDriver readback; no real Git provider" };
       return Response.json({ protocol: claims.protocol, status: "succeeded", observation: { ...claims, manifestDigest: await repositoryObservationDigest(claims) }, receipt: "fixture=synthetic-observer; providerClaim=false" });
     };
-    const options = convertV4MiniflareOptions({ name: "disclosed-writes-owned-local", modules: true, script: bundle.outputFiles[0].text, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], durableObjects: { REALM_COORDINATOR: { className: "LocalDisclosureRealm", useSQLite: true } }, serviceBindings: { ANYAM_REPOSITORY_OBSERVER: observer }, outboundService: () => new Response("outbound disabled", { status: 403 }) });
+    const options = convertV4MiniflareOptions({ name: "disclosed-writes-owned-local", modules: true, script: bundle.outputFiles[0].text, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], bindings: { ANYAM_AUTHORITY_RECOVERY_KEY_ID: "key:synthetic-runtime-only", ANYAM_AUTHORITY_RECOVERY_SECRET: "synthetic-runtime-recovery-only" }, durableObjects: { REALM_COORDINATOR: { className: "LocalDisclosureRealm", useSQLite: true } }, serviceBindings: { ANYAM_REPOSITORY_OBSERVER: observer }, outboundService: () => new Response("outbound disabled", { status: 403 }) });
     options.telemetry = { enabled: false }; options.resourcePersistencePath = join(directory, "storage"); runtime = new Miniflare(options);
     const invoke = async (path, body, member = "public") => {
       const response = await runtime.dispatchFetch(`http://localhost${path}`, { method: body === undefined ? "GET" : "POST", headers: { "content-type": "application/json", "x-fixture-member": member, ...(path.startsWith("/authority/") ? { [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -72,9 +73,16 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
       assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, before, deniedCapability);
     }
     await invoke("/fixture/seed", next);
+    const credential = (await invoke("/fixture/issue-synthetic-credential", {})).value;
+    assert.equal((await invoke("/fixture/validate-synthetic-credential", { token: credential.token })).value.valid, true);
+    const credentialBefore = (await invoke("/fixture/checkpoint", {})).value;
+    assert.deepEqual(await command("run.request", "fresh-run", runPayload), run);
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, credentialBefore, "accepted replay retains unrelated credential digest records");
+    assert.equal((await invoke("/fixture/validate-synthetic-credential", { token: credential.token })).value.valid, true);
     for (const sourceSpaceId of ["source:hidden", "source:absent"]) {
       const unavailable = await command("workspace.create", "bad-scope", { projectId: "project:fixture", projectViewRevisionId: project.value.projectViewRevision.id, sourceSpaceIds: [sourceSpaceId] });
       assert.equal(unavailable.status, 404); assert.doesNotMatch(JSON.stringify(unavailable), /source:hidden|source:absent|PRIVATE-/u);
+      assert.equal((await invoke("/fixture/validate-synthetic-credential", { token: credential.token })).value.valid, true, "denial does not revoke unrelated credential");
     }
     const raw = await invoke("/api/authority/command", { command: "workspace.create", idempotencyKey: "raw-private-probe", payload: { projectId: "project:fixture", projectRevisionId: "PRIVATE-new-canonical", sourceSpaceIds: ["source:hidden"] } });
     assert.notEqual(raw.status, 200, "ordinary contributor must not bypass safe projection through raw owner commands");
@@ -84,7 +92,12 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
     const faultPayload = { projectId: "project:fixture", projectViewRevisionId: project.value.projectViewRevision.id, sourceSpaceIds: ["source:public"] };
     assert.equal((await command("workspace.create", "atomic-fault", faultPayload)).status, 503);
     assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, faultBefore, "actual SQL, identity KV and in-memory policy must roll back together");
+    assert.equal((await invoke("/fixture/validate-synthetic-credential", { token: credential.token })).value.valid, true, "rollback retains the unrelated live credential");
     assert.equal((await command("workspace.create", "atomic-fault", faultPayload)).status, 200, "same request can recover after rolled-back persistence fault");
+    const credentialInputBefore = (await invoke("/fixture/checkpoint", {})).value;
+    const credentialInput = await command("run.request", "credential-input", { ...runPayload, inputDigests: ["input=Bearer SYNTHETIC-TEST-ONLY"] });
+    assert.equal(credentialInput.status, 422); assert.doesNotMatch(JSON.stringify(credentialInput), /SYNTHETIC-TEST-ONLY/u);
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, credentialInputBefore, "credential material cannot enter a queued Run or idempotency history");
 
     const checkpoint = (await invoke("/fixture/checkpoint", {})).value;
     const queuedRun = checkpoint.authority.runs[run.value.value.run.id];
@@ -125,6 +138,19 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
     assert.doesNotMatch(JSON.stringify(rich), /sessionId|capabilityGrantId|publicKey|privateKey|credentialId|unsigned-|source:hidden|PRIVATE-|projectRevisionId|projectViewId|networkBoundaryReceipt/u);
     const sealedCheckpoint = (await invoke("/fixture/checkpoint", {})).value;
     assert.equal(sealedCheckpoint.authority.runDetails[queuedRun.id].resultDigest, completion.resultDigest, "accepted proof persisted in actual SQLite");
+    const exported = await invoke("/authority/recovery/export/internal", { sessionId: fixture.members.owner.session.id }); assert.equal(exported.status, 200);
+    assert.deepEqual(exported.value.bundle.snapshot.runDetails[queuedRun.id], sealedCheckpoint.authority.runDetails[queuedRun.id]);
+    const restore = async bundle => {
+      const restored = await invoke("/authority/recovery/restore/internal", { sessionId: fixture.members.owner.session.id, idempotencyKey: `restore:${bundle.bundleId}`, bundle }); assert.equal(restored.status, 200, JSON.stringify(restored));
+      const activated = await invoke("/authority/recovery/activate/internal", { sessionId: fixture.members.owner.session.id, idempotencyKey: `activate:${bundle.bundleId}`, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest }); assert.equal(activated.status, 200, JSON.stringify(activated));
+    };
+    await restore(exported.value.bundle); assert.deepEqual(await invoke(path, undefined, "owner"), rich, "signed detail survives actual recovery restore");
+    const legacy = structuredClone(sealedCheckpoint.authority); delete legacy.runDetails;
+    const legacyBundle = await createAuthorityRecoveryBundle({ snapshot: legacy, bundleId: "bundle:synthetic-legacy", recoveryKeyId: "key:synthetic-runtime-only", secret: "synthetic-runtime-recovery-only" });
+    await restore(legacyBundle);
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value.authority.runDetails, {}, "old signed bytes verify before new additive collection is defaulted");
+    assert.equal((await invoke(path, undefined, "owner")).status, 404, "legacy restore cannot fabricate accepted detail");
+    await invoke("/fixture/seed", { ...fixture, state: sealedCheckpoint.authority, identity: sealedCheckpoint.identity });
     for (const member of ["public", "private", "projectOwner", "unrelated"]) {
       const denied = await invoke(path, undefined, member); assert.equal(denied.status, 404, member);
       assert.deepEqual(denied, await invoke("/api/authority/run-details/run%3Aabsent", undefined, member), `${member} cannot discover detail presence`);
@@ -144,9 +170,11 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
     assert.notEqual((await invoke(path, undefined, "owner")).status, 200);
     await reseed(sealedCheckpoint.authority);
     assert.equal((await invoke("/api/authority/run-details/run%3Apublic", undefined, "owner")).status, 404, "unsigned legacy Run cannot fabricate accepted rich detail");
-    const aliasRun = await command("run.request", "session-alias", runPayload); assert.equal(aliasRun.status, 200);
-    await complete(aliasRun.value.value.run.id, "alias", fixture.members.private.session.id);
-    assert.equal((await invoke(`/api/authority/run-details/${encodeURIComponent(aliasRun.value.value.run.id)}`, undefined, "owner")).status, 404, "signed digest alias cannot disclose another Session handle");
+    for (const [kind, handle] of [["session", fixture.members.private.session.id], ["grant", queuedRun.capabilityGrantId], ["passkey", "synthetic-private-passkey"]]) {
+      const aliasRun = await command("run.request", `${kind}-alias`, runPayload); assert.equal(aliasRun.status, 200);
+      await complete(aliasRun.value.value.run.id, `alias:${kind}`, handle);
+      assert.equal((await invoke(`/api/authority/run-details/${encodeURIComponent(aliasRun.value.value.run.id)}`, undefined, "owner")).status, 404, `signed digest alias cannot disclose ${kind} handle`);
+    }
 
     const multiCheckpoint = (await invoke("/fixture/checkpoint", {})).value;
     const multiIdentity = structuredClone(multiCheckpoint.identity);
@@ -170,6 +198,40 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
     const multiDeniedBefore = (await invoke("/fixture/checkpoint", {})).value;
     const multiDenied = await invoke("/api/authority/view-command", { command: "workspace.create", idempotencyKey: "multi-source", payload: multiPayload }, "private");
     assert.equal(multiDenied.status, 404); assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, multiDeniedBefore, "every contributing Source must authorize a cached multi-source write");
+    const legacyOwnerIdentity = structuredClone(multiDeniedCheckpoint.identity);
+    legacyOwnerIdentity.sourceSpacePolicies["source:public"].deniedCapabilities = ["workspace.write"];
+    await reseed(multiDeniedCheckpoint.authority, legacyOwnerIdentity);
+    const legacyBefore = (await invoke("/fixture/checkpoint", {})).value;
+    const legacyBody = { command: "workspace.create", idempotencyKey: "legacy-owner-scope", payload: { projectId: "project:fixture", projectRevisionId: multiState.canonicalByProject["project:fixture"], sourceSpaceIds: ["source:public"], workspaceId: "workspace:legacy-owner" } };
+    assert.equal((await invoke("/api/authority/command", legacyBody, "owner")).status, 404, "raw owner route cannot bypass explicit Source write denial");
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, legacyBefore);
+    await reseed(multiDeniedCheckpoint.authority, multiDeniedCheckpoint.identity);
+    const legacyAccepted = await invoke("/api/authority/command", legacyBody, "owner"); assert.equal(legacyAccepted.status, 200);
+    const legacyCredentialInputBefore = (await invoke("/fixture/checkpoint", {})).value;
+    assert.equal((await invoke("/api/authority/command", { ...legacyBody, idempotencyKey: "legacy-secret-input", payload: { ...legacyBody.payload, mounts: ["Bearer SYNTHETIC-TEST-ONLY"] } }, "owner")).status, 422);
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, legacyCredentialInputBefore);
+    const legacyCredential = (await invoke("/fixture/issue-synthetic-credential", {})).value;
+    const legacyReplayBefore = (await invoke("/fixture/checkpoint", {})).value;
+    assert.deepEqual(await invoke("/api/authority/command", legacyBody, "owner"), legacyAccepted);
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, legacyReplayBefore);
+    assert.equal((await invoke("/fixture/validate-synthetic-credential", { token: legacyCredential.token })).value.valid, true);
+    const legacyDenied = (await invoke("/fixture/checkpoint", {})).value;
+    legacyDenied.identity.sourceSpacePolicies["source:public"].deniedCapabilities = ["workspace.write"];
+    await reseed(legacyDenied.authority, legacyDenied.identity);
+    const revokedLegacyBefore = (await invoke("/fixture/checkpoint", {})).value;
+    assert.equal((await invoke("/api/authority/command", legacyBody, "owner")).status, 404, "raw cached acceptance cannot bypass current Source denial");
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, revokedLegacyBefore);
+    const legacyViewId = multiDeniedCheckpoint.authority.workspaces["workspace:public"].projectViewId;
+    for (const [name, capability, payload] of [
+      ["change.create", "change.publish_revision", { projectId: "project:fixture", workspaceId: "workspace:public", intentId: "intent:collaboration", baseProjectRevisionId: "canonical:base" }],
+      ["revision.publish", "change.publish_revision", { projectId: "project:fixture", workspaceId: "workspace:public", changeId: "change:public", projectViewId: legacyViewId, sourceSpaceSnapshots: { "source:public": candidateOid } }],
+      ["run.request", "run.invoke", { projectId: "project:fixture", workspaceId: "workspace:public", projectViewId: legacyViewId, projectRevisionId: "candidate:public", changeRevisionId: "revision:public", actionId: "action:synthetic-denied" }],
+    ]) {
+      const deniedIdentity = structuredClone(multiDeniedCheckpoint.identity); deniedIdentity.sourceSpacePolicies["source:public"].deniedCapabilities = [capability];
+      await reseed(multiDeniedCheckpoint.authority, deniedIdentity); const before = (await invoke("/fixture/checkpoint", {})).value;
+      assert.equal((await invoke("/api/authority/command", { command: name, idempotencyKey: `legacy-denied:${name}`, payload }, "owner")).status, 404, name);
+      assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, before, name);
+    }
 
   } finally { await runtime?.dispose(); await rm(directory, { recursive: true, force: true }); }
 });

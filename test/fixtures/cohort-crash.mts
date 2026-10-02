@@ -13,6 +13,6 @@ const store = cohortStore(database, (collection) => {
   // Abrupt termination deliberately bypasses transactionSync's JS rollback.
   if (collection === crashAt) process.exit(73);
 });
-new SQLiteCohortLandingAuthority({ store, session: input.session, projectId: input.projectId, evaluate: () => input.review }).landCohort(input.request);
+await new SQLiteCohortLandingAuthority({ store, session: input.session, projectId: input.projectId, evaluate: () => input.review }).landCohort(input.request);
 if (crashAt === "after-commit") process.exit(74); // success response lost
 database.close();

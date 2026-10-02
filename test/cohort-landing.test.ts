@@ -71,7 +71,7 @@ test("durable cohort rejects stale Evidence/members and commits exact members wi
     assert.throws(() => authority.landCohort(request), /fresh exact policy decision/);
     assert.deepEqual(store.load(session.realmId), snapshot, "policy change makes prior exact approvals stale");
     evaluate.coordinator.activatePolicy(evaluate.policy);
-    const landing = authority.landCohort(request);
+    const landing = await authority.landCohort(request);
     const after = store.load(session.realmId)!;
     assert.deepEqual(after.projectRevisions[landing.projectRevisionId]!.sourceSpaceSnapshots, { "source:a": "snapshot:a:next", "source:b": "snapshot:b:next", "source:excluded": "snapshot:excluded" });
     assert.deepEqual(after.projectRevisions[landing.projectRevisionId]!.landedChangeRevisionIds, request.members.map((member) => member.changeRevisionId));
@@ -84,7 +84,7 @@ test("durable cohort rejects stale Evidence/members and commits exact members wi
     assert.equal(packet.approvals.length, 2);
     assert.ok(packet.approvals.every((approval) => approval.id && approval.policyVersion === "policy:fixture"));
     assert.deepEqual(after.audit.at(-1)!.collaboration!.map((event) => [event.projectId, event.cohortId, event.changeRevisionId, event.role, event.policyVersion, event.disclosure]), request.members.map((member) => [projectId, request.cohortId, member.changeRevisionId, "landing", "policy:fixture", "project"]));
-    assert.deepEqual(authority.landCohort(request), landing);
+    assert.deepEqual(await authority.landCohort(request), landing);
     assert.deepEqual(store.load(session.realmId), after);
     assert.throws(() => authority.landCohort({ ...request, members: [request.members[0]!] }), /cohort identity reused/);
     assert.throws(() => authority.landCohort({ ...request, cohortId: "cohort:later", expectedCanonicalProjectRevisionId: landing.projectRevisionId }), /later Landing requires qualified canonical-ref reconciliation/);
@@ -102,7 +102,7 @@ test("composed Views preserve another member's changed snapshots regardless of s
       const selected = { ...request, members };
       store.replace(snapshot);
       const evaluate = await gate(snapshot, selected);
-      const landing = new SQLiteCohortLandingAuthority({ store, session, projectId, evaluate }).landCohort(selected);
+      const landing = await new SQLiteCohortLandingAuthority({ store, session, projectId, evaluate }).landCohort(selected);
       assert.deepEqual(store.load(session.realmId)!.projectRevisions[landing.projectRevisionId]!.sourceSpaceSnapshots, { "source:a": "snapshot:a:next", "source:b": "snapshot:b:next", "source:excluded": "snapshot:excluded" });
     }
     const conflict = structuredClone(snapshot);
@@ -140,7 +140,7 @@ test("abrupt process exit inside SQLite cohort selection rolls back on reopen; c
     store = cohortStore(database);
     const committed = store.load(session.realmId)!;
     const replay = new SQLiteCohortLandingAuthority({ store, session, projectId, evaluate: () => { throw new Error("historical replay must not authorize new work"); } });
-    assert.equal(replay.landCohort(request).projectRevisionId, committed.canonicalByProject[projectId]);
+    assert.equal((await replay.landCohort(request)).projectRevisionId, committed.canonicalByProject[projectId]);
     assert.deepEqual(store.load(session.realmId), committed);
   } finally { database.close(); rmSync(root, { recursive: true, force: true }); }
 });
@@ -195,7 +195,7 @@ test("committed cohort projects to real Git refs after partial repair, with read
     const store = cohortStore(database);
     store.replace(snapshot);
     const evaluate = await gate(snapshot, request);
-    const landing = new SQLiteCohortLandingAuthority({ store, session, projectId, evaluate }).landCohort(request);
+    const landing = await new SQLiteCohortLandingAuthority({ store, session, projectId, evaluate }).landCohort(request);
     const observe = async () => Promise.all(repositories.map(async (repository) => {
       const refs = await driver.listRefs({ repository: repository.handle });
       if (refs.status !== "succeeded") throw new Error(refs.message);

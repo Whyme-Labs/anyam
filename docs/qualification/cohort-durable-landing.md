@@ -29,12 +29,47 @@ version, disclosure, and receipt. A crash after commit cannot lose that context
 while waiting for an in-memory collaboration event.
 
 ADR 0002 requires later Landing to wait for canonical-ref reconciliation.
-This adapter rejects a new Landing when the current canonical revision has
-Landing lineage, because it cannot yet certify durable, fenced reconciliation
-completion. Historical replay remains allowed. A read-only plan whose supplied
-refs are current does not remove this gate; completing that lifecycle is a
-separate qualification gap. The qualified slice is the initial offline Cohort
-selection and its projection-recovery experiment, not repeated hosted Landing.
+The existing block remains when no qualified `CanonicalRefReconciler` is
+connected. With that internal seam, a later Landing requires a durable exact
+completion record and fresh provider observations of every sealed ref. Its
+SQLite version fence still rejects intervening Authority writes. The new
+Landing packet records the prior completion artifact; its own Git projection
+starts a new reconciliation lifecycle.
+
+`CanonicalRefReconciler` records complete, unique coverage of every Project
+Source Space repository/ref and binds each desired/base Git OID to the selected
+Project Revision. Its monotonic epoch comes from that immutable Cohort Landing
+result's Authority version. The provider identity, qualification receipt,
+Landing, epoch, policy, candidate and ref bindings cannot be substituted.
+Progress and completion use a new entity collection in the existing SQLite
+row store; old snapshots normalize the collection to empty and retain the
+Landing block. The SQL table schema and storage engine are unchanged.
+
+A qualified `FencedCanonicalRefProvider` must durably compare expected provider
+generation and ref OID, reject lower epochs and same-epoch selection reuse,
+and seal a repaired epoch against further writes. A higher epoch may open the
+next selected candidate after the preceding epoch is sealed. Every canonical
+writer must obey this contract. Fresh challenge-bound read-back checks exact
+provider/repository/ref/candidate/epoch/generation coverage before completion
+and again before subsequent Landing. Unknown external refs, forged responses,
+unqualified capability, incomplete coverage and stale generations fail closed.
+
+Provider repair and sealing happen separately for each repository. Pending
+SQLite checkpoints make partial effects inspectable. A lost reply is resolved
+by fresh provider read-back: it does not assume the external operation failed.
+Completion replay leaves Authority records unchanged. Original Landing results
+and prior checkpoint artifacts remain immutable, including after a later
+selection and a ref returning to an earlier OID.
+
+The file-backed `FencedGitProviderFixture` supplies serialized fake provider
+responses while mutating real isolated Git refs. Tests qualify the offline
+client protocol under those provider guarantees: partial repair, subsequent
+Landing, expected-generation races, lower-epoch retries across OID ABA,
+response binding, competing canonical selection and abrupt Authority-process
+exits after repair/seal or during completion persistence. They do not qualify
+production provider atomicity, multi-process provider locking, hardware/power
+loss, or prevention of a raw filesystem bypass. A deliberate raw Git bypass is
+detected on fresh observation and blocks later Landing.
 
 The idempotency key is `landing.cohort:<cohortId>` and binds the Project, ordered
 exact members, and expected base. Reuse with different inputs fails. Replaying
@@ -66,8 +101,8 @@ commit. Every desired ref needs an explicit expected OID or `null`. A stale ref
 or invalid desired object aborts every ref update in that repository. Separate
 repositories still have separate transactions. Ref OIDs do not supply a
 monotonic epoch fence against an ABA transition or a stale repair worker racing
-a newer canonical selection; a durable automatic canonical repair writer is
-therefore not connected here.
+a newer canonical selection; that driver cannot satisfy the fenced-provider seam. No ordinary local Git
+driver or live provider is enrolled as qualified by this milestone.
 
 `test/cohort-landing.test.ts` qualifies synthetic recorded Run/Evidence and
 independent Review Approvals, stale Evidence/member/policy rejection, composed
@@ -86,6 +121,6 @@ qualifies one winner among simultaneous CAS requests.
 
 This is an offline durability slice. It does not qualify power-loss durability,
 live Artifacts, native coding harnesses, live verifier proofs, hosted membership
-or capability journeys, durable collaboration-state recovery, full provider
+or capability journeys, durable collaboration-state recovery, live provider
 epoch fencing, or atomic distributed Git writes. A reopened new Landing still
 requires the trusted caller to restore and freshly evaluate its policy gate.

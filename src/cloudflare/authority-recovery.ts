@@ -35,6 +35,7 @@ export const AUTHORITY_RECOVERY_SNAPSHOT_FIELDS = [
   "externalProposals",
   "mirrorDeliveries",
   "canonicalByProject",
+  "canonicalRefProjections",
   "idempotency",
   "audit",
 ] as const;

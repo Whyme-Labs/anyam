@@ -12,7 +12,8 @@ Send `{command, idempotencyKey, payload}`. The host Session comes from the
 authenticated cookie. The optional `protocol` is `anyam.authority-command/v1`.
 Creation IDs are server-assigned. Incoming Source writes are credential-scanned
 and matched against retained Realm token digests, including opaque string/key
-aliases and one URI/base64 encoding layer,
+aliases and one URI/base64 encoding layer (valid encoded spans remain checked
+amid malformed surrounding URI text; native Base64 ASCII whitespace is allowed),
 after current authorization and before persistence. Canonical/View IDs, `expectedVersion`, caller
 Task/Grant IDs and unknown fields are rejected. The supported payload fields are:
 

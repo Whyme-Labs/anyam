@@ -160,8 +160,14 @@ export function scanCredentialMaterial(value: unknown, rootPath = "value"): Cred
 export function containsKnownTextMaterial(value: unknown, matchesText: (text: string) => boolean): boolean {
   const matches = (text: string): boolean => {
     if (matchesText(text)) return true;
-    try { const decoded = decodeURIComponent(text); if (decoded !== text && matchesText(decoded)) return true; } catch { /* malformed URI text */ }
-    for (const match of text.matchAll(/[A-Za-z0-9+/_-]+={0,2}/gu)) {
+    // Decode valid byte spans independently. Unrelated malformed escapes or
+    // invalid UTF-8 must not suppress an embedded known ASCII credential.
+    const uriDecoded = text.replace(/(?:%[0-9a-f]{2})+/giu, encoded => new TextDecoder().decode(Uint8Array.from(
+      [...encoded.matchAll(/%([0-9a-f]{2})/giu)], match => Number.parseInt(match[1]!, 16))));
+    if (uriDecoded !== text && matchesText(uriDecoded)) return true;
+    // Native Base64 permits ASCII whitespace between encoded characters.
+    const base64Text = text.replace(/[\t\n\f\r ]/gu, "");
+    for (const match of base64Text.matchAll(/[A-Za-z0-9+/_-]+={0,2}/gu)) {
       const candidate = match[0].replace(/=+$/u, "").replaceAll("-", "+").replaceAll("_", "/");
       for (let alignment = 0; alignment < 4 && alignment < candidate.length; alignment++) {
         const substring = candidate.slice(alignment);

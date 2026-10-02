@@ -57,6 +57,14 @@ test("known handle matching covers every Base64 substring alignment and one URI 
   const realmHandle = "session:00000000-0000-0000-0000-000000000000";
   const embedded = "prefix" + Buffer.from(realmHandle).toString("base64url") + "suffix";
   assert.equal(containsKnownTextMaterial(embedded, text => text.includes(realmHandle)), true, "trailing one-character Base64 quantum cannot hide a complete preceding handle");
+  for (const prefix of ["%", "%ZZ", "%FF", "prefix%ZZ"]) for (const suffix of ["%", "%ZZ", "%FF", "%suffix"]) {
+    const alias = prefix + encodeURIComponent(handle) + suffix;
+    assert.equal(matches(alias), true); assert.equal(matches({ [alias]: "key" }), true);
+  }
+  for (const whitespace of [" ", "\t", "\n", "\r\n"]) {
+    const encoded = Buffer.from(handle).toString("base64url").match(/.{1,4}/gu)!.join(whitespace);
+    assert.equal(matches(encoded), true); assert.equal(matches({ [encoded]: "key" }), true);
+  }
   assert.equal(matches(`prefix${encodeURIComponent(handle)}suffix`), true);
   assert.equal(matches({ reference: "session:ordinary", digest: "sha256:" + "a".repeat(64) }), false);
   const cycle: { value: string; self?: unknown } = { value: "safe" }; cycle.self = cycle;

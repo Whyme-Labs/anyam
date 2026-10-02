@@ -861,7 +861,10 @@ test("change.inspect summarizes exact local candidate Evidence and exposes unkno
     assert.equal(packet.canonicalWrite, false);
     await replaceCheckAction(directory, { command: "node -e \"process.exit(1)\"" });
     await agentManager.invokeTool("change.publish_revision", { declaredEffects: ["source.modify"] }, first.session.id);
-    assert.equal((await inspect()).checks.find((record) => record.actionId === "action:check")?.status, "stale");
+    const stalePacket = await inspect();
+    assert.equal(stalePacket.checks.find((record) => record.actionId === "action:check")?.status, "stale");
+    assert.equal(stalePacket.checks.find((record) => record.actionId === "action:check")?.sourceMismatch, true);
+    assert.ok(stalePacket.nextSteps.some((step) => step.reason.includes("Reconcile the intended source")));
     await agentManager.invokeTool("run.start", { actionId: "action:check" }, first.session.id);
     assert.equal((await inspect()).checks.find((record) => record.actionId === "action:check")?.status, "failed");
     const peer = await agentManager.startSession({ agent: "claude", parallel: true });

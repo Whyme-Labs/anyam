@@ -19,14 +19,15 @@ export function localReviewPacket(input: ReviewPacketInput) {
   const checks = input.actions.map((action) => {
     const run = runs.filter((record) => record.actionId === action.id).at(-1);
     const verifier = run ? input.verifiers.find((record) => record.id === run.verifierId && record.actionId === action.id) : undefined;
-    const contextMatches = candidate && run && run.sourceRevision === candidate.sourceRevision
-      && run.sourceSnapshot === candidate.sourceSnapshot && run.actionContractDigest === action.contractDigest
+    const sourceMismatch = candidate !== undefined && run !== undefined
+      && (run.sourceRevision !== candidate.sourceRevision || run.sourceSnapshot !== candidate.sourceSnapshot);
+    const contextMatches = candidate && run && !sourceMismatch && run.actionContractDigest === action.contractDigest
       && (input.verifiers.some((record) => record.actionId === action.id)
         ? verifier !== undefined && run.verifierContractDigest === verifier.contractDigest
         : run.verifierId === "verifier:missing" && run.verifierContractDigest === undefined);
     const status = !run ? "missing" : !candidate ? "unbound" : !contextMatches ? "stale" : run.status;
     return {
-      actionId: action.id, status,
+      actionId: action.id, status, sourceMismatch,
       ...(run ? { runId: run.id, evidenceId: run.evidenceId, evidenceDigest: run.evidenceDigest,
         testedSourceRevision: run.sourceRevision, testedSourceSnapshot: run.sourceSnapshot,
         changeRevisionBinding: "not-recorded",
@@ -56,7 +57,9 @@ export function localReviewPacket(input: ReviewPacketInput) {
       .map((finding) => ({ id: finding.id, severity: finding.severity, summary: finding.summary, revisionBinding: "not-recorded" })),
     decisionsRequired: { status: "unknown", reason: "Local inspection does not evaluate authoritative review or Landing policy." },
     nextSteps: !candidate ? [{ tool: "change.publish_revision", reason: "No candidate is recorded for this session." }]
-      : checks.filter((check) => check.status !== "passed").map((check) => ({ tool: "run.start", actionId: check.actionId, reason: check.status })),
+      : checks.filter((check) => check.status !== "passed").map((check) => check.sourceMismatch
+        ? { actionId: check.actionId, reason: "Reconcile the intended source with the recorded candidate; publish if changed, then rerun this Action against that candidate." }
+        : { tool: "run.start", actionId: check.actionId, reason: check.status }),
     recoveryLimits: ["Inspection does not perform Landing or recovery.", "Current working tree, full validity inputs, and provider state are not measured by this projection."],
     canonicalWrite: false as const,
   };

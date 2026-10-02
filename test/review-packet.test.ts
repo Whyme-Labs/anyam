@@ -27,3 +27,12 @@ test("review packet keeps latest matching-session failure and excludes peer prov
   assert.equal(localReviewPacket({ ...input, runs: [peer] }).checks[0]?.status, "missing");
   assert.equal(localReviewPacket({ ...input, revisions: [] }).checks[0]?.status, "unbound");
 });
+
+
+test("review packet requires source reconciliation before rerunning a differently tested commit", () => {
+  const packet = localReviewPacket({ ...input, runs: [{ ...run, sourceRevision: "git:commit:other" }] });
+  assert.equal(packet.checks[0]?.status, "stale");
+  assert.equal(packet.checks[0]?.sourceMismatch, true);
+  assert.equal(packet.nextSteps[0]?.tool, undefined);
+  assert.match(packet.nextSteps[0]?.reason ?? "", /Reconcile the intended source/);
+});

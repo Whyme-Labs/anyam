@@ -86,7 +86,7 @@ function failure(
   };
 }
 
-async function runGit(directory: string | undefined, args: readonly string[]): Promise<GitCommandResult> {
+async function runGit(directory: string | undefined, args: readonly string[], input?: string): Promise<GitCommandResult> {
   return new Promise((resolveResult, reject) => {
     const child = spawn("git", [...args], {
       cwd: directory,
@@ -103,6 +103,8 @@ async function runGit(directory: string | undefined, args: readonly string[]): P
     child.once("error", (error) => {
       reject(error);
     });
+    child.stdin.on("error", reject);
+    child.stdin.end(input);
     child.once("close", (code) => {
       if (code === 0) {
         resolveResult({ stdout, stderr });
@@ -611,10 +613,34 @@ export class LocalGitRepositoryDriver implements RepositoryDriver {
           return { status: "failed", ...failure("repository.stale_ref", "compare-and-swap", ref, false, `refresh the ref and retry with expected=${expected ?? "absent"}; actual=${actual ?? "absent"}`) };
         }
       }
-      for (const [ref, desired] of Object.entries(input.desired)) {
-        if (desired === null) await runGit(directory, ["update-ref", "-d", ref]);
-        else await runGit(directory, ["update-ref", ref, desired]);
+      const changes = Object.entries(input.desired);
+      if (changes.some(([ref]) => !(ref in input.expected))) return { status: "failed", ...failure("repository.expected_ref_missing", "compare-and-swap", input.repository.repositoryId, false, "supply an expected OID or null for every desired ref") };
+      const refs = [...new Set([...Object.keys(input.expected), ...Object.keys(input.desired)])];
+      for (const ref of refs) {
+        // The stdin protocol is line-oriented. Validate before constructing it.
+        await runGit(directory, ["check-ref-format", ref]);
+        if (/\s/u.test(ref)) throw new Error("repository.ref_invalid");
       }
+      const objectFormat = (await runGit(directory, ["rev-parse", "--show-object-format"])).stdout.trim();
+      const absentOid = "0".repeat(objectFormat === "sha256" ? 64 : 40);
+      const oid = (value: string | null): string => {
+        if (value === null) return absentOid;
+        if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(value) || value.length !== absentOid.length) throw new Error("repository.oid_invalid");
+        return value;
+      };
+      const commands = ["start"];
+      for (const ref of refs) {
+        const expected = oid(input.expected[ref] ?? null);
+        if (!(ref in input.desired)) commands.push(`verify ${ref} ${expected}`);
+        else if (input.desired[ref] === null) {
+          // Deleting an absent ref is a verify-only no-op.
+          commands.push(expected === absentOid ? `verify ${ref} ${expected}` : `delete ${ref} ${expected}`);
+        } else commands.push(`update ${ref} ${oid(input.desired[ref]!)} ${expected}`);
+      }
+      commands.push("prepare", "commit", "");
+      // Git checks old OIDs while holding all affected ref locks. A changed ref
+      // or invalid desired object aborts the whole repository transaction.
+      await runGit(directory, ["update-ref", "--stdin"], commands.join("\n"));
       return { status: "succeeded", value: operationReceipt(input.repository, "compare-and-swap", `refs=${Object.keys(input.desired).join(",")}`) };
     } catch {
       return { status: "failed", ...failure("repository.ref_update_failed", "compare-and-swap", input.repository.repositoryId, true, "inspect ref state and retry from the expected generation") };

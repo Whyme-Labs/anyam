@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { CollaborationAuditEvent } from "../change-control/collaboration.ts";
 import {
   CONTRACT_VERSIONS,
   createProject,
@@ -142,6 +143,8 @@ export type AuthorityAuditEvent = {
   capabilityGrantId?: string;
   delegatedBySessionId?: string;
   modelProvider?: string;
+  /** Exact collaboration events durably bound to this Authority transition. */
+  collaboration?: readonly CollaborationAuditEvent[];
   receipt: string;
 };
 

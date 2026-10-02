@@ -2,10 +2,13 @@ import type { SmartHttpRemoteRepositoryBinding } from "../portability/smart-http
 import type { SmartHttpCredential, SmartHttpCredentialIssuer } from "../portability/smart-http.ts";
 import { SMART_HTTP_GIT_AUDIENCE } from "../portability/smart-http.ts";
 import { MemoryArtifactsWorkspaceStore, type ArtifactsWorkspaceStore } from "./artifacts-workspace-store.ts";
+import { repositoryObservationDigest, REPOSITORY_OBSERVATION_PROTOCOL } from "../portability/repository-observation.ts";
+import type { RepositoryDriver, RepositoryDriverResult } from "../portability/repository-driver.ts";
+import type { RepositoryObservation } from "../kernel/contracts.ts";
 
 /** Structural subset checked against the pinned Workers Artifacts types. */
 export type ArtifactsRepositoryInfo = { id: string; name: string; defaultBranch: string; remote: string; readOnly: boolean };
-export type ArtifactsCommit = { hash: string; treeHash: string };
+export type ArtifactsCommit = { hash: string; treeHash: string; parents?: readonly string[] };
 export type ArtifactsRepository = {
   [Symbol.dispose](): void;
   info(): Promise<ArtifactsRepositoryInfo>;
@@ -84,6 +87,70 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
     this.options = { ...options };
     this.store = options.store ?? new MemoryArtifactsWorkspaceStore();
     this.now = options.now ?? Date.now;
+  }
+
+  /** Trusted observer seam. Provider reads never rely on a local checkout. */
+  async observeRepository(input: Parameters<RepositoryDriver["observeRepository"]>[0]): Promise<RepositoryDriverResult<RepositoryObservation>> {
+    const request = { ...input, repository: { ...input.repository } };
+    try {
+      const context = this.custody("unenrolled", () => this.store.repository(request.repository.repositoryId)?.context);
+      if (!context || context.repository.accountId !== this.options.accountId || context.repository.namespace !== this.options.namespace ||
+          request.repository.sourceSpaceId !== context.selection.sourceSpaceId || request.workspaceId !== context.selection.workspaceId || request.projectViewId !== context.selection.projectViewId) {
+        throw new ArtifactsWorkspaceError("artifacts.credential_context_denied", "unenrolled", "none", "observation requires the exact enrolled Workspace, Source Space and Project View");
+      }
+      const selection = context.selection;
+      const symbolicRef = request.expectedSymbolicRef;
+      const oid = (value: unknown) => typeof value === "string" && /^[0-9a-f]{40}$/u.test(value);
+      if (!symbolicRef?.startsWith("refs/heads/") || symbolicRef.endsWith(".") || symbolicRef.includes("..") || symbolicRef.includes("@{") ||
+          /[\x00-\x20\x7f~^:?*[\]\\]/u.test(symbolicRef) || symbolicRef.split("/").some(part => !part || part.startsWith(".") || part.endsWith(".lock")) ||
+          (request.expectedObjectFormat !== undefined && request.expectedObjectFormat !== "sha1") || !oid(request.expectedCommitOid) || !oid(request.expectedBaseCommitOid) ||
+          (request.expectedTreeOid !== undefined && !oid(request.expectedTreeOid))) {
+        throw this.error(selection, "artifacts.observation_request_invalid", "none", "select a full literal branch ref and exact SHA-1 commit, tree and base");
+      }
+      await this.authorize(selection, "none");
+      using repo = await this.options.artifacts.get(selection.targetName);
+      this.validateInfo(selection, await repo.info(), context.repository, "none");
+      const heads = await repo.log({ ref: symbolicRef, limit: 1 });
+      const head = heads[0];
+      if (heads.length !== 1 || head?.hash !== request.expectedCommitOid || (request.expectedTreeOid !== undefined && head.treeHash !== request.expectedTreeOid)) {
+        throw this.error(selection, "artifacts.observation_candidate_mismatch", "none", "fresh branch head must match the exact expected commit and tree");
+      }
+      const commits = new Set<string>();
+      const visiting = new Set<string>();
+      const pending = [{ hash: head.hash, complete: false }];
+      while (pending.length) {
+        const item = pending.pop()!;
+        if (item.complete) { visiting.delete(item.hash); commits.add(item.hash); continue; }
+        if (commits.has(item.hash)) continue;
+        if (visiting.has(item.hash)) throw this.error(selection, "artifacts.observation_graph_invalid", "none", "provider ancestry contains a cycle");
+        const commit = await repo.readCommit(item.hash);
+        if (commit?.hash !== item.hash || !oid(commit.treeHash) || !Array.isArray(commit.parents) || commit.parents.some(parent => !oid(parent)) ||
+            (item.hash === head.hash && commit.treeHash !== head.treeHash)) {
+          throw this.error(selection, "artifacts.observation_graph_invalid", "none", "every reachable commit must have its exact identity, tree and complete parent list");
+        }
+        visiting.add(item.hash);
+        pending.push({ hash: item.hash, complete: true }, ...commit.parents.map(hash => ({ hash, complete: false })));
+      }
+      if (!commits.has(request.expectedBaseCommitOid)) throw this.error(selection, "artifacts.observation_ancestry_mismatch", "none", "the selected base must be reachable in the complete candidate graph");
+      const claims = {
+        protocol: REPOSITORY_OBSERVATION_PROTOCOL, repositoryId: request.repository.repositoryId,
+        sourceSpaceId: selection.sourceSpaceId, workspaceId: selection.workspaceId, projectViewId: selection.projectViewId,
+        objectFormat: "sha1" as const, symbolicRef, commitOid: head.hash, treeOid: head.treeHash,
+        baseCommitOid: request.expectedBaseCommitOid, ancestryVerified: true as const,
+        observedAt: new Date(this.now()).toISOString(),
+        receipt: `provider=artifacts; repositoryUuid=${context.repository.repositoryId}; reachableCommits=${commits.size}; ancestry=all-parents; credentialMaterialStored=false; canonicalPublication=unqualified`,
+      };
+      const manifestDigest = await repositoryObservationDigest(claims);
+      this.validateInfo(selection, await repo.info(), context.repository, "none");
+      const currentHeads = await repo.log({ ref: symbolicRef, limit: 1 });
+      if (currentHeads.length !== 1 || currentHeads[0]?.hash !== head.hash || currentHeads[0]?.treeHash !== head.treeHash) {
+        throw this.error(selection, "artifacts.observation_candidate_mismatch", "none", "the selected branch moved during observation; publish a fresh exact candidate");
+      }
+      await this.authorize(selection, "none");
+      return { status: "succeeded", value: { ...claims, manifestDigest } };
+    } catch (error) {
+      return { status: "failed", errorCode: error instanceof ArtifactsWorkspaceError ? error.code : "artifacts.observation_unqualified", message: "Fresh Workspace observation could not be qualified; inspect the exact named repository before retrying.", retryable: false };
+    }
   }
 
   async issue(input: Parameters<SmartHttpCredentialIssuer["issue"]>[0]): Promise<SmartHttpCredential> {

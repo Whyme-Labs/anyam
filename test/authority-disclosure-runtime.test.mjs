@@ -55,6 +55,7 @@ test("actual local Coordinator SQLite REST and MCP enforce current Source disclo
     const projectOwnerExport = await invoke("/authority/recovery/export/internal", { sessionId: f.members.projectOwner.session.id }); assert.equal(projectOwnerExport.status, 422); assert.equal(projectOwnerExport.value.code, "authority.owner_denied");
     const altered = structuredClone(f); altered.state.version += 100; altered.state.sourceSpaces["source:hidden"].name = "PRIVATE-altered";
     altered.state.projectRevisions["canonical:base"].sourceSpaceSnapshots["source:hidden"] = "PRIVATE-new-snapshot";
+    altered.state.projectViews[altered.state.workspaces["workspace:hidden"].projectViewId].projectionId = altered.state.projectViews[altered.state.workspaces["workspace:public"].projectViewId].projectionId;
     altered.state.intentComments["comment:hidden"].body = "PRIVATE-new-comment"; altered.state.intents["intent:collaboration"].updatedAt = "2099-01-01";
     await invoke("/fixture/seed", altered);
     for (let i = 0; i < readPaths.length; i++) assert.deepEqual(await invoke(readPaths[i]), baseline[i], readPaths[i]);

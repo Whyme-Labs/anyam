@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AuthorityDisclosure } from "../apps/realm-worker/src/authority-disclosure.ts";
+import { AUTHORITY_COMMAND_PROTOCOL, AuthorityPlaneCoordinator } from "../src/cloudflare/authority-plane.ts";
 import { RealmIdentityPolicy } from "../src/identity/realm.ts";
 import { disclosureClock, disclosureFixture } from "./fixtures/authority-disclosure-state.ts";
 
@@ -127,12 +128,12 @@ test("Source read denies scoped to a Workspace, Change, Run or PR narrow the mat
     else assert.equal(d.run("run:public"), undefined);
   }
 });
-test("disclosure projection namespace must resolve uniquely to the producing View", () => {
+test("disclosure projection labels are resolved against the exact producing View", () => {
   const f = disclosureFixture(); const w = f.state.workspaces["workspace:public"]!;
   assert.ok(read(f).evidence("evidence:public")); assert.ok(read(f).artifact("artifact:public"));
   const view = f.state.projectViews[w.projectViewId]!;
   f.state.projectViews["ambiguous-view"] = { ...view, id: "ambiguous-view" };
-  assert.equal(read(f).evidence("evidence:public"), undefined); assert.equal(read(f).artifact("artifact:public"), undefined);
+  assert.ok(read(f).evidence("evidence:public")); assert.ok(read(f).artifact("artifact:public"));
 });
 test("Release migration, Change and Target operational history require readable consistent lineage", () => {
   const f = disclosureFixture();
@@ -203,4 +204,11 @@ test("empty Changes cannot reflect a foreign latest Revision; conflicting candid
   assert.equal(read(candidate).run("run:public"), undefined, "conflicting immutable snapshots");
   candidate.state.projectRevisions["candidate:public"]!.sourceSpaceSnapshots = { "source:public": "source:public:candidate" };
   assert.ok(read(candidate).run("run:public"), "matching authoritative candidate remains readable");
+});
+test("an accepted hidden-only Workspace reusing a public projection label cannot alter visible provenance or counts", () => {
+  const f = disclosureFixture(); const expected = observation(read(f)); const authority = new AuthorityPlaneCoordinator(f.state);
+  const owner = f.members.owner!; const view = f.state.projectViews[f.state.workspaces["workspace:public"]!.projectViewId]!;
+  const result = authority.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "workspace.create", idempotencyKey: "hidden-projection-label-reuse", payload: { projectId: "project:fixture", workspaceId: "workspace:hidden-label-collision", projectRevisionId: "canonical:base", sourceSpaceIds: ["source:hidden"], projectionId: view.projectionId } }, { realmId: f.state.realmId, principalId: owner.principal.id, actorId: owner.session.actorId, sessionId: owner.session.id, clientId: owner.session.clientId, authorizationEpoch: f.identity.realm.authorizationEpoch, kind: "human" });
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(observation(read({ ...f, state: authority.snapshot() })), expected);
 });

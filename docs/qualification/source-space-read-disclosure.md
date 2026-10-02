@@ -24,7 +24,9 @@ receipt/digest details, and validate represented Change lineage.
 Runs retain authorized basic identity, disclosed revision, status and readable
 Workspace/Change bindings. The Authority snapshot does not store RunnerJobs;
 recorded Run/Evidence digests alone cannot prove accepted job input/output
-closure or detail disclosure. Ordinary reads therefore omit runner/verifier
+closure or detail disclosure. Artifact scope additionally requires its exact producing
+Run or Change View; a globally reused projection label supplies no authority.
+Ordinary reads therefore omit runner/verifier
 identities, attempt, contract, input/output/environment/toolchain/dependency
 and log digests. Mirror operation/checkpoint/delivery/proposal records and
 Promotion provider/checkpoint/configuration/provenance details are similarly

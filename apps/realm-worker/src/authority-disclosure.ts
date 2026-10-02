@@ -241,28 +241,32 @@ export class AuthorityDisclosure {
     return { protocol: r.protocol, id, projectViewRevisionId: revision.id, status: r.status,
       ...(r.workspaceId ? { workspaceId: r.workspaceId } : {}), ...(r.changeRevisionId ? { changeRevisionId: r.changeRevisionId } : {}) };
   }
-  private disclosureView(projectionId: string) {
-    const matches = Object.values(this.state.projectViews).filter(v => v.id === projectionId || v.projectionId === projectionId);
-    return matches.length === 1 ? matches[0] : undefined;
+  private disclosureMatches(viewId: string, projectionId: string) {
+    const view = this.state.projectViews[viewId];
+    return !!view && (view.id === projectionId || view.projectionId === projectionId);
   }
   evidence(id: string) {
     const e = this.state.evidence[id];
     const scope = e && this.recordScope(e.projectRevisionId, e.projectViewId, e.changeRevisionId);
     const r = e && this.state.runs[e.runId];
     if (!e || !scope || !r || !this.run(r.id) || r.projectRevisionId !== e.projectRevisionId || r.projectViewId !== e.projectViewId
-      || r.changeRevisionId !== e.changeRevisionId || this.disclosureView(e.disclosure.projectionId)?.id !== e.projectViewId
+      || r.changeRevisionId !== e.changeRevisionId || !this.disclosureMatches(e.projectViewId, e.disclosure.projectionId)
       || !this.classification(scope.projectId, e.disclosure.classification, scope.ids)) return undefined;
     return { id, outcome: e.outcome };
   }
   private artifactScope(id: string) {
     const a = this.state.artifacts[id];
     if (!a?.disclosure) return undefined;
-    const view = this.disclosureView(a.disclosure.projectionId);
-    const scope = view && this.recordScope(a.projectRevisionId, view.id, a.changeRevisionId);
-    const r = a.runId && this.state.runs[a.runId];
+    const r = a.runId ? this.state.runs[a.runId] : undefined;
+    const change = a.changeRevisionId ? this.state.changeRevisions[a.changeRevisionId] : undefined;
+    const viewId = r?.projectViewId ?? change?.projectViewId;
+    // Artifact disclosure requires its own producer binding. Unrelated Views
+    // sharing a projection label cannot supply or revoke that authority.
+    if (!viewId || !this.disclosureMatches(viewId, a.disclosure.projectionId)) return undefined;
+    const scope = this.recordScope(a.projectRevisionId, viewId, a.changeRevisionId);
     if (!scope || !this.capable(scope.projectId, "evidence.read", { ...(scope.changeId ? { changeId: scope.changeId } : {}) })
       || !this.classification(scope.projectId, a.disclosure.classification, scope.ids)
-      || (a.runId && (!r || !this.run(r.id) || r.projectRevisionId !== a.projectRevisionId || r.projectViewId !== view?.id || r.changeRevisionId !== a.changeRevisionId))) return undefined;
+      || (a.runId && (!r || !this.run(r.id) || r.projectRevisionId !== a.projectRevisionId || r.projectViewId !== viewId || r.changeRevisionId !== a.changeRevisionId))) return undefined;
     return scope;
   }
   private artifactProject(id: string) { return this.artifactScope(id)?.projectId; }

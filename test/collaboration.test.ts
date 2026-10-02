@@ -379,3 +379,47 @@ test("declared effect overlap is conservative and never claims universal behavio
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+test("shared Evidence keys are selected per exact Cohort member rather than array order", async () => {
+  const fixture = await makeChanges();
+  try {
+    assert.ok(fixture.changeA);
+    assert.ok(fixture.changeB);
+    const coordinator = new CollaborationCoordinator({
+      projectId: project.id,
+      canonicalRevision: fixture.control.canonicalRevision,
+      policy: {
+        version: "policy:shared-check",
+        requiredEvidence: [],
+        requiredEvidenceByEffect: {
+          "api.modify": [{ key: "compatibility", currentValidityKey: "compatibility:v1", expectedProjectRevisionId: fixture.revisionA.projectRevisionId, expectedProjectViewId: fixture.revisionA.projectViewId }],
+          "schema.migrate": [{ key: "compatibility", currentValidityKey: "compatibility:v1", expectedProjectRevisionId: fixture.revisionB.projectRevisionId, expectedProjectViewId: fixture.revisionB.projectViewId }],
+        },
+      },
+      landingAuthority: { landCohort: (request) => fixture.control.landCohort(request) },
+    });
+    const cohort = await coordinator.createCohort({
+      members: [
+        { change: fixture.changeA, revision: fixture.revisionA },
+        { change: fixture.changeB, revision: fixture.revisionB },
+      ],
+      actor: landingActor,
+    });
+    const publicCheck = evidenceFor(fixture.revisionA, "compatibility", "compatibility:v1", verifier);
+    const privateCheck = evidenceFor(fixture.revisionB, "compatibility", "compatibility:v1", verifier);
+    const wrongViewCheck = { ...privateCheck, id: "evidence:wrong-view", projectViewId: "view:outside-cohort", outcome: "failed" as const };
+    const unrelatedCheck = { ...privateCheck, id: "evidence:unrelated", changeRevisionId: "revision:outside-cohort" };
+    for (const evidence of [[publicCheck, privateCheck], [privateCheck, publicCheck], [publicCheck, privateCheck, unrelatedCheck], [publicCheck, privateCheck, wrongViewCheck]]) {
+      assert.equal(coordinator.evaluateLanding({ cohortId: cohort.id, evidence }).decision, "allow");
+    }
+    assert.equal(coordinator.evaluateLanding({ cohortId: cohort.id, evidence: [publicCheck] }).decision, "deny");
+    const failedPrivate = { ...privateCheck, id: "evidence:private-failed", outcome: "failed" as const };
+    const denied = coordinator.evaluateLanding({ cohortId: cohort.id, evidence: [publicCheck, privateCheck, failedPrivate] });
+    assert.equal(denied.decision, "deny");
+    assert.ok(denied.blockers.some((blocker) => blocker.kind === "failed-evidence"));
+    const landed = await coordinator.land({ cohortId: cohort.id, evidence: [publicCheck, privateCheck], actor: landingActor });
+    assert.deepEqual(new Set(landed.landing.changeRevisionIds), new Set([fixture.revisionA.id, fixture.revisionB.id]));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});

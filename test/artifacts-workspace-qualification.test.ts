@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import test from "node:test";
+import { createHash } from "node:crypto";
 import type { AuthoritySqlHost } from "../src/cloudflare/authority-sqlite.ts";
 import { SQLiteArtifactsWorkspaceStore } from "../src/cloudflare/artifacts-workspace-store.ts";
 import type { ArtifactsQualificationOptions } from "../src/cloudflare/artifacts-workspace-qualification.ts";
@@ -76,6 +77,10 @@ test("Artifacts one-shot qualification persists a redacted resource/token ledger
   await qualificationFixture(async ({ fixture, control, deleted, metadata, reopen }) => {
     const input = { runId: "qualification:one", execution: "local-fixture" as const, selections: [artifactsSelection], credentialExpiresAt: new Date(fixture.now + 120_000).toISOString() };
     const result = await control().run(input);
+    const stored = recordInput(metadata(), input.runId);
+    const expectedDigest = `sha256:${createHash("sha256").update(JSON.stringify({ protocol: "anyam.artifacts-qualification-input/v1", accountId: "account-a", namespace: "private", input: stored.input })).digest("hex")}`;
+    assert.equal(result.inputDigest, expectedDigest);
+    assert.equal(stored.inputDigest, expectedDigest);
     assert.equal(result.status, "succeeded");
     assert.equal(result.liveQualified, false);
     assert.equal(result.cleanup, "confirmed");
@@ -90,6 +95,11 @@ test("Artifacts one-shot qualification persists a redacted resource/token ledger
     assert.equal(fixture.events.filter(event => event.startsWith("fork:")).length, forkCount, "restart must not rerun the same invocation");
   });
 });
+
+function recordInput(metadata: string, runId: string): { input: unknown; inputDigest: string } {
+  const rows = JSON.parse(metadata) as { runs: { payload: string }[] };
+  return rows.runs.map(row => JSON.parse(row.payload) as { input: { runId: string }; inputDigest: string }).find(run => run.input.runId === runId)!;
+}
 
 test("Artifacts qualification rolls back failed ledger writes, preserves uncertain effects and records confirmed token retirements", async () => {
   const outcomes: string[] = [];

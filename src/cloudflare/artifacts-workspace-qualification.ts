@@ -30,6 +30,7 @@ type QualificationResource = {
 };
 export type ArtifactsQualificationRun = {
   input: ArtifactsQualificationInput;
+  inputDigest: string;
   accountId: string;
   namespace: string;
   qualification: "running" | "passed" | "blocked";
@@ -99,17 +100,20 @@ export class ArtifactsWorkspaceQualification {
     let reserved = false;
     let passed = false;
     let failure = "qualification.scope_invalid";
+    let inputDigest: string | undefined;
     try {
       const names = new Set(request.selections.map(selection => selection.targetName));
       const assignments = new Set(request.selections.map(selection => JSON.stringify([selection.workspaceId, selection.sourceSpaceId])));
       if (!request.runId.trim() || !["local-fixture", "live-approved"].includes(request.execution) || !request.selections.length ||
           names.size !== request.selections.length || assignments.size !== request.selections.length) throw new Error("qualification scope is invalid");
       for (const selection of request.selections) assertArtifactsWorkspaceSelection(selection, this.options.accountId, this.options.namespace);
+      const boundInputDigest = `sha256:${await this.fingerprint(JSON.stringify({ protocol: "anyam.artifacts-qualification-input/v1", accountId: this.options.accountId, namespace: this.options.namespace, input: request }))}`;
+      inputDigest = boundInputDigest;
       failure = "qualification.authorization_denied";
       await this.options.authorizeRun(request);
       failure = "qualification.ledger_unavailable";
-      reserved = this.custody(() => this.options.ledger.reserve({ input: request, accountId: this.options.accountId, namespace: this.options.namespace, qualification: "running", cleanup: "pending", operations: [], credentialFingerprints: [], resources: request.selections.map(selection => ({ selection, state: "reserved", initialToken: "none", tokenIds: [], retiredTokenIds: [], mintPending: false, credentialGuardPending: false })) }));
-      if (!reserved) return this.receipt(request, false, "required", "qualification.run_already_recorded", false);
+      reserved = this.custody(() => this.options.ledger.reserve({ input: request, inputDigest: boundInputDigest, accountId: this.options.accountId, namespace: this.options.namespace, qualification: "running", cleanup: "pending", operations: [], credentialFingerprints: [], resources: request.selections.map(selection => ({ selection, state: "reserved", initialToken: "none", tokenIds: [], retiredTokenIds: [], mintPending: false, credentialGuardPending: false })) }));
+      if (!reserved) return this.receipt(request, false, "required", "qualification.run_already_recorded", false, inputDigest);
       failure = "qualification.target_unavailable";
       for (const selection of request.selections) {
         this.operation(request.runId, "preflight:get");
@@ -140,7 +144,7 @@ export class ArtifactsWorkspaceQualification {
       if (reserved) { try { this.custody(() => this.options.ledger.change(request.runId, run => { run.qualification = "blocked"; run.failure = failure; })); } catch { /* The durable pending record remains the reconciliation boundary. */ } }
     }
     const cleanup = reserved ? await this.cleanupOwned(request.runId, knownPlaintext, pendingPlaintext) : "required";
-    return this.receipt(request, passed, cleanup, passed ? cleanup === "confirmed" ? "qualification.completed" : "qualification.cleanup_required" : failure, reserved);
+    return this.receipt(request, passed, cleanup, passed ? cleanup === "confirmed" ? "qualification.completed" : "qualification.cleanup_required" : failure, reserved, inputDigest);
   }
 
   async cleanup(runId: string): Promise<"confirmed" | "required"> {
@@ -254,14 +258,14 @@ export class ArtifactsWorkspaceQualification {
     return tokens;
   }
 
-  private receipt(request: Readonly<ArtifactsQualificationInput>, passed: boolean, cleanup: "confirmed" | "required", code: string, reserved: boolean) {
+  private receipt(request: Readonly<ArtifactsQualificationInput>, passed: boolean, cleanup: "confirmed" | "required", code: string, reserved: boolean, inputDigest: string | undefined) {
     let run: ArtifactsQualificationRun | undefined;
     if (reserved) {
       try { run = this.custody(() => this.options.ledger.read(request.runId)); }
       catch { code = "qualification.ledger_unavailable"; }
     }
     return {
-      protocol: "anyam.artifacts-workspace-qualification/v1", runId: request.runId, execution: request.execution,
+      protocol: "anyam.artifacts-workspace-qualification/v1", runId: request.runId, execution: request.execution, inputDigest,
       accountId: this.options.accountId, namespace: this.options.namespace, code,
       status: passed && cleanup === "confirmed" && run ? "succeeded" : "blocked", bindingContract: passed ? "passed" : "blocked", cleanup,
       operationIntents: [...(run?.operations ?? [])], ledgerAvailable: Boolean(run),

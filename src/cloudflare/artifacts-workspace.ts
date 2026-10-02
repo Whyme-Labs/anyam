@@ -117,6 +117,7 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
       effect = "unknown";
       minted = await repo.createToken(request.operation, ttl);
       effect = "token-created";
+      this.validateInfo(selection, await repo.info(), context.repository, effect);
       const expiresAt = Date.parse(minted.expiresAt);
       if (!minted.id || !minted.plaintext || minted.scope !== request.operation || !Number.isFinite(expiresAt) || expiresAt <= this.now() || expiresAt > deadline) throw this.error(selection, "artifacts.token_result_mismatch", effect, "provider token scope and expiry must fit the exact requested authority");
       const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(minted.plaintext));

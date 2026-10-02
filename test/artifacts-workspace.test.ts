@@ -118,14 +118,17 @@ test("Artifacts denies canonical, cross-context, expired and recreated repositor
 });
 
 test("Artifacts retires a token rejected after an asynchronous mint and reports uncertain cleanup", async () => {
-  for (const change of ["grant", "scope", "expiry", "cleanup", "lost-mint-reply"] as const) {
+  for (const change of ["grant", "identity", "scope", "expiry", "cleanup", "lost-mint-reply"] as const) {
     const { fixture, workspace } = adapter();
     const context = await workspace.forkWorkspace(artifactsSelection);
     if (change === "scope") fixture.returnedScope = "write";
     if (change === "expiry") fixture.tokenExpiresAt = new Date(fixture.now + 1_000_000).toISOString();
     if (change === "cleanup") fixture.revokeSucceeds = false;
     if (change === "lost-mint-reply") fixture.mintFails = true;
-    fixture.afterMint = () => { if (change === "grant" || change === "cleanup") fixture.granted = false; };
+    fixture.afterMint = () => {
+      if (change === "grant" || change === "cleanup") fixture.granted = false;
+      if (change === "identity") fixture.infos.get("workspace-a")!.id = "recreated-during-mint";
+    };
     await assert.rejects(workspace.issue({ repositoryId: context.binding.repositoryId, sourceSpaceId: "source:app", operation: "read", expiresAt: new Date(fixture.now + 120_000).toISOString() }), (error: unknown) => {
       assert.ok(error instanceof Error);
       assert.doesNotMatch(error.message, /usable-secret|initial-secret/);

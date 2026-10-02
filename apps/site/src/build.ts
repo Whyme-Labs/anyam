@@ -1,5 +1,5 @@
 import { documentationBody } from "./docs.js";
-import { copyFile, mkdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -434,6 +434,7 @@ async function writePage(path: string, page: Page): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  await rm(outputDirectory, { recursive: true, force: true });
   await mkdir(resolve(outputDirectory, "assets"), { recursive: true });
   await writeFile(resolve(outputDirectory, "assets/site.css"), css, "utf8");
   await writeFile(resolve(outputDirectory, "assets/site.js"), javascript, "utf8");

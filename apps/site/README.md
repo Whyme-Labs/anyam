@@ -15,6 +15,8 @@ npm run build:site
 The generated `dist/` directory contains the landing page, documentation,
 examples, brand assets, and a 404 page. Guide and example articles render from
 their Markdown files; edit those sources instead of duplicating article HTML.
+The documentation and example index pages are curated summaries in
+`src/build.ts`; reconcile their links when the canonical Markdown indexes change.
 The small renderer supports headings, paragraphs, fenced code, lists, tables
 and links, and escapes HTML. Run the site smoke check after the
 build:

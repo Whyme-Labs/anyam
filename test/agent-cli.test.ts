@@ -1,5 +1,5 @@
 import { access, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, type ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -762,14 +762,31 @@ test("Linux enforceable Workspace refuses an unproxied host allowlist", { skip: 
 test("revoking a running run.start prevents a successful result", async () => {
   const directory = await projectDirectory();
   await replaceCheckAction(directory, {
-    command: "node -e \"setTimeout(() => {}, 10000)\"",
+    command: "node -e \"console.log('Action is running'); setTimeout(() => {}, 10000)\"",
     inputs: ["anyam.json"],
     outputs: [],
   });
-  const agentManager = manager(directory);
+  let signalRunning!: () => void;
+  const processRunning = new Promise<void>((resolveRunning) => { signalRunning = resolveRunning; });
+  class RunningProcessManager extends LocalAgentManager {
+    protected override async registerWorkspaceProcess(sessionId: string, child: ChildProcess): Promise<void> {
+      assert.ok(child.stdout);
+      let output = "";
+      let registered = false;
+      const observeRunning = () => { if (registered && output.includes("Action is running")) signalRunning(); };
+      child.stdout.on("data", (chunk: Buffer) => {
+        output += chunk.toString("utf8");
+        observeRunning();
+      });
+      await super.registerWorkspaceProcess(sessionId, child);
+      registered = true;
+      observeRunning();
+    }
+  }
+  const agentManager = new RunningProcessManager({ directory, stateDirectory: agentStateDirectory(directory) });
   const started = await agentManager.startSession({ agent: "cli", mode: "supervised" });
   const running = agentManager.invokeTool("run.start", { actionId: "action:check" });
-  await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 100));
+  await Promise.race([processRunning, running.then(() => { throw new Error("Action completed before its running marker was observed."); })]);
   const revoked = await agentManager.revoke(started.session.id);
   assert.equal(revoked.status, "revoked");
   const result = await running;

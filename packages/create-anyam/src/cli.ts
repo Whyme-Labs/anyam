@@ -266,7 +266,7 @@ export async function main(args: readonly string[], cwd = process.cwd(), input: 
   }
 
   if (command === "change" && subcommand === "start") {
-    const title = positionalArgs(args, "start").join(" ");
+    const title = subcommandPositionals(args).join(" ");
     const changeDirectory = valueAfter(args, "--directory") ?? cwd;
     const result = await startChange(changeDirectory, title);
     const requestedAgent = valueAfter(args, "--agent");

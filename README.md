@@ -37,6 +37,18 @@ executable tokens and inline mark are in [`src/brand.ts`](src/brand.ts); the
 normative usage rules and supplied assets are in
 [`docs/brand/anyam-brand.md`](docs/brand/anyam-brand.md).
 
+## Documentation and examples
+
+Start with the [documentation index](docs/README.md), then run the [local
+Quickstart](docs/guides/quickstart.md). The [design philosophy](docs/product/design-philosophy.md)
+and [architecture reference](docs/design/architecture.md) explain why Anyam
+separates Git, authority, Evidence, and delivery.
+
+Runnable Projects live in [`examples/`](examples/README.md). Contract and
+provider qualification inputs live in [`fixtures/`](docs/examples/README.md)
+and are labelled separately so a qualification receipt is not mistaken for a
+new-user sample.
+
 ## Current qualification status
 
 This checkout is a private-alpha implementation and qualification surface, not
@@ -88,6 +100,10 @@ cd demo
 npm install
 npx create-anyam check
 ```
+
+The public site and documentation bundle can be built locally with
+`npm run verify:site`. It is a static Cloudflare Worker bundle and does not
+require a Cloudflare credential to build.
 
 Use normal Git for source transfer. Use the Anyam CLI/MCP boundary for Change,
 Workspace, Run, Evidence, Release, and Target operations. Agents receive

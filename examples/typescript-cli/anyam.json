@@ -1,0 +1,51 @@
+{
+  "schema": "anyam.project/v1",
+  "id": "project:example-typescript-cli",
+  "repositoryId": "repository:example-typescript-cli",
+  "name": "Anyam example TypeScript CLI",
+  "referenceType": "typescript-cli",
+  "sourceSpaceIds": ["source:example-typescript-cli"],
+  "source": { "root": ".", "provenance": "runnable-example" },
+  "modules": [
+    {
+      "id": "module:cli",
+      "root": ".",
+      "dependencies": [],
+      "actions": [
+        {
+          "id": "action:check",
+          "command": "npm run typecheck",
+          "inputs": ["anyam.json", "package.json", "tsconfig.json", "src/**/*.ts"],
+          "outputs": [],
+          "network": [],
+          "resources": {}
+        },
+        {
+          "id": "action:test",
+          "command": "npm test",
+          "inputs": ["package.json", "test/**/*.js", "dist/**/*.js"],
+          "outputs": [],
+          "network": [],
+          "resources": {}
+        },
+        {
+          "id": "action:build",
+          "command": "npm run build",
+          "inputs": ["package.json", "tsconfig.json", "src/**/*.ts"],
+          "outputs": ["dist/index.js", "dist/cli.js"],
+          "network": [],
+          "resources": {}
+        }
+      ],
+      "artifactTypes": ["package.archive"]
+    }
+  ],
+  "verifiers": [
+    { "id": "verifier:cli-check", "actionId": "action:check", "disclosure": "full", "requiredFor": ["release"] },
+    { "id": "verifier:cli-test", "actionId": "action:test", "disclosure": "full", "requiredFor": ["release"] },
+    { "id": "verifier:cli-build", "actionId": "action:build", "disclosure": "full", "requiredFor": ["release"] }
+  ],
+  "targets": [
+    { "id": "target:release-assets", "adapter": "generic.release-assets", "accepts": ["package.archive"], "requiredCapabilities": [] }
+  ]
+}

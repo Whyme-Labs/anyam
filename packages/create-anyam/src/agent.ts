@@ -84,6 +84,7 @@ export type LocalCapabilityGrant = {
   subjectId: string;
   resource: AgentResource;
   actions: readonly AgentCapability[];
+  authorizedActionIds?: readonly string[];
   deniedActions: readonly string[];
   canonicalWrite: false;
   issuedAt: string;
@@ -114,6 +115,7 @@ export type LocalAgentSession = {
   workspaceBoundaryId?: string;
   workspaceEnforcement?: WorkspaceBoundaryEnforcement;
   workspaceTemporary?: boolean;
+  workspaceScope?: Pick<LocalAgentSessionOptions, "authorizedPaths" | "network" | "executablePaths" | "workspaceDirectory" | "resourceLimits">;
   processPid?: number;
   processGroupId?: number;
   revokedAt?: string;
@@ -319,6 +321,19 @@ export type LocalAgentManagerOptions = {
   credentialLifetimeMs?: number;
   sessionLifetimeMs?: number;
   now?: () => Date;
+  resourceLimits?: WorkspaceResourceLimits;
+};
+
+export type LocalAgentSessionOptions = {
+  agent: string;
+  changeId?: string;
+  parallel?: boolean;
+  mode?: WorkspaceBoundaryMode;
+  authorizedPaths?: readonly string[];
+  authorizedActionIds?: readonly string[];
+  network?: readonly string[];
+  executablePaths?: readonly string[];
+  workspaceDirectory?: string;
   resourceLimits?: WorkspaceResourceLimits;
 };
 
@@ -663,7 +678,7 @@ type LocalActionCommandResult = {
   outputLimitExceeded: boolean;
 };
 
-async function executeDeclaredAction(boundary: WorkspaceBoundary, command: string, onProcess?: (process: ChildProcess) => void): Promise<LocalActionCommandResult> {
+async function executeDeclaredAction(boundary: WorkspaceBoundary, command: string, onProcess?: (process: ChildProcess) => void | Promise<void>): Promise<LocalActionCommandResult> {
   try {
     const result = await runWorkspaceCommand({
       boundary,
@@ -1033,7 +1048,7 @@ export class LocalAgentManager {
     const active = this.activeSession(state, sessionId);
     if (!active) throw new LocalAgentError({ code: "agent.session.missing", message: `No active local agent session is available for ${sessionId ?? "the selected Project"}.`, recoveryAction: sessionId ? "inspect anyam workspace list and select an active Workspace session" : "run anyam agent start <codex|claude|cursor|cli>", receipt: `session=${sessionId ?? "current"}; active=false` });
     if (this.expireIfNeeded(state, active.session, active.grant)) {
-      state.currentSessionId = null;
+      if (state.currentSessionId === active.session.id) state.currentSessionId = null;
       await this.writeState(state);
       throw new LocalAgentError({ code: "agent.session.expired", message: `Agent session ${active.session.id} expired; no operation was performed.`, affectedObject: active.session.id, recoveryAction: "start a new agent session and retry", receipt: `session-expiry=${active.session.expiresAt}` });
     }
@@ -1041,12 +1056,15 @@ export class LocalAgentManager {
     return { state, session: active.session, grant: active.grant, context: active.context };
   }
 
-  private async startSessionUnlocked(input: { agent: string; changeId?: string; parallel?: boolean; mode?: WorkspaceBoundaryMode; authorizedPaths?: readonly string[]; network?: readonly string[]; executablePaths?: readonly string[]; workspaceDirectory?: string; resourceLimits?: WorkspaceResourceLimits }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+  private async startSessionUnlocked(input: LocalAgentSessionOptions): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
     const agent = ensureAgent(input.agent);
     const mode = input.mode ?? "supervised";
     const resourceLimits = input.resourceLimits ?? this.resourceLimits;
     const project = await this.projectMetadata();
     const change = await this.changeMetadata();
+    const authorizedActionIds = input.authorizedActionIds ? [...new Set(input.authorizedActionIds)] : project.actions.map(action => action.id);
+    const unknownActions = authorizedActionIds.filter(id => !project.actions.some(action => action.id === id));
+    if (unknownActions.length > 0) throw new LocalAgentError({ code: "agent.action_scope_invalid", message: `Requested Action scope is not declared by the Project: ${unknownActions.join(", ")}.`, recoveryAction: "select only declared Action IDs", receipt: "session=not-started; action-scope=invalid" });
     if (change.projectId !== project.id) throw new LocalAgentError({ code: "change.project_mismatch", message: `Change ${change.id} belongs to ${change.projectId}, not ${project.id}.`, affectedObject: change.id, recoveryAction: "start the agent from the Change's Project directory", receipt: `manifest-project=${project.id}; change-project=${change.projectId}` });
     if (input.changeId && input.changeId !== change.id) throw new LocalAgentError({ code: "change.not_active", message: `Requested Change ${input.changeId} is not the local active Change ${change.id}.`, affectedObject: input.changeId, recoveryAction: "switch to the Change Workspace before starting the agent", receipt: `active-change=${change.id}` });
 
@@ -1062,6 +1080,18 @@ export class LocalAgentManager {
       if (existing.session.agent !== agent) throw new LocalAgentError({ code: "agent.session.busy", message: `Change ${change.id} already has an active ${existing.session.agent} session; hand it off before starting ${agent}.`, affectedObject: existing.session.id, recoveryAction: `run anyam agent handoff ${agent}`, receipt: `active-session=${existing.session.id}` });
       const existingMode = existing.session.workspaceMode ?? "supervised";
       if (existingMode !== mode) throw new LocalAgentError({ code: "agent.session.mode_mismatch", message: `Change ${change.id} already has an active ${existingMode} session; it cannot be reused as ${mode}.`, affectedObject: existing.session.id, recoveryAction: "revoke the current session and start a new session with the requested Workspace mode", receipt: `active-mode=${existingMode}; requested-mode=${mode}` });
+      // Omitted options retain the existing session contract. Explicit options
+      // must match it; returning an old, wider Grant would ignore owner intent.
+      const sameSet = (left: readonly string[], right: readonly string[]) => JSON.stringify([...new Set(left)].sort()) === JSON.stringify([...new Set(right)].sort());
+      const mismatches: string[] = [];
+      if (input.authorizedActionIds !== undefined && (!existing.grant.authorizedActionIds || !sameSet(authorizedActionIds, existing.grant.authorizedActionIds))) mismatches.push("authorizedActionIds");
+      const scope = existing.session.workspaceScope;
+      for (const key of ["authorizedPaths", "network", "executablePaths"] as const) {
+        if (input[key] !== undefined && (!scope || !sameSet(input[key], scope[key] ?? []))) mismatches.push(key);
+      }
+      if (input.workspaceDirectory !== undefined && (!scope || resolve(input.workspaceDirectory) !== resolve(scope.workspaceDirectory ?? existing.session.workspaceDirectory ?? this.directory))) mismatches.push("workspaceDirectory");
+      if (input.resourceLimits !== undefined && (!scope?.resourceLimits || Object.keys(input.resourceLimits).some(key => input.resourceLimits![key as keyof WorkspaceResourceLimits] !== scope.resourceLimits![key as keyof WorkspaceResourceLimits]))) mismatches.push("resourceLimits");
+      if (mismatches.length) throw new LocalAgentError({ code: "agent.session.scope_mismatch", message: `Change ${change.id} already has an active session with a different ${mismatches.join(", ")} scope; it cannot be reused with the requested scope.`, affectedObject: existing.session.id, recoveryAction: "revoke the current session or explicitly start a parallel session with the requested scope", receipt: `active-session=${existing.session.id}; scope-mismatch=${mismatches.join(",")}` });
       await this.writeState(state);
       return { session: clone(existing.session), grant: clone(existing.grant), context: clone(existing.context) };
     }
@@ -1100,6 +1130,7 @@ export class LocalAgentManager {
       subjectId: actorId,
       resource,
       actions: AGENT_CAPABILITIES,
+      authorizedActionIds,
       deniedActions: PROHIBITED_OPERATIONS,
       canonicalWrite: false,
       issuedAt: startedAt,
@@ -1120,8 +1151,8 @@ export class LocalAgentManager {
       grantId,
       capabilities: AGENT_CAPABILITIES,
       prohibitedOperations: PROHIBITED_OPERATIONS,
-      actions: project.actions.map((action) => action.id),
-      verifiers: project.verifiers.map((verifier) => verifier.id),
+      actions: authorizedActionIds,
+      verifiers: project.verifiers.filter(verifier => authorizedActionIds.includes(verifier.actionId)).map(verifier => verifier.id),
       authorizationEpoch: state.authorizationEpoch,
       disclosure: "local-owner",
       createdAt: startedAt,
@@ -1156,6 +1187,13 @@ export class LocalAgentManager {
       } : {
         workspaceEnforcement: boundary.enforcement,
       }),
+      workspaceScope: {
+        ...(input.authorizedPaths ? { authorizedPaths: [...input.authorizedPaths] } : {}),
+        network: [...(input.network ?? [])],
+        executablePaths: [...(input.executablePaths ?? [])],
+        ...(input.workspaceDirectory ? { workspaceDirectory: resolve(input.workspaceDirectory) } : {}),
+        ...(resourceLimits ? { resourceLimits: clone(resourceLimits) } : {}),
+      },
     };
     state.sessions[sessionId] = session;
     state.grants[grantId] = grant;
@@ -1167,7 +1205,7 @@ export class LocalAgentManager {
     return { session, grant, context };
   }
 
-  async startSession(input: { agent: string; changeId?: string; parallel?: boolean; mode?: WorkspaceBoundaryMode; authorizedPaths?: readonly string[]; network?: readonly string[]; executablePaths?: readonly string[]; workspaceDirectory?: string; resourceLimits?: WorkspaceResourceLimits }): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+  async startSession(input: LocalAgentSessionOptions): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
     return this.withStateLock(() => this.startSessionUnlocked(input));
   }
 
@@ -1181,6 +1219,15 @@ export class LocalAgentManager {
         return { session: clone(active.session), grant: clone(active.grant), context: clone(active.context) };
       }
       return this.startSessionUnlocked({ agent: requested });
+    });
+  }
+
+  async bindSession(sessionId: string, agent: string): Promise<{ session: LocalAgentSession; grant: LocalCapabilityGrant; context: AgentContextManifest }> {
+    return this.withStateLock(async () => {
+      const active = await this.requireActiveSessionUnlocked(sessionId);
+      if (active.session.agent !== ensureAgent(agent)) throw new LocalAgentError({ code: "agent.session.agent_mismatch", message: "The selected session belongs to another agent; no binding was created.", recoveryAction: "select the session belonging to this agent", receipt: `session=${sessionId}; binding=denied` });
+      if (!this.boundaries.has(sessionId)) throw new LocalAgentError({ code: "workspace.boundary_missing", message: "The selected session has no live boundary in this broker process; no replacement session was created.", recoveryAction: "revoke the interrupted session and explicitly start a fresh scoped broker", receipt: `session=${sessionId}; boundary=missing; fallback=false` });
+      return { session: clone(active.session), grant: clone(active.grant), context: clone(active.context) };
     });
   }
 
@@ -1225,6 +1272,18 @@ export class LocalAgentManager {
     return this.withStateLock(() => this.revokeUnlocked(sessionId));
   }
 
+  /** Durable process custody; subclasses may pause here in isolated fault tests. */
+  protected async registerWorkspaceProcess(sessionId: string, child: ChildProcess): Promise<void> {
+    await this.withStateLock(async () => {
+      const active = await this.requireActiveSessionUnlocked(sessionId);
+      if (child.pid) {
+        active.session.processPid = child.pid;
+        active.session.processGroupId = child.pid;
+        await this.writeState(active.state);
+      }
+    });
+  }
+
   async launchAgent(input: AgentLaunchInput): Promise<AgentLaunchResult> {
     const mode = input.mode ?? "enforceable";
     const started = input.sessionId
@@ -1256,15 +1315,7 @@ export class LocalAgentManager {
         ...(input.args ? { args: input.args } : {}),
         onProcess: (child) => {
           this.runningProcesses.set(started.session.id, child);
-          void this.withStateLock(async () => {
-            const state = await this.readState();
-            const session = state.sessions[started.session.id];
-            if (session && child.pid) {
-              session.processPid = child.pid;
-              session.processGroupId = child.pid;
-              await this.writeState(state);
-            }
-          });
+          return this.registerWorkspaceProcess(started.session.id, child);
         },
       });
     } finally {
@@ -1379,7 +1430,7 @@ export class LocalAgentManager {
     await this.writeState(active.state);
   }
 
-  private async prepareRunStart(args: Record<string, unknown>): Promise<{
+  private async prepareRunStart(args: Record<string, unknown>, sessionId?: string): Promise<{
     session: LocalAgentSession;
     grant: LocalCapabilityGrant;
     project: ProjectMetadata;
@@ -1396,7 +1447,7 @@ export class LocalAgentManager {
     evidenceId: string;
   }> {
     return this.withStateLock(async () => {
-      const active = await this.requireActiveSessionUnlocked();
+      const active = await this.requireActiveSessionUnlocked(sessionId);
       if (!LOCAL_MCP_TOOLS.some((entry) => entry.name === "run.start")) return this.denial(active, "run.start");
       const project = await this.projectMetadata();
       const change = await this.changeMetadata();
@@ -1405,6 +1456,7 @@ export class LocalAgentManager {
       const actionId = stringField(args.actionId, "");
       const action = project.actions.find((candidate) => candidate.id === actionId);
       if (!action) throw new LocalAgentError({ code: "run.action_unknown", message: `Action ${actionId || "missing"} is not declared by the Project; no run was started.`, affectedObject: actionId || "action:missing", recoveryAction: `choose one of ${project.actions.map((candidate) => candidate.id).join(", ") || "the actions in anyam.json"}`, receipt: `declared-actions=${project.actions.map((candidate) => candidate.id).join(",")}` });
+      if (active.grant.authorizedActionIds && !active.grant.authorizedActionIds.includes(action.id)) throw new LocalAgentError({ code: "run.action_denied", message: `Action ${action.id} is outside this session's granted scope; no run was started.`, affectedObject: action.id, recoveryAction: "use an Action granted to this session or request a separately scoped session", receipt: `session=${active.session.id}; action=${action.id}; execution=not-started` });
       const requestedVerifierId = stringField(args.verifierId, "");
       const verifier = requestedVerifierId
         ? project.verifiers.find((candidate) => candidate.id === requestedVerifierId)
@@ -1440,23 +1492,16 @@ export class LocalAgentManager {
     });
   }
 
-  private async invokeRunStart(args: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const prepared = await this.prepareRunStart(args);
+  private async invokeRunStart(args: Record<string, unknown>, sessionId?: string): Promise<Record<string, unknown>> {
+    const prepared = await this.prepareRunStart(args, sessionId);
     let processRegistration: Promise<void> | undefined;
     let commandResult: LocalActionCommandResult;
     try {
       commandResult = prepared.inputs.missing.length === 0
         ? await executeDeclaredAction(prepared.boundary, prepared.action.command, (child) => {
           this.runningProcesses.set(prepared.session.id, child);
-          processRegistration = this.withStateLock(async () => {
-            const state = await this.readState();
-            const session = state.sessions[prepared.session.id];
-            if (session && child.pid) {
-              session.processPid = child.pid;
-              session.processGroupId = child.pid;
-              await this.writeState(state);
-            }
-          });
+          processRegistration = this.registerWorkspaceProcess(prepared.session.id, child);
+          return processRegistration;
         })
         : { exitCode: undefined, stdout: "", stderr: "", timedOut: false, outputLimitExceeded: false };
       if (processRegistration) await processRegistration;
@@ -1503,10 +1548,18 @@ export class LocalAgentManager {
       const state = await this.readState();
       const session = state.sessions[prepared.session.id];
       const grant = session ? state.grants[session.grantId] : undefined;
-      const revokedDuringRun = !session || !grant || session.status !== "active" || grant.status !== "active";
-      const status = revokedDuringRun ? "blocked" : failureReason ? "failed" : "passed";
       const completedAt = nowIso(this.now);
-      const finalReason = revokedDuringRun ? "session-revoked-during-run" : failureReason;
+      const completionClock = () => new Date(completedAt);
+      const revokedDuringRun = !session || !grant || session.status === "revoked" || grant.status === "revoked";
+      const expiredDuringRun = !!session && !!grant && !revokedDuringRun
+        && (session.status === "expired" || grant.status === "expired" || isExpired(session.expiresAt, completionClock) || isExpired(grant.expiresAt, completionClock));
+      if (expiredDuringRun && session && grant) {
+        session.status = "expired";
+        grant.status = "expired";
+        if (state.currentSessionId === session.id) state.currentSessionId = null;
+      }
+      const status = revokedDuringRun || expiredDuringRun ? "blocked" : failureReason ? "failed" : "passed";
+      const finalReason = revokedDuringRun ? "session-revoked-during-run" : expiredDuringRun ? "session-expired-during-run" : failureReason;
       const evidenceDigest = digest({ actionId: prepared.action.id, verifierId: prepared.verifier?.id ?? "verifier:missing", sourceRevision: gitCommitIdentity(prepared.source.commitId), sourceSnapshot: `git:snapshot:${prepared.source.commitId}`, inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, status, sourceMutated, actorId: prepared.session.actorId, grantId: prepared.grant.id });
       const observation: LocalRunObservation = {
         id: prepared.runId,
@@ -1547,8 +1600,8 @@ export class LocalAgentManager {
     });
   }
 
-  private async invokeToolUnlocked(name: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
-    const active = await this.requireActiveSessionUnlocked();
+  private async invokeToolUnlocked(name: string, args: Record<string, unknown>, sessionId?: string): Promise<Record<string, unknown>> {
+    const active = await this.requireActiveSessionUnlocked(sessionId);
     if (!LOCAL_MCP_TOOLS.some((entry) => entry.name === name)) return this.denial(active, name);
     const project = await this.projectMetadata();
     const change = await this.changeMetadata();
@@ -1566,7 +1619,7 @@ export class LocalAgentManager {
     }
     if (name === "workspace.inspect") {
       await this.appendToolAudit(active, name);
-      return { workspace: active.grant.resource, sessionId: active.session.id, contextId: active.context.id, capabilities: active.grant.actions, prohibitedOperations: active.grant.deniedActions, canonicalWrite: false };
+      return { workspace: active.grant.resource, sessionId: active.session.id, contextId: active.context.id, capabilities: active.grant.actions, authorizedActionIds: active.grant.authorizedActionIds ?? active.context.actions, prohibitedOperations: active.grant.deniedActions, canonicalWrite: false };
     }
     if (name === "run.start") {
       const actionId = stringField(args.actionId, "");
@@ -1802,9 +1855,9 @@ export class LocalAgentManager {
     return this.denial(active, name);
   }
 
-  async invokeTool(name: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
-    if (name === "run.start") return this.invokeRunStart(args);
-    return this.withStateLock(() => this.invokeToolUnlocked(name, args));
+  async invokeTool(name: string, args: Record<string, unknown> = {}, sessionId?: string): Promise<Record<string, unknown>> {
+    if (name === "run.start") return this.invokeRunStart(args, sessionId);
+    return this.withStateLock(() => this.invokeToolUnlocked(name, args, sessionId));
   }
 }
 
@@ -1814,16 +1867,35 @@ export type McpStdioOptions = {
   input: Readable;
   output: Writable;
   manager?: LocalAgentManager;
+  sessionId?: string;
+  sessionOptions?: Omit<LocalAgentSessionOptions, "agent" | "parallel">;
 };
 
 export class LocalMcpBroker {
   private readonly manager: LocalAgentManager;
   private readonly agent: AgentKind;
-  private sessionId: string | null = null;
+  private binding: Promise<string> | null = null;
+  private readonly selectedSessionId: string | undefined;
+  private readonly sessionOptions: Omit<LocalAgentSessionOptions, "agent" | "parallel"> | undefined;
 
-  constructor(input: { manager: LocalAgentManager; agent: string }) {
+  constructor(input: { manager: LocalAgentManager; agent: string; sessionId?: string; sessionOptions?: Omit<LocalAgentSessionOptions, "agent" | "parallel"> }) {
     this.manager = input.manager;
     this.agent = ensureAgent(input.agent);
+    this.selectedSessionId = input.sessionId;
+    this.sessionOptions = input.sessionOptions;
+    if (input.sessionId && input.sessionOptions) throw new Error("select an existing session or create a fresh scoped session, not both");
+  }
+
+  private bind(): Promise<string> {
+    this.binding ??= (async () => {
+      const selected = this.selectedSessionId
+        ? await this.manager.bindSession(this.selectedSessionId, this.agent)
+        : this.sessionOptions
+          ? await this.manager.startSession({ ...this.sessionOptions, agent: this.agent, parallel: true })
+          : await this.manager.ensureActiveSession(this.agent);
+      return selected.session.id;
+    })();
+    return this.binding;
   }
 
   async handle(request: Record<string, unknown>): Promise<Record<string, unknown> | null> {
@@ -1831,13 +1903,20 @@ export class LocalMcpBroker {
     const method = typeof request.method === "string" ? request.method : "";
     if (method === "notifications/initialized") return null;
     if (method === "initialize") {
-      const session = await this.manager.ensureActiveSession(this.agent);
-      this.sessionId = session.session.id;
+      if (this.binding) return { jsonrpc: "2.0", id, error: { code: -32600, message: "This MCP broker is already bound or initializing. Open a new connection to initialize another session." } };
+      try {
+        await this.bind();
+      } catch (error) {
+        return { jsonrpc: "2.0", id, error: { code: -32000, message: error instanceof Error ? error.message : String(error), data: error instanceof LocalAgentError ? error.toJSON() : undefined } };
+      }
       return { jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "anyam", version: "0.0.0" }, instructions: "Anyam MCP is a semantic Change broker. Git transfers source objects; canonical writes, secret reads, approvals, and production promotion are not available to this local session." } };
     }
-    if (!this.sessionId) {
-      const session = await this.manager.ensureActiveSession(this.agent);
-      this.sessionId = session.session.id;
+    let boundSessionId: string;
+    try {
+      boundSessionId = await this.bind();
+    } catch (error) {
+      const detail = error instanceof LocalAgentError ? error.toJSON() : { code: "agent.broker.error", message: error instanceof Error ? error.message : String(error) };
+      return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(detail) }], structuredContent: { error: detail }, isError: true } };
     }
     if (method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: LOCAL_MCP_TOOLS } };
     if (method === "tools/call") {
@@ -1845,7 +1924,7 @@ export class LocalMcpBroker {
       const name = typeof params.name === "string" ? params.name : "";
       const args = isRecord(params.arguments) ? params.arguments : {};
       try {
-        const result = await this.manager.invokeTool(name, args);
+        const result = await this.manager.invokeTool(name, args, boundSessionId);
         return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result, isError: false } };
       } catch (error) {
         const detail = error instanceof LocalAgentError ? error.toJSON() : { code: "agent.broker.error", message: error instanceof Error ? error.message : String(error) };
@@ -1858,7 +1937,7 @@ export class LocalMcpBroker {
 
 export async function runMcpStdio(options: McpStdioOptions): Promise<void> {
   const manager = options.manager ?? new LocalAgentManager({ directory: options.directory });
-  const broker = new LocalMcpBroker({ manager, agent: options.agent });
+  const broker = new LocalMcpBroker({ manager, agent: options.agent, ...(options.sessionId ? { sessionId: options.sessionId } : {}), ...(options.sessionOptions ? { sessionOptions: options.sessionOptions } : {}) });
   const lines = createInterface({ input: options.input, crlfDelay: Infinity });
   for await (const line of lines) {
     if (!line.trim()) continue;

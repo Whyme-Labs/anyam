@@ -1,0 +1,51 @@
+{
+  "schema": "anyam.project/v1",
+  "id": "project:example-worker-app",
+  "repositoryId": "repository:example-worker-app",
+  "name": "Anyam example Worker app",
+  "referenceType": "typescript-worker",
+  "sourceSpaceIds": ["source:example-worker-app"],
+  "source": { "root": ".", "provenance": "runnable-example" },
+  "modules": [
+    {
+      "id": "module:worker",
+      "root": ".",
+      "dependencies": [],
+      "actions": [
+        {
+          "id": "action:check",
+          "command": "npm run typecheck",
+          "inputs": ["anyam.json", "package.json", "tsconfig.json", "src/**/*.ts"],
+          "outputs": [],
+          "network": [],
+          "resources": {}
+        },
+        {
+          "id": "action:test",
+          "command": "npm test",
+          "inputs": ["package.json", "test/**/*.js", "dist/**/*.js"],
+          "outputs": [],
+          "network": [],
+          "resources": {}
+        },
+        {
+          "id": "action:build",
+          "command": "npm run build",
+          "inputs": ["package.json", "tsconfig.json", "src/**/*.ts"],
+          "outputs": ["dist/index.js"],
+          "network": [],
+          "resources": {}
+        }
+      ],
+      "artifactTypes": ["worker.bundle"]
+    }
+  ],
+  "verifiers": [
+    { "id": "verifier:worker-check", "actionId": "action:check", "disclosure": "full", "requiredFor": ["release"] },
+    { "id": "verifier:worker-test", "actionId": "action:test", "disclosure": "full", "requiredFor": ["release"] },
+    { "id": "verifier:worker-build", "actionId": "action:build", "disclosure": "full", "requiredFor": ["release"] }
+  ],
+  "targets": [
+    { "id": "target:worker", "adapter": "cloudflare.worker", "accepts": ["worker.bundle"], "requiredCapabilities": [] }
+  ]
+}

@@ -5,8 +5,10 @@ import { mkdir, mkdtemp, lstat, readFile, readdir, realpath, rm, stat, writeFile
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import type { Duplex } from "node:stream";
 
 import { trustedGitArgs, trustedGitEnvironment } from "./trusted-git.js";
+import { WORKSPACE_PROCESS_CUSTODY_SCRIPT } from "./workspace-process-custody.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -433,6 +435,13 @@ function sandboxProfile(input: { workspaceDirectory: string; stateDirectory: str
     lines.push(`(deny file-write* (subpath ${quoteProfile(path)}))`);
   }
   for (const root of runtimeRoots) lines.push(`(allow file-read* (subpath ${quoteProfile(root)}))`);
+  // File entry points resolve their real path before Node loads them. Permit
+  // metadata traversal of this workspace's ancestors, not directory contents
+  // or sibling source. Inline-only probes did not exercise this boundary.
+  for (let ancestor = dirname(input.workspaceDirectory); ; ancestor = dirname(ancestor)) {
+    lines.push(`(allow file-read-metadata (literal ${quoteProfile(ancestor)}))`);
+    if (dirname(ancestor) === ancestor) break;
+  }
   lines.push(`(allow file-read* (subpath ${quoteProfile(input.workspaceDirectory)}))`);
   lines.push(`(allow file-write* (subpath ${quoteProfile(input.workspaceDirectory)}))`);
   if (input.protectGitMetadata) lines.push(`(deny file-write* (subpath ${quoteProfile(join(input.workspaceDirectory, ".git"))}))`);
@@ -557,7 +566,7 @@ export async function createWorkspaceBoundary(input: WorkspaceBoundaryInput): Pr
   };
 }
 
-export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; command: string; args?: readonly string[]; shell?: boolean; timeoutMs?: number; protectGitMetadata?: boolean; onProcess?: (process: ChildProcess) => void }): Promise<WorkspaceBoundaryCommandResult> {
+export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; command: string; args?: readonly string[]; shell?: boolean; timeoutMs?: number; protectGitMetadata?: boolean; onProcess?: (process: ChildProcess) => void | Promise<void> }): Promise<WorkspaceBoundaryCommandResult> {
   const args = [...(input.args ?? [])];
   const timeoutMs = input.timeoutMs ?? WORKSPACE_BOUNDARY_POLICY.commandTimeoutMs;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new WorkspaceBoundaryError({ code: "workspace.command_timeout_invalid", message: `Workspace command timeout must be positive; asked=${timeoutMs}.`, recoveryAction: "provide a positive timeout or use the provisional boundary tripwire", receipt: WORKSPACE_BOUNDARY_POLICY.receipt });
@@ -585,8 +594,35 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
       ? resourceLimits && prlimit && linuxBwrapArgs ? [...linuxPrlimitArgs(resourceLimits), "bwrap", ...linuxBwrapArgs] : linuxBwrapArgs ?? []
       : shellCommand ? invokedArgs : ["-c", `${input.command} ${args.map((arg) => JSON.stringify(arg)).join(" ")}`];
   const detached = process.platform !== "win32" && input.boundary.enforcement !== "none";
-  const child = spawn(executable, executableArgs, { cwd: input.boundary.workspaceDirectory, env: input.boundary.environment, stdio: ["inherit", "pipe", "pipe"], detached });
-  input.onProcess?.(child);
+  const child = detached
+    ? spawn(process.execPath, ["-e", WORKSPACE_PROCESS_CUSTODY_SCRIPT, JSON.stringify([executable, ...executableArgs])], { cwd: input.boundary.workspaceDirectory, env: input.boundary.environment, stdio: ["inherit", "pipe", "pipe", "pipe"], detached: true })
+    : spawn(executable, executableArgs, { cwd: input.boundary.workspaceDirectory, env: input.boundary.environment, stdio: ["inherit", "pipe", "pipe"], detached: false });
+  const custody = detached ? child.stdio[3] as Duplex : undefined;
+  let custodyResult: { exitCode?: number; signal?: string } | undefined;
+  let custodyFailureReason: "invalid-result" | "stream-error" | "completion-missing" | undefined;
+  let custodyMessage = "";
+  custody?.on("data", (chunk: Buffer) => {
+    custodyMessage += chunk.toString();
+    if (!custodyMessage.endsWith("\n")) return;
+    try {
+      const observed = JSON.parse(custodyMessage) as { exitCode?: unknown; signal?: unknown };
+      if ((observed.exitCode === null || typeof observed.exitCode === "number") && (observed.signal === undefined || observed.signal === null || typeof observed.signal === "string")) {
+        custodyResult = { ...(typeof observed.exitCode === "number" ? { exitCode: observed.exitCode } : {}), ...(typeof observed.signal === "string" ? { signal: observed.signal } : {}) };
+      } else custodyFailureReason = "invalid-result";
+    } catch { custodyFailureReason = "invalid-result"; }
+  });
+  custody?.on("error", () => { custodyFailureReason = "stream-error"; terminate("SIGKILL"); });
+  let registrationError: unknown;
+  // Registration may block or fail. The custodian cannot release the workload
+  // until it succeeds, and pipe EOF kills its own group if this broker dies.
+  const registration = Promise.resolve().then(() => input.onProcess?.(child)).then(() => {
+    if (custodyFailureReason) custody?.destroy();
+    else custody?.write("start");
+  }, error => {
+    registrationError = error;
+    custody?.destroy();
+    terminate("SIGKILL");
+  });
   const terminate = (signal: NodeJS.Signals): void => {
     if (child.pid && detached) {
       try { process.kill(-child.pid, signal); return; } catch { /* fall back to the direct child */ }
@@ -673,9 +709,19 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
       if (killTimer) clearTimeout(killTimer);
       if (outputKillTimer) clearTimeout(outputKillTimer);
       if (workspaceMonitor) clearInterval(workspaceMonitor);
-      resolveResult({ ...(exitCode === null ? {} : { exitCode }), ...(signal ? { signal } : {}), timedOut });
+      custody?.destroy();
+      resolveResult({ ...(custodyResult ?? { ...(!detached && exitCode !== null ? { exitCode } : {}), ...(signal ? { signal } : {}) }), timedOut });
     });
   });
+  await registration;
+  if (registrationError) throw registrationError;
+  if (detached && !custodyResult) custodyFailureReason ??= "completion-missing";
+  if (custodyFailureReason) {
+    delete result.exitCode;
+    // Fixed diagnostic vocabulary only: never reflect transport contents or
+    // arbitrary error messages from the control channel into owner receipts.
+    stderr += `Workspace custody failed: ${custodyFailureReason}.\n`;
+  }
   if (workspaceMonitor) {
     clearInterval(workspaceMonitor);
     await monitorWorkspaceUsage();
@@ -698,7 +744,7 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
     stderrDigest: digest(stderr),
     ...(result.timedOut ? { timedOut: true } : {}),
     ...(child.pid ? { processId: child.pid, ...(detached ? { processGroupId: child.pid } : {}) } : {}),
-    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=${input.boundary.enforcement};${input.boundary.enforcement === "linux-bwrap" ? ` containment=${LINUX_BWRAP_CONTAINMENT_RECEIPT};` : ""} networkEnforcement=${input.boundary.networkEnforcement}; gitMetadata=${protectGitMetadata ? "read-only" : "workspace-writable"}; status=${status};${result.timedOut ? ` budget=workspace.command; limit=${timeoutMs}ms; asked=timeout;` : ""}${outputLimitExceeded ? ` budget=workspace.output; limit=${WORKSPACE_BOUNDARY_POLICY.maxOutputBytes}bytes; asked=output-exceeded;` : ""}${resourceReceipt}`,
+    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=${input.boundary.enforcement}; custody=${detached ? "parent-pipe; command-release=after-registration" : "supervised-host"};${custodyFailureReason ? ` custody-failure=${custodyFailureReason};` : ""}${input.boundary.enforcement === "linux-bwrap" ? ` containment=${LINUX_BWRAP_CONTAINMENT_RECEIPT};` : ""} networkEnforcement=${input.boundary.networkEnforcement}; gitMetadata=${protectGitMetadata ? "read-only" : "workspace-writable"}; status=${status};${result.timedOut ? ` budget=workspace.command; limit=${timeoutMs}ms; asked=timeout;` : ""}${outputLimitExceeded ? ` budget=workspace.output; limit=${WORKSPACE_BOUNDARY_POLICY.maxOutputBytes}bytes; asked=output-exceeded;` : ""}${resourceReceipt}`,
   };
 }
 

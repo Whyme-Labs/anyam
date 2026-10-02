@@ -152,18 +152,29 @@ export class ArtifactsWorkspaceQualification {
       const run = this.custody(() => this.options.ledger.read(runId));
       if (!run || run.accountId !== this.options.accountId || run.namespace !== this.options.namespace) return "required";
       await this.options.authorizeRun(Object.freeze({ ...run.input, selections: Object.freeze(run.input.selections.map(immutableArtifactsWorkspaceSelection)) }));
+      // Every resource shares this run's credential redaction boundary. Finish
+      // any in-memory fingerprints before adopting metadata from any resource.
+      for (const resource of run.resources) {
+        if (!resource.credentialGuardPending) continue;
+        const plaintext = pendingPlaintext.get(resource.selection.targetName);
+        if (plaintext === undefined) continue;
+        await this.rememberCredential(runId, resource.selection.targetName, plaintext);
+        pendingPlaintext.delete(resource.selection.targetName);
+      }
+      if (this.custody(() => this.options.ledger.read(runId)?.resources.some(resource => resource.credentialGuardPending)) !== false) {
+        this.custody(() => this.options.ledger.change(runId, entry => {
+          for (const resource of entry.resources) {
+            if (resource.state !== "reserved" && resource.state !== "deleted") resource.recovery = "qualification.credential_redaction_pending";
+          }
+        }));
+        throw new QualificationFailure("qualification.credential_redaction_pending");
+      }
       let confirmed = true;
       for (const resource of run.resources) {
         if (resource.state === "reserved" || resource.state === "deleted") continue;
         try {
           if (resource.state === "delete-pending") throw new QualificationFailure("qualification.deletion_outcome_unknown");
           if (!resource.repositoryId) throw new QualificationFailure("qualification.repository_identity_unknown");
-          if (resource.credentialGuardPending) {
-            const plaintext = pendingPlaintext.get(resource.selection.targetName);
-            if (plaintext === undefined) throw new QualificationFailure("qualification.credential_redaction_pending");
-            await this.rememberCredential(runId, resource.selection.targetName, plaintext);
-            pendingPlaintext.delete(resource.selection.targetName);
-          }
           this.operation(runId, "cleanup:get");
           using repo = await this.options.artifacts.get(resource.selection.targetName);
           this.operation(runId, "cleanup:info");
@@ -316,7 +327,8 @@ export class ArtifactsWorkspaceQualification {
           operation("fork");
           const raw = await repo.fork(target, options);
           const reply = { id: raw.id, name: raw.name, remote: raw.remote, defaultBranch: raw.defaultBranch, token: raw.token };
-          if (typeof reply.token === "string") knownPlaintext.add(reply.token);
+          if (typeof reply.token !== "string" || !reply.token.length) throw new QualificationFailure("qualification.credential_shape_invalid");
+          knownPlaintext.add(reply.token);
           pendingPlaintext.set(target, reply.token);
           this.assertCurrentMetadata([reply.id, reply.name, reply.remote, reply.defaultBranch], knownPlaintext);
           const resources = capture(() => this.custody(() => this.options.ledger.read(runId)?.resources));
@@ -334,7 +346,8 @@ export class ArtifactsWorkspaceQualification {
           try { raw = await repo.createToken(scope, ttl); }
           catch (error) { change(selection.targetName, resource => { resource.credentialGuardPending = false; }); throw error; }
           const reply = { id: raw.id, plaintext: raw.plaintext, scope: raw.scope, expiresAt: raw.expiresAt };
-          if (typeof reply.plaintext === "string") knownPlaintext.add(reply.plaintext);
+          if (typeof reply.plaintext !== "string" || !reply.plaintext.length) throw new QualificationFailure("qualification.credential_shape_invalid");
+          knownPlaintext.add(reply.plaintext);
           pendingPlaintext.set(selection.targetName, reply.plaintext);
           this.assertCurrentMetadata([reply.id, reply.scope, reply.expiresAt], knownPlaintext);
           if (!this.metadataId(reply.id, reply.plaintext, knownPlaintext)) throw new Error("token identity reply is unqualified");
@@ -362,6 +375,7 @@ export class ArtifactsWorkspaceQualification {
   }
 
   private assertCurrentMetadata(values: readonly unknown[], knownPlaintext: ReadonlySet<string>): void {
+    if (values.some(value => typeof value !== "string")) throw new QualificationFailure("qualification.metadata_shape_invalid");
     if (values.some(value => typeof value === "string" && [...knownPlaintext].some(secret => secret && value.includes(secret)))) throw new QualificationFailure("qualification.metadata_contains_credential");
   }
 
@@ -382,11 +396,11 @@ export class ArtifactsWorkspaceQualification {
 
   private async assertMetadata(runId: string, values: readonly unknown[], knownPlaintext: ReadonlySet<string>): Promise<void> {
     this.assertCurrentMetadata(values, knownPlaintext);
-    const fingerprints = this.custody(() => this.options.ledger.read(runId)?.credentialFingerprints);
-    if (!fingerprints) throw new QualificationFailure("qualification.credential_redaction_pending");
+    const run = this.custody(() => this.options.ledger.read(runId));
+    if (!run || run.resources.some(resource => resource.credentialGuardPending)) throw new QualificationFailure("qualification.credential_redaction_pending");
     for (const value of new Set(values)) {
       if (typeof value !== "string") continue;
-      for (const credential of fingerprints) {
+      for (const credential of run.credentialFingerprints) {
         for (let offset = 0; offset + credential.length <= value.length; offset++) {
           if (await this.fingerprint(value.slice(offset, offset + credential.length)) === credential.digest) throw new QualificationFailure("qualification.metadata_contains_credential");
         }

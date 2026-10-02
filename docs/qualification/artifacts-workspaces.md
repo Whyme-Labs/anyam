@@ -49,13 +49,17 @@ provider exceptions. Local tests use actual disposable SQLite, replace the
 connection/store/ledger/adapter, and inject rollback failures before and after
 provider effects. A lost fork reply retains its named reservation with unknown
 UUID; the invoker does not adopt a repository merely because that name exists.
-Declared provider metadata is copied before asynchronous checks. Branches,
+Declared provider metadata is copied before asynchronous checks. String metadata
+and credential plaintext must be primitive strings; implicit coercion cannot
+carry an array or object into a ref or fingerprint. Branches,
 object metadata and token IDs that contain observed credential plaintext are
 rejected. One-way SHA-256 fingerprints and credential lengths preserve this
 guard across restart, including plaintext embedded in a metadata string. UUIDs
 and token IDs are journaled before fingerprinting awaits, with a durable pending
 guard marker. An unfinished guard requires named reconciliation after restart;
-fresh provider metadata cannot replace missing redaction custody.
+fresh provider metadata cannot replace missing redaction custody. This boundary
+covers the entire run: every pending credential fingerprint must be resolved
+before cleanup accesses any resource's provider or adopts its metadata.
 
 Cleanup reauthorizes the recorded scope and rereads the recorded UUID. Complete
 `listTokens` results require unique valid IDs and a page length equal to the
@@ -64,7 +68,8 @@ surround each inventory read. All active IDs are retired, and another complete
 inventory must confirm no active tokens before deletion. This can reconcile a
 lost mint/initial-token reply for a known owned UUID. It does not reopen blocked
 Workspace custody or certify provider expiry timing. Each resource is attempted
-independently; one failure cannot hide another resource's cleanup result.
+independently once run-wide redaction custody is complete; one resource's
+retirement or deletion failure cannot hide another resource's cleanup result.
 False/not-found revocation alone does not prove retirement. Complete fresh
 inactive inventories can reconcile known IDs whose retirement reply was lost;
 active or newly journaled IDs still block deletion.

@@ -424,3 +424,63 @@ test("Artifacts restarted cleanup refuses an unfinished credential redaction jou
     assert.doesNotMatch(metadata() + JSON.stringify(result), /usable-secret|initial-secret|provider-extra-secret/);
   });
 });
+
+test("Artifacts acquisition rejects non-string branch and credential fields before coercion", async () => {
+  const outcomes: string[] = [];
+  for (const condition of ["branch-array", "initial-token-array", "mint-token-array"] as const) {
+    await qualificationFixture(async ({ fixture, control, artifacts, metadata }) => {
+      const branch = ["initial-secret-workspace-a"];
+      if (condition === "branch-array") Object.assign(fixture.infos.get("source")!, { defaultBranch: branch });
+      const get = artifacts.get.bind(artifacts);
+      const provider = { async get(name: string) {
+        const repo = await get(name);
+        return { ...repo,
+          async fork(target: string, options: { readOnly: boolean; defaultBranchOnly: boolean }) {
+            const reply = await repo.fork(target, options);
+            if (condition === "branch-array") { Object.assign(fixture.infos.get(target)!, { defaultBranch: branch }); Object.assign(reply, { defaultBranch: branch }); }
+            if (condition === "initial-token-array") Object.assign(reply, { token: [reply.token] });
+            return reply;
+          },
+          async createToken(scope: "read" | "write", ttl: number) {
+            const reply = await repo.createToken(scope, ttl);
+            if (condition === "mint-token-array") Object.assign(reply, { plaintext: [reply.plaintext] });
+            return reply;
+          },
+        };
+      } };
+      const result = await control({ artifacts: provider }).run({ runId: `qualification:primitive-${condition}`, execution: "local-fixture", selections: [artifactsSelection], credentialExpiresAt: new Date(fixture.now + 120_000).toISOString() });
+      outcomes.push(`${condition}:${result.bindingContract}`);
+      assert.doesNotMatch(metadata() + JSON.stringify(result), /usable-secret|initial-secret|provider-extra-secret/);
+    });
+  }
+  assert.deepEqual(outcomes, ["branch-array:blocked", "initial-token-array:blocked", "mint-token-array:blocked"]);
+});
+
+test("Artifacts missing fingerprint coverage blocks metadata adoption across the entire run after restart", async () => {
+  await qualificationFixture(async ({ fixture, control, artifacts, metadata, reopen, blockLedgerWrites, record, deleted }) => {
+    const get = artifacts.get.bind(artifacts);
+    const provider = { async get(name: string) {
+      const repo = await get(name);
+      return { ...repo, async createToken(scope: "read" | "write", ttl: number) {
+        if (name === "workspace-b") fixture.afterMint = () => blockLedgerWrites(true);
+        return repo.createToken(scope, ttl);
+      } };
+    } };
+    const runId = "qualification:run-wide-redaction";
+    const result = await control({ artifacts: provider }).run({ runId, execution: "local-fixture", selections: [artifactsSelection, { ...artifactsSelection, workspaceId: "workspace:b", targetName: "workspace-b" }], credentialExpiresAt: new Date(fixture.now + 120_000).toISOString() });
+    assert.equal(result.status, "blocked");
+    assert.deepEqual(result.resources.map(resource => resource.credentialGuardPending), [false, true]);
+    blockLedgerWrites(false);
+    reopen();
+    const malicious = { async get(name: string) {
+      const repo = await get(name);
+      return { ...repo, async listTokens() { return { tokens: [{ id: "usable-secret-token-id-2", state: "active" as const }], total: 1 }; } };
+    } };
+    const events = fixture.events.length;
+    assert.equal(await control({ artifacts: malicious }).cleanup(runId), "required");
+    assert.equal(fixture.events.length, events, "missing run-wide redaction custody must stop fresh metadata adoption before any resource's provider lookup");
+    assert.deepEqual(deleted, []);
+    assert.deepEqual(record(runId)?.resources[0]?.tokenIds, []);
+    assert.doesNotMatch(metadata() + JSON.stringify(result), /usable-secret|initial-secret|provider-extra-secret/);
+  });
+});

@@ -1,15 +1,35 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { SQLiteCohortLandingAuthority } from "../src/cloudflare/cohort-landing.ts";
-import { executeLocalVerification, runLocalVerifierCohortQualification, verifierGitSources, type LocalVerificationObservation } from "./fixtures/cohort-local-verifier.ts";
+import { executeLocalVerification, fixtureGit, runLocalVerifierCohortQualification, verifierGitSources, type LocalVerificationObservation } from "./fixtures/cohort-local-verifier.ts";
 import { cohortStore } from "./fixtures/cohort-sqlite.ts";
 import { prepareCohort, projectId, session } from "./fixtures/reconciliation-project.ts";
 
 const supported = process.platform === "darwin" || process.platform === "linux";
+
+test("inherited Git selectors fail before the qualification can mutate an outside repository", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyam-cohort-verifier-git-env-"));
+  try {
+    const source = verifierGitSources(root);
+    const outside = source.directories["repo:a"]!;
+    const head = fixtureGit(outside, "rev-parse", "HEAD");
+    const config = readFileSync(join(outside, ".git/config"), "utf8");
+    const canonical = fixtureGit(outside, "rev-parse", "refs/heads/canonical");
+    for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_CONFIG_PARAMETERS"]) {
+      const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", "import { runLocalVerifierCohortQualification } from './test/fixtures/cohort-local-verifier.ts'; await runLocalVerifierCohortQualification({revision:'probe',tree:'probe'});"], { encoding: "utf8", env: { ...process.env, [name]: name === "GIT_INDEX_FILE" ? join(outside, ".git/index") : join(outside, ".git") } });
+      assert.notEqual(child.status, 0);
+      assert.match(child.stderr, new RegExp(`refuses inherited Git override ${name}`));
+      assert.equal(fixtureGit(outside, "rev-parse", "HEAD"), head);
+      assert.equal(fixtureGit(outside, "rev-parse", "refs/heads/canonical"), canonical);
+      assert.equal(readFileSync(join(outside, ".git/config"), "utf8"), config);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("real isolated local verifiers feed signed Evidence into two durable Cohort Landings and partial projection recovery", { skip: supported ? false : "enforceable local Workspace backend unavailable" }, async () => {
   const report = await runLocalVerifierCohortQualification({ revision: "test-source", tree: "test-tree" });

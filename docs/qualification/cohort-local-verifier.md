@@ -15,6 +15,12 @@ Runner profiles/Attempts, Evidence, Review Approvals and Landing packets. It
 destroys the disposable databases and repositories after capture. It never
 operates on the caller's Project or configures a hosted Runner.
 
+Inherited `GIT_*` overrides are rejected before fixture Git mutations, including
+repository, worktree, index, object-directory and configuration selectors;
+the harmless `GIT_PAGER` and `GIT_TERMINAL_PROMPT` flags are allowed.
+Unset these overrides for the qualification command; it does not silently
+redirect operations or modify the caller's environment.
+
 Each Source Space has a small committed arithmetic module and a verifier with
 positive and negative input assertions. The candidate is checked out by exact
 OID and cloned into the existing enforceable Workspace boundary. The immutable

@@ -20,13 +20,22 @@ import { FencedGitProviderFixture } from "./fenced-git-provider.ts";
 import { prepareCohort, projectId, session, type CohortVerification, type realGitSources } from "./reconciliation-project.ts";
 
 // Reference-fixture wiring only: no hosted Runner adapter or enrollment route.
+export function requireFixtureGitEnvironment(): void {
+  // Presentation and prompt flags cannot select a repository or Git config.
+  const harmless = new Set(["GIT_PAGER", "GIT_TERMINAL_PROMPT"]);
+  const override = Object.keys(process.env).find((key) => key.startsWith("GIT_") && !harmless.has(key) && process.env[key] !== undefined);
+  if (override) throw new Error(`offline qualification refuses inherited Git override ${override}; unset Git overrides for this command; fixtureGitMutation=false`);
+}
+
 export function fixtureGit(directory: string, ...args: string[]): string {
+  requireFixtureGitEnvironment();
   return execFileSync("git", trustedGitArgs(args), { cwd: directory, env: trustedGitEnvironment(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
 function digest(bytes: string | Uint8Array): string { return `sha256:${createHash("sha256").update(bytes).digest("hex")}`; }
 
 export function verifierGitSources(root: string): ReturnType<typeof realGitSources> {
+  requireFixtureGitEnvironment();
   const directories: Record<string, string> = {};
   const revisions: Record<string, string>[] = [{}, {}, {}];
   const bindings = ["a", "b"].map((space) => ({ sourceSpaceId: `source:${space}`, repositoryId: `repo:${space}`, ref: "refs/heads/canonical" }));
@@ -79,6 +88,7 @@ export async function executeLocalVerification(input: {
   beforeExecution?: (boundary: WorkspaceBoundary) => void;
   beforeConsumption?: (completion: SignedRunnerCompletion) => void;
 }): Promise<LocalVerificationObservation> {
+  requireFixtureGitEnvironment();
   const { store, selection } = input;
   const sourceSpaceId = `source:${selection.space}`;
   const directory = input.source.directories[`repo:${selection.space}`]!;
@@ -143,6 +153,7 @@ export async function executeLocalVerification(input: {
 }
 
 export async function runLocalVerifierCohortQualification(implementation: { revision: string; tree: string }) {
+  requireFixtureGitEnvironment();
   const root = await mkdtemp(join(tmpdir(), "anyam-cohort-local-verifier-"));
   const path = join(root, "authority.sqlite");
   let database = new DatabaseSync(path);

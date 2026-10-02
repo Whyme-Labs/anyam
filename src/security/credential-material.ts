@@ -164,7 +164,11 @@ export function containsKnownTextMaterial(value: unknown, matchesText: (text: st
     for (const match of text.matchAll(/[A-Za-z0-9+/_-]+={0,2}/gu)) {
       const candidate = match[0].replace(/=+$/u, "").replaceAll("-", "+").replaceAll("_", "/");
       for (let alignment = 0; alignment < 4 && alignment < candidate.length; alignment++) {
-        const aligned = candidate.slice(alignment);
+        const substring = candidate.slice(alignment);
+        // A surrounding suffix can leave an invalid final one-character
+        // quantum. Discard only that quantum; complete preceding bytes still
+        // contain any embedded encoding.
+        const aligned = substring.length % 4 === 1 ? substring.slice(0, -1) : substring;
         try {
           const binary = atob(aligned + "=".repeat((4 - aligned.length % 4) % 4));
           const decoded = new TextDecoder().decode(Uint8Array.from(binary, character => character.charCodeAt(0)));

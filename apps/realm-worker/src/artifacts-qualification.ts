@@ -34,16 +34,18 @@ export class RealmArtifactsQualification {
 
   async cleanup(request: ArtifactsRealmAuthorization & { runId: string }) {
     try {
+      const runId = request.runId;
+      if (typeof runId !== "string" || !runId.trim()) return this.denied();
       const authorization = this.authorization(request);
       await this.authorizeOwner(authorization);
       const tables = new Set(this.options.sql.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").toArray().map(row => row.name));
       if (!tables.has("anyam_artifacts_qualification_runs")) return this.denied();
       const ledger = new SQLiteArtifactsQualificationLedger(this.options.sql);
-      const run = ledger.read(request.runId);
-      if (!run || !run.inputDigest || run.accountId !== this.options.accountId || run.namespace !== this.options.namespace) return this.denied();
+      const run = ledger.read(runId);
+      if (!run || run.input.runId !== runId || !run.inputDigest || run.accountId !== this.options.accountId || run.namespace !== this.options.namespace) return this.denied();
       await this.authorizeInput(authorization, run.input, false);
-      const cleanup = await this.invoker(authorization).cleanup(request.runId);
-      return { protocol: "anyam.realm-artifacts-qualification/v1", runId: request.runId, inputDigest: run.inputDigest, cleanup, deletion: "unsupported-name-only-binding", liveQualified: false } as const;
+      const cleanup = await this.invoker(authorization).cleanup(runId);
+      return { protocol: "anyam.realm-artifacts-qualification/v1", runId, inputDigest: run.inputDigest, cleanup, deletion: "unsupported-name-only-binding", liveQualified: false } as const;
     } catch { return this.denied(); }
   }
 

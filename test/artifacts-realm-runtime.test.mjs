@@ -97,6 +97,11 @@ test("local workerd Realm composes current authorization and SQLite custody with
     assert.equal(result.repositoryIds.length, 2);
     assert.ok(result.events.every(event => !event.startsWith("UNSAFE-delete")));
     assert.doesNotMatch(JSON.stringify(result.result), /initial-secret|usable-secret|fixture-passkey/u);
+    const mutatedCleanup = await invoke("/cleanup", { ...fixture.request, runId: fixture.request.input.runId, testMutateCleanupRunId: fixture.peerSessionId });
+    assert.equal(mutatedCleanup.result.runId, fixture.request.input.runId, "cleanup must retain the recorded run identifier across asynchronous authorization");
+    assert.equal(mutatedCleanup.result.inputDigest, result.result.inputDigest);
+    assert.ok(!JSON.stringify(mutatedCleanup.result).includes(fixture.peerSessionId), "mutable caller data cannot reflect a known session handle");
+    assert.ok(mutatedCleanup.events.every(event => !event.startsWith("UNSAFE-delete")));
     const before = await invoke("/inspect", {});
     const denied = await invoke("/run", { ...fixture.request, sessionId: "untrusted-session", input: { ...fixture.request.input, runId: "denied" } });
     assert.equal(denied.result.code, "artifacts.realm_authorization_denied");

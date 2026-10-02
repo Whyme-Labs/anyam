@@ -57,12 +57,14 @@ export class LocalArtifactsRealm extends DurableObject {
     }, async delete(name: string) { fixture.events.push(`UNSAFE-delete:${name}`); fixture.infos.delete(name); await persist(); return true; } };
     let currentChecks = 0;
     const host = new RealmArtifactsQualification({ artifacts, accountId: "account-a", namespace: "private", sql, now: () => artifactsClock, current: async () => {
+      currentChecks++;
+      if (path === "/cleanup" && currentChecks === 2 && typeof body.testMutateCleanupRunId === "string") body.runId = body.testMutateCleanupRunId;
       const snapshot = await this.ctx.storage.get<any>("identity");
       const identity = new RealmIdentityPolicy({ realmId: snapshot.realm.id, relyingPartyId: snapshot.realm.relyingPartyId, now: () => new Date(artifactsClock) });
       identity.restoreOperationalSnapshot(snapshot);
       const state = authority.readExisting(identity.realm.id);
       if (!state) throw new Error("missing authority");
-      return { identity, authority: state, active: typeof body.testDenyAfter !== "number" || ++currentChecks <= body.testDenyAfter };
+      return { identity, authority: state, active: typeof body.testDenyAfter !== "number" || currentChecks <= body.testDenyAfter };
     } });
     let result;
     if (path === "/run") result = await host.run(body);

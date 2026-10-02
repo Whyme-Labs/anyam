@@ -198,6 +198,7 @@ test("empty Changes cannot reflect a foreign latest Revision; conflicting candid
   assert.equal(read(f).change("change:public"), undefined);
   const candidate = disclosureFixture(); candidate.state.projectRevisions["candidate:public"] = { ...candidate.state.projectRevisions["canonical:base"]!, id: "candidate:public", projectId: "project:other" };
   assert.equal(read(candidate).run("run:public"), undefined);
+  assert.equal(read(candidate).change("change:public"), undefined);
   candidate.state.projectRevisions["candidate:public"]!.projectId = "project:fixture";
   assert.equal(read(candidate).run("run:public"), undefined, "conflicting immutable snapshots");
   candidate.state.projectRevisions["candidate:public"]!.sourceSpaceSnapshots = { "source:public": "source:public:candidate" };

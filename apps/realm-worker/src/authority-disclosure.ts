@@ -160,6 +160,9 @@ export class AuthorityDisclosure {
     if (!r || !c || !r.sourceSpaceSnapshots || !r.projectViewId) return false;
     const view = this.view(r.projectViewId, c.projectId, c.baseProjectRevisionId);
     if (!view || (r.baseProjectRevisionId && r.baseProjectRevisionId !== c.baseProjectRevisionId)) return false;
+    const manifest = this.state.projectRevisions[r.projectRevisionId];
+    if (manifest && (manifest.id !== r.projectRevisionId || manifest.projectId !== c.projectId
+      || view.visibleSourceSpaceIds.some(source => manifest.sourceSpaceSnapshots[source] !== r.sourceSpaceSnapshots![source]))) return false;
     const ids = Object.keys(r.sourceSpaceSnapshots);
     const w = r.workspaceId && this.state.workspaces[r.workspaceId];
     const parent = r.parentRevisionId && this.state.changeRevisions[r.parentRevisionId];

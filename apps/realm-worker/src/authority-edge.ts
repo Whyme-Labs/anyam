@@ -912,6 +912,14 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   let sourceWriteRequest = false;
   try {
     if (url.pathname === "/api/authority/view-command" && request.method === "POST") return json(await requestAnyamRealmCoordinator(env, "/authority/view-command/internal", { ...(await readBody(request)), sessionId }));
+    if (url.pathname.startsWith("/api/authority/runs/")) {
+      const unavailable = () => json({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "not_found", receipt: "runRead=unavailable; discoverable=false" }, 404);
+      if (request.method !== "GET") return json({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "method_not_allowed", receipt: "runRead=get-required; canonicalWrite=false" }, 405);
+      let runId: string;
+      try { runId = decodeURIComponent(url.pathname.slice("/api/authority/runs/".length)); } catch { return unavailable(); }
+      if (!runId.trim() || runId.includes("/") || runId.includes("\\") || runId === "." || runId === ".." || url.search) return unavailable();
+      return json(await requestAnyamRealmCoordinator(env, "/authority/runs/internal", { sessionId, runId }));
+    }
     if (url.pathname.startsWith("/api/authority/run-details/") && request.method === "GET") {
       const encoded = url.pathname.slice("/api/authority/run-details/".length);
       if (!encoded || encoded.includes("/")) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "not_found", receipt: "runDetail=unavailable; discoverable=false" }, 404);
@@ -937,7 +945,7 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
     return json({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "not_found", recoveryAction: "Use GET /api/authority/state, POST /api/authority/command, or the owner-authenticated Authority recovery endpoints.", receipt: `authorityRoute=${url.pathname}; method=${request.method}; transition=not-started` }, 404);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
-    if (sourceWriteRequest || url.pathname === "/api/authority/view-command" || url.pathname.startsWith("/api/authority/run-details/")) {
+    if (sourceWriteRequest || url.pathname === "/api/authority/view-command" || url.pathname.startsWith("/api/authority/run-details/") || url.pathname.startsWith("/api/authority/runs/")) {
       const status = detail.includes("not_found") ? 404 : detail.includes("conflict") ? 409 : detail.includes("invalid_request") ? 422 : detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : 503;
       return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: status === 404 ? "not_found" : status === 409 ? "conflict" : status === 422 ? "invalid_request" : "command_unavailable", recoveryAction: "use a currently disclosed resource and retry an accepted command with its original payload", receipt: "viewCommand=not-accepted; details=not-disclosed; canonicalWrite=false" }, status);
     }

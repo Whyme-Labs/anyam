@@ -47,6 +47,7 @@ import { GitHubActionsBridgeOutboundCoordinator, MemoryGitHubActionsBridgeOutbou
 import { encodeGitHubActionsBridgeHistory, encodeGitHubActionsBridgeOutboundBundle, encodeGitHubActionsBridgeSourcePackage, parseGitHubActionsBridgeHistory, parseGitHubActionsBridgeMode, parseGitHubActionsBridgeOutboundBundle, parseGitHubActionsBridgeOutboundPlan, parseGitHubActionsBridgeOutboundProvider, parseGitHubActionsBridgeOutboundRun, parseGitHubActionsBridgePlan, parseGitHubActionsBridgeSourcePackage } from "./github-actions-bridge-contract.ts";
 import { handleGitHubActionsBridgeRequest } from "./github-actions-bridge-route.ts";
 import { authorizeMcpCommandTarget } from "../../../src/cloudflare/mcp-command-target.ts";
+import { delegatedSelectorContext } from "./delegated-selector-context.ts";
 import { parseRepositoryObservationServiceResponse, verifyRepositoryObservation, type RepositoryObservationRequest } from "../../../src/portability/repository-observation.ts";
 import { prepareHostedRevisionPublish, type HostedRevisionObservationInput } from "../../../src/cloudflare/hosted-revision-publication.ts";
 import { assertAuthoritySnapshotEquivalent, AuthoritySQLiteStore, type AuthoritySqlHost } from "../../../src/cloudflare/authority-sqlite.ts";
@@ -1108,9 +1109,69 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", ...value, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=${operation}; readOnly=true; credentialFree=true; canonicalWrite=false` });
   }
   private async authorityReadContext(body: CoordinatorRequestBody) {
-    const session = this.authorityHumanSession(coordinatorString(body, "sessionId"));
     const snapshot = await this.authoritySnapshot();
+    if (body.surface === "mcp") {
+      const { session, disclosure } = delegatedSelectorContext(this.requireIdentity(), snapshot, body);
+      return { session, snapshot, disclosure };
+    }
+    const session = this.authorityHumanSession(coordinatorString(body, "sessionId"));
     return { session, snapshot, disclosure: this.authorityDisclosure(snapshot, session) };
+  }
+
+  private delegatedSelectorFailure(error: unknown): Response {
+    const code = error instanceof AuthorityPlaneError && error.code === "invalid_request" ? "invalid_request" : error instanceof AuthorityPlaneError && ["conflict", "idempotency_conflict"].includes(error.code) ? "conflict" : error instanceof RealmIdentityError || error instanceof AuthorityPlaneError && error.code === "not_found" ? "not_found" : undefined;
+    if (!code) return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "command_unavailable", receipt: "delegatedSelector=unavailable; details=not-disclosed; transition=not-applied" }, 503);
+    const safe = disclosedCommandFailure(code);
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code, message: safe.message, recoveryAction: safe.recoveryAction, receipt: safe.receipt }, code === "not_found" ? 404 : code === "conflict" ? 409 : 422);
+  }
+
+  private async authorityMcpRead(body: CoordinatorRequestBody): Promise<Response> {
+    await this.requireAuthorityActive();
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const restore = this.requireIdentity().captureOperationalRollback();
+      try {
+        if (body.surface !== "mcp") disclosedCommandError();
+        const operations: Record<string, () => Promise<Response>> = {
+          project: () => this.authorityProject(body), projects: () => this.authorityProjects(body), workspaces: () => this.authorityWorkspaces(body), changes: () => this.authorityChanges(body), intents: () => this.authorityIntents(body), "pull-requests": () => this.authorityPullRequests(body), runs: () => this.authorityRun(body),
+        };
+        const operation = typeof body.operation === "string" && Object.hasOwn(operations, body.operation) ? operations[body.operation] : undefined;
+        if (!operation) disclosedCommandError("invalid_request");
+        return await operation();
+      } catch (error) { return this.delegatedSelectorFailure(error); } finally { restore(); }
+    });
+  }
+
+  private async authorityMcpViewCommand(body: CoordinatorRequestBody): Promise<Response> {
+    await this.requireAuthorityActive();
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const identity = this.requireIdentity(); const restore = identity.captureOperationalRollback();
+      try {
+        return await this.ctx.storage.transaction(async () => {
+          const current = await this.authoritySnapshot();
+          const context = delegatedSelectorContext(identity, current, body);
+          const prepared = prepareDisclosedCommand({ snapshot: current, disclosure: context.disclosure, session: context.session, delegation: context.binding,
+            body: { command: body.command, payload: body.payload, idempotencyKey: body.idempotencyKey, ...(body.protocol ? { protocol: body.protocol } : {}) }, actorPrincipal: actorId => identity.getRecoverySnapshot().actors[actorId]?.principalId });
+          if (body.capability !== prepared.capability) disclosedCommandError();
+          context.authorize(prepared);
+          if (scanCredentialMaterial(body, "delegatedViewCommand") || identity.containsKnownCredentialMaterial(body)) disclosedCommandError("invalid_request");
+          if (prepared.requestConflict) disclosedCommandError("conflict");
+          let command = prepared.command;
+          if (!prepared.replay && command.command === "run.request") command = { ...command, payload: { ...command.payload, policyVersion: identity.realm.policyVersion, capabilityGrantId: context.session.capabilityGrantId } };
+          if (!prepared.replay && command.command === "revision.publish") command = await this.prepareHostedRevision(current, command);
+          if (scanCredentialMaterial(command, "delegatedPreparedCommand") || identity.containsKnownCredentialMaterial(command)) disclosedCommandError("invalid_request");
+          const fresh = delegatedSelectorContext(identity, current, body);
+          fresh.authorize({ ...prepared, command });
+          const coordinator = new AuthorityPlaneCoordinator(current);
+          const accepted = coordinator.execute(command, fresh.session);
+          const next = coordinator.snapshot();
+          const response = disclosedCommandResult(delegatedSelectorContext(identity, next, body).disclosure, { ...prepared, command }, accepted);
+          if (scanCredentialMaterial(response, "delegatedResult") || identity.containsKnownCredentialMaterial(response)) disclosedCommandError("invalid_request");
+          if (prepared.replay) restore();
+          else { await this.persistAuthoritySnapshot(current, next); await this.persistIdentity(); }
+          return coordinatorJson(response);
+        });
+      } catch (error) { restore(); return this.delegatedSelectorFailure(error); }
+    });
   }
 
   private async authorityProject(body: CoordinatorRequestBody): Promise<Response> {
@@ -1907,6 +1968,8 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/mirror-ingest/internal") return await this.authorityMirrorIngest(body);
       if (url.pathname === "/authority/qualification/mirror/internal") return await this.authorityQualificationMirror(body);
       if (url.pathname === "/authority/mcp-command/internal") return await this.authorityMcpCommand(body);
+      if (url.pathname === "/authority/mcp-view-command/internal") return await this.authorityMcpViewCommand(body);
+      if (url.pathname === "/authority/mcp-read/internal") return await this.authorityMcpRead(body);
       if (url.pathname === "/authority/runner-profile/internal") return await this.authorityRunnerProfile(body);
       if (url.pathname === "/authority/runner-complete/internal") return await this.authorityRunnerComplete(body);
       if (url.pathname === "/public-gateway/authorize") return await this.publicGatewayAuthorize(body);

@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { RealmAuthorityHttpClient } from "./realm-authority-client.js";
 import type { WorkspaceBoundaryMode } from "./workspace-boundary.js";
 import type { Readable } from "node:stream";
+import { runRealmSourceCommand } from "./realm-source-command.js";
 
 function valueAfter(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
@@ -66,6 +67,8 @@ function printHelp(): void {
   console.log("connect github --method actions  generate a reviewable GitHub Actions Bridge workflow");
   console.log("Bridge options: --realm <url> --project <id> --connection <id> --action-ref <owner/repo@sha> [--workflow-path <path>] [--remote <name>] [--schedule <cron>]");
   console.log("realm plan|install|upgrade|doctor|export|restore|destroy  customer-operated lifecycle");
+  console.log("realm project|workspace|change|run inspect --realm <url> --id <id> --session-stdin [--json]  disclosed hosted reads");
+  console.log("realm workspace create|change create|revision publish|run request --realm <url> --input <json-file> --idempotency-key <key> --session-stdin [--json]  disclosed hosted writes");
   console.log("intent list|inspect|create|assign|comment|close|reopen  hosted Realm Intent lifecycle (--realm, --owner-session or ANYAM_OWNER_SESSION)");
   console.log("pr list|inspect|open|update|review|close|reopen|block|merge  hosted Pull Request compatibility projection (--realm, --owner-session or ANYAM_OWNER_SESSION)");
   console.log("workspace start|list|inspect|exec  explicit concurrent local Workspace controls (use --session for selection)");
@@ -166,6 +169,11 @@ export async function main(args: readonly string[], cwd = process.cwd(), input: 
   }
 
   if (command === "realm") {
+    if (["project", "workspace", "change", "revision", "run"].includes(subcommand ?? "")) {
+      const result = await runRealmSourceCommand(args, input);
+      printResult(result, json, JSON.stringify(result, null, 2));
+      return 0;
+    }
     const directory = valueAfter(args, "--directory") ?? cwd;
     const installationId = valueAfter(args, "--installation") ?? `installation:local:${directory.replaceAll(/[^A-Za-z0-9._-]+/gu, "-")}`;
     const resources = valuesAfter(args, "--resource").length > 0 ? valuesAfter(args, "--resource") : (process.env.ANYAM_REALM_RESOURCES ?? "d1,r2,queues,workflows").split(",").map((value) => value.trim()).filter(Boolean);

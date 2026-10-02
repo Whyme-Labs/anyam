@@ -6,6 +6,8 @@
  * qualifications and tests; the customer Realm remains the state owner.
  */
 
+import { parseDisclosedSourcePayload, type DisclosedSourceOperation, type DisclosedSourcePayloads } from "./disclosed-source-command.js";
+
 export class RealmAuthorityRequestError extends Error {
   readonly status: number;
   readonly code: string;
@@ -100,6 +102,13 @@ export class RealmAuthorityHttpClient {
 
   inspectProject(projectId: string): Promise<JsonObject> { return this.request(`/api/projects/${encodeURIComponent(projectId)}`, { method: "GET" }); }
   inspectState(): Promise<JsonObject> { return this.request("/api/authority/state", { method: "GET" }); }
+  inspectWorkspace(workspaceId: string): Promise<JsonObject> { return this.request(`/api/workspaces/${encodeURIComponent(workspaceId)}`, { method: "GET" }); }
+  inspectChange(changeId: string): Promise<JsonObject> { return this.request(`/api/changes/${encodeURIComponent(changeId)}`, { method: "GET" }); }
+  inspectRun(runId: string): Promise<JsonObject> { return this.request(`/api/authority/runs/${encodeURIComponent(runId)}`, { method: "GET" }); }
+  viewCommand<C extends DisclosedSourceOperation>(command: C, payload: DisclosedSourcePayloads[C], idempotencyKey: string): Promise<JsonObject> {
+    if (!idempotencyKey.trim()) throw new Error("disclosed_source_idempotency_key_required");
+    return this.request("/api/authority/view-command", { method: "POST", body: { command, payload: parseDisclosedSourcePayload(command, payload), idempotencyKey }, idempotencyKey });
+  }
   inspectMirror(mirrorId: string): Promise<JsonObject> { return this.request(`/api/mirrors/${encodeURIComponent(mirrorId)}`, { method: "GET" }); }
   listIntents(projectId?: string): Promise<JsonObject> { return this.request(`/api/intents${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`, { method: "GET" }); }
   inspectIntent(intentId: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}`, { method: "GET" }); }

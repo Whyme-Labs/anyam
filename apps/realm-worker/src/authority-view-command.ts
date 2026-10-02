@@ -3,15 +3,11 @@ import { AUTHORITY_COMMAND_PROTOCOL, AUTHORITY_PLANE_PROTOCOL, AuthorityPlaneErr
 import { opaqueId, type ResourceRef } from "../../../src/kernel/contracts.ts";
 import type { Capability } from "../../../src/identity/realm.ts";
 import { AuthorityDisclosure } from "./authority-disclosure.ts";
+import { DISCLOSED_SOURCE_FIELDS } from "../../../src/portability/disclosed-source-command.ts";
 
 const capabilities = { "workspace.create": "workspace.write", "change.create": "change.publish_revision", "revision.publish": "change.publish_revision", "run.request": "run.invoke" } as const;
 type ViewCommandName = keyof typeof capabilities;
-const fields: Record<ViewCommandName, readonly string[]> = {
-  "workspace.create": ["projectId", "projectViewRevisionId", "sourceSpaceIds", "mounts", "classification"],
-  "change.create": ["projectId", "workspaceId", "baseProjectViewRevisionId", "intentId"],
-  "revision.publish": ["projectId", "workspaceId", "changeId", "baseProjectViewRevisionId", "sourceSpaceSnapshots", "declaredEffects", "kind", "expectedSymbolicRef"],
-  "run.request": ["projectId", "workspaceId", "changeRevisionId", "projectViewRevisionId", "actionId", "actionContractDigest", "verifierId", "verifierContractDigest", "inputDigests", "effectDigests", "dependencyDigest", "toolchainDigest", "environmentDigest"],
-};
+const fields: Record<ViewCommandName, readonly string[]> = DISCLOSED_SOURCE_FIELDS;
 function stable(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stable);
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, entry]) => [key, stable(entry)]));
@@ -153,6 +149,8 @@ export function prepareDisclosedCommand(input: {
   session: AuthoritySession;
   actorPrincipal: (actorId: string) => string | undefined;
   allocateId?: (kind: string) => string;
+  /** Server-supplied delegation namespace; never accepted from payload. */
+  delegation?: { agentId: string; actorId: string; clientId: string; sessionId: string; taskId: string; capabilityGrantId: string };
 }): PreparedViewCommand {
   const { snapshot: state, disclosure: d, body, session } = input;
   if (Object.keys(body).some(key => !["command", "payload", "idempotencyKey", "protocol", "sessionId"].includes(key)) || (body.protocol !== undefined && body.protocol !== AUTHORITY_COMMAND_PROTOCOL)) disclosedCommandError("invalid_request");
@@ -175,7 +173,7 @@ export function prepareDisclosedCommand(input: {
   }
   const requestDigest = digest({ command: commandName, payload: requested });
   const selector = string(commandName === "change.create" || commandName === "revision.publish" ? requested.baseProjectViewRevisionId : requested.projectViewRevisionId);
-  const key = `view-command:${digest({ principalId: session.principalId, command: commandName, projectId: requestedProjectId, workspaceId: requested.workspaceId, sourceSpaceIds: [...requestedScope].sort(), selector, key: string(body.idempotencyKey) })}`;
+  const key = `view-command:${digest({ principalId: session.principalId, ...(input.delegation ? { delegation: input.delegation } : {}), command: commandName, projectId: requestedProjectId, workspaceId: requested.workspaceId, sourceSpaceIds: [...requestedScope].sort(), selector, key: string(body.idempotencyKey) })}`;
   const saved = state.idempotency[key];
   let command: AuthorityCommand; let requestConflict = false; const allocateId = input.allocateId ?? opaqueId;
   if (saved) {
@@ -185,9 +183,10 @@ export function prepareDisclosedCommand(input: {
     const marker = command.payload?.disclosedCommand;
     if (!marker || typeof marker !== "object" || Array.isArray(marker)) disclosedCommandError();
     const binding = marker as Record<string, unknown>;
+    if (input.delegation && !equal(binding.delegation, input.delegation)) disclosedCommandError();
     if (binding.principalId !== session.principalId || input.actorPrincipal(string(binding.actorId)) !== session.principalId || command.command !== commandName || command.protocol !== AUTHORITY_COMMAND_PROTOCOL || command.idempotencyKey !== key) disclosedCommandError();
     requestConflict = binding.requestDigest !== requestDigest;
-  } else command = { protocol: AUTHORITY_COMMAND_PROTOCOL, command: commandName, idempotencyKey: key, payload: { ...requested, disclosedCommand: { principalId: session.principalId, actorId: session.actorId, requestDigest } } };
+  } else command = { protocol: AUTHORITY_COMMAND_PROTOCOL, command: commandName, idempotencyKey: key, payload: { ...requested, disclosedCommand: { principalId: session.principalId, actorId: session.actorId, requestDigest, ...(input.delegation ? { delegation: input.delegation } : {}) } } };
 
   const p = command.payload;
   const projectId = string(p.projectId);

@@ -15,9 +15,14 @@ function env(): { env: AnyamRealmMcpEnv; calls: Array<{ path: string; body: Reco
     idFromName: (name: string): string => name,
     get: (_id: string) => ({
       fetch: async (request: Request): Promise<Response> => {
-        const path = new URL(request.url).pathname;
+        let path = new URL(request.url).pathname;
         const body = await request.json() as Record<string, unknown>;
         calls.push({ path, body });
+        if (path === "/authority/mcp-read/internal") {
+          assert.equal(body.surface, "mcp"); assert.equal(body.agentId, "agent:mcp");
+          assert.ok(body.taskId && body.capabilityGrantId && body.resource && Array.isArray(body.sourceSpaceIds));
+          path = `/authority/${String(body.operation)}/internal`;
+        }
         if (request.headers.get(REALM_COORDINATOR_INTERNAL_HEADER) !== REALM_COORDINATOR_INTERNAL_VALUE) return new Response(JSON.stringify({ code: "internal_binding_required" }), { status: 403 });
         if (body.sessionId !== "kernel-session:owner" && body.sessionId !== "kernel-session:agent") return new Response(JSON.stringify({ code: "session.invalid", receipt: "session=invalid; project=not-disclosed" }), { status: 403 });
         if (path === "/identity/oauth-grant/validate-delivery") {
@@ -369,7 +374,7 @@ test("remote MCP exposes scope-filtered typed bootstrap mutations with idempoten
   const ownerWriteProps: AnyamRealmMcpProps = { scopes: ["project.write"], realmId: "realm:mcp-test", kernelSessionId: "kernel-session:owner" };
   const listed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }), fixture.env, writeProps);
   const listedTools = ((await body(listed)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
-  assert.deepEqual(listedTools.map((tool) => tool.name), ["workspace.create", "change.create", "change.publish_revision"]);
+  assert.deepEqual(listedTools.map((tool) => tool.name), ["workspace.create", "change.create", "change.publish_revision", "workspace.create_from_view", "change.create_from_view", "change.publish_revision_from_view"]);
   const agentDeliveryListed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 1.1, method: "tools/list" }), fixture.env, { ...writeProps, scopes: ["project.read", "landing.request"], anyamGrantId: "grant:mcp:delivery", mcpResource: "https://realm.example/mcp/projects/project:mcp?sourceSpaceId=source:mcp-public" });
   const agentDeliveryTools = ((await body(agentDeliveryListed)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
   assert.equal(agentDeliveryTools.some((tool) => tool.name === "landing.apply"), false);
@@ -484,7 +489,7 @@ test("remote MCP exposes scope-filtered typed bootstrap mutations with idempoten
   assert.equal((projectWriteOnlyBody.error as Record<string, unknown>).code, -32001);
   assert.match(String(((projectWriteOnlyBody.error as Record<string, unknown>).data as Record<string, unknown>).receipt), /delegatedAgent=true/);
   const changeWriteOnly = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 12, method: "tools/list" }), fixture.env, { ...writeProps, scopes: ["change.write"] });
-  assert.deepEqual((((await body(changeWriteOnly)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>).map((tool) => tool.name), ["change.create", "change.publish_revision"]);
+  assert.deepEqual((((await body(changeWriteOnly)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>).map((tool) => tool.name), ["change.create", "change.publish_revision", "change.create_from_view", "change.publish_revision_from_view"]);
 });
 
 test("remote MCP exposes authenticated typed delivery mutations with grant-bound safe projections", async () => {
@@ -587,7 +592,7 @@ test("remote MCP exposes Runner request/inspect and rejects caller-authoritative
   const runProps: AnyamRealmMcpProps = { scopes: ["run.invoke"], realmId: "realm:mcp-test", kernelSessionId: "kernel-session:agent", agentId: "agent:mcp", taskId: "task:mcp", capabilityGrantId: "grant:mcp", resource: { realmId: "realm:mcp-test", projectId: "project:mcp", workspaceId: "workspace:mcp", changeId: "change:mcp" }, sourceSpaceIds: ["source:mcp-public"] };
   const listed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }), fixture.env, runProps);
   const tools = ((await body(listed)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
-  assert.deepEqual(tools.map((tool) => tool.name), ["run.request", "run.inspect"]);
+  assert.deepEqual(tools.map((tool) => tool.name), ["run.request", "run.inspect", "run.request_from_view"]);
   const runArguments = { idempotencyKey: "mcp-run-request-1", projectId: "project:mcp", runId: "run:mcp:1", actionId: "action:unit", actionContractDigest: "sha256:action", verifierId: "verifier:unit", verifierContractDigest: "sha256:verifier", projectRevisionId: "candidate:mcp:1", projectViewId: "project-view:mcp:1", changeRevisionId: "change-revision:mcp:1", workspaceId: "workspace:mcp", inputDigests: ["sha256:input"], outputDigests: ["dist/cli.archive=sha256:output"], policyVersion: "policy:mcp", authorizationEpoch: "1", capabilityGrantId: "grant:mcp" };
   const requested = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "run.request", arguments: runArguments } }), fixture.env, runProps);
   const requestedBody = await body(requested);
@@ -599,7 +604,10 @@ test("remote MCP exposes Runner request/inspect and rejects caller-authoritative
   assert.equal(fixture.calls.at(-1)?.body.capabilityGrantId, "grant:mcp");
   const inspected = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "run.inspect", arguments: { runId: "run:mcp:1" } } }), fixture.env, runProps);
   assert.equal(((await body(inspected)).result as Record<string, unknown>).isError, false);
-  assert.equal(fixture.calls.at(-1)?.path, "/authority/runs/internal");
+  assert.equal(fixture.calls.at(-1)?.path, "/authority/mcp-read/internal");
+  assert.equal(fixture.calls.at(-1)?.body.operation, "runs");
+  assert.equal(fixture.calls.at(-1)?.body.taskId, runProps.taskId);
+  assert.equal(fixture.calls.at(-1)?.body.capabilityGrantId, runProps.capabilityGrantId);
   for (const [id, name] of [[4, "run.record"], [5, "evidence.record"], [6, "artifact.record"]] as const) {
     const before = fixture.calls.length;
     const rejected = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: runArguments } }), fixture.env, runProps);

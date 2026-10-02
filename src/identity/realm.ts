@@ -1518,7 +1518,16 @@ export class RealmIdentityPolicy {
     return clone(this.state.realm);
   }
 
+  /** The same current kernel decision, without audit/expiry state mutation. */
+  evaluateReadOnly(input: PolicyEvaluationInput): PolicyDecision {
+    return this.evaluateDecision(input, false);
+  }
+
   evaluate(input: PolicyEvaluationInput): PolicyDecision {
+    return this.evaluateDecision(input, true);
+  }
+
+  private evaluateDecision(input: PolicyEvaluationInput, observe: boolean): PolicyDecision {
     const capability = capabilityForOperation(input.operation, input.capability);
     const requestedSourceSpaceId = input.sourceSpaceId ?? input.resource.sourceSpaceId;
     const sourcePolicy = requestedSourceSpaceId ? this.state.sourceSpacePolicies[requestedSourceSpaceId] : undefined;
@@ -1566,7 +1575,7 @@ export class RealmIdentityPolicy {
       factors.push(factor("session-chain", "unknown", safeProjection ? "session does not match the request chain" : undefined));
       unknown = true;
     } else if (!this.sessionChainIsActive(session)) {
-      if (session.status === "active" && expired(session.expiresAt, this.now)) session.status = "expired";
+      if (observe && session.status === "active" && expired(session.expiresAt, this.now)) session.status = "expired";
       factors.push(factor("session", "denied", safeProjection ? session.status === "active" ? "the delegated Session chain is inactive" : `session is ${session.status}` : undefined));
       denied = true;
     } else if (input.requiredAuthStrength === "passkey" && session.strength !== "passkey") {
@@ -1638,7 +1647,7 @@ export class RealmIdentityPolicy {
         factors.push(factor("task-grant", "unknown", safeProjection ? "Capability Grant and Task chain do not match" : undefined));
         unknown = true;
       } else if (!this.grantChainIsActive(grant)) {
-        if (grant.status === "active" && expired(grant.expiresAt, this.now)) grant.status = "expired";
+        if (observe && grant.status === "active" && expired(grant.expiresAt, this.now)) grant.status = "expired";
         factors.push(factor("task-grant", "denied", safeProjection ? "Capability Grant is expired, revoked, or stale" : undefined));
         denied = true;
       } else if (!resourceMatches(grant.resource, input.resource)) {
@@ -1706,7 +1715,7 @@ export class RealmIdentityPolicy {
       recheckAt: nowIso(this.now),
       safeProjection: !hidden,
     };
-    this.audit({
+    if (observe) this.audit({
       eventType: "policy.evaluated",
       outcome: decision === "allow" ? "succeeded" : "denied",
       principalId: input.principalId,

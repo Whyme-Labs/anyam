@@ -3,6 +3,13 @@
 Package-manager-neutral TypeScript scaffolding for Anyam Projects, with the
 local `anyam` command for inspection and Changes.
 
+Hosted human commands now also expose `realm project|workspace|change|run
+inspect`, `realm workspace create`, `realm change create`, `realm revision
+publish` and `realm run request` using disclosed selectors, JSON payload files,
+stable idempotency keys and an existing human Session through stdin. See the
+[CLI and delegated MCP selector workflow](https://github.com/Whyme-Labs/anyam/blob/main/docs/qualification/cli-mcp-disclosed-selectors.md)
+for authentication, payloads, native delegation and local qualification limits.
+
 Start with the [Anyam Quickstart](https://github.com/Whyme-Labs/anyam/blob/main/docs/guides/quickstart.md). Read the
 [documentation index](https://github.com/Whyme-Labs/anyam/blob/main/docs/README.md) for the design, Realm, and example guides.
 

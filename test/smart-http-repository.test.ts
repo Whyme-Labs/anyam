@@ -345,6 +345,14 @@ test("Smart HTTP qualifies real Git clone, fetch, Workspace push, CAS, export/re
     const secondCommit = await driver.commitRepository({ repository: workspace.value, message: "CAS change" });
     assert.equal(secondCommit.status, "succeeded");
     if (secondCommit.status !== "succeeded") return;
+    for (const expected of [{}, { "refs/heads/main": firstCommit.value.commitId }]) {
+      const credentialCount = authority.snapshot().credentialCount;
+      const empty = await driver.compareAndSwapRefs({ repository: workspace.value, expected, desired: {} });
+      assert.equal(empty.status, "failed", "an empty CAS cannot invoke Git's implicit default push");
+      if (empty.status === "failed") assert.equal(empty.errorCode, "repository.desired_ref_missing");
+      assert.equal(authority.snapshot().credentialCount, credentialCount);
+      assert.equal(await git(undefined, ["--git-dir", repositories.workspace, "rev-parse", "refs/heads/main"]), firstCommit.value.commitId, "an ahead checkout must not be pushed by an empty desired map");
+    }
     const cas = await driver.compareAndSwapRefs({
       repository: workspace.value,
       expected: { "refs/heads/main": firstCommit.value.commitId },

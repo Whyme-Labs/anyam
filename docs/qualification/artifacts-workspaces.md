@@ -103,6 +103,8 @@ readback. Remote CAS requires an explicit expected OID/null for each desired ref
 empty, abbreviated and symbolic expected values fail before credential issuance.
 Both ref maps are snapshotted before awaiting credentials, so later caller
 mutation cannot add unguarded refs or alter predicates.
+Empty desired maps are rejected before credentials, preventing Git's implicit
+default push from updating an ahead branch.
 Force-with-lease alone does not establish all-ref atomicity, generation fencing
 or protection against ABA. Canonical reconciliation remains gated by its
 separate all-writers generation/epoch/seal contract.

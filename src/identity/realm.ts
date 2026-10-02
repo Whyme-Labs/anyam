@@ -517,6 +517,10 @@ export class RealmIdentityError extends Error {
   }
 }
 
+/** Semantic read capabilities accepted by the trusted human metadata observer. */
+export type SourceMetadataReadCapability = Extract<Capability,
+  "project.inspect" | "intent.inspect" | "source.read" | "workspace.inspect" | "change.inspect" | "pullRequest.inspect" | "evidence.read" | "target.read">;
+
 const ROLE_CAPABILITIES: Readonly<Record<RealmRole, readonly Capability[]>> = {
   viewer: ["project.inspect", "intent.inspect", "source.read", "workspace.inspect", "change.inspect", "pullRequest.inspect", "evidence.read", "target.read"],
   contributor: ["project.inspect", "intent.inspect", "source.read", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "run.invoke", "evidence.read", "target.read", "agent.delegate"],
@@ -695,14 +699,16 @@ export class RealmIdentityPolicy {
 
   /** Current disclosure observation for authenticated human read adapters.
    * This does not mint a Task/Grant or authorize source transfer or effects. */
-  canReadSourceSpaceMetadata(input: { sessionId: string; resource: ResourceRef; classification: SourceSpacePolicy["classification"] }): boolean {
+  canReadSourceSpaceMetadata(input: { sessionId: string; resource: ResourceRef; classification: SourceSpacePolicy["classification"]; capability?: SourceMetadataReadCapability }): boolean {
     const session = this.validateSession(input.sessionId);
     const actor = this.state.actors[session.actorId];
     const sourceId = input.resource.sourceSpaceId;
     const policy = sourceId ? this.state.sourceSpacePolicies[sourceId] : undefined;
     if (!actor || actor.kind !== "human" || input.resource.realmId !== this.realm.id || !policy || policy.classification !== input.classification || policy.policyVersion !== this.realm.policyVersion) return false;
-    if (!this.activeCapabilitiesForPrincipal({ principalId: session.principalId, resource: input.resource }).includes("source.read")) return false;
-    return policy.allowedCapabilities.includes("source.read") && !policy.deniedCapabilities.includes("source.read")
+    const capabilities = this.activeCapabilitiesForPrincipal({ principalId: session.principalId, resource: input.resource });
+    const capability = input.capability ?? "source.read";
+    if (!capabilities.includes("source.read") || !capabilities.includes(capability)) return false;
+    return policy.allowedCapabilities.includes("source.read") && !policy.deniedCapabilities.includes("source.read") && !policy.deniedCapabilities.includes(capability)
       && (policy.discoverable || policy.readerPrincipalIds.includes(session.principalId))
       && (policy.readerPrincipalIds.length === 0 || policy.readerPrincipalIds.includes(session.principalId));
   }

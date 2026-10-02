@@ -12,7 +12,7 @@ function read(f: Fixture, member = "public") {
   const session = f.members[member]!.session;
   return new AuthorityDisclosure(f.state, {
     capabilities: resource => identity.activeCapabilitiesForPrincipal({ principalId: session.principalId, resource }),
-    sourceReadable: (projectId, sourceSpaceId) => !!f.state.sourceSpaces[sourceSpaceId] && identity.canReadSourceSpaceMetadata({ sessionId: session.id, resource: { realmId: f.state.realmId, projectId, sourceSpaceId }, classification: f.state.sourceSpaces[sourceSpaceId]!.classification }),
+    sourceReadable: (projectId, sourceSpaceId, capability = "source.read") => !!f.state.sourceSpaces[sourceSpaceId] && identity.canReadSourceSpaceMetadata({ sessionId: session.id, resource: { realmId: f.state.realmId, projectId, sourceSpaceId }, classification: f.state.sourceSpaces[sourceSpaceId]!.classification, capability }),
   });
 }
 function observation(d: AuthorityDisclosure) {
@@ -223,4 +223,33 @@ test("accepted PRs with no revisionIds or Source selector still honor PR-scoped 
     assert.equal(d.pullRequest("pr:empty"), undefined); assert.equal(d.project("project:fixture")?.counts.pullRequests, 1);
     assert.ok(d.change("change:public"), "PR deny does not revoke independent Change scope");
   }
+});
+test("typed read denials are checked at every contributing Source with the complete resource binding", () => {
+  const cases = [
+    ["workspace.inspect", { sourceSpaceId: "source:public", workspaceId: "workspace:public" }, "workspace"],
+    ["change.inspect", { sourceSpaceId: "source:public", changeId: "change:public" }, "change"],
+    ["evidence.read", { sourceSpaceId: "source:public", runId: "run:public" }, "run"],
+    ["pullRequest.inspect", { workspaceId: "workspace:public", pullRequestId: "pr:public" }, "pr"],
+    ["pullRequest.inspect", { sourceSpaceId: "source:public", pullRequestId: "pr:public" }, "pr"],
+    ["target.read", { sourceSpaceId: "source:public", releaseId: "release:public" }, "release"],
+    ["target.read", { sourceSpaceId: "source:public", targetId: "target:public" }, "target"],
+  ] as const;
+  for (const [capability, extra, kind] of cases) {
+    const f = disclosureFixture(); const identity = new RealmIdentityPolicy({ realmId: f.state.realmId, relyingPartyId: f.identity.realm.relyingPartyId, now: () => new Date(disclosureClock) }); identity.restoreOperationalSnapshot(f.identity);
+    identity.addRelationship({ principalId: f.members.public!.principal.id, subjectId: "typed-read-denial", kind: "organization-member", role: "viewer", resource: { realmId: f.state.realmId, projectId: "project:fixture", ...extra }, deniedCapabilities: [capability] });
+    const d = read({ ...f, identity: identity.getRecoverySnapshot() });
+    const value = kind === "workspace" ? d.workspace("workspace:public") : kind === "change" ? d.change("change:public") : kind === "run" ? d.run("run:public") : kind === "pr" ? d.pullRequest("pr:public") : kind === "release" ? d.release("release:public") : d.target("target:public");
+    assert.equal(value, undefined, `${capability} ${JSON.stringify(extra)}`);
+  }
+});
+test("inconsistent base manifest identity invalidates every contributing read", () => {
+  const f = disclosureFixture(); f.state.projectRevisions["canonical:base"]!.id = "PRIVATE-inconsistent-manifest"; const d = read(f);
+  assert.equal(d.workspace("workspace:public"), undefined); assert.equal(d.change("change:public"), undefined);
+  assert.equal(d.run("run:public"), undefined); assert.equal(d.evidence("evidence:public"), undefined);
+  assert.equal(d.artifact("artifact:public"), undefined); assert.equal(d.release("release:public"), undefined);
+});
+test("Source policy typed metadata denies are effective without revoking Source.read", () => {
+  const f = disclosureFixture(); f.identity.sourceSpacePolicies["source:public"]!.deniedCapabilities = ["workspace.inspect", "pullRequest.inspect", "target.read"];
+  const d = read(f); assert.equal(d.workspace("workspace:public"), undefined); assert.equal(d.pullRequest("pr:public"), undefined); assert.equal(d.release("release:public"), undefined);
+  assert.ok(d.run("run:public"), "independent Evidence read remains allowed");
 });

@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { summarizeIntentForAudience, summarizePullRequestForAudience } from "../../../src/disclosure/hybrid.ts";
 import type { AuthorityPlaneSnapshot } from "../../../src/cloudflare/authority-plane.ts";
-import type { Capability } from "../../../src/identity/realm.ts";
+import type { Capability, SourceMetadataReadCapability } from "../../../src/identity/realm.ts";
 import type { DisclosureClassification, ResourceRef } from "../../../src/kernel/contracts.ts";
 
 type ReadContext = {
   capabilities(resource: ResourceRef): readonly Capability[];
-  sourceReadable(projectId: string, sourceSpaceId: string): boolean;
+  sourceReadable(projectId: string, sourceSpaceId: string, capability?: SourceMetadataReadCapability): boolean;
 };
 export type DisclosedProjectViewRevision = {
   protocol: "anyam.disclosed-project-view-revision/v1";
@@ -25,9 +25,13 @@ export class AuthorityDisclosure {
   capable(projectId: string, capability: Capability, extra: Partial<ResourceRef> = {}) {
     return this.state.projects[projectId]?.id === projectId && this.context.capabilities({ realmId: this.state.realmId, projectId, ...extra }).includes(capability);
   }
+  private scopedCapability(projectId: string, capability: SourceMetadataReadCapability, ids: readonly string[], extra: Partial<ResourceRef> = {}) {
+    return this.capable(projectId, capability, extra)
+      && ids.every(sourceSpaceId => this.capable(projectId, capability, { ...extra, sourceSpaceId }) && this.context.sourceReadable(projectId, sourceSpaceId, capability));
+  }
   readableSources(projectId: string) {
     const project = this.state.projects[projectId];
-    return project ? [...new Set(project.sourceSpaceIds)].filter(id => !!this.state.sourceSpaces[id] && this.context.sourceReadable(projectId, id)).sort() : [];
+    return project ? [...new Set(project.sourceSpaceIds)].filter(id => !!this.state.sourceSpaces[id] && this.context.sourceReadable(projectId, id, "project.inspect") && this.capable(projectId, "project.inspect", { sourceSpaceId: id })).sort() : [];
   }
   completeProject(projectId: string) {
     const project = this.state.projects[projectId];
@@ -61,7 +65,7 @@ export class AuthorityDisclosure {
       && this.capable(projectId, "source.read", { ...extra, sourceSpaceId });
   }
   private disclosedRevision(projectId: string, snapshots: Readonly<Record<string, string>>, ids: readonly string[]): DisclosedProjectViewRevision | undefined {
-    if (!this.capable(projectId, "project.inspect") || new Set(ids).size !== ids.length
+    if (!this.scopedCapability(projectId, "project.inspect", ids) || new Set(ids).size !== ids.length
       || ids.some(id => !this.sourceReadable(projectId, id) || typeof snapshots[id] !== "string" || !snapshots[id])) return undefined;
     const scope = [...ids].sort();
     const sourceSpaceSnapshots = Object.fromEntries(scope.map(id => [id, snapshots[id]!]));
@@ -79,7 +83,7 @@ export class AuthorityDisclosure {
   private view(viewId: string, projectId: string, revisionId?: string) {
     const view = this.state.projectViews[viewId];
     const revision = view && this.state.projectRevisions[view.projectRevisionId];
-    if (!view || view.id !== viewId || !revision || view.projectId !== projectId || revision.projectId !== projectId
+    if (!view || view.id !== viewId || !revision || revision.id !== view.projectRevisionId || view.projectId !== projectId || revision.projectId !== projectId
       || (revisionId && view.projectRevisionId !== revisionId)) return undefined;
     const ids = view.visibleSourceSpaceIds;
     if (!ids.length || new Set(ids).size !== ids.length || Object.keys(view.disclosedSourceSpaceSnapshots).length !== ids.length
@@ -147,7 +151,7 @@ export class AuthorityDisclosure {
   workspace(id: string) {
     const scope = this.workspaceScope(id);
     const w = scope?.workspace;
-    if (!w || !this.capable(w.projectId, "workspace.inspect", { workspaceId: id, ...(w.changeId ? { changeId: w.changeId } : {}) })) return undefined;
+    if (!w || !this.scopedCapability(w.projectId, "workspace.inspect", scope!.view.visibleSourceSpaceIds, { workspaceId: id, ...(w.changeId ? { changeId: w.changeId } : {}) })) return undefined;
     const reference = this.viewReference(w.projectId, w.projectViewId);
     if (!reference) return undefined;
     return { workspace: { protocol: w.protocol, id, projectId: w.projectId, ...reference, state: w.state,
@@ -176,7 +180,10 @@ export class AuthorityDisclosure {
     const c = this.state.changes[id];
     if (!c || !this.capable(c.projectId, "change.inspect", { changeId: id, ...(c.workspaceId ? { workspaceId: c.workspaceId } : {}) })) return false;
     const revisions = Object.values(this.state.changeRevisions).filter(r => r.changeId === id);
-    if (c.workspaceId && !this.workspaceScope(c.workspaceId)) return false;
+    const workspace = c.workspaceId && this.workspaceScope(c.workspaceId);
+    if (c.workspaceId && !workspace) return false;
+    const ids = [...new Set([...revisions.flatMap(r => Object.keys(r.sourceSpaceSnapshots ?? {})), ...(workspace ? workspace.view.visibleSourceSpaceIds : [])])];
+    if (!this.scopedCapability(c.projectId, "change.inspect", ids, { changeId: id, ...(c.workspaceId ? { workspaceId: c.workspaceId } : {}) })) return false;
     if (revisions.length) return revisions.every(r => this.revisionEligible(r.id)) && revisions.some(r => r.id === c.latestRevisionId);
     if (c.latestRevisionId !== null) return false;
     const w = c.workspaceId && this.state.workspaces[c.workspaceId];
@@ -220,7 +227,7 @@ export class AuthorityDisclosure {
     const workspace = c.change.workspaceId && this.workspaceScope(c.change.workspaceId);
     const ids = [...new Set([...revisions.flatMap(r => Object.keys(r.sourceSpaceSnapshots!)), ...(workspace ? workspace.view.visibleSourceSpaceIds : [])])];
     const resource = { pullRequestId: id, changeId: p.changeId, ...(c.change.workspaceId ? { workspaceId: c.change.workspaceId } : {}) };
-    if (!ids.length || !ids.every(source => this.sourceReadable(p.projectId, source, resource))
+    if (!ids.length || !this.scopedCapability(p.projectId, "pullRequest.inspect", ids, resource) || !ids.every(source => this.sourceReadable(p.projectId, source, resource))
       || !this.classification(p.projectId, p.disclosure, ids)
       || (p.sourceSpaceId && (!ids.includes(p.sourceSpaceId) || !this.sourceReadable(p.projectId, p.sourceSpaceId, resource)))
       || !p.revisionIds.every(r => this.state.changeRevisions[r]?.changeId === p.changeId && this.revisionEligible(r))) return undefined;
@@ -236,7 +243,7 @@ export class AuthorityDisclosure {
   run(id: string) {
     const r = this.state.runs[id];
     const scope = r && this.recordScope(r.projectRevisionId, r.projectViewId, r.changeRevisionId);
-    if (!r || !scope || !this.capable(scope.projectId, "evidence.read", { runId: id,
+    if (!r || !scope || !this.scopedCapability(scope.projectId, "evidence.read", scope.ids, { runId: id,
       ...(scope.changeId ? { changeId: scope.changeId } : {}), ...(r.workspaceId ? { workspaceId: r.workspaceId } : {}) })) return undefined;
     if (!scope.ids.every(sourceId => this.sourceReadable(scope.projectId, sourceId, { runId: id, ...(scope.changeId ? { changeId: scope.changeId } : {}), ...(r.workspaceId ? { workspaceId: r.workspaceId } : {}) }))) return undefined;
     const w = r.workspaceId && this.state.workspaces[r.workspaceId];
@@ -272,7 +279,7 @@ export class AuthorityDisclosure {
     // sharing a projection label cannot supply or revoke that authority.
     if (!viewId || !this.disclosureMatches(viewId, a.disclosure.projectionId)) return undefined;
     const scope = this.recordScope(a.projectRevisionId, viewId, a.changeRevisionId);
-    if (!scope || !this.capable(scope.projectId, "evidence.read", { ...(scope.changeId ? { changeId: scope.changeId } : {}) })
+    if (!scope || !this.scopedCapability(scope.projectId, "evidence.read", scope.ids, { ...(scope.changeId ? { changeId: scope.changeId } : {}) })
       || !this.classification(scope.projectId, a.disclosure.classification, scope.ids)
       || (a.runId && (!r || !this.run(r.id) || r.projectRevisionId !== a.projectRevisionId || r.projectViewId !== viewId || r.changeRevisionId !== a.changeRevisionId))) return undefined;
     return scope;
@@ -290,7 +297,7 @@ export class AuthorityDisclosure {
     const canonical = this.state.projectRevisions[r.projectRevisionId];
     const change = r.changeRevisionId ? this.state.changeRevisions[r.changeRevisionId] : undefined;
     const projectId = scopes[0]?.projectId ?? canonical?.projectId ?? (change && this.state.changes[change.changeId]?.projectId);
-    if (!projectId || scopes.some(s => s!.projectId !== projectId) || !this.capable(projectId, "target.read", { releaseId: id })) return undefined;
+    if (!projectId || scopes.some(s => s!.projectId !== projectId) || !this.capable(projectId, "target.read", { ...extra, releaseId: id })) return undefined;
     const consistent = new Map<string, string>();
     for (const scope of scopes) for (const source of scope!.ids) {
       const snapshot = scope!.snapshots[source]!;
@@ -300,7 +307,8 @@ export class AuthorityDisclosure {
     const snapshots = scopes.length ? Object.assign({}, ...scopes.map(s => s!.snapshots)) as Record<string, string> : canonical?.sourceSpaceSnapshots ?? change?.sourceSpaceSnapshots;
     if (!snapshots) return undefined;
     const ids = scopes.length ? [...new Set(scopes.flatMap(s => s!.ids))] : Object.keys(snapshots);
-    if (!ids.every(source => this.sourceReadable(projectId, source, { ...extra, releaseId: id, ...(change ? { changeId: change.changeId } : {}) }))) return undefined;
+    const resource = { ...extra, releaseId: id, ...(change ? { changeId: change.changeId } : {}) };
+    if (!this.scopedCapability(projectId, "target.read", ids, resource) || !ids.every(source => this.sourceReadable(projectId, source, resource))) return undefined;
     const revision = this.disclosedRevision(projectId, snapshots, ids);
     return revision && { protocol: r.protocol, id, projectId, projectViewRevisionId: revision.id, status: r.status };
   }

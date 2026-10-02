@@ -1088,9 +1088,9 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     identity.validateSession(session.sessionId);
     return new AuthorityDisclosure(snapshot, {
       capabilities: resource => identity.activeCapabilitiesForPrincipal({ principalId: session.principalId, resource }),
-      sourceReadable: (projectId, sourceSpaceId) => {
+      sourceReadable: (projectId, sourceSpaceId, capability = "source.read") => {
         const source = snapshot.sourceSpaces[sourceSpaceId];
-        return !!source && identity.canReadSourceSpaceMetadata({ sessionId: session.sessionId, resource: { realmId: snapshot.realmId, projectId, sourceSpaceId }, classification: source.classification });
+        return !!source && identity.canReadSourceSpaceMetadata({ sessionId: session.sessionId, resource: { realmId: snapshot.realmId, projectId, sourceSpaceId }, classification: source.classification, capability });
       },
     });
   }

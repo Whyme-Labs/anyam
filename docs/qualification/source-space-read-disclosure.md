@@ -22,9 +22,11 @@ summaries omit provider identity, remote repositories, review identities and
 receipt/digest details, and validate represented Change lineage.
 
 Runs retain authorized basic identity, disclosed revision, status and readable
-Workspace/Change bindings. The Authority snapshot does not store RunnerJobs;
-recorded Run/Evidence digests alone cannot prove accepted job input/output
-closure or detail disclosure. Artifact scope additionally requires its exact producing
+Workspace/Change bindings. Ordinary stored Run/Evidence digests alone cannot
+prove accepted job input/output closure or detail disclosure. A separate accepted
+signed completion contract now retains its proof for the explicit Realm-owner
+detail endpoint described in [disclosed writes and owner Run detail](disclosed-writes-and-owner-run-detail.md).
+Artifact scope additionally requires its exact producing
 Run or Change View; a globally reused projection label supplies no authority.
 Ordinary reads therefore omit runner/verifier
 identities, attempt, contract, input/output/environment/toolchain/dependency
@@ -63,13 +65,14 @@ executable refinement/noninterference checks, not an unbounded formal proof.
 
 ## Remaining product boundaries
 
-Fresh clients still need server-side disclosed-selector resolution before a
-read-safe Project View Revision can be used in write APIs that require an exact
-canonical selector. Existing authorized exact-selector writes and explicit
-owner recovery continue. This qualification does not claim a complete fresh
-restricted-audience write lifecycle.
+The separate [disclosed write qualification](disclosed-writes-and-owner-run-detail.md)
+resolves read-safe Project View Revision selectors into exact server-side
+canonical context for Workspace creation, Change creation, Change Revision
+publication and Run request. This read qualification alone does not establish
+their write authority. Raw exact-selector commands for these four operations
+now require a human Realm-wide owner with complete Source access.
 
-Restricted Intent/comment reader scopes, signed Run detail manifests, sealed
-verification result projections and audience-approved Mirror/Promotion recovery
-details remain separate contracts. Read hardening does not grant their authority
-or qualify private implementations merely from fixture digests.
+Restricted Intent/comment reader scopes, audience-approved Sealed Verifier
+invocation/result projections and Mirror/Promotion recovery details remain
+separate contracts. The fixed owner Run detail does not implement those
+contracts or qualify private implementations merely from fixture digests.

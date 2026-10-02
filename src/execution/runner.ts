@@ -21,7 +21,7 @@ import {
 } from "../kernel/contracts.ts";
 import { base64Url } from "../kernel/encoding.ts";
 import type { NormalizedActionInput, NormalizedActionOutput } from "./local.ts";
-import { runnerResultMessage } from "./runner-proof.ts";
+import { runnerResultMessage, runnerResultContextClaims } from "./runner-proof.ts";
 export { runnerResultMessage } from "./runner-proof.ts";
 
 type JsonRecord = Record<string, unknown>;
@@ -385,29 +385,7 @@ export function runnerResultContext(input: { job: RunnerJob; attempt: RunnerAtte
   if (!job.networkEnforcement || !job.networkBoundaryReceipt) {
     error({ code: "result-input-mismatch", message: `Runner Job ${job.id} has no enrolled network boundary receipt after claim.`, affectedObject: job.id, recoveryAction: "claim the Job through a Runner with a qualified network boundary before producing a Result", receipt: `job=${job.id}; networkBoundary=missing; resultContext=not-issued` });
   }
-  return {
-    protocol: "anyam.runner-result-context/v1",
-    replayId: `${job.id}:${attempt.id}`,
-    jobId: job.id,
-    attemptId: attempt.id,
-    runnerId: attempt.runnerId ?? job.currentRunnerId ?? "runner:unassigned",
-    leaseExpiresAt: attempt.leaseExpiresAt,
-    inputManifestDigest: job.inputManifestDigest,
-    sourceSpaceSnapshots: { ...job.sourceSpaceSnapshots },
-    actionId: job.actionId,
-    actionContractDigest: job.actionContractDigest,
-    ...(job.verifierId ? { verifierId: job.verifierId } : {}),
-    ...(job.verifierContractDigest ? { verifierContractDigest: job.verifierContractDigest } : {}),
-    projectRevisionId: job.projectRevisionId,
-    projectViewId: job.projectViewId,
-    ...(job.changeRevisionId ? { changeRevisionId: job.changeRevisionId } : {}),
-    ...(job.workspaceId ? { workspaceId: job.workspaceId } : {}),
-    policyVersion: job.policyVersion,
-    authorizationEpoch: job.authorizationEpoch,
-    capabilityGrantId: job.capabilityGrantId,
-    networkEnforcement: job.networkEnforcement,
-    networkBoundaryReceipt: job.networkBoundaryReceipt,
-  };
+  return { ...runnerResultContextClaims(input), networkEnforcement: job.networkEnforcement, networkBoundaryReceipt: job.networkBoundaryReceipt };
 }
 
 export function runnerInputManifestDigest(input: {

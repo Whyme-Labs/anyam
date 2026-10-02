@@ -25,6 +25,22 @@ export class LocalDisclosureRealm extends AnyamRealmCoordinator {
     return { seeded: true };
   }
   async members() { return await this.ctx.storage.get<Fixture["members"]>("fixture-members"); }
+  async checkpoint() {
+    const identity: unknown = Reflect.get(this, "identity");
+    if (!(identity instanceof RealmIdentityPolicy)) throw new Error("missing current identity");
+    const store = new AuthoritySQLiteStore(this.ctx.storage as unknown as AuthoritySqlHost, { empty: emptyAuthorityPlaneSnapshot, normalize: normalizeAuthorityPlaneSnapshot });
+    return { identity: identity.getRecoverySnapshot(), authority: store.load(identity.realm.id), keys: Object.fromEntries(await this.ctx.storage.list()) };
+  }
+  async failIdentityWriteOnce() {
+    const original: unknown = Reflect.get(this, "persistIdentity");
+    if (typeof original !== "function") throw new Error("missing actual identity persistence");
+    Reflect.set(this, "persistIdentity", async () => {
+      Reflect.set(this, "persistIdentity", original);
+      await original.call(this);
+      throw new Error("synthetic failure after actual SQL and identity KV writes");
+    });
+    return { faultArmed: true };
+  }
   async revoke(sessionId: string) {
     const identity: unknown = Reflect.get(this, "identity");
     if (!(identity instanceof RealmIdentityPolicy)) throw new Error("missing current identity");
@@ -37,6 +53,8 @@ export default { async fetch(request: Request, bindings: { REALM_COORDINATOR: Du
   const realm = bindings.REALM_COORDINATOR.get(bindings.REALM_COORDINATOR.idFromName("realm:disclosure-local"));
   if (url.pathname === "/fixture/seed") return Response.json(await realm.seed(await request.json() as Fixture));
   if (url.pathname === "/fixture/revoke") return Response.json(await realm.revoke((await request.json() as { sessionId: string }).sessionId));
+  if (url.pathname === "/fixture/checkpoint") return Response.json(await realm.checkpoint());
+  if (url.pathname === "/fixture/fail-identity-write-once") return Response.json(await realm.failIdentityWriteOnce());
   if (url.pathname.startsWith("/authority/")) return realm.fetch(request);
   const name = request.headers.get("x-fixture-member") ?? "public";
   const member = (await realm.members())?.[name];

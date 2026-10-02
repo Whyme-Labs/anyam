@@ -7,6 +7,7 @@ import type { DisclosureClassification, ResourceRef } from "../../../src/kernel/
 type ReadContext = {
   capabilities(resource: ResourceRef): readonly Capability[];
   sourceReadable(projectId: string, sourceSpaceId: string, capability?: SourceMetadataReadCapability): boolean;
+  realmOwner?: () => boolean;
 };
 export type DisclosedProjectViewRevision = {
   protocol: "anyam.disclosed-project-view-revision/v1";
@@ -42,6 +43,7 @@ export class AuthorityDisclosure {
     return projects.every(p => this.completeProject(p.id) && this.capable(p.id, "project.inspect"))
       && Object.keys(this.state.sourceSpaces).every(id => projects.some(p => p.sourceSpaceIds.includes(id)));
   }
+  ownerDetails() { return this.context.realmOwner?.() === true && this.completeRealm(); }
   summary() {
     const projects = this.projects();
     const counts = Object.fromEntries(Object.keys(projects[0]?.counts ?? { workspaces: 0, intents: 0, intentComments: 0, pullRequests: 0, changes: 0, revisions: 0, runs: 0, evidence: 0, artifacts: 0, releases: 0, targets: 0, promotions: 0 }).map(key => [key, projects.reduce((n, p) => n + p.counts[key as keyof typeof p.counts], 0)]));

@@ -19,6 +19,8 @@ import {
   type RunnerResult,
 } from "../src/execution/runner.ts";
 import type { NormalizedActionInput, NormalizedActionOutput } from "../src/execution/local.ts";
+import { AuthorityDisclosure } from "../apps/realm-worker/src/authority-disclosure.ts";
+import { acceptedOwnerRunDetail } from "../apps/realm-worker/src/accepted-run-detail.ts";
 
 const realmId = "realm:runner-authority-completion";
 const projectId = "project:runner-authority-completion";
@@ -198,9 +200,45 @@ test("Authority consumes one signed Runner completion atomically and idempotentl
   assert.equal((accepted.value.attempt as { state: string }).state, "succeeded");
   assert.equal((accepted.receipt.match(/credentialState=closed/g) ?? []).length, 1);
   assert.equal(fixture.authority.snapshot().version, 7);
+  const snapshot = fixture.authority.snapshot();
+  const disclosure = new AuthorityDisclosure(snapshot, { capabilities: () => ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "evidence.read"], sourceReadable: () => true, realmOwner: () => true });
+  const detail = await acceptedOwnerRunDetail(snapshot, disclosure, fixture.runId);
+  assert.ok(detail); assert.equal(detail.proof.signatureVerified, true); assert.equal(detail.proof.resultDigest, completion.resultDigest);
+  assert.equal(detail.context.inputManifestDigest, completion.job.inputManifestDigest);
+  assert.doesNotMatch(JSON.stringify(detail), /sessionId|capabilityGrantId|publicKey|privateKey|credentialId|networkBoundaryReceipt|toolchainDigest|environmentDigest|dependencyDigest|"receipt":.*enrollment/u);
   const replay = await fixture.authority.completeRunner(command, runnerSession);
   assert.deepEqual(replay, accepted);
   assert.equal(fixture.authority.snapshot().version, 7);
+});
+
+test("sealed owner detail rejects unsigned records and tampered accepted proof without changing ordinary Run status", async () => {
+  const fixture = setup(); const runnerFixture = makeRunner(fixture.input, fixture.runId);
+  fixture.authority.registerRunnerProfile(runnerFixture.profile, runnerSession);
+  const completion = runnerFixture.runner.submit({ credential: runnerFixture.lease.credential, result: runnerFixture.result });
+  await fixture.authority.completeRunner({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "runner.complete", idempotencyKey: "accepted-detail", payload: { completion } }, runnerSession);
+  const expected = fixture.authority.snapshot();
+  for (const mode of ["missing", "audience", "signature", "digest", "profile", "source", "attempt"] as const) {
+    const state = structuredClone(expected); const detail = state.runDetails[fixture.runId]!;
+    if (mode === "missing") delete state.runDetails[fixture.runId];
+    if (mode === "audience") Object.assign(detail, { audience: "public" });
+    if (mode === "signature") detail.result.signature += "tampered";
+    if (mode === "digest") detail.resultDigest = "sha256:tampered";
+    if (mode === "profile") detail.runnerProfile.publicKey = "tampered";
+    if (mode === "source") detail.job.sourceSpaceSnapshots = { ...detail.job.sourceSpaceSnapshots, "source:unbound": "PRIVATE-snapshot" };
+    if (mode === "attempt") detail.attempt.runId = "run:foreign";
+    const d = new AuthorityDisclosure(state, { capabilities: () => ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "evidence.read"], sourceReadable: () => true, realmOwner: () => true });
+    assert.equal(d.run(fixture.runId)?.status, "succeeded", mode);
+    assert.equal(await acceptedOwnerRunDetail(state, d, fixture.runId), undefined, mode);
+  }
+});
+
+test("an enrolled signed Runner cannot add an undeclared Source to the accepted producing scope", async () => {
+  const fixture = setup(); fixture.input.sourceSpaceSnapshots = { ...fixture.input.sourceSpaceSnapshots, "source:unbound-private": "PRIVATE-fixture" };
+  const runnerFixture = makeRunner(fixture.input, fixture.runId); fixture.authority.registerRunnerProfile(runnerFixture.profile, runnerSession);
+  const completion = runnerFixture.runner.submit({ credential: runnerFixture.lease.credential, result: runnerFixture.result });
+  const before = fixture.authority.snapshot();
+  await assert.rejects(() => fixture.authority.completeRunner({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "runner.complete", idempotencyKey: "unbound-source", payload: { completion } }, runnerSession), /exact producing View and Revision/u);
+  assert.deepEqual(fixture.authority.snapshot(), before);
 });
 
 test("Authority rejects a signed completion through a human session and leaves queued state untouched", async () => {

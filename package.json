@@ -6,7 +6,7 @@
   "workspaces": ["packages/create-anyam", "apps/realm-worker", "apps/github-mirror-producer", "apps/public-gateway-worker", "apps/hosted-saas-qualification", "apps/promotion-executor", "apps/linux-egress-qualification", "apps/repository-observer", "apps/repository-driver", "apps/site", "examples/worker-app", "examples/typescript-cli", "examples/hybrid-video-player"],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test \"test/**/*.test.ts\" test/artifacts-realm-runtime.test.mjs test/authority-disclosure-runtime.test.mjs",
+    "test": "tsx --test \"test/**/*.test.ts\" test/artifacts-realm-runtime.test.mjs test/authority-disclosure-runtime.test.mjs test/disclosed-authority-writes-runtime.test.mjs",
     "harness": "tsx src/harness/cli.ts",
     "qualification:external-runner": "tsx scripts/qualify-external-runner.ts",
     "qualification:provider-feed": "tsx scripts/qualify-provider-feed.ts",
@@ -72,6 +72,7 @@
     "qualification:artifacts-workspaces": "tsx --test test/artifacts-workspace.test.ts test/artifacts-workspace-custody.test.ts test/artifacts-workspace-observation.test.ts test/artifacts-workspace-qualification.test.ts test/smart-http-repository.test.ts test/smart-http-state-model.test.ts",
     "qualification:artifacts-realm-local": "tsx --test test/artifacts-realm-runtime.test.mjs",
     "qualification:disclosure-local": "tsx --test test/authority-disclosure.test.ts test/authority-disclosure-runtime.test.mjs",
+    "qualification:disclosed-writes-local": "tsx --test test/authority-view-command.test.ts test/runner-authority-completion.test.ts test/disclosed-authority-writes-runtime.test.mjs",
     "qualification:scm-credential-model": "tsx scripts/qualify-scm-credential-model.ts",
     "typecheck:artifacts-workspaces": "tsc -p apps/artifacts-workspace-contract/tsconfig.json --noEmit",
     "build:artifacts-workspaces": "npm run typecheck:artifacts-workspaces && wrangler deploy --dry-run --config apps/artifacts-workspace-contract/wrangler.qualification.jsonc --outdir=dist/artifacts-workspace-contract"

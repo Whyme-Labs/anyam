@@ -67,6 +67,7 @@ const ENTITY_COLLECTIONS = [
   "runs",
   "runnerProfiles",
   "runnerAttempts",
+  "runDetails",
   "evidence",
   "artifacts",
   "landings",

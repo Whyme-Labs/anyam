@@ -1,4 +1,6 @@
 import { AuthorityDisclosure } from "./authority-disclosure.ts";
+import { prepareDisclosedCommand, disclosedCommandResult, disclosedCommandError, disclosedCommandFailure } from "./authority-view-command.ts";
+import { acceptedOwnerRunDetail } from "./accepted-run-detail.ts";
 /// <reference types="@cloudflare/workers-types" />
 
 import { DurableObject, WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
@@ -663,6 +665,7 @@ function authorityQualificationCleanupAllowed(input: { current: AuthorityPlaneSn
     "runs",
     "runnerProfiles",
     "runnerAttempts",
+    "runDetails",
     "evidence",
     "artifacts",
     "landings",
@@ -1087,6 +1090,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const identity = this.requireIdentity();
     identity.validateSession(session.sessionId);
     return new AuthorityDisclosure(snapshot, {
+      realmOwner: () => { try { this.authorityOwnerSession(session.sessionId); return true; } catch (error) { if (error instanceof RealmIdentityError) return false; throw error; } },
       capabilities: resource => identity.activeCapabilitiesForPrincipal({ principalId: session.principalId, resource }),
       sourceReadable: (projectId, sourceSpaceId, capability = "source.read") => {
         const source = snapshot.sourceSpaces[sourceSpaceId];
@@ -1382,6 +1386,79 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     });
   }
 
+  private async authorityRunDetails(body: CoordinatorRequestBody): Promise<Response> {
+    const sessionId = coordinatorString(body, "sessionId");
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      try {
+        const session = this.authorityHumanSession(sessionId); const snapshot = await this.authoritySnapshot();
+        const value = await acceptedOwnerRunDetail(snapshot, this.authorityDisclosure(snapshot, session), coordinatorString(body, "runId"));
+        const current = this.authorityDisclosure(snapshot, this.authorityHumanSession(sessionId));
+        if (!value || !current.ownerDetails() || !current.run(coordinatorString(body, "runId"))) this.authorityReadNotFound();
+        // Typed identifiers/digests are still caller-controlled strings. A
+        // signed alias must not turn a credential-free DTO into a Session leak.
+        const metadata = JSON.stringify(value);
+        if (Object.keys(this.requireIdentity().getRecoverySnapshot().sessions).some(handle => metadata.includes(handle))) this.authorityReadNotFound();
+        return coordinatorJson(value);
+      } catch (error) {
+        if (!(error instanceof RealmIdentityError) && !(error instanceof AuthorityPlaneError && error.code === "not_found")) return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "detail_unavailable", recoveryAction: "ask the Realm operator to restore detail verification or storage, then retry", receipt: "runDetail=unavailable; details=not-disclosed" }, 503);
+        const safe = disclosedCommandFailure();
+        return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: safe.code, message: safe.message, recoveryAction: "use a currently authorized accepted Run detail", receipt: "runDetail=unavailable; discoverable=false; rawDetails=not-disclosed" }, 404);
+      }
+    });
+  }
+
+  private async authorityViewCommand(body: CoordinatorRequestBody): Promise<Response> {
+    await this.requireAuthorityActive();
+    const authenticated = this.authorityHumanSession(coordinatorString(body, "sessionId"));
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      const current = await this.authoritySnapshot();
+      const identity = this.requireIdentity();
+      const before = identity.getRecoverySnapshot();
+      try {
+        return await this.ctx.storage.transaction(async () => {
+          const session = identity.validateSession(authenticated.sessionId);
+          const prepared = prepareDisclosedCommand({ snapshot: current, disclosure: this.authorityDisclosure(current, authenticated), body, session: authenticated,
+            actorPrincipal: actorId => before.actors[actorId]?.principalId });
+          const resource = { ...prepared.resource, ...(prepared.sourceSpaceIds.length === 1 ? { sourceSpaceId: prepared.sourceSpaceIds[0]! } : {}) };
+          const effectsValue = prepared.command.command === "revision.publish" ? prepared.command.payload.declaredEffects ?? [] : [];
+          if (!Array.isArray(effectsValue) || effectsValue.some(value => typeof value !== "string" || !value.trim())) disclosedCommandError("invalid_request");
+          const issued = identity.createOwnerTaskGrant({ sessionId: session.id, purpose: "Authenticated disclosed Authority command", resource,
+            sourceSpaceIds: prepared.sourceSpaceIds, actions: ["source.read", prepared.capability], effects: effectsValue as string[], expiresAt: session.expiresAt });
+          const authorize = () => {
+            for (const sourceSpaceId of prepared.sourceSpaceIds) for (const capability of ["source.read", prepared.capability] as const) identity.authorize({
+              operation: prepared.command.command, capability, principalId: session.principalId, actorId: session.actorId, clientId: session.clientId,
+              sessionId: session.id, taskId: issued.task.id, grantId: issued.grant.id, resource: { ...prepared.resource, sourceSpaceId }, sourceSpaceId, protected: true,
+            });
+          };
+          authorize();
+          if (prepared.requestConflict) disclosedCommandError("conflict");
+          let command = prepared.command;
+          if (!prepared.replay && command.command === "run.request") command = { ...command, payload: { ...command.payload, policyVersion: identity.realm.policyVersion, capabilityGrantId: issued.grant.id } };
+          if (!prepared.replay && command.command === "revision.publish") command = await this.prepareHostedRevision(current, command);
+          authorize();
+          const coordinator = new AuthorityPlaneCoordinator(current);
+          const accepted = coordinator.execute(command, { ...authenticated, taskId: issued.task.id, capabilityGrantId: issued.grant.id });
+          const next = coordinator.snapshot();
+          const response = disclosedCommandResult(this.authorityDisclosure(next, authenticated), { ...prepared, command }, accepted);
+          if (prepared.replay) identity.restoreOperationalSnapshot(before);
+          else {
+            await this.persistAuthoritySnapshot(current, next);
+            await this.persistIdentity();
+          }
+          return coordinatorJson(response);
+        });
+      } catch (error) {
+        identity.restoreOperationalSnapshot(before);
+        const code = error instanceof AuthorityPlaneError && error.code === "invalid_request" ? "invalid_request" : error instanceof AuthorityPlaneError && (error.code === "conflict" || error.code === "idempotency_conflict") ? "conflict" : error instanceof RealmIdentityError || error instanceof AuthorityPlaneError && error.code === "not_found" ? "not_found" : "command_unavailable";
+        // Return expected denials inside blockConcurrencyWhile. Throwing out of
+        // the callback breaks the Durable Object instead of returning a denial.
+        if (code === "command_unavailable") return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction: "ask the Realm operator to restore repository observation or storage before retrying the same disclosed command", receipt: "viewCommand=unavailable; transition=not-applied; details=not-disclosed; canonicalWrite=false" }, 503);
+        const safe = disclosedCommandFailure(code);
+        return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, message: safe.message, recoveryAction: safe.recoveryAction, receipt: safe.receipt }, code === "not_found" ? 404 : code === "conflict" ? 409 : 422);
+      }
+    });
+  }
+
   private async authorityCommand(body: CoordinatorRequestBody): Promise<Response> {
     await this.requireAuthorityActive();
     const command = coordinatorString(body, "command") as AuthorityCommandName;
@@ -1403,6 +1480,8 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const session = capability
       ? this.authorityCapabilitySession(coordinatorString(body, "sessionId"), capability, resource, command === "landing.apply" || command === "release.create" || command === "target.configure" || command === "promotion.request")
       : this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const rawSourceCommand = ["workspace.create", "change.create", "revision.publish", "run.request"].includes(command);
+    if (rawSourceCommand) this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const envelope: AuthorityCommand = {
       protocol: body.protocol === undefined ? AUTHORITY_COMMAND_PROTOCOL : coordinatorString(body, "protocol") as typeof AUTHORITY_COMMAND_PROTOCOL,
       command,
@@ -1412,6 +1491,10 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     };
     return await this.ctx.blockConcurrencyWhile(async () => {
       const current = await this.authoritySnapshot();
+      if (rawSourceCommand && !this.authorityDisclosure(current, session).completeRealm()) {
+        const safe = disclosedCommandFailure();
+        return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: safe.code, message: safe.message, recoveryAction: safe.recoveryAction, receipt: safe.receipt }, 404);
+      }
       const coordinator = new AuthorityPlaneCoordinator(current);
       const prepared = command === "revision.publish" ? await this.prepareHostedRevision(current, envelope) : envelope;
       const result = coordinator.execute(prepared, session);
@@ -1775,6 +1858,8 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/runner-complete/internal") return await this.authorityRunnerComplete(body);
       if (url.pathname === "/public-gateway/authorize") return await this.publicGatewayAuthorize(body);
       if (url.pathname === "/authority/command/internal") return await this.authorityCommand(body);
+      if (url.pathname === "/authority/view-command/internal") return await this.authorityViewCommand(body);
+      if (url.pathname === "/authority/run-details/internal") return await this.authorityRunDetails(body);
 
       if (url.pathname === "/identity/passkey-challenge/issue") {
         return await this.ctx.blockConcurrencyWhile(async () => {

@@ -1,3 +1,4 @@
+import { ANYAM_BRAND } from "../../../src/brand.js";
 import { documentationBody } from "./docs.js";
 import { copyFile, mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -52,7 +53,7 @@ function layout(page: Page): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#0a0a0a">
+  <meta name="theme-color" content="${ANYAM_BRAND.colors.ink}">
   <title>${escapeHtml(page.title)} · Anyam</title>
   <meta name="description" content="${escapeHtml(page.description)}">
   <meta property="og:type" content="website">
@@ -183,7 +184,7 @@ const architectureBody = await documentationBody(repositoryDirectory, "docs/desi
 
 const examplesBody = `
 <section class="page-hero"><p class="eyebrow">Runnable examples</p><h1>See the Project path in code.</h1><p>Each example is small enough to read and complete enough to run. The examples prove local behavior. They do not claim a live Cloudflare deployment.</p></section>
-<section class="section examples-grid-section"><div class="example-grid"><a class="example-card example-worker" href="/examples/worker-app/"><div class="example-meta"><span>01</span><span>Cloudflare Worker</span></div><h2>Worker app</h2><p>A TypeScript Worker with a health route, test, build, and Cloudflare Target manifest.</p><code>npm run check</code><span class="card-arrow">Open example ↗</span></a><a class="example-card example-cli" href="/examples/typescript-cli/"><div class="example-meta"><span>02</span><span>Non-web Project</span></div><h2>TypeScript CLI</h2><p>A compiled command-line tool that shows a package Artifact without a live web runtime.</p><code>npm run check</code><span class="card-arrow">Open example ↗</span></a><a class="example-card example-hybrid" href="/examples/hybrid-video-player/"><div class="example-meta"><span>03</span><span>Two Source Spaces</span></div><h2>Hybrid video player</h2><p>A local projection fixture with two marker checks. It does not establish general private-content exclusion.</p><code>npm run check</code><span class="card-arrow">Open example ↗</span></a></div></section>
+<section class="section examples-grid-section"><div class="example-grid"><a class="example-card example-worker" href="/examples/worker-app/"><div class="example-meta"><span>01</span><span>Cloudflare Worker</span></div><h2>Worker app</h2><p>A TypeScript Worker with a health route, test, build, and Cloudflare Target manifest.</p><code>npm run check</code><span class="card-arrow">Open example ↗</span></a><a class="example-card example-cli" href="/examples/typescript-cli/"><div class="example-meta"><span>02</span><span>Non-web Project</span></div><h2>TypeScript CLI</h2><p>A compiled command-line tool with local build/test checks and a planned generic release-assets Target.</p><code>npm run check</code><span class="card-arrow">Open example ↗</span></a><a class="example-card example-hybrid" href="/examples/hybrid-video-player/"><div class="example-meta"><span>03</span><span>Two Source Spaces</span></div><h2>Hybrid video player</h2><p>A local projection fixture with two marker checks. It does not establish general private-content exclusion.</p><code>npm run check</code><span class="card-arrow">Open example ↗</span></a></div></section>
 <section class="section fixture-section"><div class="section-heading"><p class="eyebrow">Qualification inputs</p><h2>Fixtures are not examples.</h2><p>The <code>fixtures/</code> directory feeds deterministic contract and provider qualification. The golden Worker fixture requires customer-owned resources and is not a clone-and-run sample.</p></div><div class="fixture-list"><a href="https://github.com/Whyme-Labs/anyam/tree/main/fixtures/worker">Worker contract fixture ↗</a><a href="https://github.com/Whyme-Labs/anyam/tree/main/fixtures/typescript-library">TypeScript library fixture ↗</a><a href="https://github.com/Whyme-Labs/anyam/tree/main/fixtures/hybrid">Hybrid disclosure fixture ↗</a><a href="https://github.com/Whyme-Labs/anyam/tree/main/fixtures/worker-golden">Golden Worker provider fixture ↗</a></div></section>
 <section class="section section-dark simulation-section"><div><p class="eyebrow">Team simulation</p><h2>Run the local multi-actor path.</h2><p>The simulation covers Worker and CLI Projects, conflicts and rebases, reviews, Landing, hybrid disclosure, bidirectional mirror proposals, Intent and Pull Request lifecycle, and export/restore.</p></div>${codeBlock("npm run qualification:team-simulation", "Repository root")}</section>
 `;
@@ -196,18 +197,18 @@ const hybridExampleBody = await documentationBody(repositoryDirectory, "examples
 
 const css = `
 :root {
-  --ink: #0a0a0a;
-  --ink-soft: #15171b;
-  --slate: #6b7280;
-  --slate-light: #9ba3af;
-  --mist: #f2f4f7;
-  --white: #ffffff;
-  --blue: #2563eb;
-  --blue-dark: #1749bb;
-  --line: #d8dde5;
-  --line-dark: #2d323b;
-  --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --ink: ${ANYAM_BRAND.colors.ink};
+  --ink-soft: color-mix(in srgb, var(--ink) 95%, var(--white));
+  --slate: ${ANYAM_BRAND.colors.slate};
+  --slate-light: color-mix(in srgb, var(--slate) 65%, var(--white));
+  --mist: ${ANYAM_BRAND.colors.mist};
+  --white: ${ANYAM_BRAND.colors.white};
+  --blue: ${ANYAM_BRAND.colors.accentBlue};
+  --blue-dark: color-mix(in srgb, var(--blue) 80%, var(--ink));
+  --line: color-mix(in srgb, var(--slate) 25%, var(--white));
+  --line-dark: color-mix(in srgb, var(--slate) 35%, var(--ink));
+  --sans: ${ANYAM_BRAND.typography.sans};
+  --mono: ${ANYAM_BRAND.typography.mono};
   --max: 1180px;
 }
 * { box-sizing: border-box; }

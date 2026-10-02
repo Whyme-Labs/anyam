@@ -263,9 +263,10 @@ test("Smart HTTP qualifies real Git clone, fetch, Workspace push, CAS, export/re
     if (unboundRoute) assert.equal(unboundRoute.status, 403);
     const gatewayFixture = await createGatewayServer(gatewayConfig, tls);
     gateway = gatewayFixture.server;
+    let beforeCredential: (() => void) | undefined;
     const driver = new SmartHttpRepositoryDriver({
       workspaceRoot: join(root, "driver"),
-      credentials: authority,
+      credentials: { async issue(input) { beforeCredential?.(); return authority.issue(input); } },
       credentialExpiresAt: expiry,
       allowInsecureTlsForQualification: true,
       workspaceIdForRepository: (repositoryId) => repositoryId === "workspace" ? "workspace:test" : undefined,
@@ -313,6 +314,32 @@ test("Smart HTTP qualifies real Git clone, fetch, Workspace push, CAS, export/re
     assert.equal(unguarded.status, "failed", "every desired remote ref requires an explicit expected OID or null");
     if (unguarded.status === "failed") assert.equal(unguarded.errorCode, "repository.expected_ref_missing");
     assert.equal(await git(undefined, ["--git-dir", repositories.workspace, "for-each-ref", "--format=%(refname)", "refs/heads/unguarded"]), "", "rejection must leave the provider ref absent");
+    for (const [index, expected] of ["", "1", "HEAD"].entries()) {
+      const ref = `refs/heads/malformed-${index}`;
+      const credentialCount = authority.snapshot().credentialCount;
+      const malformed = await driver.compareAndSwapRefs({ repository: workspace.value, expected: { [ref]: expected }, desired: { [ref]: firstCommit.value.commitId } });
+      assert.equal(malformed.status, "failed", "expected must contain a full OID or explicit null");
+      if (malformed.status === "failed") assert.equal(malformed.errorCode, "repository.expected_oid_invalid");
+      assert.equal(authority.snapshot().credentialCount, credentialCount, "malformed predicates must fail before credential issuance");
+      assert.equal(await git(undefined, ["--git-dir", repositories.workspace, "for-each-ref", "--format=%(refname)", ref]), "");
+    }
+    const createdRef = "refs/heads/guarded-create";
+    const createGuarded = await driver.compareAndSwapRefs({ repository: workspace.value, expected: { [createdRef]: null }, desired: { [createdRef]: firstCommit.value.commitId } });
+    assert.equal(createGuarded.status, "succeeded", "explicit null retains guarded creation");
+    const deleteGuarded = await driver.compareAndSwapRefs({ repository: workspace.value, expected: { [createdRef]: firstCommit.value.commitId }, desired: { [createdRef]: null } });
+    assert.equal(deleteGuarded.status, "succeeded", "an exact OID retains guarded deletion");
+    const expectedSnapshot: Record<string, string | null> = { "refs/heads/snapshot": null };
+    const desiredSnapshot: Record<string, string | null> = { "refs/heads/snapshot": firstCommit.value.commitId };
+    beforeCredential = () => {
+      delete expectedSnapshot["refs/heads/snapshot"];
+      desiredSnapshot["refs/heads/injected"] = firstCommit.value.commitId;
+    };
+    const snapshotted = await driver.compareAndSwapRefs({ repository: workspace.value, expected: expectedSnapshot, desired: desiredSnapshot });
+    beforeCredential = undefined;
+    assert.equal(snapshotted.status, "succeeded");
+    assert.equal(await git(undefined, ["--git-dir", repositories.workspace, "rev-parse", "refs/heads/snapshot"]), firstCommit.value.commitId);
+    assert.equal(await git(undefined, ["--git-dir", repositories.workspace, "for-each-ref", "--format=%(refname)", "refs/heads/injected"]), "", "credential issuance must not change the checked ref maps");
+    assert.doesNotMatch(JSON.stringify(snapshotted), /refs\/heads\/injected/);
 
     await writeFile(join(root, "workspace-checkout", "README.md"), "initial\nworkspace change\nCAS change\n", "utf8");
     const secondCommit = await driver.commitRepository({ repository: workspace.value, message: "CAS change" });

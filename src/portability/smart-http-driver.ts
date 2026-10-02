@@ -320,15 +320,18 @@ export class SmartHttpRepositoryDriver implements RepositoryDriver {
     const binding = this.binding(input.repository);
     if (!binding) return failure({ errorCode: "repository.unknown", operation: "compare-and-swap", affectedObject: input.repository.repositoryId, retryable: false, recoveryAction: "restore or register the Smart HTTP checkout before a CAS push", idempotencyKey: input.idempotencyKey });
     if (!binding.workspaceId) return failure({ errorCode: "canonical_write_denied", operation: "compare-and-swap", affectedObject: binding.repositoryId, retryable: false, recoveryAction: "request Landing through the Authority Plane; canonical refs are not directly writable", idempotencyKey: input.idempotencyKey, detail: "canonicalWrite=false" });
-    if (Object.keys(input.desired).some((ref) => !Object.hasOwn(input.expected, ref))) return failure({ errorCode: "repository.expected_ref_missing", operation: "compare-and-swap", affectedObject: binding.repositoryId, retryable: false, recoveryAction: "supply an explicit expected OID or null for every desired ref", idempotencyKey: input.idempotencyKey });
+    const expectedRefs = { ...input.expected };
+    const desiredRefs = { ...input.desired };
+    if (Object.keys(desiredRefs).some((ref) => !Object.hasOwn(expectedRefs, ref))) return failure({ errorCode: "repository.expected_ref_missing", operation: "compare-and-swap", affectedObject: binding.repositoryId, retryable: false, recoveryAction: "supply an explicit expected OID or null for every desired ref", idempotencyKey: input.idempotencyKey });
+    if (Object.values(expectedRefs).some((oid) => oid !== null && (typeof oid !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(oid)))) return failure({ errorCode: "repository.expected_oid_invalid", operation: "compare-and-swap", affectedObject: binding.repositoryId, retryable: false, recoveryAction: "supply a full SHA-1 or SHA-256 expected OID, or explicit null for an absent ref; empty strings and revision expressions are not predicates", idempotencyKey: input.idempotencyKey });
     const credentialResult = await this.issue(binding, "write", input.idempotencyKey);
     if (credentialResult.status !== "succeeded") return credentialResult;
     const args = ["push", "origin"];
-    for (const [ref, expected] of Object.entries(input.expected)) args.push(`--force-with-lease=${ref}:${expected ?? ""}`);
-    for (const [ref, desired] of Object.entries(input.desired)) args.push(desired === null ? `:${ref}` : `${desired}:${ref}`);
+    for (const [ref, expected] of Object.entries(expectedRefs)) args.push(`--force-with-lease=${ref}:${expected ?? ""}`);
+    for (const [ref, desired] of Object.entries(desiredRefs)) args.push(desired === null ? `:${ref}` : `${desired}:${ref}`);
     try {
       await runGit(this.localDirectory(binding), args, credentialResult.value, this.options.allowInsecureTlsForQualification === true);
-      return { status: "succeeded", value: success(input.repository, "compare-and-swap", `refs=${Object.keys(input.desired).join(",")}; lease=force-with-lease; workspace=${binding.workspaceId}; canonicalWrite=false`, input.idempotencyKey) };
+      return { status: "succeeded", value: success(input.repository, "compare-and-swap", `refs=${Object.keys(desiredRefs).join(",")}; lease=force-with-lease; workspace=${binding.workspaceId}; canonicalWrite=false`, input.idempotencyKey) };
     } catch (error) {
       const detail = this.gitDetail(error);
       return failure({ errorCode: /stale|lease|rejected|non-fast-forward/i.test(detail) ? "repository.stale_ref" : "repository.ref_update_failed", operation: "compare-and-swap", affectedObject: binding.repositoryId, retryable: false, recoveryAction: "inspect the current remote ref and publish a new Change Revision from the current Project Revision", idempotencyKey: input.idempotencyKey, detail });

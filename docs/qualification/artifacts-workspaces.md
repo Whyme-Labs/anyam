@@ -100,7 +100,10 @@ Smart HTTP remote observation now fails with
 cannot certify a current provider ref. Locally restored repositories retain
 local observation. A live revision path still needs a fresh qualified remote
 readback. Remote CAS requires an explicit expected OID/null for each desired ref;
-force-with-lease alone does not establish all-ref atomicity, generation fencing
+empty, abbreviated and symbolic expected values fail before credential issuance.
+Both ref maps are snapshotted before awaiting credentials, so later caller
+mutation cannot add unguarded refs or alter predicates.
+Force-with-lease alone does not establish all-ref atomicity, generation fencing
 or protection against ABA. Canonical reconciliation remains gated by its
 separate all-writers generation/epoch/seal contract.
 

@@ -172,10 +172,14 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
   /** Trusted caller only. Stop issuance before awaiting provider retirement. */
   async revokeWorkspace(input: { workspaceId: string; sourceSpaceId: string }): Promise<void> {
     const selectionKey = { workspaceId: input.workspaceId, sourceSpaceId: input.sourceSpaceId, sourceRepository: { accountId: this.options.accountId, namespace: this.options.namespace } };
-    const context = this.custody("unenrolled", () => this.store.read(selectionKey)?.context);
-    if (!context) throw new ArtifactsWorkspaceError("artifacts.workspace_unknown", "unenrolled", "none", "resolve the exact registered Workspace and Source Space before revocation");
-    const selection = context.selection;
+    const reserved = this.custody("unenrolled", () => this.store.read(selectionKey));
+    if (!reserved) throw new ArtifactsWorkspaceError("artifacts.workspace_unknown", "unenrolled", "none", "resolve the exact registered Workspace and Source Space before revocation");
+    const { selection, context } = reserved;
     this.custody(selection.targetName, () => this.store.change(selection, record => { record.blocked = true; }));
+    if (!context) {
+      if (reserved.pendingOperation !== "none" || reserved.unknownTokenInventory) throw this.error(selection, "artifacts.workspace_token_inventory_unknown", "unknown", "Workspace issuance is blocked before enrollment; reconcile the pending provider operation and its token inventory");
+      return;
+    }
     try {
       using repo = await this.options.artifacts.get(selection.targetName);
       this.validateInfo(selection, await repo.info(), context.repository, "unknown");
@@ -252,7 +256,10 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
       await this.authorize(selection, effect);
       // The documented fork API has no pinned-commit argument. Check its
       // actual result instead of assuming that it copied a stable snapshot.
-      this.store.change(selection, record => { record.pendingOperation = "fork"; });
+      this.store.change(selection, record => {
+        if (record.blocked) throw this.error(selection, "artifacts.authorization_denied", effect, "Workspace issuance has been revoked");
+        record.pendingOperation = "fork";
+      });
       effect = "unknown";
       const forked = await source.fork(selection.targetName, { readOnly: false, defaultBranchOnly: false });
       effect = "fork-created";
@@ -270,7 +277,11 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
         binding: Object.freeze({ source: targetInfo.remote, repositoryId: repositoryId(identity), sourceSpaceId: selection.sourceSpaceId, workspaceId: selection.workspaceId }),
         storage: this.store.storage, canonicalPublication: "unqualified",
       });
-      this.store.change(selection, record => { record.context = context; record.pendingOperation = "none"; });
+      this.store.change(selection, record => {
+        if (record.blocked) throw this.error(selection, "artifacts.authorization_denied", effect, "Workspace issuance has been revoked");
+        record.context = context;
+        record.pendingOperation = "none";
+      });
       return context;
     } catch (error) {
       if (effect === "none") this.store.release(selection);

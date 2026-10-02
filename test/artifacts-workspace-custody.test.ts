@@ -193,6 +193,59 @@ test("Artifacts journals a fork before its provider effect and retains uncertain
   });
 });
 
+test("Artifacts revocation durably blocks a pending fork before context enrollment", async () => {
+  await withCustody(async ({ fixture, control, reopen, metadata }) => {
+    let started!: () => void;
+    const forkStarted = new Promise<void>(resolve => { started = resolve; });
+    let settle!: () => void;
+    const held = new Promise<void>(resolve => { settle = resolve; });
+    const get = fixture.binding.get.bind(fixture.binding);
+    fixture.binding.get = async name => {
+      const repo = await get(name);
+      return { ...repo, async fork(targetName, options) {
+        const result = await repo.fork(targetName, options);
+        started();
+        await held;
+        return result;
+      } };
+    };
+    const pending = control().forkWorkspace(artifactsSelection);
+    const outcome = pending.catch(error => error);
+    await forkStarted;
+    try {
+      await assert.rejects(control().revokeWorkspace({ workspaceId: "workspace:a", sourceSpaceId: "source:app" }), { code: "artifacts.workspace_token_inventory_unknown" });
+      assert.match(metadata(), /blocked.*true/);
+    } finally { settle(); await outcome; }
+    assert.equal((await outcome).code, "artifacts.authorization_denied", "revocation must prevent enrollment after the held fork reply");
+    assert.equal(fixture.activeTokens.size, 0, "the returned initial fork token must still be retired");
+    reopen();
+    await assert.rejects(control().forkWorkspace(artifactsSelection), { code: "artifacts.workspace_already_bound" });
+    assert.match(metadata(), /blocked.*true/);
+    assert.equal(fixture.mintedCount, 0);
+    assert.doesNotMatch(metadata(), /usable-secret|initial-secret/);
+  });
+});
+
+test("Artifacts pre-effect fork failure retains a revoked reservation after restart", async () => {
+  await withCustody(async ({ fixture, control, reopen, metadata }) => {
+    let started!: () => void;
+    const authorizing = new Promise<void>(resolve => { started = resolve; });
+    let settle!: () => void;
+    const held = new Promise<void>(resolve => { settle = resolve; });
+    const pending = control({ async authorize() { started(); await held; return fixture.authorize(); } }).forkWorkspace(artifactsSelection);
+    const outcome = pending.catch(error => error);
+    await authorizing;
+    try {
+      await control().revokeWorkspace({ workspaceId: "workspace:a", sourceSpaceId: "source:app" });
+    } finally { settle(); await outcome; }
+    assert.equal((await outcome).code, "artifacts.authorization_denied");
+    assert.equal(fixture.events.filter(event => event !== "authorize").length, 0, "revocation before authorization completes must prevent provider access");
+    reopen();
+    await assert.rejects(control().forkWorkspace(artifactsSelection), { code: "artifacts.workspace_already_bound" });
+    assert.match(metadata(), /blocked.*true/);
+  });
+});
+
 test("Artifacts SQLite reservations serialize concurrent adapters for the same assignment or name", async () => {
   for (const peer of [artifactsSelection, { ...artifactsSelection, workspaceId: "workspace:peer" }]) {
     await withCustody(async ({ fixture, control }) => {

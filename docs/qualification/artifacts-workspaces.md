@@ -103,7 +103,10 @@ Each fork and mint commits a pending marker before its provider effect. A
 concurrent adapter cannot start another mint while that marker remains. Known
 token IDs are committed before later asynchronous checks or credential release;
 plaintext is never stored. Revocation commits its block before provider access,
-then removes IDs only after confirmed retirement. Pending/lost mint replies
+including reservations whose fork has not yet enrolled a context. A revoked
+pre-effect reservation remains a durable tombstone rather than being released;
+a pending fork reports uncertain inventory and cannot later release context.
+Revocation then removes IDs only after confirmed retirement. Pending/lost mint replies
 cannot certify complete revocation. Failed writes roll back, withhold credentials
 and prevent unjournaled provider effects. Unknown operations retain reservations
 and require named reconciliation rather than automatic adoption or broad deletion.

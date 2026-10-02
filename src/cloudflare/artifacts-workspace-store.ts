@@ -18,6 +18,7 @@ export type ArtifactsWorkspaceStore = {
   read(selection: ArtifactsWorkspaceKey): ArtifactsWorkspaceRecord | undefined;
   repository(repositoryId: string): ArtifactsWorkspaceRecord | undefined;
   change(selection: ArtifactsWorkspaceSelection, update: (record: ArtifactsWorkspaceRecord) => void): void;
+  /** Release a pre-effect reservation only when it has not been revoked. */
   release(selection: ArtifactsWorkspaceSelection): void;
 };
 
@@ -44,7 +45,7 @@ export class MemoryArtifactsWorkspaceStore implements ArtifactsWorkspaceStore {
     update(record);
     this.records.set(key(selection), structuredClone(record));
   }
-  release(selection: ArtifactsWorkspaceSelection): void { this.records.delete(key(selection)); }
+  release(selection: ArtifactsWorkspaceSelection): void { if (!this.records.get(key(selection))?.blocked) this.records.delete(key(selection)); }
   private copy(record: ArtifactsWorkspaceRecord | undefined): ArtifactsWorkspaceRecord | undefined { return record && structuredClone(record); }
 }
 
@@ -71,7 +72,11 @@ export class SQLiteArtifactsWorkspaceStore implements ArtifactsWorkspaceStore {
       this.host.sql.exec("UPDATE anyam_artifacts_workspaces SET repository_id = ?, payload = ? WHERE row_key = ?", record.context?.binding.repositoryId ?? null, JSON.stringify(record), key(selection));
     });
   }
-  release(selection: ArtifactsWorkspaceSelection): void { this.host.transactionSync(() => this.host.sql.exec("DELETE FROM anyam_artifacts_workspaces WHERE row_key = ?", key(selection))); }
+  release(selection: ArtifactsWorkspaceSelection): void {
+    this.host.transactionSync(() => {
+      if (!this.read(selection)?.blocked) this.host.sql.exec("DELETE FROM anyam_artifacts_workspaces WHERE row_key = ?", key(selection));
+    });
+  }
   private load(column: "row_key" | "repository_id", value: string): ArtifactsWorkspaceRecord | undefined {
     const row = this.host.sql.exec<{ payload: string }>(`SELECT payload FROM anyam_artifacts_workspaces WHERE ${column} = ?`, value).toArray()[0];
     return row ? JSON.parse(row.payload) as ArtifactsWorkspaceRecord : undefined;

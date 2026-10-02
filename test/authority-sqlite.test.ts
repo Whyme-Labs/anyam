@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import test from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { CollaborationCoordinator } from "../src/change-control/collaboration.ts";
 
-import { AuthorityPlaneCoordinator, AUTHORITY_COMMAND_PROTOCOL, emptyAuthorityPlaneSnapshot, normalizeAuthorityPlaneSnapshot, type AuthorityPlaneSnapshot, type AuthoritySession } from "../src/cloudflare/authority-plane.ts";
+import { AuthorityPlaneCoordinator, AuthorityPlaneError, AUTHORITY_COMMAND_PROTOCOL, emptyAuthorityPlaneSnapshot, normalizeAuthorityPlaneSnapshot, type AuthorityPlaneSnapshot, type AuthorityCommandName, type AuthoritySession } from "../src/cloudflare/authority-plane.ts";
 import { AUTHORITY_LEGACY_JSON_VALUE_TRIPWIRE_BYTES, AuthoritySQLiteStore, authorityCommandLatencyReceipt, authoritySnapshotJsonBytes, type AuthoritySqlHost, type AuthoritySqlStorage } from "../src/cloudflare/authority-sqlite.ts";
 import { PROMOTION_EXECUTION_PROTOCOL, type PromotionExecutionContext, type PromotionExecutionResult } from "../src/cloudflare/promotion-execution.ts";
 import { CONTRACT_VERSIONS } from "../src/kernel/contracts.ts";
@@ -212,5 +216,109 @@ test("SQLite Authority growth continues beyond the legacy JSON value tripwire an
     assert.equal(persistence.load(session.realmId)?.projects["project:post-tripwire:31"]?.name, "post-tripwire");
   } finally {
     database.close();
+  }
+});
+
+test("one two-space Change survives an interrupted SQLite Landing and lost-response replay", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyam-source-space-landing-"));
+  const databasePath = join(root, "authority.sqlite");
+  let database = new DatabaseSync(databasePath);
+  try {
+    let persistence = store(database);
+    persistence.replace(emptyAuthorityPlaneSnapshot(session.realmId));
+    const execute = (name: AuthorityCommandName, key: string, payload: Record<string, unknown>) => {
+      const previous = persistence.load(session.realmId)!;
+      const coordinator = new AuthorityPlaneCoordinator(previous);
+      const result = coordinator.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: name, idempotencyKey: key, payload }, session);
+      persistence.commit(previous, coordinator.snapshot());
+      return result;
+    };
+    const projectId = "project:cross-space";
+    const changeId = "change:cross-space";
+    const workspaceId = "workspace:cross-space";
+    const baseId = "revision:cross-space-base";
+    const candidateId = "revision:cross-space-candidate";
+    const landedId = "revision:cross-space-landed";
+    const candidateSnapshots = { "source:public": "commit:public:two", "source:internal": "commit:internal:two" };
+    execute("project.create", "cross:project", {
+      projectId, name: "Synthetic cross-space fixture", referenceType: "hybrid-public-private", projectRevisionId: baseId,
+      sourceSpaces: [
+        { id: "source:public", name: "Public contract", classification: "public", snapshotId: "commit:public:one" },
+        { id: "source:internal", name: "Internal implementation", classification: "internal", snapshotId: "commit:internal:one" },
+        { id: "source:excluded", name: "Excluded fixture", classification: "restricted", snapshotId: "commit:excluded:one" },
+      ],
+    });
+    execute("workspace.create", "cross:workspace", { projectId, workspaceId, projectRevisionId: baseId, sourceSpaceIds: ["source:public", "source:internal"], mounts: ["public", "internal"] });
+    const workspace = persistence.load(session.realmId)!.workspaces[workspaceId]!;
+    execute("change.create", "cross:change", { projectId, changeId, workspaceId, intentId: "intent:cross-space", baseProjectRevisionId: baseId });
+    execute("revision.publish", "cross:default", { projectId, changeId, revisionId: "revision:cross-space-default", projectRevisionId: baseId });
+    assert.deepEqual(persistence.load(session.realmId)!.changeRevisions["revision:cross-space-default"]!.sourceSpaceSnapshots, { "source:public": "commit:public:one", "source:internal": "commit:internal:one" });
+    const beforeDenied = persistence.load(session.realmId)!;
+    for (const sourceSpaceSnapshots of [
+      { ...candidateSnapshots, "source:excluded": "commit:excluded:two" },
+      { "source:public": "commit:public:two", "source:excluded": "commit:excluded:two" },
+      { "source:public": "commit:public:two" },
+      { ...candidateSnapshots, "source:internal": " " },
+    ]) {
+      assert.throws(() => execute("revision.publish", "cross:excluded", { projectId, changeId, revisionId: "revision:excluded", sourceSpaceSnapshots }), (error: unknown) => error instanceof AuthorityPlaneError && error.code === "conflict" && error.receipt.includes("workspace-view-snapshots-only") && !JSON.stringify(error).includes("source:excluded"));
+    }
+    assert.deepEqual(persistence.load(session.realmId), beforeDenied, "outside-View publication cannot persist partial state");
+    execute("revision.publish", "cross:revision", { projectId, changeId, revisionId: candidateId, projectRevisionId: baseId, sourceSpaceSnapshots: candidateSnapshots, declaredEffects: ["contract.modify", "implementation.modify"] });
+    execute("run.record", "cross:run", { projectId, workspaceId, changeRevisionId: candidateId, projectRevisionId: baseId, projectViewId: workspace.projectViewId, runId: "run:cross-space", actionId: "action:synthetic-compatibility", runnerId: "runner:synthetic", status: "succeeded", inputDigests: Object.values(candidateSnapshots), outputDigest: "sha256:synthetic-output" });
+    execute("evidence.record", "cross:evidence", { projectId, runId: "run:cross-space", evidenceId: "evidence:cross-space", actionId: "action:synthetic-compatibility", runnerId: "runner:synthetic", key: "compatibility", criterion: "synthetic two-space compatibility", validityKey: "validity:cross-space", verifierId: "verifier:synthetic", toolchainDigest: "sha256:synthetic-toolchain", dependencyDigest: "sha256:synthetic-dependencies", environmentDigest: "sha256:synthetic-environment", inputDigests: Object.values(candidateSnapshots), effectDigests: ["effect:contract", "effect:implementation"], outputDigest: "sha256:synthetic-output", policyVersion: "policy:synthetic", capabilityGrantId: "grant:synthetic", disclosure: { projectionId: workspace.projectViewId, classification: "project" }, receipt: "synthetic=true; liveVerifier=false; sourceSpaces=2", invalidators: [], owner: "synthetic fixture" });
+    const prepared = persistence.load(session.realmId)!;
+    const evidence = prepared.evidence["evidence:cross-space"]!;
+    assert.equal(evidence.changeRevisionId, candidateId);
+    assert.equal(evidence.projectViewId, workspace.projectViewId);
+    assert.deepEqual(evidence.inputDigests, Object.values(candidateSnapshots));
+    const collaboration = new CollaborationCoordinator({ projectId, canonicalRevision: prepared.projectRevisions[baseId]!, policy: { version: "policy:synthetic", requiredEvidence: [{ key: "compatibility", currentValidityKey: "validity:cross-space", expectedChangeRevisionId: candidateId, expectedProjectRevisionId: baseId, expectedProjectViewId: workspace.projectViewId }] } });
+    const cohort = await collaboration.createCohort({ members: [{ change: prepared.changes[changeId]!, revision: prepared.changeRevisions[candidateId]! }], actor: evidence.actor });
+    assert.equal(collaboration.evaluateLanding({ cohortId: cohort.id, evidence: [] }).decision, "deny");
+    assert.equal(collaboration.evaluateLanding({ cohortId: cohort.id, evidence: [{ ...evidence, changeRevisionId: "revision:other" }] }).decision, "deny");
+    assert.equal(collaboration.evaluateLanding({ cohortId: cohort.id, evidence: [{ ...evidence, projectViewId: "view:other" }] }).decision, "deny");
+    assert.equal(collaboration.evaluateLanding({ cohortId: cohort.id, evidence: [evidence] }).decision, "allow");
+    // The policy gate and persisted single-Change Landing are tested separately:
+    // this fixture does not introduce a durable multi-Change Cohort adapter.
+    const landingPayload = { projectId, changeRevisionId: candidateId, expectedCanonicalProjectRevisionId: baseId, projectRevisionId: landedId, landingId: "landing:cross-space" };
+    const coordinator = new AuthorityPlaneCoordinator(prepared);
+    const result = coordinator.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "landing.apply", idempotencyKey: "cross:landing", payload: landingPayload }, session);
+    const next = coordinator.snapshot();
+    const host = new NodeSqlHost(database);
+    let interrupted = false;
+    const failingStore = new AuthoritySQLiteStore({
+      transactionSync: (closure) => host.transactionSync(closure),
+      sql: {
+        exec<T extends Record<string, unknown>>(query: string, ...bindings: unknown[]) {
+          const cursor = host.sql.exec<T>(query, ...bindings);
+          if (query.startsWith("INSERT INTO anyam_authority_entities") && bindings[0] === "projectRevisions" && bindings[1] === landedId) {
+            interrupted = true;
+            throw new Error("synthetic interruption after landed manifest row write");
+          }
+          return cursor;
+        },
+      },
+    }, { empty: emptyAuthorityPlaneSnapshot, normalize: normalizeAuthorityPlaneSnapshot });
+    assert.throws(() => failingStore.commit(prepared, next), /synthetic interruption/);
+    assert.equal(interrupted, true);
+    database.close();
+    database = new DatabaseSync(databasePath);
+    persistence = store(database);
+    assert.deepEqual(persistence.load(session.realmId), prepared, "restart sees neither partial manifest nor Landing/audit/idempotency rows");
+    const accepted = execute("landing.apply", "cross:landing", landingPayload);
+    assert.deepEqual(accepted, result);
+    const committed = persistence.load(session.realmId)!;
+    assert.equal(committed.canonicalByProject[projectId], landedId);
+    assert.deepEqual(committed.projectRevisions[landedId]!.sourceSpaceSnapshots, { ...candidateSnapshots, "source:excluded": "commit:excluded:one" });
+    assert.equal(committed.projectRevisions[landedId]!.landedChangeRevisionId, candidateId);
+    assert.equal(committed.workspaces[workspaceId]!.state, "closed");
+    assert.deepEqual(committed.evidence[evidence.id], evidence);
+    database.close(); // Simulate committed state whose success response was lost.
+    database = new DatabaseSync(databasePath);
+    persistence = store(database);
+    assert.deepEqual(execute("landing.apply", "cross:landing", landingPayload), accepted);
+    assert.deepEqual(persistence.load(session.realmId), committed, "replay does not duplicate or mutate source, Evidence, Landing, audit, or idempotency");
+  } finally {
+    database.close();
+    rmSync(root, { recursive: true, force: true });
   }
 });

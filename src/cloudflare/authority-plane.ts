@@ -1565,7 +1565,15 @@ export class AuthorityPlaneCoordinator {
           const projectView = next.projectViews[projectViewId];
           if (!baseRevision || baseRevision.projectId !== change.projectId || workspace.projectRevisionId !== change.baseProjectRevisionId || !projectView || projectView.projectId !== change.projectId || projectView.projectRevisionId !== change.baseProjectRevisionId) throw new AuthorityPlaneError({ code: "conflict", message: `Workspace ${workspace.id}, Project View ${projectViewId}, and Change ${changeId} do not share one Project Revision base.`, recoveryAction: "rebase the Change onto a fresh Workspace and Project View derived from its declared base", receipt: `change=${changeId}; changeBase=${change.baseProjectRevisionId}; workspaceBase=${workspace.projectRevisionId}; viewBase=${projectView?.projectRevisionId ?? "missing"}; revision=not-created` });
         }
-        const sourceSnapshots = record<string>(payload.sourceSpaceSnapshots ?? next.projectRevisions[change.baseProjectRevisionId]?.sourceSpaceSnapshots, "sourceSpaceSnapshots");
+        const workspaceView = workspace ? next.projectViews[workspace.projectViewId] : undefined;
+        const sourceSnapshots = record<string>(payload.sourceSpaceSnapshots ?? workspaceView?.disclosedSourceSpaceSnapshots ?? next.projectRevisions[change.baseProjectRevisionId]?.sourceSpaceSnapshots, "sourceSpaceSnapshots");
+        if (workspaceView) {
+          const requestedIds = Object.keys(sourceSnapshots);
+          const visibleIds = workspaceView.visibleSourceSpaceIds;
+          if (requestedIds.length !== visibleIds.length || requestedIds.some((id) => !visibleIds.includes(id)) || Object.values(sourceSnapshots).some((id) => typeof id !== "string" || id.trim().length === 0)) {
+            throw new AuthorityPlaneError({ code: "conflict", message: "Change Revision snapshots must cover exactly the Source Spaces disclosed by its Workspace View.", recoveryAction: "publish one non-empty snapshot per disclosed Source Space; request a separately authorized Workspace to change another scope", receipt: `change=${changeId}; workspace=${workspace!.id}; requested=${requestedIds.length}; disclosed=${visibleIds.length}; rule=workspace-view-snapshots-only; revision=not-created` });
+          }
+        }
         const project = next.projects[change.projectId];
         if (!project) throw new AuthorityPlaneError({ code: "indeterminate", message: `Change ${changeId} refers to a Project that is not readable.`, recoveryAction: "reconcile the Authority snapshot before publishing a Revision", receipt: `change=${changeId}; project=${change.projectId}; revision=not-created` });
         const unknownSourceSpaceId = Object.keys(sourceSnapshots).find((sourceSpaceId) => !project.sourceSpaceIds.includes(sourceSpaceId));

@@ -1079,7 +1079,16 @@ export class CollaborationCoordinator {
     }
     for (const requirement of this.requiredEvidenceFor(cohort)) {
       const records = input.evidence.filter((record) => record.key === requirement.key);
-      const record = [...records].reverse()[0];
+      // A key may be required by several exact Cohort members. Select within
+      // the required identity before applying latest-result semantics, so a
+      // sibling's check cannot replace this member's result.
+      const matchesContext = (record: Evidence): boolean =>
+        (requirement.expectedProjectRevisionId === undefined || record.projectRevisionId === requirement.expectedProjectRevisionId)
+        && (requirement.expectedProjectViewId === undefined || record.projectViewId === requirement.expectedProjectViewId)
+        && (requirement.expectedChangeRevisionId === undefined || record.changeRevisionId === requirement.expectedChangeRevisionId)
+        && (requirement.expectedTargetId === undefined || record.targetId === requirement.expectedTargetId)
+        && (requirement.expectedDisclosureClassification === undefined || record.disclosure.classification === requirement.expectedDisclosureClassification);
+      const record = [...records].reverse().find(matchesContext) ?? [...records].reverse()[0];
       if (!record) {
         addBlocker({
           kind: "missing-evidence",
@@ -1091,12 +1100,7 @@ export class CollaborationCoordinator {
         });
         continue;
       }
-      const contextMismatch = (requirement.expectedProjectRevisionId !== undefined && record.projectRevisionId !== requirement.expectedProjectRevisionId)
-        || (requirement.expectedProjectViewId !== undefined && record.projectViewId !== requirement.expectedProjectViewId)
-        || (requirement.expectedChangeRevisionId !== undefined && record.changeRevisionId !== requirement.expectedChangeRevisionId)
-        || (requirement.expectedTargetId !== undefined && record.targetId !== requirement.expectedTargetId)
-        || (requirement.expectedDisclosureClassification !== undefined && record.disclosure.classification !== requirement.expectedDisclosureClassification)
-        || record.validityKey !== requirement.currentValidityKey;
+      const contextMismatch = !matchesContext(record) || record.validityKey !== requirement.currentValidityKey;
       if (contextMismatch && record.outcome === "passed") {
         addBlocker({
           kind: "stale-evidence",

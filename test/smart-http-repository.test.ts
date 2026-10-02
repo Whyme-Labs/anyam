@@ -371,7 +371,7 @@ test("Smart HTTP qualifies real Git clone, fetch, Workspace push, CAS, export/re
     }
     await git(join(root, "workspace-checkout"), ["config", "push.followTags", "true"]);
     await git(join(root, "workspace-checkout"), ["config", "push.recurseSubmodules", "only"]);
-    await git(join(root, "workspace-checkout"), ["tag", "--annotate", "implicit-tag", "--message", "Fixture tag must not be implicitly pushed"]);
+    await git(join(root, "workspace-checkout"), ["-c", "user.name=Anyam Smart HTTP Fixture", "-c", "user.email=smart-http-fixture@anyam.invalid", "tag", "--annotate", "implicit-tag", "--message", "Fixture tag must not be implicitly pushed"]);
     const cas = await driver.compareAndSwapRefs({
       repository: workspace.value,
       expected: { "refs/heads/main": firstCommit.value.commitId },

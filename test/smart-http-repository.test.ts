@@ -17,13 +17,56 @@ import {
   smartHttpQualificationReceipt,
 } from "../src/portability/smart-http.ts";
 import { SmartHttpRepositoryDriver } from "../src/portability/smart-http-driver.ts";
+import type { SmartHttpCredentialIssuer } from "../src/portability/smart-http.ts";
 
 const execFile = promisify(execFileCallback);
+
+test("Smart HTTP binds identical provider repo names to their complete enrolled remote identities", async () => {
+  const root = await mkdtemp(join(tmpdir(), "anyam-smart-http-identity-"));
+  const issued: string[] = [];
+  const remoteRepositories = [
+    { source: "https://account-a.artifacts.cloudflare.net/git/default/workspace.git", repositoryId: "repository:artifacts:account-a:default:provider-id-a", sourceSpaceId: "source:test", workspaceId: "workspace:a" },
+    { source: "https://account-b.artifacts.cloudflare.net/git/default/workspace.git", repositoryId: "repository:artifacts:account-b:default:provider-id-b", sourceSpaceId: "source:test", workspaceId: "workspace:b" },
+    { source: "https://account-a.artifacts.cloudflare.net/git/private/workspace.git", repositoryId: "repository:artifacts:account-a:private:provider-id-c", sourceSpaceId: "source:test", workspaceId: "workspace:c" },
+  ];
+  const credentials: SmartHttpCredentialIssuer = { async issue(input) { issued.push(input.repositoryId); throw new Error("fixture stops before network or credential creation"); } };
+  const options = { workspaceRoot: root, credentials, credentialExpiresAt: () => "2030-01-01T00:00:00Z", remoteRepositories };
+  const driver = new SmartHttpRepositoryDriver(options);
+  try {
+    for (const binding of remoteRepositories) await driver.cloneRepository({ sourceSpaceId: "source:test", source: binding.source });
+    assert.deepEqual(issued, ["repository:artifacts:account-a:default:provider-id-a", "repository:artifacts:account-b:default:provider-id-b", "repository:artifacts:account-a:private:provider-id-c"]);
+    const unbound = await driver.cloneRepository({ sourceSpaceId: "source:test", source: "https://account-a.artifacts.cloudflare.net/git/other/workspace.git" });
+    assert.equal(unbound.status, "failed");
+    if (unbound.status === "failed") assert.equal(unbound.errorCode, "repository.identity_unbound");
+    const wrongSource = await driver.cloneRepository({ sourceSpaceId: "source:other", source: remoteRepositories[0]!.source });
+    assert.equal(wrongSource.status, "failed");
+    if (wrongSource.status === "failed") assert.equal(wrongSource.errorCode, "repository.source_space_mismatch");
+    assert.equal(issued.length, remoteRepositories.length, "unknown or cross-Source-Space remotes must not request credentials");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 async function git(directory: string | undefined, args: readonly string[]): Promise<string> {
   const result = await execFile("git", [...args], { cwd: directory });
   return result.stdout.trim();
 }
+
+test("Smart HTTP rejects credential-bearing and decorated remote URLs before issuing credentials", async () => {
+  const root = await mkdtemp(join(tmpdir(), "anyam-smart-http-unsafe-url-"));
+  const issued: string[] = [];
+  const sources = ["https://user:embedded-secret@example.test/git/workspace.git", "https://example.test/git/workspace.git?token=embedded-secret", "https://example.test/git/workspace.git#embedded-secret"];
+  const driver = new SmartHttpRepositoryDriver({ workspaceRoot: root, credentials: { async issue(input) { issued.push(input.repositoryId); throw new Error("fixture prevents network"); } }, credentialExpiresAt: () => "2030-01-01T00:00:00Z", remoteRepositories: sources.map(source => ({ source, repositoryId: "repo:workspace", sourceSpaceId: "source:test", workspaceId: "workspace:test" })) });
+  try {
+    for (const source of sources) {
+      const result = await driver.cloneRepository({ sourceSpaceId: "source:test", source });
+      assert.equal(result.status, "failed");
+      if (result.status === "failed") assert.equal(result.errorCode, "repository.transport_denied");
+      assert.doesNotMatch(JSON.stringify(result), /embedded-secret/);
+    }
+    assert.deepEqual(issued, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 async function readBody(request: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
@@ -261,6 +304,16 @@ test("Smart HTTP qualifies real Git clone, fetch, Workspace push, CAS, export/re
     const workspacePush = await driver.pushRepository({ repository: workspace.value, refs: ["refs/heads/main"], idempotencyKey: "push:workspace" });
     assert.equal(workspacePush.status, "succeeded");
 
+    const unguarded = await driver.compareAndSwapRefs({
+      repository: workspace.value,
+      expected: {},
+      desired: { "refs/heads/unguarded": firstCommit.value.commitId },
+      idempotencyKey: "cas:workspace:missing-expected",
+    });
+    assert.equal(unguarded.status, "failed", "every desired remote ref requires an explicit expected OID or null");
+    if (unguarded.status === "failed") assert.equal(unguarded.errorCode, "repository.expected_ref_missing");
+    assert.equal(await git(undefined, ["--git-dir", repositories.workspace, "for-each-ref", "--format=%(refname)", "refs/heads/unguarded"]), "", "rejection must leave the provider ref absent");
+
     await writeFile(join(root, "workspace-checkout", "README.md"), "initial\nworkspace change\nCAS change\n", "utf8");
     const secondCommit = await driver.commitRepository({ repository: workspace.value, message: "CAS change" });
     assert.equal(secondCommit.status, "succeeded");
@@ -292,6 +345,15 @@ test("Smart HTTP qualifies real Git clone, fetch, Workspace push, CAS, export/re
     });
     assert.equal(casAfterStale.status, "succeeded");
 
+    // A checkout still matches its own HEAD after a different writer moves the
+    // remote. It cannot certify the current provider ref or ancestry.
+    await git(undefined, ["--git-dir", repositories.workspace, "update-ref", "refs/heads/main", firstCommit.value.commitId]);
+    const candidateTree = await git(join(root, "workspace-checkout"), ["rev-parse", "HEAD^{tree}"]);
+    const observationInput = { workspaceId: "workspace:test", projectViewId: "view:test", expectedCommitOid: thirdCommit.value.commitId, expectedTreeOid: candidateTree, expectedBaseCommitOid: firstCommit.value.commitId };
+    const remoteObservation = await driver.observeRepository({ repository: workspace.value, ...observationInput });
+    assert.equal(remoteObservation.status, "failed");
+    if (remoteObservation.status === "failed") assert.equal(remoteObservation.errorCode, "repository.remote_observation_unqualified");
+
     const exportDirectory = join(root, "export");
     const exported = await driver.exportRepository({ repository: workspace.value, destination: exportDirectory, checkpointId: "checkpoint:smart-http-export" });
     assert.equal(exported.status, "succeeded");
@@ -310,6 +372,8 @@ test("Smart HTTP qualifies real Git clone, fetch, Workspace push, CAS, export/re
     if (restoredVerification.status !== "succeeded") return;
     assert.equal(restoredVerification.value.refsMatch, true);
     assert.equal(restoredVerification.value.bundleVerified, true);
+    const localObservation = await driver.observeRepository({ repository: restored.value.repository, ...observationInput });
+    assert.equal(localObservation.status, "succeeded", "a restored local repository retains local observation");
 
     const failedFirst = await driver.cloneRepository({ sourceSpaceId: "source:test", source: "https://127.0.0.1:1/git/unavailable.git", destination: join(root, "failed-first"), idempotencyKey: "clone:provider-outage" });
     const failedSecond = await driver.cloneRepository({ sourceSpaceId: "source:test", source: "https://127.0.0.1:1/git/unavailable.git", destination: join(root, "failed-second"), idempotencyKey: "clone:provider-outage" });

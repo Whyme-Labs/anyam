@@ -34,10 +34,20 @@ type RemoteBinding = {
   workspaceId?: string;
 };
 
+/** Provider enrollment binds the complete returned remote to an Anyam identity.
+ * Repo basenames cannot identify repositories across accounts/namespaces. */
+export type SmartHttpRemoteRepositoryBinding = {
+  source: string;
+  repositoryId: string;
+  sourceSpaceId: string;
+  workspaceId?: string;
+};
+
 export type SmartHttpRepositoryDriverOptions = {
   workspaceRoot: string;
   credentials: SmartHttpCredentialIssuer;
   credentialExpiresAt: () => string;
+  remoteRepositories?: readonly SmartHttpRemoteRepositoryBinding[];
   workspaceIdForRepository?: (repositoryId: string) => string | undefined;
   allowInsecureHttp?: boolean;
   /** Qualification-only TLS trust bypass for a local self-signed fixture. */
@@ -98,10 +108,11 @@ function success(repository: RepositoryHandle, operation: string, detail: string
 function parseRepositoryId(source: string): string | undefined {
   try {
     const url = new URL(source);
-    const segments = url.pathname.split("/").filter((segment) => segment.length > 0);
-    const gitSegment = [...segments].reverse().find((segment) => segment.endsWith(".git"));
-    if (!gitSegment) return undefined;
-    const id = decodeURIComponent(gitSegment.slice(0, -4));
+    // Only the existing Anyam gateway encodes its enrolled ID in one path
+    // segment. Provider paths require an explicit complete remote binding.
+    const match = /^\/git\/([^/]+)\.git$/u.exec(url.pathname);
+    if (!match?.[1]) return undefined;
+    const id = decodeURIComponent(match[1]);
     return id.length > 0 && !id.includes("..") && !id.includes("/") ? id : undefined;
   } catch {
     return undefined;
@@ -110,7 +121,9 @@ function parseRepositoryId(source: string): string | undefined {
 
 function remoteProtocol(source: string): "https:" | "http:" | undefined {
   try {
-    const protocol = new URL(source).protocol;
+    const url = new URL(source);
+    if (url.username || url.password || url.search || url.hash) return undefined;
+    const protocol = url.protocol;
     return protocol === "https:" || protocol === "http:" ? protocol : undefined;
   } catch {
     return undefined;
@@ -208,6 +221,7 @@ export class SmartHttpRepositoryDriver implements RepositoryDriver {
   }
 
   async observeRepository(input: Parameters<RepositoryDriver["observeRepository"]>[0]): Promise<RepositoryDriverResult<import("../kernel/contracts.ts").RepositoryObservation>> {
+    if (this.binding(input.repository)) return failure({ errorCode: "repository.remote_observation_unqualified", operation: "observe", affectedObject: input.repository.repositoryId, retryable: false, recoveryAction: "qualify a fresh provider readback of the exact remote ref, commit, tree and ancestry before publishing remote evidence; local checkout inspection is insufficient" });
     return this.local.observeRepository(input);
   }
 
@@ -223,8 +237,10 @@ export class SmartHttpRepositoryDriver implements RepositoryDriver {
   async cloneRepository(input: { sourceSpaceId: string; source: string; destination?: string; mirror?: boolean; idempotencyKey?: string }): Promise<RepositoryDriverResult<RepositoryHandle>> {
     const protocol = remoteProtocol(input.source);
     if (!protocol || (protocol === "http:" && this.options.allowInsecureHttp !== true)) return failure({ errorCode: "repository.transport_denied", operation: "clone", affectedObject: input.sourceSpaceId, retryable: false, recoveryAction: "use an HTTPS Smart HTTP endpoint; allow insecure HTTP only in a qualification harness", idempotencyKey: input.idempotencyKey, detail: `protocol=${protocol ?? "invalid"}` });
-    const repositoryId = parseRepositoryId(input.source);
-    if (!repositoryId) return failure({ errorCode: "repository.url_invalid", operation: "clone", affectedObject: input.sourceSpaceId, retryable: false, recoveryAction: "use a Git gateway URL shaped as /git/<repositoryId>.git", idempotencyKey: input.idempotencyKey });
+    const enrolled = this.options.remoteRepositories?.find((binding) => binding.source === input.source);
+    const repositoryId = this.options.remoteRepositories === undefined ? parseRepositoryId(input.source) : enrolled?.repositoryId;
+    if (!repositoryId) return failure({ errorCode: "repository.identity_unbound", operation: "clone", affectedObject: input.sourceSpaceId, retryable: false, recoveryAction: "enroll the complete provider remote and repository identity, or use an Anyam gateway URL shaped as /git/<repositoryId>.git", idempotencyKey: input.idempotencyKey });
+    if (enrolled && enrolled.sourceSpaceId !== input.sourceSpaceId) return failure({ errorCode: "repository.source_space_mismatch", operation: "clone", affectedObject: repositoryId, retryable: false, recoveryAction: "clone only the Source Space enrolled for this exact provider repository", idempotencyKey: input.idempotencyKey });
     let credential: SmartHttpCredential;
     try {
       credential = await this.options.credentials.issue({ repositoryId, sourceSpaceId: input.sourceSpaceId, operation: "read", expiresAt: this.options.credentialExpiresAt() });
@@ -239,7 +255,7 @@ export class SmartHttpRepositoryDriver implements RepositoryDriver {
       await runGit(undefined, ["clone", "--quiet", ...(input.mirror ? ["--mirror"] : []), input.source, destination], credential, this.options.allowInsecureTlsForQualification === true);
       const local = await this.local.createRepository({ sourceSpaceId: input.sourceSpaceId, directory: destination });
       if (local.status !== "succeeded") return local;
-      const workspaceId = this.options.workspaceIdForRepository?.(repositoryId);
+      const workspaceId = enrolled ? enrolled.workspaceId : this.options.workspaceIdForRepository?.(repositoryId);
       this.remotes.set(local.value.repositoryId, { local: local.value, repositoryId, sourceSpaceId: input.sourceSpaceId, sourceUrl: input.source, directory: destination, ...(workspaceId ? { workspaceId } : {}) });
       return local;
     } catch (error) {
@@ -304,6 +320,7 @@ export class SmartHttpRepositoryDriver implements RepositoryDriver {
     const binding = this.binding(input.repository);
     if (!binding) return failure({ errorCode: "repository.unknown", operation: "compare-and-swap", affectedObject: input.repository.repositoryId, retryable: false, recoveryAction: "restore or register the Smart HTTP checkout before a CAS push", idempotencyKey: input.idempotencyKey });
     if (!binding.workspaceId) return failure({ errorCode: "canonical_write_denied", operation: "compare-and-swap", affectedObject: binding.repositoryId, retryable: false, recoveryAction: "request Landing through the Authority Plane; canonical refs are not directly writable", idempotencyKey: input.idempotencyKey, detail: "canonicalWrite=false" });
+    if (Object.keys(input.desired).some((ref) => !Object.hasOwn(input.expected, ref))) return failure({ errorCode: "repository.expected_ref_missing", operation: "compare-and-swap", affectedObject: binding.repositoryId, retryable: false, recoveryAction: "supply an explicit expected OID or null for every desired ref", idempotencyKey: input.idempotencyKey });
     const credentialResult = await this.issue(binding, "write", input.idempotencyKey);
     if (credentialResult.status !== "succeeded") return credentialResult;
     const args = ["push", "origin"];

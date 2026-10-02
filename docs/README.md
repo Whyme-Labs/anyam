@@ -47,6 +47,8 @@ losing ordinary Git workflows.
   explains the state-first operator view and receipt requirements.
 - [Repository gate](ci/repository-gate.md) lists the checks that protect the
   repository itself.
+- [Artifacts Workspace contracts](qualification/artifacts-workspaces.md) covers
+  isolated forks, local evidence and the remaining live demonstration gates.
 - [GitHub Actions Bridge](adr/0076-github-actions-oidc-bridge.md) documents
   the no-standing-credential GitHub connection.
 - [Site Worker](../apps/site/README.md) explains how to build and deploy the

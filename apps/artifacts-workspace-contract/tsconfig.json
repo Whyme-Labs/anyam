@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "WebWorker", "ESNext.Disposable"],
+    "types": ["@cloudflare/workers-types", "node"],
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts"]
+}

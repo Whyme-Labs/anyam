@@ -105,6 +105,11 @@ Both ref maps are snapshotted before awaiting credentials, so later caller
 mutation cannot add unguarded refs or alter predicates.
 Empty desired maps are rejected before credentials, preventing Git's implicit
 default push from updating an ahead branch.
+Ref keys must be full literal refs accepted by `git check-ref-format`, and
+desired values must be exact OIDs/null. This rejects wildcard expansion and
+force-prefixed or symbolic source expressions. Guarded pushes explicitly disable
+implicit tag following and submodule recursion, so ambient Git configuration
+cannot add unrequested tags or suppress the requested parent update.
 Force-with-lease alone does not establish all-ref atomicity, generation fencing
 or protection against ABA. Canonical reconciliation remains gated by its
 separate all-writers generation/epoch/seal contract.

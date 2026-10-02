@@ -353,6 +353,25 @@ test("Smart HTTP qualifies real Git clone, fetch, Workspace push, CAS, export/re
       assert.equal(authority.snapshot().credentialCount, credentialCount);
       assert.equal(await git(undefined, ["--git-dir", repositories.workspace, "rev-parse", "refs/heads/main"]), firstCommit.value.commitId, "an ahead checkout must not be pushed by an empty desired map");
     }
+    for (const ref of ["refs/heads/*", "main", "refs/heads/bad:ref"]) {
+      const credentialCount = authority.snapshot().credentialCount;
+      const invalidRef = await driver.compareAndSwapRefs({ repository: workspace.value, expected: { [ref]: null }, desired: { [ref]: ref === "refs/heads/*" ? "refs/heads/*" : secondCommit.value.commitId } });
+      assert.equal(invalidRef.status, "failed");
+      if (invalidRef.status === "failed") assert.equal(invalidRef.errorCode, "repository.ref_invalid");
+      assert.equal(authority.snapshot().credentialCount, credentialCount);
+      assert.equal(await git(undefined, ["--git-dir", repositories.workspace, "rev-parse", "refs/heads/main"]), firstCommit.value.commitId, "refspec expansion must not bypass literal per-ref predicates");
+    }
+    for (const desired of ["HEAD", "1", "", `+${secondCommit.value.commitId}`]) {
+      const credentialCount = authority.snapshot().credentialCount;
+      const invalidDesired = await driver.compareAndSwapRefs({ repository: workspace.value, expected: { "refs/heads/main": firstCommit.value.commitId }, desired: { "refs/heads/main": desired } });
+      assert.equal(invalidDesired.status, "failed");
+      if (invalidDesired.status === "failed") assert.equal(invalidDesired.errorCode, "repository.desired_oid_invalid");
+      assert.equal(authority.snapshot().credentialCount, credentialCount);
+      assert.equal(await git(undefined, ["--git-dir", repositories.workspace, "rev-parse", "refs/heads/main"]), firstCommit.value.commitId);
+    }
+    await git(join(root, "workspace-checkout"), ["config", "push.followTags", "true"]);
+    await git(join(root, "workspace-checkout"), ["config", "push.recurseSubmodules", "only"]);
+    await git(join(root, "workspace-checkout"), ["tag", "--annotate", "implicit-tag", "--message", "Fixture tag must not be implicitly pushed"]);
     const cas = await driver.compareAndSwapRefs({
       repository: workspace.value,
       expected: { "refs/heads/main": firstCommit.value.commitId },
@@ -360,6 +379,8 @@ test("Smart HTTP qualifies real Git clone, fetch, Workspace push, CAS, export/re
       idempotencyKey: "cas:workspace:current",
     });
     assert.equal(cas.status, "succeeded");
+    assert.equal(await git(undefined, ["--git-dir", repositories.workspace, "rev-parse", "refs/heads/main"]), secondCommit.value.commitId, "submodule-only configuration must not suppress the requested parent ref update");
+    assert.equal(await git(undefined, ["--git-dir", repositories.workspace, "for-each-ref", "--format=%(refname)", "refs/tags/implicit-tag"]), "", "ambient followTags must not add refs outside the guarded request");
     await writeFile(join(root, "workspace-checkout", "README.md"), "initial\nworkspace change\nCAS change\nconflict candidate\n", "utf8");
     const thirdCommit = await driver.commitRepository({ repository: workspace.value, message: "Conflict candidate" });
     assert.equal(thirdCommit.status, "succeeded");

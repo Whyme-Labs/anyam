@@ -130,6 +130,10 @@ function remoteProtocol(source: string): "https:" | "http:" | undefined {
   }
 }
 
+function fullObjectIdOrAbsent(value: unknown): boolean {
+  return value === null || (typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(value));
+}
+
 function authEnvironment(credential: SmartHttpCredential, allowInsecureTlsForQualification: boolean): NodeJS.ProcessEnv {
   return {
     GIT_TERMINAL_PROMPT: "0",
@@ -324,10 +328,19 @@ export class SmartHttpRepositoryDriver implements RepositoryDriver {
     const desiredRefs = { ...input.desired };
     if (Object.keys(desiredRefs).length === 0) return failure({ errorCode: "repository.desired_ref_missing", operation: "compare-and-swap", affectedObject: binding.repositoryId, retryable: false, recoveryAction: "supply at least one explicit desired ref; use qualified observation for read-only predicate checks", idempotencyKey: input.idempotencyKey });
     if (Object.keys(desiredRefs).some((ref) => !Object.hasOwn(expectedRefs, ref))) return failure({ errorCode: "repository.expected_ref_missing", operation: "compare-and-swap", affectedObject: binding.repositoryId, retryable: false, recoveryAction: "supply an explicit expected OID or null for every desired ref", idempotencyKey: input.idempotencyKey });
-    if (Object.values(expectedRefs).some((oid) => oid !== null && (typeof oid !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(oid)))) return failure({ errorCode: "repository.expected_oid_invalid", operation: "compare-and-swap", affectedObject: binding.repositoryId, retryable: false, recoveryAction: "supply a full SHA-1 or SHA-256 expected OID, or explicit null for an absent ref; empty strings and revision expressions are not predicates", idempotencyKey: input.idempotencyKey });
+    if (Object.values(expectedRefs).some((oid) => !fullObjectIdOrAbsent(oid))) return failure({ errorCode: "repository.expected_oid_invalid", operation: "compare-and-swap", affectedObject: binding.repositoryId, retryable: false, recoveryAction: "supply a full SHA-1 or SHA-256 expected OID, or explicit null for an absent ref; empty strings and revision expressions are not predicates", idempotencyKey: input.idempotencyKey });
+    try {
+      for (const ref of new Set([...Object.keys(expectedRefs), ...Object.keys(desiredRefs)])) {
+        if (!ref.startsWith("refs/")) throw new Error("full ref required");
+        await runGit(this.localDirectory(binding), ["check-ref-format", ref]);
+      }
+    } catch {
+      return failure({ errorCode: "repository.ref_invalid", operation: "compare-and-swap", affectedObject: binding.repositoryId, retryable: false, recoveryAction: "supply full literal Git refs; wildcard patterns, shorthand and refspec syntax cannot bind a per-ref predicate", idempotencyKey: input.idempotencyKey });
+    }
+    if (Object.values(desiredRefs).some((oid) => !fullObjectIdOrAbsent(oid))) return failure({ errorCode: "repository.desired_oid_invalid", operation: "compare-and-swap", affectedObject: binding.repositoryId, retryable: false, recoveryAction: "supply a full SHA-1 or SHA-256 desired OID, or explicit null for deletion; force prefixes and revision expressions are not exact candidates", idempotencyKey: input.idempotencyKey });
     const credentialResult = await this.issue(binding, "write", input.idempotencyKey);
     if (credentialResult.status !== "succeeded") return credentialResult;
-    const args = ["push", "origin"];
+    const args = ["push", "--no-follow-tags", "--recurse-submodules=no", "origin"];
     for (const [ref, expected] of Object.entries(expectedRefs)) args.push(`--force-with-lease=${ref}:${expected ?? ""}`);
     for (const [ref, desired] of Object.entries(desiredRefs)) args.push(desired === null ? `:${ref}` : `${desired}:${ref}`);
     try {

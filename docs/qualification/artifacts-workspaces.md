@@ -32,6 +32,49 @@ requires a trusted caller to supply the current Realm authorization callback.
 Its optional third argument injects the metadata store; omitting it retains the
 explicit process-local contract. No durable binding is provisioned by this app.
 
+`createArtifactsWorkspaceQualification` separately accepts the current run-owner
+authorization callback, Workspace authorization, custody store and run ledger.
+The owner supplies an explicit run ID, execution mode, account/namespace, exact
+prepared source UUID/base and disposable names. It performs no account discovery,
+source provisioning, plan activation, deployment or automatic retry. Reusing a
+recorded run ID is rejected without exposing or rewriting its previous receipt.
+All target names are checked before the first fork; every selection is validated
+before provider access. The caller must qualify its exclusive disposable scope
+and actual durable storage before live use.
+
+The one-shot ledger records operation intents before provider effects and stores
+allowlisted UUID/token metadata, exact observation claims/digests, pending effects
+and confirmed token-retirement IDs. It never stores token plaintext or raw
+provider exceptions. Local tests use actual disposable SQLite, replace the
+connection/store/ledger/adapter, and inject rollback failures before and after
+provider effects. A lost fork reply retains its named reservation with unknown
+UUID; the invoker does not adopt a repository merely because that name exists.
+
+Cleanup reauthorizes the recorded scope and rereads the recorded UUID. Complete
+`listTokens` results require unique valid IDs and a page length equal to the
+provider's total; incomplete or malformed pages fail closed. Fresh UUID checks
+surround each inventory read. All active IDs are retired, and another complete
+inventory must confirm no active tokens before deletion. This can reconcile a
+lost mint/initial-token reply for a known owned UUID. It does not reopen blocked
+Workspace custody or certify provider expiry timing. Each resource is attempted
+independently; one failure cannot hide another resource's cleanup result.
+
+Deletion requires a separately injected `deleteOwned` port qualified to delete
+only the expected immutable UUID. The official binding exposes `delete(name)`;
+the invoker never substitutes that API for a conditional UUID operation. If the
+port is absent, known tokens are still retired and the resource receipt names
+`qualification.guarded_delete_unqualified`. An uncertain deletion is journaled
+before the call and is never automatically repeated, including after restart.
+The local fixture qualifies this port's contract, not a live service capability.
+
+Receipts identify the execution mode, selected account/namespace, named resources,
+pending states, token IDs, exact observation digests, operation intents and
+recovery codes. Operation intents are not measured billing or performance.
+`liveQualified` remains false; Git scope, expiry timing and native harnesses remain
+`not-run`. A `local-fixture` success means the injected binding contract and owned
+cleanup passed. The `live-approved` label requires owner authorization and cannot
+upgrade those other gates.
+
 The Workspace tests inject fake Artifacts responses. They concurrently provision
 two distinct forks, retire their initial tokens, check source and fork UUIDs,
 remotes, default-branch heads and commit trees, issue explicit read/write tokens,
@@ -116,6 +159,17 @@ cross-region authority, durable grant epochs, complete provider token inventory,
 an adoption/reopen/delete workflow or orphan cleanup. Production must supply and
 qualify its actual Realm storage/routing and reconciliation before exposing this
 seam to agents.
+
+The Artifacts control adapter now exposes a trusted `observeRepository` seam.
+It resolves enrolled custody, rechecks current authorization and fresh provider
+UUID/remote, and reads an exact full branch ref matching the expected commit/tree.
+An iterative all-parent traversal requires exact commit identities, complete
+parent lists and a reachable selected base; missing objects and cycles fail.
+Initial head hash/tree primitives are copied before asynchronous reads. Provider
+identity and the ref are reread before releasing the existing observation digest.
+These are bounded fresh observations, not provider linearizability, ABA detection
+or canonical generation fencing. The trusted caller still needs to wire and
+qualify this provider observer in its actual revision/verification flow.
 
 Smart HTTP remote observation now fails with
 `repository.remote_observation_unqualified`: local checkout HEAD/ref/ancestry

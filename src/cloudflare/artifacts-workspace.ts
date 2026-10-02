@@ -65,7 +65,7 @@ function expectedRemote(identity: ArtifactsRepositoryIdentity): string {
   return `https://${identity.accountId}.artifacts.cloudflare.net/git/${identity.namespace}/${identity.name}.git`;
 }
 
-function immutableSelection(input: ArtifactsWorkspaceSelection): ArtifactsWorkspaceSelection {
+export function immutableArtifactsWorkspaceSelection(input: ArtifactsWorkspaceSelection): ArtifactsWorkspaceSelection {
   const source = input.sourceRepository;
   return Object.freeze({
     projectId: input.projectId, projectRevisionId: input.projectRevisionId, projectViewId: input.projectViewId,
@@ -73,6 +73,17 @@ function immutableSelection(input: ArtifactsWorkspaceSelection): ArtifactsWorksp
     baseCommitOid: input.baseCommitOid, baseTreeOid: input.baseTreeOid,
     sourceRepository: Object.freeze({ accountId: source.accountId, namespace: source.namespace, repositoryId: source.repositoryId, name: source.name }),
   });
+}
+
+export function assertArtifactsWorkspaceSelection(selection: ArtifactsWorkspaceSelection, accountId: string, namespace: string): void {
+  const source = selection.sourceRepository;
+  const segments = [source.accountId, source.namespace, source.name, selection.targetName];
+  if (segments.some(value => !/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/u.test(value) || value.includes("..")) ||
+      [selection.projectId, selection.projectRevisionId, selection.projectViewId, selection.workspaceId, selection.sourceSpaceId, source.repositoryId].some(value => !value.trim()) ||
+      !/^[0-9a-f]{40}$/u.test(selection.baseCommitOid) || !/^[0-9a-f]{40}$/u.test(selection.baseTreeOid) ||
+      source.accountId !== accountId || source.namespace !== namespace || source.name === selection.targetName) {
+    throw new ArtifactsWorkspaceError("artifacts.selection_invalid", selection.targetName, "none", "select an exact SHA-1 base and distinct Workspace repository inside the enrolled account and namespace");
+  }
 }
 
 /** Internal, injected control adapter. The trusted caller owns Realm policy.
@@ -274,23 +285,12 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
 
   private async authorize(selection: ArtifactsWorkspaceSelection, effect: ProviderEffect): Promise<number> {
     try {
-      const grant = await this.options.authorize(immutableSelection(selection));
+      const grant = await this.options.authorize(immutableArtifactsWorkspaceSelection(selection));
       const deadline = Date.parse(grant.expiresAt);
       if (this.store.read(selection)?.blocked || !Number.isFinite(deadline) || deadline <= this.now()) throw new Error("grant is revoked or expired");
       return deadline;
     } catch {
       throw this.error(selection, "artifacts.authorization_denied", effect, "current Workspace grant is unavailable, denied or expired");
-    }
-  }
-
-  private validateSelection(selection: ArtifactsWorkspaceSelection): void {
-    const source = selection.sourceRepository;
-    const segments = [source.accountId, source.namespace, source.name, selection.targetName];
-    if (segments.some(value => !/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/u.test(value) || value.includes("..")) ||
-        [selection.projectId, selection.projectRevisionId, selection.projectViewId, selection.workspaceId, selection.sourceSpaceId, source.repositoryId].some(value => !value.trim()) ||
-        !/^[0-9a-f]{40}$/u.test(selection.baseCommitOid) || !/^[0-9a-f]{40}$/u.test(selection.baseTreeOid) ||
-        source.accountId !== this.options.accountId || source.namespace !== this.options.namespace || source.name === selection.targetName) {
-      throw this.error(selection, "artifacts.selection_invalid", "none", "select an exact SHA-1 base and distinct Workspace repository inside the enrolled account and namespace");
     }
   }
 
@@ -309,8 +309,8 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
   }
 
   async forkWorkspace(input: ArtifactsWorkspaceSelection): Promise<ArtifactsWorkspaceContext> {
-    const selection = immutableSelection(input);
-    this.validateSelection(selection);
+    const selection = immutableArtifactsWorkspaceSelection(input);
+    assertArtifactsWorkspaceSelection(selection, this.options.accountId, this.options.namespace);
     const reserved = this.custody(selection.targetName, () => this.store.reserve(selection));
     if (!reserved) throw this.error(selection, "artifacts.workspace_already_bound", "none", "this Workspace/Source Space or target name is already assigned or requires reconciliation");
     let effect: ProviderEffect = "none";

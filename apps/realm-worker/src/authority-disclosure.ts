@@ -215,7 +215,15 @@ export class AuthorityDisclosure {
   pullRequest(id: string) {
     const p = this.state.pullRequests[id];
     const c = p && this.change(p.changeId);
-    if (!p || !c || c.change.projectId !== p.projectId || !this.capable(p.projectId, "pullRequest.inspect", { pullRequestId: p.id, changeId: p.changeId }) || !this.classification(p.projectId, p.disclosure, p.sourceSpaceId ? [p.sourceSpaceId] : undefined) || (p.sourceSpaceId && !this.sourceReadable(p.projectId, p.sourceSpaceId)) || !p.revisionIds.every(r => this.state.changeRevisions[r]?.changeId === p.changeId && this.revisionEligible(r) && Object.keys(this.state.changeRevisions[r]!.sourceSpaceSnapshots!).every(source => this.sourceReadable(p.projectId, source, { pullRequestId: p.id, changeId: p.changeId })))) return undefined;
+    if (!p || !c || c.change.projectId !== p.projectId || !this.capable(p.projectId, "pullRequest.inspect", { pullRequestId: p.id, changeId: p.changeId })) return undefined;
+    const revisions = Object.values(this.state.changeRevisions).filter(r => r.changeId === p.changeId);
+    const workspace = c.change.workspaceId && this.workspaceScope(c.change.workspaceId);
+    const ids = [...new Set([...revisions.flatMap(r => Object.keys(r.sourceSpaceSnapshots!)), ...(workspace ? workspace.view.visibleSourceSpaceIds : [])])];
+    const resource = { pullRequestId: id, changeId: p.changeId, ...(c.change.workspaceId ? { workspaceId: c.change.workspaceId } : {}) };
+    if (!ids.length || !ids.every(source => this.sourceReadable(p.projectId, source, resource))
+      || !this.classification(p.projectId, p.disclosure, ids)
+      || (p.sourceSpaceId && (!ids.includes(p.sourceSpaceId) || !this.sourceReadable(p.projectId, p.sourceSpaceId, resource)))
+      || !p.revisionIds.every(r => this.state.changeRevisions[r]?.changeId === p.changeId && this.revisionEligible(r))) return undefined;
     const summary = summarizePullRequestForAudience({ project: this.state.projects[p.projectId]!, pullRequest: p, audience: p.disclosure === "restricted" ? "restricted" : "project" });
     if (!summary) return undefined;
     return { pullRequest: { protocol: p.protocol, id, projectId: p.projectId, changeId: p.changeId,

@@ -212,3 +212,15 @@ test("an accepted hidden-only Workspace reusing a public projection label cannot
   assert.equal(result.status, "succeeded");
   assert.deepEqual(observation(read({ ...f, state: authority.snapshot() })), expected);
 });
+test("accepted PRs with no revisionIds or Source selector still honor PR-scoped Source denials", () => {
+  for (const sourceSpaceId of [undefined, "source:public"]) {
+    const f = disclosureFixture(); const authority = new AuthorityPlaneCoordinator(f.state); const owner = f.members.owner!;
+    const result = authority.execute({ protocol: AUTHORITY_COMMAND_PROTOCOL, command: "pullRequest.open", idempotencyKey: "empty-pr", payload: { projectId: "project:fixture", pullRequestId: "pr:empty", changeId: "change:public", provider: "local", headRef: "refs/heads/public", baseRef: "refs/heads/main", headCommit: "a".repeat(40), baseCommit: "b".repeat(40), title: "Visible empty PR", disclosure: "public", ...(sourceSpaceId ? { sourceSpaceId } : {}) } }, { realmId: f.state.realmId, principalId: owner.principal.id, actorId: owner.session.actorId, sessionId: owner.session.id, clientId: owner.session.clientId, authorizationEpoch: f.identity.realm.authorizationEpoch, kind: "human" });
+    assert.equal(result.status, "succeeded"); f.state = authority.snapshot(); assert.ok(read(f).pullRequest("pr:empty"));
+    const identity = new RealmIdentityPolicy({ realmId: f.state.realmId, relyingPartyId: f.identity.realm.relyingPartyId, now: () => new Date(disclosureClock) }); identity.restoreOperationalSnapshot(f.identity);
+    identity.addRelationship({ principalId: f.members.public!.principal.id, subjectId: "denied-empty-pr", kind: "organization-member", role: "viewer", resource: { realmId: f.state.realmId, projectId: "project:fixture", sourceSpaceId: "source:public", pullRequestId: "pr:empty" }, deniedCapabilities: ["source.read"] });
+    const d = read({ ...f, identity: identity.getRecoverySnapshot() });
+    assert.equal(d.pullRequest("pr:empty"), undefined); assert.equal(d.project("project:fixture")?.counts.pullRequests, 1);
+    assert.ok(d.change("change:public"), "PR deny does not revoke independent Change scope");
+  }
+});

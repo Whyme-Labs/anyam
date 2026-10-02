@@ -60,6 +60,11 @@ guard marker. An unfinished guard requires named reconciliation after restart;
 fresh provider metadata cannot replace missing redaction custody. This boundary
 covers the entire run: every pending credential fingerprint must be resolved
 before cleanup accesses any resource's provider or adopts its metadata.
+Public cleanup refuses a `running` invocation, which can still acquire credentials
+while asynchronous metadata checks are in flight. The invocation's finally path
+owns its cleanup. An interrupted run still marked `running` needs explicit owner
+reconciliation of quiescence and pending effects; restart cannot infer completion
+or automatically overlap acquisition with cleanup.
 
 Cleanup reauthorizes the recorded scope and rereads the recorded UUID. Complete
 `listTokens` results require unique valid IDs and a page length equal to the

@@ -144,6 +144,24 @@ export class ArtifactsWorkspaceQualification {
   }
 
   async cleanup(runId: string): Promise<"confirmed" | "required"> {
+    try {
+      // A running invocation may still acquire credentials while metadata is
+      // checked asynchronously. Its finally path owns cleanup; public recovery
+      // requires a terminal acquisition state, including after interruption.
+      const run = this.custody(() => this.options.ledger.read(runId));
+      if (!run || run.accountId !== this.options.accountId || run.namespace !== this.options.namespace) return "required";
+      if (run.qualification === "running") {
+        await this.options.authorizeRun(Object.freeze({ ...run.input, selections: Object.freeze(run.input.selections.map(immutableArtifactsWorkspaceSelection)) }));
+        this.custody(() => this.options.ledger.change(runId, entry => {
+          if (entry.qualification !== "running") return;
+          entry.cleanup = "required";
+          for (const resource of entry.resources) {
+            if (resource.state !== "reserved" && resource.state !== "deleted") resource.recovery = resource.credentialGuardPending ? "qualification.credential_redaction_pending" : "qualification.acquisition_in_progress";
+          }
+        }));
+        return "required";
+      }
+    } catch { return "required"; }
     return this.cleanupOwned(runId, new Set(), new Map());
   }
 

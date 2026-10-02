@@ -484,3 +484,38 @@ test("Artifacts missing fingerprint coverage blocks metadata adoption across the
     assert.doesNotMatch(metadata() + JSON.stringify(result), /usable-secret|initial-secret|provider-extra-secret/);
   });
 });
+
+test("Artifacts public cleanup refuses to overlap a running qualification and its credential acquisition", async () => {
+  await qualificationFixture(async ({ fixture, control, artifacts, record, deleted }) => {
+    const get = artifacts.get.bind(artifacts);
+    let sourceReads = 0;
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const pause = new Promise<void>(resolve => { release = resolve; });
+    const provider = { async get(name: string) {
+      if (name === "source" && ++sourceReads === 2) { enter(); await pause; }
+      return get(name);
+    } };
+    const runId = "qualification:active-cleanup-overlap";
+    const running = control({ artifacts: provider }).run({ runId, execution: "local-fixture", selections: [artifactsSelection, { ...artifactsSelection, workspaceId: "workspace:b", targetName: "workspace-b" }], credentialExpiresAt: new Date(fixture.now + 120_000).toISOString() });
+    try {
+      await entered;
+      assert.equal(record(runId)?.qualification, "running");
+      assert.deepEqual(record(runId)?.resources.map(resource => resource.credentialGuardPending), [false, false]);
+      const events = fixture.events.length;
+      const beforeDenied = JSON.stringify(record(runId));
+      assert.equal(await control({ artifacts: provider, authorizeRun: async () => { throw new Error("not the owner"); } }).cleanup(runId), "required");
+      assert.equal(JSON.stringify(record(runId)), beforeDenied, "denied cleanup cannot rewrite a running owner's recovery state");
+      assert.equal(await control({ artifacts: provider }).cleanup(runId), "required");
+      assert.equal(fixture.events.length, events, "public cleanup must not adopt metadata while this run can still acquire credentials");
+      assert.equal(record(runId)?.resources[0]?.recovery, "qualification.acquisition_in_progress");
+      assert.deepEqual(deleted, []);
+    } finally {
+      release();
+      await running;
+    }
+    assert.equal(await control({ artifacts: provider }).cleanup(runId), "confirmed");
+    assert.deepEqual(deleted, ["workspace-a", "workspace-b"]);
+  });
+});

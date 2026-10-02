@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { CollaborationAuditEvent } from "../change-control/collaboration.ts";
+import type { CanonicalRefProjectionRecord } from "./canonical-ref-reconciliation.ts";
 import {
   CONTRACT_VERSIONS,
   createProject,
@@ -175,6 +176,7 @@ export type AuthorityPlaneSnapshot = {
   evidence: Record<string, Evidence>;
   artifacts: Record<string, Artifact>;
   landings: Record<string, Landing>;
+  canonicalRefProjections: Record<string, CanonicalRefProjectionRecord>;
   releases: Record<string, Release>;
   targets: Record<string, Target>;
   promotions: Record<string, PromotionRecord>;
@@ -564,6 +566,7 @@ export function emptyAuthorityPlaneSnapshot(realmId: string): AuthorityPlaneSnap
     evidence: {},
     artifacts: {},
     landings: {},
+    canonicalRefProjections: {},
     releases: {},
     targets: {},
     promotions: {},
@@ -608,6 +611,7 @@ export function normalizeAuthorityPlaneSnapshot(snapshot: AuthorityPlaneSnapshot
     intentComments: snapshot.intentComments ?? {},
     runnerProfiles: snapshot.runnerProfiles ?? {},
     runnerAttempts: snapshot.runnerAttempts ?? {},
+    canonicalRefProjections: snapshot.canonicalRefProjections ?? {},
     mirrors: snapshot.mirrors ?? {},
     mirrorOperations: snapshot.mirrorOperations ?? {},
     mirrorCheckpoints: snapshot.mirrorCheckpoints ?? {},

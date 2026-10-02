@@ -70,6 +70,7 @@ const ENTITY_COLLECTIONS = [
   "evidence",
   "artifacts",
   "landings",
+  "canonicalRefProjections",
   "releases",
   "targets",
   "promotions",

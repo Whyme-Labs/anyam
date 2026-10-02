@@ -32,6 +32,27 @@ function manager(directory: string, options: Omit<LocalAgentManagerOptions, "dir
   return new LocalAgentManager({ ...options, directory, stateDirectory: agentStateDirectory(directory) });
 }
 
+function runningProcessManager(directory: string, marker: string) {
+  let signalRunning!: () => void;
+  const processRunning = new Promise<void>((resolveRunning) => { signalRunning = resolveRunning; });
+  class RunningProcessManager extends LocalAgentManager {
+    protected override async registerWorkspaceProcess(sessionId: string, child: ChildProcess): Promise<void> {
+      assert.ok(child.stdout);
+      let output = "";
+      let registered = false;
+      const observeRunning = () => { if (registered && output.includes(marker)) signalRunning(); };
+      child.stdout.on("data", (chunk: Buffer) => {
+        output += chunk.toString("utf8");
+        observeRunning();
+      });
+      await super.registerWorkspaceProcess(sessionId, child);
+      registered = true;
+      observeRunning();
+    }
+  }
+  return { agentManager: new RunningProcessManager({ directory, stateDirectory: agentStateDirectory(directory) }), processRunning };
+}
+
 async function git(directory: string, args: readonly string[]): Promise<string> {
   const result = await execFile("git", [...args], { cwd: directory, encoding: "utf8" });
   return result.stdout.trim();
@@ -766,24 +787,7 @@ test("revoking a running run.start prevents a successful result", async () => {
     inputs: ["anyam.json"],
     outputs: [],
   });
-  let signalRunning!: () => void;
-  const processRunning = new Promise<void>((resolveRunning) => { signalRunning = resolveRunning; });
-  class RunningProcessManager extends LocalAgentManager {
-    protected override async registerWorkspaceProcess(sessionId: string, child: ChildProcess): Promise<void> {
-      assert.ok(child.stdout);
-      let output = "";
-      let registered = false;
-      const observeRunning = () => { if (registered && output.includes("Action is running")) signalRunning(); };
-      child.stdout.on("data", (chunk: Buffer) => {
-        output += chunk.toString("utf8");
-        observeRunning();
-      });
-      await super.registerWorkspaceProcess(sessionId, child);
-      registered = true;
-      observeRunning();
-    }
-  }
-  const agentManager = new RunningProcessManager({ directory, stateDirectory: agentStateDirectory(directory) });
+  const { agentManager, processRunning } = runningProcessManager(directory, "Action is running");
   const started = await agentManager.startSession({ agent: "cli", mode: "supervised" });
   const running = agentManager.invokeTool("run.start", { actionId: "action:check" });
   await Promise.race([processRunning, running.then(() => { throw new Error("Action completed before its running marker was observed."); })]);
@@ -834,9 +838,9 @@ test("supervised local Workspace is labelled non-enforcing", async () => {
 
 test("revoking an enforceable Workspace terminates the running agent and removes its disposable Workspace", { skip: process.platform !== "darwin" ? "requires macOS enforceable Workspace support" : false }, async () => {
   const directory = await projectDirectory();
-  const agentManager = manager(directory);
-  const running = agentManager.launchAgent({ agent: "cli", mode: "enforceable", command: process.execPath, args: ["-e", "setTimeout(() => {}, 10000)"] });
-  await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 150));
+  const { agentManager, processRunning } = runningProcessManager(directory, "Agent is running");
+  const running = agentManager.launchAgent({ agent: "cli", mode: "enforceable", command: process.execPath, args: ["-e", "console.log('Agent is running'); setTimeout(() => {}, 10000)"] });
+  await Promise.race([processRunning, running.then(() => { throw new Error("Agent completed before its running marker was observed."); })]);
   const status = await agentManager.status();
   assert.ok(status.session);
   const sessionId = status.session!.id;

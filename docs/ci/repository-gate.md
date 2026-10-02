@@ -22,6 +22,22 @@ npm run check
 The dependency receipt must be kept with the gate result. Do not replace a
 failed audit with a silent allow-list or a production-only scan.
 
+The gate also checks the public adoption bundle:
+
+- `npm run verify:docs` checks the canonical guide set, one heading per guide,
+  the documentation index, and relative Markdown links. It also builds the local
+  CLI and executes isolated Realm plan, blocked/provider-pending installation,
+  export and recovery-pending restore commands. OAuth arguments are inspected;
+  authentication and provider actions are not run.
+- `npm run verify:examples` copies each runnable example into a temporary Git
+  repository, runs its typecheck, build, and tests, and runs the Anyam doctor.
+- `npm run verify:site` builds the static marketing, documentation, and example
+  pages, checks their metadata and internal links, and validates the
+  customer-owned Cloudflare Worker bundle with Wrangler dry-run.
+
+These checks prove the local bundle. They do not prove DNS, a live custom
+domain, a Cloudflare account, or a production deployment.
+
 ## Remote provider selection
 
 The default is Blacksmith's `blacksmith-2vcpu-ubuntu-2404`. The organization

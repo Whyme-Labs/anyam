@@ -3,6 +3,9 @@
 Package-manager-neutral TypeScript scaffolding for Anyam Projects, with the
 local `anyam` command for inspection and Changes.
 
+Start with the [Anyam Quickstart](https://github.com/Whyme-Labs/anyam/blob/main/docs/guides/quickstart.md). Read the
+[documentation index](https://github.com/Whyme-Labs/anyam/blob/main/docs/README.md) for the design, Realm, and example guides.
+
 ## Scaffold a Project
 
 All of these forms use the same package and produce the same local template:
@@ -59,6 +62,59 @@ anyam init --dry-run --type worker --name demo
 
 The local workflow uses familiar Git vocabulary. Anyam adds the Project
 manifest, checks, and Change metadata without replacing normal Git editing.
+
+## Start a scoped local MCP broker
+
+Run the broker as a trusted host-side process. Each CLI broker connection
+creates its own session; its declared Actions run in the selected Workspace
+boundary. For a Project with `src/` and a declared `action:check`:
+
+```bash
+anyam mcp serve --stdio --agent codex --mode enforceable \
+  --allow-path src --allow-path package.json --allow-path tsconfig.json \
+  --allow-action action:check
+```
+
+Repeat `--allow-path` and `--allow-action` for explicitly permitted inputs and
+Actions. The Project manifest is common metadata in every projection. Ensure
+the selected projection contains the Action's declared inputs and runtime
+dependencies. File entry points may need their package metadata. Omitting an
+Action allowlist permits all declared Project Actions; omitting path selection
+clones the full source. `--mode supervised` remains non-enforcing and refuses
+path restrictions. An enforceable Linux backend still requires its separately
+qualified resource policy; this command does not bypass that requirement.
+
+Capture the session ID from `workspace.inspect` and revoke that exact session
+when it is no longer needed:
+
+```bash
+anyam agent revoke --session '<session ID>'
+```
+
+Enforceable commands use a trusted host-side process custodian. It waits for
+durable session process registration before releasing the sandboxed command.
+An exclusive parent pipe ties the owned process group to the broker's lifetime,
+including interruption before registration. The workload does not inherit this
+control pipe. Only the actual command's completion can establish passed Evidence.
+
+Closing or interrupting a broker does not establish successful Evidence or
+remove session metadata and disposable Workspace files. After interruption,
+explicitly revoke its session and start
+a fresh broker with the intended scopes. `mcp serve --session '<session ID>'`
+fails closed when this process has no live boundary for that session; it never
+borrows the current peer session or silently recreates a boundary. Repeated
+initialization on one connection is rejected.
+
+The local process tests use synthetic Commands through real CLI/MCP stdio and
+macOS sandbox execution. They qualify source projection, peer-read denial,
+Action allowlists, attribution, revocation, expiry and interrupted restart,
+including broker death and revocation before durable process registration.
+They do not qualify real Codex/Claude model execution, connecting those clients
+from inside a sandbox, restricted metadata disclosure, Linux execution, or
+provider readiness, hostile process-group escape, or independent custodian
+failure. The custodian changes process and resource overhead; Linux resource
+qualification must be rerun before claiming Linux readiness. No native agent
+or paid model is run by these tests.
 
 ## Use the hosted Intent lifecycle
 
@@ -221,6 +277,10 @@ owned by the logged-in npm publisher. Confirm that identity and enable account
 2FA before the first live publish; a package name and version are immutable
 once published.
 
+This checkout retains version `0.0.0`. Select and approve a release version and
+signed tag separately after the repository gate passes. No package publication
+is implied by building these examples.
+
 ### First-time npm account setup
 
 Configure a new second factor from the npm website, not by trying to enroll a
@@ -243,7 +303,7 @@ for:
 
 ```text
 Provider:       GitHub Actions
-Owner:          wms2537
+Owner:          Whyme-Labs
 Repository:     anyam
 Workflow:       publish-create-anyam.yml
 Environment:    npm-publish

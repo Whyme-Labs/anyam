@@ -1,0 +1,51 @@
+{
+  "schema": "anyam.project/v1",
+  "id": "project:example-hybrid-video-player",
+  "repositoryId": "repository:example-hybrid-video-player",
+  "name": "Anyam example hybrid video player",
+  "referenceType": "hybrid-video-player",
+  "sourceSpaceIds": ["source:public-player", "source:private-codec"],
+  "source": { "root": ".", "provenance": "runnable-example" },
+  "modules": [
+    {
+      "id": "module:hybrid-player",
+      "root": ".",
+      "dependencies": [],
+      "actions": [
+        {
+          "id": "action:check",
+          "command": "node scripts/check-public-projection.mjs",
+          "inputs": ["anyam.json", "src/**/*.ts", "public-player/**/*.ts", "private-codec/**/*.ts", "scripts/check-public-projection.mjs"],
+          "outputs": [],
+          "network": [],
+          "resources": {}
+        },
+        {
+          "id": "action:test",
+          "command": "npm test",
+          "inputs": ["package.json", "test/**/*.js", "dist/**/*.js"],
+          "outputs": [],
+          "network": [],
+          "resources": {}
+        },
+        {
+          "id": "action:build",
+          "command": "npm run build",
+          "inputs": ["package.json", "public-player/**/*.ts", "scripts/build-public.mjs"],
+          "outputs": ["dist/public-player.js"],
+          "network": [],
+          "resources": {}
+        }
+      ],
+      "artifactTypes": ["package.archive"]
+    }
+  ],
+  "verifiers": [
+    { "id": "verifier:hybrid-check", "actionId": "action:check", "disclosure": "full", "requiredFor": ["release"] },
+    { "id": "verifier:hybrid-test", "actionId": "action:test", "disclosure": "full", "requiredFor": ["release"] },
+    { "id": "verifier:hybrid-build", "actionId": "action:build", "disclosure": "project", "requiredFor": ["release"] }
+  ],
+  "targets": [
+    { "id": "target:release-assets", "adapter": "generic.release-assets", "accepts": ["package.archive"], "requiredCapabilities": [] }
+  ]
+}

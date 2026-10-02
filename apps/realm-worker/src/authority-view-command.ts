@@ -100,8 +100,10 @@ export function prepareRawSourceCommand(input: {
     if (workspaceId && (!workspace || workspace.projectId !== projectId)) disclosedCommandError();
     if (saved && (!state.changes[changeId] || state.changes[changeId]!.projectId !== projectId || state.changes[changeId]!.workspaceId !== workspaceId)) disclosedCommandError();
     resource = { ...resource, ...(workspaceId ? { workspaceId } : {}), changeId };
-    viewId = workspace?.projectViewId ?? (p.projectViewId === undefined ? undefined : string(p.projectViewId));
-    binding(p.projectViewId, viewId);
+    // Core does not retain a View on an unbound Change. A caller's unused
+    // selector cannot narrow the actual base revision's contributing Sources.
+    viewId = workspace?.projectViewId;
+    if (workspace) binding(p.projectViewId, viewId);
     if (!viewId) {
       const baseId = existingChange?.baseProjectRevisionId ?? (p.baseProjectRevisionId === undefined ? state.canonicalByProject[projectId] : string(p.baseProjectRevisionId));
       const base = baseId && state.projectRevisions[baseId];

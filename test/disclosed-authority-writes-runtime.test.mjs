@@ -305,5 +305,21 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
     assert.equal(observationCalls, observationsBefore + 1);
     assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, rawRevokedBefore);
 
+    const unboundBody = { command: "change.create", idempotencyKey: "raw-unbound-base", payload: { projectId: "project:fixture", baseProjectRevisionId: "canonical:base", projectViewId: legacyViewId, intentId: "intent:collaboration" } };
+    const unboundDenied = structuredClone(multiDeniedCheckpoint.identity); unboundDenied.sourceSpacePolicies["source:hidden"].deniedCapabilities = ["change.publish_revision"];
+    await reseed(multiDeniedCheckpoint.authority, unboundDenied);
+    const unboundBefore = (await invoke("/fixture/checkpoint", {})).value;
+    assert.equal((await invoke("/api/authority/command", unboundBody, "owner")).status, 404, "unused public View cannot narrow an unbound Change's full base Source authority");
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, unboundBefore);
+    await reseed(multiDeniedCheckpoint.authority, multiDeniedCheckpoint.identity);
+    const unboundAccepted = await invoke("/api/authority/command", unboundBody, "owner"); assert.equal(unboundAccepted.status, 200);
+    assert.equal(unboundAccepted.value.value.change.workspaceId, undefined);
+    const acceptedUnbound = (await invoke("/fixture/checkpoint", {})).value;
+    acceptedUnbound.identity.sourceSpacePolicies["source:hidden"].deniedCapabilities = ["change.publish_revision"];
+    await reseed(acceptedUnbound.authority, acceptedUnbound.identity);
+    const unboundRevokedBefore = (await invoke("/fixture/checkpoint", {})).value;
+    assert.equal((await invoke("/api/authority/command", unboundBody, "owner")).status, 404, "unbound cached acceptance retains full base scope under revocation");
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, unboundRevokedBefore);
+
   } finally { await runtime?.dispose(); await rm(directory, { recursive: true, force: true }); }
 });

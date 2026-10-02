@@ -80,7 +80,9 @@ Public Sealed Verifier contracts from ADR 0004/0032 remain a separate product
 gap. Raw legacy commands for the four Source operations are owner-only and now
 also require current per-Source kernel read/write authorization over the full
 Project/Workspace/Change/Run context derived from Authority records. Omitting a
-caller binding never removes a scoped deny. Their first
+caller binding never removes a scoped deny.
+Workspace-less Changes authorize every Source in their actual base revision;
+an unused caller View cannot narrow that scope. Their first
 acceptance commits identity and SQL together, and cached results are checked
 under current permissions without persisting a new Task/Grant or repeating
 repository observation. The first accepted prepared command and original

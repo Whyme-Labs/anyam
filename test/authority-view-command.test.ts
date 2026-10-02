@@ -124,3 +124,14 @@ test("old exact fingerprints with server-generated Workspace, Change and Run IDs
   const revision = f.state.changeRevisions["revision:public"]!;
   replay({ protocol: "anyam.authority-command/v1", command: "run.request", idempotencyKey: "old-generated-run", payload: { projectId: "project:fixture", changeRevisionId: revision.id, projectRevisionId: revision.projectRevisionId, projectViewId: revision.projectViewId, actionId: "action:test", policyVersion: f.identity.realm.policyVersion, capabilityGrantId: "grant:synthetic-legacy" } }, "run");
 });
+
+test("a workspace-less Change authorizes its full base regardless of an unused caller View", () => {
+  const f = disclosureFixture(); const c = context(f);
+  const prepared = prepareRawSourceCommand({ snapshot: f.state, command: { protocol: "anyam.authority-command/v1", command: "change.create", idempotencyKey: "unbound-full-base", payload: { projectId: "project:fixture", baseProjectRevisionId: "canonical:base", projectViewId: f.state.workspaces["workspace:public"]!.projectViewId, intentId: "intent:collaboration" } }, session: c.session, actorPrincipal: id => f.identity.actors[id]?.principalId });
+  assert.deepEqual([...prepared.sourceSpaceIds].sort(), ["source:hidden", "source:public"]);
+  assert.equal(prepared.resource.workspaceId, undefined);
+  const coordinator = new AuthorityPlaneCoordinator(f.state); coordinator.execute(prepared.command, c.session); f.state = coordinator.snapshot();
+  const original = { protocol: "anyam.authority-command/v1" as const, command: "change.create" as const, idempotencyKey: "unbound-full-base", payload: { projectId: "project:fixture", baseProjectRevisionId: "canonical:base", projectViewId: f.state.workspaces["workspace:public"]!.projectViewId, intentId: "intent:collaboration" } };
+  const replay = prepareRawSourceCommand({ snapshot: f.state, command: original, session: c.session, actorPrincipal: id => f.identity.actors[id]?.principalId });
+  assert.deepEqual([...replay.sourceSpaceIds].sort(), ["source:hidden", "source:public"]);
+});

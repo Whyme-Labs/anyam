@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { retainRunnerArtifacts, RunnerArtifactCustodyError, type RunnerArtifactCustody } from "./runner-artifact-custody.ts";
 import type { CollaborationAuditEvent } from "../change-control/collaboration.ts";
 import type { CanonicalRefProjectionRecord } from "./canonical-ref-reconciliation.ts";
 import {
@@ -815,9 +816,11 @@ export class AuthorityPlaneCoordinator {
    * because Ed25519 verification is performed with Web Crypto. The state is
    * cloned and committed only after every Run, Evidence, Artifact, Attempt,
    * and digest check succeeds, so a rejected completion cannot leave a
-   * half-terminal Authority snapshot behind.
+   * half-terminal Authority snapshot behind. The hosted Realm supplies trusted
+   * Artifact custody bindings; library callers without them retain explicitly
+   * Runner-attested byte semantics. Bindings never come from command payloads.
    */
-  async completeRunner(command: AuthorityCommand, session: AuthoritySession): Promise<AuthorityCommandResult> {
+  async completeRunner(command: AuthorityCommand, session: AuthoritySession, artifactCustody?: RunnerArtifactCustody): Promise<AuthorityCommandResult> {
     if (command.protocol !== AUTHORITY_COMMAND_PROTOCOL) {
       throw new AuthorityPlaneError({ code: "invalid_request", message: `Unsupported authority command protocol ${command.protocol}.`, recoveryAction: "send an anyam.authority-command/v1 envelope; no authority transition was accepted", receipt: `protocol=${command.protocol}; command=runner.complete; transition=not-applied` });
     }
@@ -843,7 +846,7 @@ export class AuthorityPlaneCoordinator {
       throw new AuthorityPlaneError({ code: "stale_state", message: `Authority state changed before Runner completion ${idempotencyKey} was accepted.`, recoveryAction: "read the current Authority version and retry the same signed completion with a fresh idempotency key", receipt: `expectedVersion=${command.expectedVersion}; actualVersion=${this.state.version}; runnerCompletion=not-applied` });
     }
     const next = clone(this.state);
-    const result = await this.applyRunnerCompletion(next, command, session);
+    const result = await this.applyRunnerCompletion(next, command, session, artifactCustody);
     next.version += 1;
     result.version = next.version;
     next.idempotency[idempotencyKey] = { fingerprint: requestFingerprint, result: clone(result) };
@@ -865,7 +868,7 @@ export class AuthorityPlaneCoordinator {
     return clone(result);
   }
 
-  private async applyRunnerCompletion(next: AuthorityPlaneSnapshot, command: AuthorityCommand, session: AuthoritySession): Promise<AuthorityCommandResult> {
+  private async applyRunnerCompletion(next: AuthorityPlaneSnapshot, command: AuthorityCommand, session: AuthoritySession, artifactCustody?: RunnerArtifactCustody): Promise<AuthorityCommandResult> {
     const payload = command.payload;
     const completionValue = record(payload.completion, "completion");
     if (scanCredentialMaterial(completionValue, "completion")) throw new AuthorityPlaneError({ code: "invalid_request", message: "Runner completion must be credential-free.", recoveryAction: "remove credential material before forwarding the signed completion; no state was changed", receipt: "runnerCompletion=credential-material-rejected; transition=not-applied" });
@@ -990,12 +993,21 @@ export class AuthorityPlaneCoordinator {
       if (next.artifacts[id]) throw new AuthorityPlaneError({ code: "conflict", message: `Artifact ${id} already exists for Attempt ${attempt.id}.`, recoveryAction: "reuse the original Authority idempotency key or inspect the accepted completion; no state was changed", receipt: `artifact=${id}; attempt=${attempt.id}; runnerCompletion=not-applied` });
       return { protocol: CONTRACT_VERSIONS.artifact, id, type: "runner.output", digest: output.digest, projectRevisionId: run.projectRevisionId, ...(run.changeRevisionId ? { changeRevisionId: run.changeRevisionId } : {}), runId: run.id, actionId: job.actionId, outputPath: output.location, provenanceDigest: resultDigest, disclosure: { ...output.disclosure } };
     });
+    let custodyReceipt = "artifactByteCustody=runner-attested";
+    if (artifactCustody) {
+      try { custodyReceipt = await retainRunnerArtifacts(job, outputs, artifactCustody); }
+      catch (error) {
+        if (!(error instanceof RunnerArtifactCustodyError)) throw error;
+        throw new AuthorityPlaneError({ code: error.code, message: error.message, recoveryAction: error.code === "blocked" ? "bind customer-owned ANYAM_RUNNER_OUTPUTS and the executor's ANYAM_PROMOTION_ARTIFACTS bucket, then retry the same completion" : "reconcile the exact Attempt output and digest-addressed Artifact objects, then retry the same signed completion and idempotency key", receipt: `artifactByteCustody=${error.reason}; runnerCompletion=not-applied; artifactWrite=may-have-occurred; credentialMaterialStored=false` });
+      }
+    }
+    evidence.receipt += `; ${custodyReceipt}`;
     next.runs[run.id] = terminalRun;
     next.evidence[evidence.id] = evidence;
     for (const artifact of artifacts) next.artifacts[artifact.id] = artifact;
     next.runnerAttempts[attempt.id] = clone(attempt);
     next.runDetails[run.id] = { protocol: "anyam.accepted-run-detail/v1", audience: "realm-owner", runId: run.id, job: clone(job), attempt: clone(attempt), result: clone(result), runnerProfile: clone(registeredRunner), resultDigest };
-    return { protocol: AUTHORITY_PLANE_PROTOCOL, command: command.command, status: result.status === "indeterminate" ? "indeterminate" : "succeeded", version: next.version, value: { run: terminalRun, evidence, artifacts, attempt: clone(attempt), runner: clone(registeredRunner) }, receipt: `run=${run.id}; attempt=${attempt.id}; runner=${runnerId}; status=${result.status}; evidence=${evidence.id}; artifacts=${artifacts.length}; resultDigest=${resultDigest}; credentialState=closed; outputReadBack=runner-attested; canonicalWrite=false`, ...(result.status === "indeterminate" ? { recoveryAction: result.recoveryAction ?? "reconcile the Runner provider result before using this Evidence or Artifact" } : {}) };
+    return { protocol: AUTHORITY_PLANE_PROTOCOL, command: command.command, status: result.status === "indeterminate" ? "indeterminate" : "succeeded", version: next.version, value: { run: terminalRun, evidence, artifacts, attempt: clone(attempt), runner: clone(registeredRunner) }, receipt: `run=${run.id}; attempt=${attempt.id}; runner=${runnerId}; status=${result.status}; evidence=${evidence.id}; artifacts=${artifacts.length}; resultDigest=${resultDigest}; credentialState=closed; outputReadBack=runner-attested; ${custodyReceipt}; canonicalWrite=false`, ...(result.status === "indeterminate" ? { recoveryAction: result.recoveryAction ?? "reconcile the Runner provider result before using this Evidence or Artifact" } : {}) };
   }
 
   /**

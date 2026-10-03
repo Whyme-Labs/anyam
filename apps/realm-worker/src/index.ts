@@ -58,6 +58,10 @@ import { isAnyamOAuthPath } from "../../../src/cloudflare/oauth-path.ts";
 import { RealmArtifactsQualification, type RealmArtifactsQualificationRequest, type ArtifactsRealmAuthorization } from "./artifacts-qualification.ts";
 
 export type Env = AnyamRealmOAuthEnv & {
+  /** Attempt-scoped Runner outputs; Realm reads only after proof validation. */
+  ANYAM_RUNNER_OUTPUTS?: R2Bucket;
+  /** Same digest-addressed customer bucket bound to the Promotion executor. */
+  ANYAM_PROMOTION_ARTIFACTS?: R2Bucket;
   ANYAM_ARTIFACTS?: Artifacts;
   ANYAM_ARTIFACTS_ACCOUNT_ID?: string;
   ANYAM_ARTIFACTS_NAMESPACE?: string;
@@ -1660,8 +1664,11 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       const current = await this.authoritySnapshot();
       const coordinator = new AuthorityPlaneCoordinator(current);
       if (this.requireIdentity().containsKnownCredentialMaterial(completionValue)) return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "invalid_request", receipt: "runnerCompletion=not-accepted; details=not-disclosed; credentialMaterialStored=false" }, 422);
-      const result = await coordinator.completeRunner(command, session);
-      await this.persistAuthoritySnapshot(current, coordinator.snapshot());
+      const result = await coordinator.completeRunner(command, session, { source: this.env.ANYAM_RUNNER_OUTPUTS, destination: this.env.ANYAM_PROMOTION_ARTIFACTS });
+      try { await this.persistAuthoritySnapshot(current, coordinator.snapshot()); }
+      catch {
+        return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "runner_completion_unconfirmed", recoveryAction: "retry the same signed completion and idempotency key to confirm persisted Authority state", receipt: "runnerCompletion=unconfirmed; artifactWrite=may-have-occurred; authorityCommit=unconfirmed; details=not-disclosed; credentialMaterialStored=false" }, 503);
+      }
       return coordinatorJson({ ...result, provenance: { runnerId, clientId: session.clientId, sessionId: session.sessionId, authorizationEpoch: session.authorizationEpoch }, credentialFree: true, canonicalWrite: false, receipt: `${result.receipt}; authority=runner-completion; runner=${runnerId}; canonicalWrite=false` }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
     });
   }

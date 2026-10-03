@@ -53,3 +53,9 @@ test("Runner detaches immutable typed declarations and denies a signed path/dige
  assert.throws(() => runner.runner.submit({ credential: runner.lease.credential, result }), /digest|malformed/u);
  assert.equal(runner.runner.getJob(runner.lease.job.id)?.state, "running");
 });
+
+test("direct owner Run request forwards its advertised typed declaration", async () => {
+ const { runRequestCommand } = await import("../apps/realm-worker/src/run-evidence-contract.ts");
+ const request = runRequestCommand({ idempotencyKey: "typed:owner-run", projectId: "project:test", actionId: "action:build", actionContractDigest: "sha256:action", artifactOutputContract: contract, projectRevisionId: "revision:test", projectViewId: "view:test", inputDigests: [], outputDigests: [], policyVersion: "policy:test", authorizationEpoch: "4", capabilityGrantId: "grant:test" });
+ assert.deepEqual(request.payload.artifactOutputContract, contract);
+});

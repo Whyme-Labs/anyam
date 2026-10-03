@@ -281,8 +281,10 @@ export class AuthorityDisclosure {
     const revision = this.disclosedRevision(scope.projectId, scope.snapshots, scope.ids);
     if (!revision) return undefined;
     // Stored Runs are not signed job/input/output disclosure proof. Only the
-    // wholly readable record-local execution identity and status are exposed.
+    // wholly readable record-local execution identity, status and caller-declared
+    // output contract are exposed. The declaration asserts no output or proof.
     return { protocol: r.protocol, id, projectViewRevisionId: revision.id, status: r.status,
+      ...(r.artifactOutputContract ? { artifactOutputContract: structuredClone(r.artifactOutputContract) } : {}),
       ...(r.workspaceId ? { workspaceId: r.workspaceId } : {}), ...(r.changeRevisionId ? { changeRevisionId: r.changeRevisionId } : {}) };
   }
   private disclosureMatches(viewId: string, projectionId: string) {

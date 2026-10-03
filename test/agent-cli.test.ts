@@ -912,7 +912,7 @@ test("native Agent validates typed Artifact declarations before starting an Acti
   const directory = await projectDirectory();
   try {
     await replaceCheckAction(directory, { command: "node -e \"process.exit(0)\"", inputs: ["anyam.json"], outputs: [], artifactOutputContract: { protocol: "anyam.action-artifact-outputs/v1", outputs: [{ path: "dist/undeclared.js", type: "worker.bundle" }] } });
-    const agentManager = manager(directory); await agentManager.startSession({ agent: "codex" });
-    await assert.rejects(agentManager.invokeTool("run.start", { actionId: "action:check" }), (error: unknown) => error instanceof LocalAgentError && error.code === "run.manifest_invalid" && /outside Action outputs/u.test(error.message));
+    const agentManager = manager(directory);
+    await assert.rejects(agentManager.startSession({ agent: "codex" }), (error: unknown) => error instanceof LocalAgentError && error.code === "run.manifest_invalid" && /outside Action outputs/u.test(error.message));
   } finally { await rm(join(directory, ".."), { recursive: true, force: true }); }
 });

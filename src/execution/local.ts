@@ -1354,6 +1354,11 @@ export async function runLocalRelease(input: {
       expectedDisclosureClassification,
     };
   });
+  for (const result of results) {
+    if (result.evidence.outcome === "failed" && !requiredEvidence.some((requirement) => requirement.key === result.evidence.key)) {
+      requiredEvidence.push({ key: result.evidence.key, currentValidityKey: result.validityKey });
+    }
+  }
   const gate = evaluateStageGate({
     gateId: `release:${input.releaseName}`,
     requiredEvidence,

@@ -12,8 +12,10 @@ bindings remain required.
 Changed or missing outputs fall through to ordinary Action execution. The fresh
 Evidence receipt includes
 `cacheReuse=not-applied; cached-output-bytes=changed-or-missing`. A successful
-regeneration produces new Run/Evidence/Artifact provenance; a failed one blocks
-release readiness even when older passed Evidence remains in the shared ledger.
+regeneration produces new Run/Evidence/Artifact provenance. Every failed Action
+executed by the local release flow blocks readiness, including a producing
+Action with an optional or absent Verifier. Older passed Evidence in the shared
+ledger cannot mask that failure.
 Affected release planning records the damaged Action as a fallback and retains
 reuse for eligible unaffected Actions. Original producing records remain
 immutable. Unexpected output read/storage errors propagate instead of returning
@@ -31,7 +33,8 @@ node --import ./node_modules/tsx/dist/loader.mjs --test \
 Coverage includes same-size byte tampering, deleted output recovery, healthy
 reuse after regeneration, changed/deleted cross-revision fallback, reuse of an
 unaffected no-output Action, immutable original provenance, failed regeneration
-with historical passed Evidence, and propagation of an unreadable output error.
+with historical passed Evidence and required/optional/absent Verifiers, and
+propagation of an unreadable output error.
 The repository gate also runs the existing complete-validity and healthy
 cross-revision cache tests.
 

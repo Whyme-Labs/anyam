@@ -324,50 +324,56 @@ for (const damage of ["changed", "missing"] as const) {
   });
 }
 
-test("failed Runner cache regeneration blocks release readiness even with prior passed Evidence in the ledger", async () => {
-  const copied = await copyFixture("worker");
-  try {
-    const raw = copied.manifest as { modules: readonly Record<string, unknown>[] } & Record<string, unknown>;
-    const manifest = {
-      ...raw,
-      modules: raw.modules.map((module) => ({
-        ...module,
-        actions: (module.actions as readonly Record<string, unknown>[]).map((action) => action.id === "action:build"
-          ? { ...action, command: "node -e \"const fs=require('fs');if(fs.existsSync('.fail-build'))process.exit(9);fs.mkdirSync('dist',{recursive:true});fs.copyFileSync('src/index.ts','dist/worker.bundle')\"" }
-          : action),
-      })),
-    };
-    const cache = new LocalExecutionCache();
-    const ledger = new EvidenceLedger();
-    const first = await runLocalRelease({
-      manifest, cache, ledger, context: context(copied.directory, "target:worker"), releaseName: "byte-cache-passed",
-    });
-    assert.equal(first.release.status, "ready");
-    const original = structuredClone(first);
-    await rm(join(copied.directory, "dist/worker.bundle"));
-    await writeFile(join(copied.directory, ".fail-build"), "fail the existing declared command\n");
-    const second = await runLocalRelease({
-      manifest, cache, ledger, context: context(copied.directory, "target:worker"), releaseName: "byte-cache-failed",
-    });
-    assert.equal(second.release.status, "draft");
-    assert.equal(second.gate.status, "blocked");
-    assert.ok(second.gate.blockers.some((blocker) => blocker.kind === "failed"));
-    assert.equal(second.artifacts.length, 0);
-    assert.equal(second.cacheHits, 1, "healthy no-output check retains exact cache reuse");
-    const failedRun = second.runs.find((run) => run.actionId === "action:build")!;
-    assert.equal(failedRun.status, "failed");
-    assert.equal(failedRun.exitCode, 9);
-    const records = ledger.list().filter((record) => record.actionId === "action:build");
-    assert.deepEqual(records.map((record) => record.outcome), ["passed", "failed"]);
-    assert.equal(records[0]!.validityKey, records[1]!.validityKey, "failure blocks the formerly passing exact validity key");
-    assert.match(records[1]!.receipt, /cached-output-bytes=changed-or-missing/);
-    assert.ok(second.release.evidenceIds.includes(records[1]!.id));
-    assert.ok(!second.release.evidenceIds.includes(records[0]!.id));
-    assert.deepEqual(first, original);
-  } finally {
-    await rm(copied.directory, { recursive: true, force: true });
-  }
-});
+for (const buildVerifier of ["release-required", "optional", "absent"] as const) {
+  test(`failed Runner cache regeneration with ${buildVerifier} Verifier blocks release readiness despite prior passed Evidence`, async () => {
+    const copied = await copyFixture("worker");
+    try {
+      const raw = copied.manifest as { modules: readonly Record<string, unknown>[] } & Record<string, unknown>;
+      const manifest = {
+        ...raw,
+        verifiers: (raw.verifiers as readonly Record<string, unknown>[]).flatMap((verifier) => {
+          if (verifier.actionId !== "action:build" || buildVerifier === "release-required") return [verifier];
+          return buildVerifier === "absent" ? [] : [{ ...verifier, requiredFor: [] }];
+        }),
+        modules: raw.modules.map((module) => ({
+          ...module,
+          actions: (module.actions as readonly Record<string, unknown>[]).map((action) => action.id === "action:build"
+            ? { ...action, command: "node -e \"const fs=require('fs');if(fs.existsSync('.fail-build'))process.exit(9);fs.mkdirSync('dist',{recursive:true});fs.copyFileSync('src/index.ts','dist/worker.bundle')\"" }
+            : action),
+        })),
+      };
+      const cache = new LocalExecutionCache();
+      const ledger = new EvidenceLedger();
+      const first = await runLocalRelease({
+        manifest, cache, ledger, context: context(copied.directory, "target:worker"), releaseName: "byte-cache-passed",
+      });
+      assert.equal(first.release.status, "ready");
+      const original = structuredClone(first);
+      await rm(join(copied.directory, "dist/worker.bundle"));
+      await writeFile(join(copied.directory, ".fail-build"), "fail the existing declared command\n");
+      const second = await runLocalRelease({
+        manifest, cache, ledger, context: context(copied.directory, "target:worker"), releaseName: "byte-cache-failed",
+      });
+      assert.equal(second.release.status, "draft");
+      assert.equal(second.gate.status, "blocked");
+      assert.ok(second.gate.blockers.some((blocker) => blocker.kind === "failed"));
+      assert.equal(second.artifacts.length, 0);
+      assert.equal(second.cacheHits, 1, "healthy no-output check retains exact cache reuse");
+      const failedRun = second.runs.find((run) => run.actionId === "action:build")!;
+      assert.equal(failedRun.status, "failed");
+      assert.equal(failedRun.exitCode, 9);
+      const records = ledger.list().filter((record) => record.actionId === "action:build");
+      assert.deepEqual(records.map((record) => record.outcome), ["passed", "failed"]);
+      assert.equal(records[0]!.validityKey, records[1]!.validityKey, "failure blocks the formerly passing exact validity key");
+      assert.match(records[1]!.receipt, /cached-output-bytes=changed-or-missing/);
+      assert.ok(second.release.evidenceIds.includes(records[1]!.id));
+      assert.ok(!second.release.evidenceIds.includes(records[0]!.id));
+      assert.deepEqual(first, original);
+    } finally {
+      await rm(copied.directory, { recursive: true, force: true });
+    }
+  });
+}
 
 test("Runner cache propagates unreadable output failures before returning old passed Evidence", async () => {
   const copied = await copyFixture("worker");

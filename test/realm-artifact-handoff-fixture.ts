@@ -60,7 +60,7 @@ function keyPair() {
 }
 
 function signMessage(privateKey: ReturnType<typeof keyPair>["privateKey"], message: string): string {
-  return sign(null, Buffer.from(message), privateKey).toString("base64url");
+  return Buffer.from(sign(null, Buffer.from(message), privateKey)).toString("base64url");
 }
 
 function actionInput(): NormalizedActionInput {

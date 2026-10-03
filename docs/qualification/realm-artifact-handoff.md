@@ -63,6 +63,7 @@ the Runner executed an Action or that a failed/indeterminate Run passed.
 
 ```sh
 node --import ./node_modules/tsx/dist/loader.mjs --test test/realm-artifact-handoff.test.mjs
+node --import ./node_modules/tsx/dist/loader.mjs --test test/realm-artifact-handoff-runtime.test.mjs
 ```
 
 The Worker-driving `test/fixtures/realm-artifact-handoff-runtime.ts` is included
@@ -75,9 +76,14 @@ constructors, authentication state, Authority persistence and R2 bindings with
 owned fixtures. They prove boundary ordering, immutable conditional writes,
 readback, safe failures, replay, retry and serialized completion. They do not
 qualify live workerd, SQLite, R2 conditional-write behavior or deployed services.
+The second command separately runs the actual local workerd Realm handler and
+SQLite store with Miniflare R2. It covers source tampering, conditional retention,
+immutable destination conflict, operator restoration and durable replay after
+Attempt cleanup. Its authentication state and process output are synthetic,
+and all storage is disposable and local. It is not a live Cloudflare claim.
 
-Next gates are core/Worker/test typechecks, the ordinary full repository check,
-a local workerd/R2/SQLite flow and then a customer-approved disposable live
+Required gates are core/Worker/test typechecks, the ordinary full repository
+check, the local workerd/R2/SQLite flow and a customer-approved disposable live
 Realm/Runner R2 flow. Live qualification requires the existing Realm and Runner
 services, their own output bucket, the executor Artifact bucket and explicit
 service/bucket bindings; no Cloudflare API credential belongs in Authority or

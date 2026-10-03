@@ -40,7 +40,7 @@ export async function createRealmArtifactHandoffFixture({ configured = true, out
   result.status = runStatus; result.output.status = runStatus; result.output.exitCode = runStatus === "succeeded" ? 0 : 1;
   result.output.outputDigest = sha256(artifactBytes); result.output.outputDigests = [`dist/result.txt=${sha256(artifactBytes)}`];
   result.outputs = outputs ? result.outputs.map(output => ({ ...output, digest: sha256(artifactBytes) })) : [];
-  result.signature = sign(null, Buffer.from(runnerResultMessage(result)), runner.keys.privateKey).toString("base64url");
+  result.signature = Buffer.from(sign(null, Buffer.from(runnerResultMessage(result)), runner.keys.privateKey)).toString("base64url");
   const completion = runner.runner.submit({ credential: runner.lease.credential, result });
   authority.authority.registerRunnerProfile(runner.profile, runnerSession);
   let state = authority.authority.snapshot();

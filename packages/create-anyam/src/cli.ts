@@ -1,5 +1,5 @@
 import { proposedManifest, runLocalCheck, scaffoldProject, startChange, type ProjectTemplateKind } from "./scaffold.js";
-import { gitCredentialGet, LocalAgentManager, readGitCredentialContext, runMcpStdio, setupAgent } from "./agent.js";
+import { gitCredentialGet, LocalAgentManager, readGitCredentialContext, runMcpStdio, setupAgent, type AgentLaunchResult } from "./agent.js";
 import { loginAnyam, logoutAnyam } from "./auth.js";
 import { connectGitHubActions } from "./github-actions-bridge.js";
 import { realmDestroy, realmDoctor, realmExport, realmInstall, realmPlan, realmRestore, realmUpgrade } from "./realm.js";
@@ -12,6 +12,13 @@ import { runRealmSourceCommand } from "./realm-source-command.js";
 function valueAfter(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   return index >= 0 ? args[index + 1] : undefined;
+}
+
+function disclosedAgentLaunch(result: AgentLaunchResult) {
+  // The trusted runtime retains this environment; CLI output must not copy
+  // ambient host credentials from the supervised boundary into a receipt.
+  const { environment, ...boundary } = result.boundary;
+  return { ...result, boundary };
 }
 
 function valuesAfter(args: readonly string[], flag: string): readonly string[] {
@@ -127,8 +134,12 @@ async function runGitCredentialHelper(action: string | undefined, cwd: string, i
   return 0;
 }
 
-export async function main(args: readonly string[], cwd = process.cwd(), input: Readable = process.stdin): Promise<number> {
-  const [command, subcommand] = args;
+export async function main(inputArgs: readonly string[], cwd = process.cwd(), input: Readable = process.stdin): Promise<number> {
+  const [command, subcommand] = inputArgs;
+  const separator = inputArgs.indexOf("--");
+  const executionCommand = (command === "agent" || command === "workspace") && subcommand === "exec";
+  const args = executionCommand && separator >= 0 ? inputArgs.slice(0, separator) : inputArgs;
+  const executableArgs = executionCommand && separator >= 0 ? inputArgs.slice(separator + 1) : [];
   const json = args.includes("--json");
   if (!command || command === "--help" || command === "-h") {
     printHelp();
@@ -309,13 +320,12 @@ export async function main(args: readonly string[], cwd = process.cwd(), input: 
 
   if (command === "workspace" && subcommand === "exec") {
     const sessionId = requiredValue(args, "--session", "workspace exec");
-    const separator = args.indexOf("--");
-    const executable = separator >= 0 ? args[separator + 1] : undefined;
+    const executable = executableArgs[0];
     if (!executable) throw new Error("workspace exec requires --session <id> -- <command> [args...]; no process was started.");
     const mode = (valueAfter(args, "--mode") ?? "enforceable") as WorkspaceBoundaryMode;
     if (mode !== "enforceable" && mode !== "supervised") throw new Error(`--mode must be enforceable or supervised; asked=${mode}.`);
-    const result = await new LocalAgentManager({ directory: valueAfter(args, "--directory") ?? cwd }).launchAgent({ sessionId, command: executable, args: args.slice(separator + 2), mode });
-    printResult(result, json, `Workspace process ${result.command.status} in ${result.boundary.mode} Workspace (${result.boundary.enforcement}).\nWorkspace: ${result.boundary.workspaceDirectory}\nReceipt: ${result.command.receipt}`);
+    const result = await new LocalAgentManager({ directory: valueAfter(args, "--directory") ?? cwd }).launchAgent({ sessionId, command: executable, args: executableArgs.slice(1), mode });
+    printResult(disclosedAgentLaunch(result), json, `Workspace process ${result.command.status} in ${result.boundary.mode} Workspace (${result.boundary.enforcement}).\nWorkspace: ${result.boundary.workspaceDirectory}\nReceipt: ${result.command.receipt}`);
     return result.command.status === "passed" ? 0 : 1;
   }
 
@@ -340,14 +350,13 @@ export async function main(args: readonly string[], cwd = process.cwd(), input: 
   if (command === "agent" && subcommand === "exec") {
     const agent = agentValue(args);
     if (!agent) throw new Error("agent exec requires an agent; run anyam agent exec <codex|claude|cursor|cli> -- <command>.");
-    const separator = args.indexOf("--");
-    const executable = separator >= 0 ? args[separator + 1] : undefined;
+    const executable = executableArgs[0];
     if (!executable) throw new Error("agent exec requires `-- <command> [args...]`; no process was started.");
     const mode = (valueAfter(args, "--mode") ?? "enforceable") as WorkspaceBoundaryMode;
     if (mode !== "enforceable" && mode !== "supervised") throw new Error(`--mode must be enforceable or supervised; asked=${mode}.`);
     const directory = valueAfter(args, "--directory") ?? cwd;
-    const result = await new LocalAgentManager({ directory }).launchAgent({ agent, command: executable, args: args.slice(separator + 2), mode });
-    printResult(result, json, `Agent process ${result.command.status} in ${result.boundary.mode} Workspace (${result.boundary.enforcement}).\nWorkspace: ${result.boundary.workspaceDirectory}\nReceipt: ${result.command.receipt}`);
+    const result = await new LocalAgentManager({ directory }).launchAgent({ agent, command: executable, args: executableArgs.slice(1), mode });
+    printResult(disclosedAgentLaunch(result), json, `Agent process ${result.command.status} in ${result.boundary.mode} Workspace (${result.boundary.enforcement}).\nWorkspace: ${result.boundary.workspaceDirectory}\nReceipt: ${result.command.receipt}`);
     return result.command.status === "passed" ? 0 : 1;
   }
 

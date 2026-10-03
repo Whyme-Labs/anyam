@@ -75,8 +75,10 @@ export type WorkspaceBoundary = {
 
 export type WorkspaceBoundaryCommandResult = {
   boundaryId: string;
+  /** Workload executable/argv; host isolation wrappers are identified by the boundary receipt. */
   command: string;
   args: readonly string[];
+  shell: boolean;
   status: "passed" | "failed";
   exitCode?: number;
   signal?: string;
@@ -574,11 +576,16 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
     throw new WorkspaceBoundaryError({ code: "workspace.network_allowlist_unsupported", message: "Linux enforceable Workspaces refuse host-allowlist execution without an attached egress proxy.", affectedObject: input.boundary.id, recoveryAction: "use deny-all networking or a qualified runner with an explicit egress proxy", receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=linux-bwrap; networkEnforcement=unsupported; process-start=false` });
   }
   const shellCommand = input.shell === true;
+  if (shellCommand && args.length > 0) throw new WorkspaceBoundaryError({ code: "workspace.shell_arguments_unsupported", message: "Shell execution accepts one command string, not a separate argument array; no process was started.", recoveryAction: "use direct execution with command/args or put the complete explicit shell program in command", receipt: "commandMode=shell; separate-args=unsupported; process-start=false" });
   const protectGitMetadata = input.protectGitMetadata === true;
   const resourceLimits = input.boundary.enforcement === "linux-bwrap" ? input.boundary.resourceLimits : undefined;
   const prlimit = resourceLimits ? linuxPrlimitPath() : undefined;
   if (resourceLimits && !prlimit) throw new WorkspaceBoundaryError({ code: "workspace.resource_prlimit_unavailable", message: "Linux enforceable Workspace execution lost its qualified prlimit primitive before process start.", affectedObject: input.boundary.id, recoveryAction: "restore util-linux prlimit or choose a qualified container runner", receipt: "resourceLimits=unavailable; primitive=prlimit; process-start=false" });
-  const invokedCommand = shellCommand ? (process.platform === "win32" ? "cmd.exe" : "/bin/sh") : input.boundary.enforcement === "none" ? input.command : input.boundary.executablePaths[0] ?? input.command;
+  let invokedCommand = shellCommand ? (process.platform === "win32" ? "cmd.exe" : "/bin/sh") : input.command;
+  if (!shellCommand && input.boundary.enforcement !== "none" && input.boundary.executablePaths.length > 0) {
+    invokedCommand = await resolveExecutablePath(input.command);
+    if (!input.boundary.executablePaths.includes(invokedCommand)) throw new WorkspaceBoundaryError({ code: "workspace.executable_unqualified", message: `Executable ${input.command} is not configured for this enforceable Workspace; no process was started.`, affectedObject: input.command, recoveryAction: "start a new Workspace with the intended executable path; existing mounts are unchanged", receipt: "commandMode=direct; executable=not-configured; process-start=false" });
+  }
   const invokedArgs = shellCommand ? (process.platform === "win32" ? ["/d", "/s", "/c", input.command] : ["-c", input.command]) : args;
   const executable = input.boundary.enforcement === "macos-sandbox-exec"
     ? "sandbox-exec"
@@ -592,8 +599,10 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
     ? ["-p", protectGitMetadata ? `${input.boundary.profile ?? ""} (deny file-write* (subpath ${quoteProfile(join(input.boundary.workspaceDirectory, ".git"))}))` : input.boundary.profile ?? "", invokedCommand, ...invokedArgs]
     : input.boundary.enforcement === "linux-bwrap"
       ? resourceLimits && prlimit && linuxBwrapArgs ? [...linuxPrlimitArgs(resourceLimits), "bwrap", ...linuxBwrapArgs] : linuxBwrapArgs ?? []
-      : shellCommand ? invokedArgs : ["-c", `${input.command} ${args.map((arg) => JSON.stringify(arg)).join(" ")}`];
-  const detached = process.platform !== "win32" && input.boundary.enforcement !== "none";
+      : invokedArgs;
+  // Supervised POSIX commands need the same owned-group lifecycle as sandboxed
+  // commands. Custody controls cleanup, not filesystem/credential enforcement.
+  const detached = process.platform !== "win32";
   const child = detached
     ? spawn(process.execPath, ["-e", WORKSPACE_PROCESS_CUSTODY_SCRIPT, JSON.stringify([executable, ...executableArgs])], { cwd: input.boundary.workspaceDirectory, env: input.boundary.environment, stdio: ["inherit", "pipe", "pipe", "pipe"], detached: true })
     : spawn(executable, executableArgs, { cwd: input.boundary.workspaceDirectory, env: input.boundary.environment, stdio: ["inherit", "pipe", "pipe"], detached: false });
@@ -615,10 +624,16 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
   let registrationError: unknown;
   // Registration may block or fail. The custodian cannot release the workload
   // until it succeeds, and pipe EOF kills its own group if this broker dies.
-  const registration = Promise.resolve().then(() => input.onProcess?.(child)).then(() => {
+  const processSpawned = new Promise<boolean>((resolveSpawned) => {
+    child.once("spawn", () => resolveSpawned(true));
+    child.once("error", () => resolveSpawned(false));
+  });
+  const registration = processSpawned.then(async (spawned) => {
+    if (!spawned) return;
+    await input.onProcess?.(child);
     if (custodyFailureReason) custody?.destroy();
     else custody?.write("start");
-  }, error => {
+  }).catch(error => {
     registrationError = error;
     custody?.destroy();
     terminate("SIGKILL");
@@ -734,7 +749,8 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
   return {
     boundaryId: input.boundary.id,
     command: invokedCommand,
-    args,
+    args: invokedArgs,
+    shell: shellCommand,
     status,
     ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }),
     ...(result.signal ? { signal: result.signal } : {}),
@@ -744,7 +760,7 @@ export async function runWorkspaceCommand(input: { boundary: WorkspaceBoundary; 
     stderrDigest: digest(stderr),
     ...(result.timedOut ? { timedOut: true } : {}),
     ...(child.pid ? { processId: child.pid, ...(detached ? { processGroupId: child.pid } : {}) } : {}),
-    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; enforcement=${input.boundary.enforcement}; custody=${detached ? "parent-pipe; command-release=after-registration" : "supervised-host"};${custodyFailureReason ? ` custody-failure=${custodyFailureReason};` : ""}${input.boundary.enforcement === "linux-bwrap" ? ` containment=${LINUX_BWRAP_CONTAINMENT_RECEIPT};` : ""} networkEnforcement=${input.boundary.networkEnforcement}; gitMetadata=${protectGitMetadata ? "read-only" : "workspace-writable"}; status=${status};${result.timedOut ? ` budget=workspace.command; limit=${timeoutMs}ms; asked=timeout;` : ""}${outputLimitExceeded ? ` budget=workspace.output; limit=${WORKSPACE_BOUNDARY_POLICY.maxOutputBytes}bytes; asked=output-exceeded;` : ""}${resourceReceipt}`,
+    receipt: `${WORKSPACE_BOUNDARY_POLICY.receipt}; commandMode=${shellCommand ? "shell" : "direct"}; invocationDigest=${digest({ command: invokedCommand, args: invokedArgs, shell: shellCommand })}; enforcement=${input.boundary.enforcement}; custody=${detached ? "parent-pipe; command-release=after-registration" : "supervised-host"};${custodyFailureReason ? ` custody-failure=${custodyFailureReason};` : ""}${input.boundary.enforcement === "linux-bwrap" ? ` containment=${LINUX_BWRAP_CONTAINMENT_RECEIPT};` : ""} networkEnforcement=${input.boundary.networkEnforcement}; gitMetadata=${protectGitMetadata ? "read-only" : "workspace-writable"}; status=${status};${result.timedOut ? ` budget=workspace.command; limit=${timeoutMs}ms; asked=timeout;` : ""}${outputLimitExceeded ? ` budget=workspace.output; limit=${WORKSPACE_BOUNDARY_POLICY.maxOutputBytes}bytes; asked=output-exceeded;` : ""}${resourceReceipt}`,
   };
 }
 

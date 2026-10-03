@@ -21,6 +21,7 @@ import {
 import { main } from "../packages/create-anyam/src/cli.ts";
 import { inspectGitSource } from "../packages/create-anyam/src/git-source.ts";
 import { scaffoldProject, startChange } from "../packages/create-anyam/src/scaffold.ts";
+import { removeWorkspaceBoundary, type WorkspaceBoundary } from "../packages/create-anyam/src/workspace-boundary.ts";
 
 const execFile = promisify(execFileCallback);
 
@@ -625,6 +626,156 @@ test("CLI agent exec defaults to the enforceable Workspace lane", { skip: proces
   } finally {
     if (previousStateHome === undefined) delete process.env.ANYAM_STATE_HOME;
     else process.env.ANYAM_STATE_HOME = previousStateHome;
+  }
+});
+
+test("CLI supervised agent exec keeps child options after the executable separator", async () => {
+  const directory = await projectDirectory();
+  const childOptions = ["--directory", join(directory, "child-only-directory"), "--agent", "codex", "--mode", "child-only-mode", "--session", "child-only-session", "--json", "", "with spaces", "$(literal)"];
+  const childArgs = ["-e", "console.log(JSON.stringify(process.argv.slice(1)))", "--", ...childOptions];
+  try {
+    const result = await execFile(process.execPath, ["--import", import.meta.resolve("tsx"), join(process.cwd(), "packages/create-anyam/src/anyam.ts"), "agent", "exec", "cli", "--mode", "supervised", "--json", "--", process.execPath, ...childArgs], { cwd: directory, env: { PATH: process.env.PATH, LANG: "C", TERM: "dumb", TMPDIR: tmpdir(), ANYAM_STATE_HOME: agentStateDirectory(directory), OPENAI_API_KEY: "SYNTHETIC-HOST-CREDENTIAL-MUST-NOT-PRINT" } });
+    const launched = JSON.parse(result.stdout) as { session: { agent: string; workspaceMode: string }; command: { command: string; args: string[]; shell: boolean; stdout: string; status: string } };
+    assert.equal(launched.session.agent, "cli");
+    assert.equal(launched.session.workspaceMode, "supervised");
+    assert.equal(launched.command.command, process.execPath);
+    assert.deepEqual(launched.command.args, childArgs);
+    assert.equal(launched.command.shell, false);
+    assert.equal(launched.command.stdout, `${JSON.stringify(childOptions)}\n`);
+    assert.equal(launched.command.status, "passed");
+    assert.doesNotMatch(result.stdout, /SYNTHETIC-HOST-CREDENTIAL-MUST-NOT-PRINT/u);
+  } finally {
+    await manager(directory).revoke();
+    await rm(join(directory, ".."), { recursive: true, force: true });
+  }
+});
+
+test("agent completion audit records executed arguments rather than mutated caller intent", async () => {
+  const directory = await projectDirectory();
+  const args = ["-e", "console.log(JSON.stringify(process.argv.slice(1)))", "--", "original"];
+  const expectedArgs = [...args];
+  class MutatingCallerManager extends LocalAgentManager {
+    protected override async registerWorkspaceProcess(sessionId: string, child: ChildProcess) {
+      args[3] = "changed after launch";
+      await super.registerWorkspaceProcess(sessionId, child);
+    }
+  }
+  const agentManager = new MutatingCallerManager({ directory, stateDirectory: agentStateDirectory(directory) });
+  try {
+    const result = await agentManager.launchAgent({ agent: "cli", mode: "supervised", command: process.execPath, args });
+    assert.equal(result.command.stdout, '["original"]\n');
+    const state = JSON.parse(await readFile(localAgentStatePath(directory, agentStateDirectory(directory)), "utf8")) as { audit: Array<{ operation: string; details: { command: string; args: string[]; shell: boolean } }> };
+    const completed = state.audit.find(event => event.operation === "agent.process.completed");
+    assert.ok(completed);
+    assert.equal(completed.details.command, process.execPath);
+    assert.deepEqual(completed.details.args, expectedArgs);
+    assert.equal(completed.details.shell, false);
+  } finally {
+    await agentManager.revoke();
+    await rm(join(directory, ".."), { recursive: true, force: true });
+  }
+});
+
+test("agent launch snapshots the executable and arguments before asynchronous session setup", async () => {
+  const directory = await projectDirectory();
+  const agentManager = manager(directory);
+  const args = ["-e", "console.log(JSON.stringify(process.argv.slice(1)))", "--", "original"];
+  const input = { agent: "cli", mode: "supervised" as const, command: process.execPath, args };
+  try {
+    const running = agentManager.launchAgent(input);
+    args[3] = "changed during setup";
+    input.command = "missing-changed-executable";
+    const result = await running;
+    assert.equal(result.command.status, "passed");
+    assert.equal(result.command.command, process.execPath);
+    assert.equal(result.command.stdout, '["original"]\n');
+  } finally {
+    await agentManager.revoke();
+    await rm(join(directory, ".."), { recursive: true, force: true });
+  }
+});
+
+test("selected live Workspace audit records the actual supervised boundary mode", async () => {
+  const directory = await projectDirectory();
+  const agentManager = manager(directory);
+  try {
+    const started = await agentManager.startSession({ agent: "cli", mode: "supervised" });
+    const result = await agentManager.launchAgent({ sessionId: started.session.id, command: process.execPath, args: ["-e", "console.log('selected workspace')"] });
+    assert.equal(result.command.stdout, "selected workspace\n");
+    assert.equal(result.boundary.mode, "supervised");
+    const state = JSON.parse(await readFile(localAgentStatePath(directory, agentStateDirectory(directory)), "utf8")) as { audit: Array<{ operation: string; details: { mode?: string } }> };
+    for (const operation of ["agent.process.started", "agent.process.completed"]) {
+      const event = state.audit.find(event => event.operation === operation);
+      assert.ok(event);
+      assert.equal(event.details.mode, result.boundary.mode, operation);
+    }
+  } finally {
+    await agentManager.revoke();
+    await rm(join(directory, ".."), { recursive: true, force: true });
+  }
+});
+
+test("failed process registration cannot leave an observed agent start audit", async () => {
+  const directory = await projectDirectory();
+  const marker = join(directory, "unreleased-workload");
+  class RefusingRegistrationManager extends LocalAgentManager {
+    protected override async registerWorkspaceProcess(): Promise<void> {
+      throw new Error("fixture registration refused");
+    }
+  }
+  const agentManager = new RefusingRegistrationManager({ directory, stateDirectory: agentStateDirectory(directory) });
+  try {
+    await assert.rejects(agentManager.launchAgent({ agent: "cli", mode: "supervised", command: process.execPath, args: ["-e", "require('node:fs').writeFileSync(process.argv[1], 'released')", marker] }), /fixture registration refused/u);
+    if (process.platform !== "win32") await assert.rejects(access(marker));
+    const state = JSON.parse(await readFile(localAgentStatePath(directory, agentStateDirectory(directory)), "utf8")) as { audit: Array<{ operation: string }> };
+    assert.equal(state.audit.some(event => event.operation === "agent.process.started"), false);
+    assert.equal(state.audit.some(event => event.operation === "agent.process.completed"), false);
+  } finally {
+    await agentManager.revoke();
+    await rm(join(directory, ".."), { recursive: true, force: true });
+  }
+});
+
+test("separate workspace exec stays fail closed without the selected live broker boundary", async () => {
+  const directory = await projectDirectory();
+  const agentManager = manager(directory);
+  const marker = join(directory, "unstarted-workload");
+  try {
+    const started = await agentManager.startSession({ agent: "cli", mode: "supervised" });
+    await assert.rejects(execFile(process.execPath, ["--import", import.meta.resolve("tsx"), join(process.cwd(), "packages/create-anyam/src/anyam.ts"), "workspace", "exec", "--directory", directory, "--session", started.session.id, "--json", "--", process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1], 'started')", marker, "--session", "child-only-session", "--directory", "child-only-directory", "--mode", "child-only-mode"], { cwd: directory, env: { PATH: process.env.PATH, LANG: "C", TERM: "dumb", TMPDIR: tmpdir(), ANYAM_STATE_HOME: agentStateDirectory(directory) } }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      const failure = error as Error & { code: number; stdout: string; stderr: string };
+      assert.equal(failure.code, 1);
+      assert.equal(failure.stdout, "");
+      assert.match(failure.stderr, /has no live Workspace boundary; no process was started/u);
+      return true;
+    });
+    await assert.rejects(access(marker));
+    const state = JSON.parse(await readFile(localAgentStatePath(directory, agentStateDirectory(directory)), "utf8")) as { audit: Array<{ operation: string }> };
+    assert.equal(state.audit.some(event => event.operation === "agent.process.started"), false);
+  } finally {
+    await agentManager.revoke();
+    await rm(join(directory, ".."), { recursive: true, force: true });
+  }
+});
+
+test("CLI child mode flags cannot downgrade the default enforceable Workspace", { skip: process.platform !== "darwin" ? "requires macOS enforceable Workspace support" : false }, async () => {
+  const directory = await projectDirectory();
+  let boundary: WorkspaceBoundary | undefined;
+  try {
+    const childArgs = ["-e", "console.log(JSON.stringify({mode:process.env.ANYAM_WORKSPACE_MODE,args:process.argv.slice(1),ambient:Boolean(process.env.OPENAI_API_KEY)}))", "--", "--mode", "supervised"];
+    const result = await execFile(process.execPath, ["--import", import.meta.resolve("tsx"), join(process.cwd(), "packages/create-anyam/src/anyam.ts"), "agent", "exec", "cli", "--json", "--", process.execPath, ...childArgs], { cwd: directory, env: { PATH: process.env.PATH, LANG: "C", TERM: "dumb", TMPDIR: tmpdir(), ANYAM_STATE_HOME: agentStateDirectory(directory), OPENAI_API_KEY: "SYNTHETIC-HOST-CREDENTIAL-MUST-NOT-PRINT" } });
+    const launched = JSON.parse(result.stdout) as { boundary: WorkspaceBoundary; command: { stdout: string; status: string } };
+    boundary = launched.boundary;
+    assert.equal(boundary.mode, "enforceable");
+    assert.equal(boundary.enforcement, "macos-sandbox-exec");
+    assert.deepEqual(JSON.parse(launched.command.stdout), { mode: "enforceable", args: ["--mode", "supervised"], ambient: false });
+    assert.equal(launched.command.status, "passed");
+    assert.doesNotMatch(result.stdout, /SYNTHETIC-HOST-CREDENTIAL-MUST-NOT-PRINT/u);
+  } finally {
+    await manager(directory).revoke();
+    if (boundary) await removeWorkspaceBoundary(boundary);
+    await rm(join(directory, ".."), { recursive: true, force: true });
   }
 });
 

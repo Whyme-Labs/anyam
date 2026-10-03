@@ -1139,13 +1139,20 @@ export class LocalExecutionEngine {
     };
     const cachePolicy = input.cachePolicy ?? "exact";
     const cached = cachePolicy === "none" ? undefined : this.cache.get(validityKey);
-    if (cached) {
-      appendCachedEvidence(this.ledger, cached.evidence);
-      return { ...cached, cacheHit: true };
-    }
-    if (cachePolicy === "reusable") {
-      const reusable = this.cache.getReusable(reuseKey);
-      if (reusable) return this.reuseActionResult({ reusable, action, verifier, runnerInput, runnerOutput: reusable.runnerOutput, inputDigests, effectDigests, effectiveDisclosure, validityKey, reuseKey });
+    const reusable = cachePolicy === "reusable" ? this.cache.getReusable(reuseKey) : undefined;
+    let cacheValidationReceipt: string | undefined;
+    if (cached || reusable) {
+      const materialized = await outputFiles(this.context.directory, action.outputPaths);
+      const materializedDigests = materialized.files.map((file) => `${file.path}=${file.digest}`);
+      const bytesMatch = (record: LocalActionResult) => materialized.missingPaths.length === 0
+        && record.runnerOutput.outputDigests.length === materializedDigests.length
+        && record.runnerOutput.outputDigests.every((value, index) => value === materializedDigests[index]);
+      if (cached && bytesMatch(cached)) {
+        appendCachedEvidence(this.ledger, cached.evidence);
+        return { ...cached, cacheHit: true };
+      }
+      if (reusable && bytesMatch(reusable)) return this.reuseActionResult({ reusable, action, verifier, runnerInput, runnerOutput: reusable.runnerOutput, inputDigests, effectDigests, effectiveDisclosure, validityKey, reuseKey });
+      cacheValidationReceipt = "cacheReuse=not-applied; cached-output-bytes=changed-or-missing";
     }
 
     const runId = opaqueId("run");
@@ -1237,6 +1244,7 @@ export class LocalExecutionEngine {
         `exit-code=${commandResult.exitCode}`,
         `inputs=${inputDigests.length}`,
         `outputs=${outputDigests.length}`,
+        cacheValidationReceipt,
         failureReceipt,
       ].filter((part): part is string => part !== undefined).join("; "),
       invalidators: [
@@ -1346,6 +1354,11 @@ export async function runLocalRelease(input: {
       expectedDisclosureClassification,
     };
   });
+  for (const result of results) {
+    if (result.evidence.outcome === "failed" && !requiredEvidence.some((requirement) => requirement.key === result.evidence.key)) {
+      requiredEvidence.push({ key: result.evidence.key, currentValidityKey: result.validityKey });
+    }
+  }
   const gate = evaluateStageGate({
     gateId: `release:${input.releaseName}`,
     requiredEvidence,

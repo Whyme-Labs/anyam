@@ -1,13 +1,12 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptsDirectory = dirname(fileURLToPath(import.meta.url));
 const repository = dirname(scriptsDirectory);
-const temporaryDirectory = await mkdtemp(join(repository, ".worker-test-boundary-"));
-const probePath = join(temporaryDirectory, "pull-request-rest.type-probe.test.ts");
-const probeConfigPath = join(temporaryDirectory, "tsconfig.json");
+const sources = ["test/pull-request-rest.test.ts", "test/fixtures/artifacts-realm-runtime.ts", "test/fixtures/authority-disclosure-runtime.ts", "test/fixtures/selector-clients-runtime.ts"];
+const probes = [];
 
 function runTypeScript(configPath) {
   return new Promise((resolve) => {
@@ -20,15 +19,34 @@ function runTypeScript(configPath) {
   });
 }
 
-try {
-  const source = await readFile(join(repository, "test/pull-request-rest.test.ts"), "utf8");
-  await writeFile(probePath, `${source}\nconst __intentionalWorkerTestBoundaryError: string = __missingWorkerTestBoundaryValue;\n`, "utf8");
-  await writeFile(probeConfigPath, JSON.stringify({ extends: "../tsconfig.worker-tests.json", compilerOptions: { noEmit: true }, include: ["pull-request-rest.type-probe.test.ts"] }, null, 2), "utf8");
-  const result = await runTypeScript(probeConfigPath);
-  const output = `${result.stdout}${result.stderr}`;
-  const rejectedIntentionalError = result.code !== 0 && output.includes("__missingWorkerTestBoundaryValue");
-  console.log(JSON.stringify({ protocol: "anyam.worker-test-type-boundary/v1", status: rejectedIntentionalError ? "succeeded" : "blocked", project: "tsconfig.worker-tests.json", source: "test/pull-request-rest.test.ts", intentionalTypeError: "rejected", compilerExitCode: result.code, ...(rejectedIntentionalError ? {} : { diagnostics: output.slice(-2000) }), receipt: `project=tsconfig.worker-tests.json; source=test/pull-request-rest.test.ts; intentionalErrorRejected=${rejectedIntentionalError}; baseline=run-by-repository-gate` }, null, 2));
-  if (!rejectedIntentionalError) process.exitCode = 1;
-} finally {
-  await rm(temporaryDirectory, { recursive: true, force: true });
+for (const sourcePath of sources) {
+  // Keep the copied file at its original import depth under the repository.
+  const temporaryDirectory = await mkdtemp(join(dirname(dirname(join(repository, sourcePath))), ".worker-test-boundary-"));
+  const probeName = basename(sourcePath).replace(/\.ts$/, ".type-probe.ts");
+  try {
+    const source = await readFile(join(repository, sourcePath), "utf8");
+    await writeFile(join(temporaryDirectory, probeName), `${source}\nconst __intentionalWorkerTestBoundaryError: string = __missingWorkerTestBoundaryValue;\n`, "utf8");
+    if (sourcePath === "test/fixtures/artifacts-realm-runtime.ts") {
+      await writeFile(join(temporaryDirectory, "artifacts-binding.ts"), await readFile(join(repository, "test/fixtures/artifacts-binding.ts"), "utf8"), "utf8");
+    }
+    if (sourcePath === "test/fixtures/authority-disclosure-runtime.ts") {
+      await writeFile(join(temporaryDirectory, "authority-disclosure-state.ts"), await readFile(join(repository, "test/fixtures/authority-disclosure-state.ts"), "utf8"), "utf8");
+    }
+    if (sourcePath === "test/fixtures/selector-clients-runtime.ts") {
+      for (const dependency of ["authority-disclosure-runtime.ts", "authority-disclosure-state.ts"]) {
+        await writeFile(join(temporaryDirectory, dependency), await readFile(join(repository, "test/fixtures", dependency), "utf8"), "utf8");
+      }
+    }
+    const configPath = join(temporaryDirectory, "tsconfig.json");
+    await writeFile(configPath, JSON.stringify({ extends: join(repository, "tsconfig.worker-tests.json"), compilerOptions: { noEmit: true }, include: [probeName] }, null, 2), "utf8");
+    const result = await runTypeScript(configPath);
+    const output = `${result.stdout}${result.stderr}`;
+    const errors = output.split("\n").filter(line => line.includes("error TS"));
+    const rejected = result.code !== 0 && errors.length > 0 && errors.every(line => line.includes(probeName) && line.includes("__missingWorkerTestBoundaryValue"));
+    probes.push({ source: sourcePath, intentionalTypeError: rejected ? "rejected" : "not-rejected", compilerExitCode: result.code, ...(rejected ? {} : { diagnostics: output.slice(-2000) }) });
+    if (!rejected) process.exitCode = 1;
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
 }
+console.log(JSON.stringify({ protocol: "anyam.worker-test-type-boundary/v1", status: process.exitCode ? "blocked" : "succeeded", project: "tsconfig.worker-tests.json", probes, receipt: "baseline=run-by-repository-gate; probes=exact-source-copies; cleanup=owned-probes-only" }, null, 2));

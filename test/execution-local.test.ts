@@ -220,6 +220,186 @@ test("reuses a result only for the complete validity key and reattaches cached E
   }
 });
 
+test("exact Runner cache rereads raw output bytes and rebuilds same-size tampered artifacts", async () => {
+  const copied = await copyFixture("worker");
+  try {
+    const engine = new LocalExecutionEngine({
+      manifest: normalizeProjectManifest(copied.manifest),
+      context: context(copied.directory, "target:worker"),
+    });
+    const first = await engine.runAction({ actionId: "action:build" });
+    const original = structuredClone(first);
+    const outputPath = join(copied.directory, "dist/worker.bundle");
+    const expectedBytes = await readFile(join(copied.directory, "src/index.ts"));
+    const tampered = Buffer.from(expectedBytes);
+    tampered[0] = tampered[0]! ^ 1;
+    await writeFile(outputPath, tampered);
+    assert.equal(tampered.length, expectedBytes.length);
+    const second = await engine.runAction({ actionId: "action:build" });
+    assert.equal(second.cacheHit, false, "matching inputs and file size cannot authorize changed output bytes");
+    assert.notEqual(second.run.id, first.run.id);
+    assert.equal(second.evidence.outcome, "passed");
+    assert.match(second.evidence.receipt, /cached-output-bytes=changed-or-missing/);
+    assert.deepEqual(await readFile(outputPath), expectedBytes);
+    assert.equal(second.artifacts[0]!.digest, `sha256:${createHash("sha256").update(expectedBytes).digest("hex")}`);
+    assert.deepEqual(first, original, "original producing Evidence and provenance stay immutable");
+  } finally {
+    await rm(copied.directory, { recursive: true, force: true });
+  }
+});
+
+test("exact Runner cache regenerates missing outputs and then reuses the new unchanged bytes", async () => {
+  const copied = await copyFixture("worker");
+  try {
+    const engine = new LocalExecutionEngine({
+      manifest: normalizeProjectManifest(copied.manifest),
+      context: context(copied.directory, "target:worker"),
+    });
+    const first = await engine.runAction({ actionId: "action:build" });
+    const outputPath = join(copied.directory, "dist/worker.bundle");
+    await rm(outputPath);
+    const second = await engine.runAction({ actionId: "action:build" });
+    assert.equal(second.cacheHit, false);
+    assert.notEqual(second.run.id, first.run.id);
+    assert.match(second.evidence.receipt, /cached-output-bytes=changed-or-missing/);
+    const bytes = await readFile(outputPath);
+    assert.deepEqual(bytes, await readFile(join(copied.directory, "src/index.ts")));
+    assert.equal(second.artifacts[0]!.digest, `sha256:${createHash("sha256").update(bytes).digest("hex")}`);
+    const third = await engine.runAction({ actionId: "action:build" });
+    assert.equal(third.cacheHit, true);
+    assert.deepEqual(third, { ...second, cacheHit: true });
+  } finally {
+    await rm(copied.directory, { recursive: true, force: true });
+  }
+});
+
+for (const damage of ["changed", "missing"] as const) {
+  test(`reusable Runner cache falls back to actual execution for ${damage} output bytes across Revisions`, async () => {
+    const copied = await copyFixture("worker");
+    try {
+      const cache = new LocalExecutionCache();
+      const first = await runLocalRelease({
+        manifest: copied.manifest,
+        cache,
+        context: context(copied.directory, "target:worker"),
+        releaseName: "byte-cache-v1",
+      });
+      assert.equal(first.release.status, "ready");
+      const original = structuredClone(first);
+      const outputPath = join(copied.directory, "dist/worker.bundle");
+      if (damage === "changed") {
+        const bytes = await readFile(outputPath);
+        bytes[0] = bytes[0]! ^ 1;
+        await writeFile(outputPath, bytes);
+      } else {
+        await rm(outputPath);
+      }
+      const second = await runLocalRelease({
+        manifest: copied.manifest,
+        cache,
+        changedPaths: [],
+        context: { ...context(copied.directory, "target:worker"), projectRevisionId: "project-revision:fixture:v2" },
+        releaseName: "byte-cache-v2",
+      });
+      assert.equal(second.release.status, "ready");
+      assert.equal(second.gate.status, "ready");
+      assert.deepEqual(second.plan.selectedActionIds, []);
+      assert.deepEqual(second.plan.reusedActionIds, ["action:check"]);
+      assert.deepEqual(second.plan.fallbackActionIds, ["action:build"]);
+      assert.equal(second.cacheHits, 1);
+      const check = second.evidence.find((record) => record.actionId === "action:check")!;
+      const build = second.evidence.find((record) => record.actionId === "action:build")!;
+      assert.equal(check.producer.kind, "attestation", "unaffected no-output Action remains reusable");
+      assert.equal(build.producer.kind, "run", "damaged output requires actual execution, not a reuse attestation");
+      assert.notEqual(build.runId, first.runs.find((run) => run.actionId === "action:build")!.id);
+      assert.match(build.receipt, /cached-output-bytes=changed-or-missing/);
+      const bytes = await readFile(outputPath);
+      assert.deepEqual(bytes, await readFile(join(copied.directory, "src/index.ts")));
+      assert.equal(second.artifacts[0]!.digest, `sha256:${createHash("sha256").update(bytes).digest("hex")}`);
+      assert.equal(second.artifacts[0]!.projectRevisionId, "project-revision:fixture:v2");
+      assert.deepEqual(first, original, "reuse invalidation preserves original Evidence and Artifact provenance");
+    } finally {
+      await rm(copied.directory, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const buildVerifier of ["release-required", "optional", "absent"] as const) {
+  test(`failed Runner cache regeneration with ${buildVerifier} Verifier blocks release readiness despite prior passed Evidence`, async () => {
+    const copied = await copyFixture("worker");
+    try {
+      const raw = copied.manifest as { modules: readonly Record<string, unknown>[] } & Record<string, unknown>;
+      const manifest = {
+        ...raw,
+        verifiers: (raw.verifiers as readonly Record<string, unknown>[]).flatMap((verifier) => {
+          if (verifier.actionId !== "action:build" || buildVerifier === "release-required") return [verifier];
+          return buildVerifier === "absent" ? [] : [{ ...verifier, requiredFor: [] }];
+        }),
+        modules: raw.modules.map((module) => ({
+          ...module,
+          actions: (module.actions as readonly Record<string, unknown>[]).map((action) => action.id === "action:build"
+            ? { ...action, command: "node -e \"const fs=require('fs');if(fs.existsSync('.fail-build'))process.exit(9);fs.mkdirSync('dist',{recursive:true});fs.copyFileSync('src/index.ts','dist/worker.bundle')\"" }
+            : action),
+        })),
+      };
+      const cache = new LocalExecutionCache();
+      const ledger = new EvidenceLedger();
+      const first = await runLocalRelease({
+        manifest, cache, ledger, context: context(copied.directory, "target:worker"), releaseName: "byte-cache-passed",
+      });
+      assert.equal(first.release.status, "ready");
+      const original = structuredClone(first);
+      await rm(join(copied.directory, "dist/worker.bundle"));
+      await writeFile(join(copied.directory, ".fail-build"), "fail the existing declared command\n");
+      const second = await runLocalRelease({
+        manifest, cache, ledger, context: context(copied.directory, "target:worker"), releaseName: "byte-cache-failed",
+      });
+      assert.equal(second.release.status, "draft");
+      assert.equal(second.gate.status, "blocked");
+      assert.ok(second.gate.blockers.some((blocker) => blocker.kind === "failed"));
+      assert.equal(second.artifacts.length, 0);
+      assert.equal(second.cacheHits, 1, "healthy no-output check retains exact cache reuse");
+      const failedRun = second.runs.find((run) => run.actionId === "action:build")!;
+      assert.equal(failedRun.status, "failed");
+      assert.equal(failedRun.exitCode, 9);
+      const records = ledger.list().filter((record) => record.actionId === "action:build");
+      assert.deepEqual(records.map((record) => record.outcome), ["passed", "failed"]);
+      assert.equal(records[0]!.validityKey, records[1]!.validityKey, "failure blocks the formerly passing exact validity key");
+      assert.match(records[1]!.receipt, /cached-output-bytes=changed-or-missing/);
+      assert.ok(second.release.evidenceIds.includes(records[1]!.id));
+      assert.ok(!second.release.evidenceIds.includes(records[0]!.id));
+      assert.deepEqual(first, original);
+    } finally {
+      await rm(copied.directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test("Runner cache propagates unreadable output failures before returning old passed Evidence", async () => {
+  const copied = await copyFixture("worker");
+  try {
+    const ledger = new EvidenceLedger();
+    const engine = new LocalExecutionEngine({
+      manifest: normalizeProjectManifest(copied.manifest),
+      context: context(copied.directory, "target:worker"),
+      ledger,
+    });
+    await engine.runAction({ actionId: "action:build" });
+    const original = structuredClone(ledger.list());
+    const outputPath = join(copied.directory, "dist/worker.bundle");
+    await rm(outputPath);
+    await mkdir(outputPath);
+    await assert.rejects(engine.runAction({ actionId: "action:build" }), (error: unknown) => {
+      assert.ok(error instanceof Error && "code" in error);
+      assert.equal(error.code, "EISDIR");
+      return true;
+    });
+    assert.deepEqual(ledger.list(), original, "storage failure cannot append a new passing cache receipt");
+  } finally {
+    await rm(copied.directory, { recursive: true, force: true });
+  }
+});
+
 test("failed local Actions and stale or indeterminate Evidence block a Release gate", async () => {
   const copied = await copyFixture("worker");
   try {

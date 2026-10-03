@@ -67,6 +67,7 @@ const ENTITY_COLLECTIONS = [
   "runs",
   "runnerProfiles",
   "runnerAttempts",
+  "runDetails",
   "evidence",
   "artifacts",
   "landings",
@@ -195,24 +196,40 @@ export class AuthoritySQLiteStore {
   load(realmId: string): AuthorityPlaneSnapshot | undefined {
     return this.host.transactionSync(() => {
       createSchema(this.host.sql);
-      const meta = requireMeta(this.host.sql, realmId);
-      if (!meta) return undefined;
-      const rows = this.host.sql.exec<EntityRow>("SELECT collection, entity_id, payload FROM anyam_authority_entities ORDER BY collection, entity_id").toArray();
-      const collections = rowsByCollection(rows);
-      const auditRows = this.host.sql.exec<AuditRow>("SELECT event_id, state_version, payload FROM anyam_authority_audit_events ORDER BY state_version, event_id").toArray();
-      const idempotencyRows = this.host.sql.exec<IdempotencyRow>("SELECT idempotency_key, fingerprint, result FROM anyam_authority_idempotency ORDER BY idempotency_key").toArray();
-      const empty = this.adapter.empty(realmId);
-      const snapshot: AuthorityPlaneSnapshot = {
-        ...empty,
-        protocol: meta.protocol as AuthorityPlaneSnapshot["protocol"],
-        realmId: meta.realm_id,
-        version: meta.version,
-        ...Object.fromEntries(ENTITY_COLLECTIONS.map((collection) => [collection, collections[collection] ?? {}])),
-        idempotency: Object.fromEntries(idempotencyRows.map((row) => [sqlText(row.idempotency_key, "idempotency_key"), { fingerprint: sqlText(row.fingerprint, "fingerprint"), result: parsed(sqlText(row.result, "idempotency"), "idempotency") }])),
-        audit: auditRows.map((row) => parsed(sqlText(row.payload, "audit"), "audit")),
-      };
-      return this.adapter.normalize(snapshot);
+      return this.readRows(realmId);
     });
+  }
+
+  /** Authorization reads must not initialize or migrate a missing Authority. */
+  readExisting(realmId: string): AuthorityPlaneSnapshot | undefined {
+    return this.host.transactionSync(() => {
+      const required = ["anyam_authority_meta", "anyam_authority_entities", "anyam_authority_audit_events", "anyam_authority_idempotency", "anyam_authority_migrations"];
+      const tables = new Set(this.host.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").toArray().map(row => row.name));
+      if (required.some(name => !tables.has(name))) return undefined;
+      const version = Number(this.host.sql.exec<{ version: number }>("SELECT MAX(version) AS version FROM anyam_authority_migrations").toArray()[0]?.version ?? 0);
+      if (version !== AUTHORITY_SQLITE_SCHEMA_VERSION) throw new Error("authority_sqlite_schema_version_unsupported");
+      return this.readRows(realmId);
+    });
+  }
+
+  private readRows(realmId: string): AuthorityPlaneSnapshot | undefined {
+    const meta = requireMeta(this.host.sql, realmId);
+    if (!meta) return undefined;
+    const rows = this.host.sql.exec<EntityRow>("SELECT collection, entity_id, payload FROM anyam_authority_entities ORDER BY collection, entity_id").toArray();
+    const collections = rowsByCollection(rows);
+    const auditRows = this.host.sql.exec<AuditRow>("SELECT event_id, state_version, payload FROM anyam_authority_audit_events ORDER BY state_version, event_id").toArray();
+    const idempotencyRows = this.host.sql.exec<IdempotencyRow>("SELECT idempotency_key, fingerprint, result FROM anyam_authority_idempotency ORDER BY idempotency_key").toArray();
+    const empty = this.adapter.empty(realmId);
+    const snapshot: AuthorityPlaneSnapshot = {
+      ...empty,
+      protocol: meta.protocol as AuthorityPlaneSnapshot["protocol"],
+      realmId: meta.realm_id,
+      version: meta.version,
+      ...Object.fromEntries(ENTITY_COLLECTIONS.map((collection) => [collection, collections[collection] ?? {}])),
+      idempotency: Object.fromEntries(idempotencyRows.map((row) => [sqlText(row.idempotency_key, "idempotency_key"), { fingerprint: sqlText(row.fingerprint, "fingerprint"), result: parsed(sqlText(row.result, "idempotency"), "idempotency") }])),
+      audit: auditRows.map((row) => parsed(sqlText(row.payload, "audit"), "audit")),
+    };
+    return this.adapter.normalize(snapshot);
   }
 
   replace(snapshot: AuthorityPlaneSnapshot): void {

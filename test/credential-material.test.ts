@@ -5,6 +5,7 @@ import {
   credentialMaterialReceipt,
   isCredentialFree,
   scanCredentialMaterial,
+  containsKnownTextMaterial,
 } from "../src/security/credential-material.ts";
 
 test("the shared scanner accepts redacted markers and non-secret metadata", () => {
@@ -44,4 +45,30 @@ test("scanner receipts expose only a path and category, never the matched value"
   assert.match(receipt, /scanner=anyam\.credential-material-scanner\/v1/u);
   assert.match(receipt, /field=value\.nested\.providerToken/u);
   assert.equal(receipt.includes(secret), false);
+});
+
+test("known handle matching covers every Base64 substring alignment and one URI layer", () => {
+  const handle = "session:synthetic-known-handle";
+  const matches = (value: unknown) => containsKnownTextMaterial(value, text => text.includes(handle));
+  for (const encoding of ["base64", "base64url"] as const) for (const prefix of ["", "p", "pr", "pre", "prefix"]) {
+    const alias = prefix + Buffer.from(handle).toString(encoding) + "suffix";
+    assert.equal(matches([alias]), true); assert.equal(matches({ [alias]: "key" }), true);
+  }
+  const realmHandle = "session:00000000-0000-0000-0000-000000000000";
+  const embedded = "prefix" + Buffer.from(realmHandle).toString("base64url") + "suffix";
+  assert.equal(containsKnownTextMaterial(embedded, text => text.includes(realmHandle)), true, "trailing one-character Base64 quantum cannot hide a complete preceding handle");
+  for (const prefix of ["%", "%ZZ", "%FF", "prefix%ZZ"]) for (const suffix of ["%", "%ZZ", "%FF", "%suffix"]) {
+    const alias = prefix + encodeURIComponent(handle) + suffix;
+    assert.equal(matches(alias), true); assert.equal(matches({ [alias]: "key" }), true);
+  }
+  for (const whitespace of [" ", "\t", "\n", "\r\n"]) {
+    const encoded = Buffer.from(handle).toString("base64url").match(/.{1,4}/gu)!.join(whitespace);
+    assert.equal(matches(encoded), true); assert.equal(matches({ [encoded]: "key" }), true);
+  }
+  assert.equal(matches(`prefix${encodeURIComponent(handle)}suffix`), true);
+  assert.equal(matches({ reference: "session:ordinary", digest: "sha256:" + "a".repeat(64) }), false);
+  const cycle: { value: string; self?: unknown } = { value: "safe" }; cycle.self = cycle;
+  assert.equal(matches(cycle), false);
+  const twice = Buffer.from(Buffer.from(handle).toString("base64")).toString("base64");
+  assert.equal(matches(twice), false, "only the documented single layer is decoded");
 });

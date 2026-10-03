@@ -1,3 +1,6 @@
+import { AuthorityDisclosure } from "./authority-disclosure.ts";
+import { prepareDisclosedCommand, prepareRawSourceCommand, disclosedCommandResult, disclosedCommandError, disclosedCommandFailure } from "./authority-view-command.ts";
+import { acceptedOwnerRunDetail } from "./accepted-run-detail.ts";
 /// <reference types="@cloudflare/workers-types" />
 
 import { DurableObject, WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
@@ -44,15 +47,21 @@ import { GitHubActionsBridgeOutboundCoordinator, MemoryGitHubActionsBridgeOutbou
 import { encodeGitHubActionsBridgeHistory, encodeGitHubActionsBridgeOutboundBundle, encodeGitHubActionsBridgeSourcePackage, parseGitHubActionsBridgeHistory, parseGitHubActionsBridgeMode, parseGitHubActionsBridgeOutboundBundle, parseGitHubActionsBridgeOutboundPlan, parseGitHubActionsBridgeOutboundProvider, parseGitHubActionsBridgeOutboundRun, parseGitHubActionsBridgePlan, parseGitHubActionsBridgeSourcePackage } from "./github-actions-bridge-contract.ts";
 import { handleGitHubActionsBridgeRequest } from "./github-actions-bridge-route.ts";
 import { authorizeMcpCommandTarget } from "../../../src/cloudflare/mcp-command-target.ts";
+import { delegatedSelectorContext } from "./delegated-selector-context.ts";
 import { parseRepositoryObservationServiceResponse, verifyRepositoryObservation, type RepositoryObservationRequest } from "../../../src/portability/repository-observation.ts";
 import { prepareHostedRevisionPublish, type HostedRevisionObservationInput } from "../../../src/cloudflare/hosted-revision-publication.ts";
 import { assertAuthoritySnapshotEquivalent, AuthoritySQLiteStore, type AuthoritySqlHost } from "../../../src/cloudflare/authority-sqlite.ts";
 import { MIRROR_HANDOFF_AUDIENCE, MIRROR_INGESTION_PROTOCOL, verifyMirrorIngestionHandoff, type MirrorHandoffKey, type MirrorIngestionHandoff } from "../../../src/portability/mirror-observation.ts";
 import { GITHUB_WEBHOOK_INGRESS_PROTOCOL, type GitHubWebhookIngressEnvelope } from "../../../src/portability/github-webhook.ts";
-import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
+import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial, containsKnownTextMaterial } from "../../../src/security/credential-material.ts";
 import { isAnyamOAuthPath } from "../../../src/cloudflare/oauth-path.ts";
+import { RealmArtifactsQualification, type RealmArtifactsQualificationRequest, type ArtifactsRealmAuthorization } from "./artifacts-qualification.ts";
 
-export type Env = AnyamRealmOAuthEnv;
+export type Env = AnyamRealmOAuthEnv & {
+  ANYAM_ARTIFACTS?: Artifacts;
+  ANYAM_ARTIFACTS_ACCOUNT_ID?: string;
+  ANYAM_ARTIFACTS_NAMESPACE?: string;
+};
 
 const REALM_IDENTITY_SNAPSHOT_KEY = "anyam/realm-identity/snapshot/v1";
 const REALM_RECOVERY_STATUS_KEY = "anyam/realm-identity/recovery-status/v1";
@@ -593,7 +602,9 @@ function authorityRecoverySnapshot(body: CoordinatorRequestBody, realmId: string
       receipt: `authorityRecoverySnapshot=unsupported-field; field=${unknownField}; restore=not-applied; credentialMaterialStored=false`,
     });
   }
-  const missingField = AUTHORITY_RECOVERY_SNAPSHOT_FIELDS.find((field) => !Object.prototype.hasOwnProperty.call(raw, field));
+  // Previously signed bundles predate accepted Run detail. Verify the exact
+  // signed bytes first, then normalize this additive collection to empty.
+  const missingField = AUTHORITY_RECOVERY_SNAPSHOT_FIELDS.find((field) => field !== "runDetails" && !Object.prototype.hasOwnProperty.call(raw, field));
   if (missingField) {
     throw new AuthorityPlaneError({
       code: "invalid_request",
@@ -657,6 +668,7 @@ function authorityQualificationCleanupAllowed(input: { current: AuthorityPlaneSn
     "runs",
     "runnerProfiles",
     "runnerAttempts",
+    "runDetails",
     "evidence",
     "artifacts",
     "landings",
@@ -670,7 +682,7 @@ function authorityQualificationCleanupAllowed(input: { current: AuthorityPlaneSn
     "mirrorDeliveries",
     "canonicalByProject",
   ] as const;
-  if (disposableMaps.some((field) => Object.keys(input.exported[field]).length > 0)) return false;
+  if (disposableMaps.some((field) => Object.keys(input.exported[field] ?? {}).length > 0)) return false;
   const exportedAudit = input.exported.audit;
   if (input.current.audit.length < exportedAudit.length || exportedAudit.some((event, index) => JSON.stringify(input.current.audit[index]) !== JSON.stringify(event))) return false;
   const exportedIdempotencyKeys = new Set(Object.keys(input.exported.idempotency));
@@ -750,6 +762,34 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return this.identity;
   }
 
+  /** Private namespace RPC only; the public HTTP router exposes no Artifacts
+   * mutation or credential path. Current owner/Task/Grant checks occur inside. */
+  async qualifyArtifacts(request: RealmArtifactsQualificationRequest) {
+    await this.initialized;
+    const qualifier = this.artifactsQualifier();
+    return qualifier ? qualifier.run(request) : { status: "blocked", code: "artifacts.binding_unconfigured", liveQualified: false };
+  }
+
+  async cleanupArtifacts(request: ArtifactsRealmAuthorization & { runId: string }) {
+    await this.initialized;
+    const qualifier = this.artifactsQualifier();
+    return qualifier ? qualifier.cleanup(request) : { status: "blocked", code: "artifacts.binding_unconfigured", liveQualified: false };
+  }
+
+  private artifactsQualifier(): RealmArtifactsQualification | undefined {
+    const artifacts = this.env.ANYAM_ARTIFACTS;
+    const accountId = this.env.ANYAM_ARTIFACTS_ACCOUNT_ID?.trim();
+    const namespace = this.env.ANYAM_ARTIFACTS_NAMESPACE?.trim();
+    if (!artifacts || !accountId || !namespace) return undefined;
+    return new RealmArtifactsQualification({ artifacts, accountId, namespace, sql: this.ctx.storage as unknown as AuthoritySqlHost, current: async () => {
+      const recoveryActive = this.recoveryStatus === "active" && await this.authorityRecoveryStatus() === "active";
+      const identity = this.requireIdentity();
+      const authority = this.authoritySqliteStore().readExisting(identity.realm.id);
+      if (!authority) throw new Error("artifacts.authority_unconfigured");
+      return { identity, authority, active: recoveryActive };
+    } });
+  }
+
   private requireGitHubActionsBridge(): GitHubActionsBridgeAuthority {
     if (!this.githubActionsBridge) throw new Error("github_actions_bridge_not_hydrated");
     return this.githubActionsBridge;
@@ -784,14 +824,14 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
 
   private async transitionIdentity<T>(operation: (identity: RealmIdentityPolicy) => Promise<T> | T): Promise<T> {
     const identity = this.requireIdentity();
-    const before = identity.getRecoverySnapshot();
+    const rollback = identity.captureOperationalRollback();
     const beforeRecoveryStatus = this.recoveryStatus;
     try {
       const result = await operation(identity);
       await this.persistIdentity();
       return result;
     } catch (error) {
-      identity.restoreOperationalSnapshot(before);
+      rollback();
       this.recoveryStatus = beforeRecoveryStatus;
       throw error;
     }
@@ -824,7 +864,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const session = identity.validateSession(humanSessionId);
     const snapshot = identity.getRecoverySnapshot();
     const isOwner = Object.values(snapshot.relationships).some((relationship) => relationship.principalId === session.principalId && relationship.role === "owner" && relationship.status === "active");
-    if (!isOwner) {
+    if (!isOwner || snapshot.actors[session.actorId]?.kind !== "human") {
       throw new RealmIdentityError({
         code: "qualification.provider_owner_denied",
         message: "The bounded customer-provider operation is owner-only.",
@@ -846,11 +886,12 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const identity = this.requireIdentity();
     const session = identity.validateSession(humanSessionId);
     const snapshot = identity.getRecoverySnapshot();
-    const isOwner = Object.values(snapshot.relationships).some((relationship) => relationship.principalId === session.principalId && relationship.role === "owner" && relationship.status === "active" && relationship.resource.realmId === snapshot.realm.id);
-    if (!isOwner) {
+    const isOwner = Object.values(snapshot.relationships).some((relationship) => relationship.principalId === session.principalId && relationship.role === "owner" && relationship.status === "active" && relationship.resource.realmId === snapshot.realm.id && Object.keys(relationship.resource).every(key => key === "realmId"));
+    const actor = snapshot.actors[session.actorId];
+    if (!isOwner || actor?.kind !== "human") {
       throw new RealmIdentityError({
         code: "authority.owner_denied",
-        message: "The Authority Plane vertical slice is owner-only until project membership and capability policy are qualified.",
+        message: "This operation requires a current human Realm-wide owner Session.",
         recoveryAction: "authenticate an active Realm owner session before issuing an Authority command",
         receipt: `principal=${session.principalId}; owner=false; authorityCommand=not-accepted`,
       });
@@ -982,9 +1023,10 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   private async authorityState(humanSessionId: string): Promise<Response> {
     const session = this.authorityOwnerSession(humanSessionId);
     const snapshot = await this.authoritySnapshot();
+    const disclosure = this.authorityDisclosure(snapshot, session);
+    const complete = disclosure.completeRealm();
     const recoveryStatus = await this.authorityRecoveryStatus();
-    const storage = this.authoritySqliteStore().receipt();
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: recoveryStatus === "active" ? "ready" : "quarantined", authority: authorityStateSummary(snapshot), recoveryStatus, storage, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; persistence=sqlite-row-storage; version=${snapshot.version}; recoveryStatus=${recoveryStatus}; storage=${storage.receipt}; credentialFree=true; canonicalWrite=landing-only` });
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: recoveryStatus === "active" ? "ready" : "quarantined", authority: complete ? authorityStateSummary(snapshot) : disclosure.summary(), recoveryStatus, ...(complete ? { storage: this.authoritySqliteStore().receipt() } : {}), session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: "authority=coordinator; operation=state.inspect; credentialFree=true; canonicalWrite=landing-only" });
   }
 
   private async authorityRecoveryExport(humanSessionId: string): Promise<Response> {
@@ -992,6 +1034,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     // separate owner ceremony and is intentionally not touched here.
     const session = this.authorityOwnerSession(humanSessionId);
     const snapshot = await this.authoritySnapshot();
+    if (!this.authorityDisclosure(snapshot, session).completeRealm()) this.authorityReadNotFound();
     const recoveryKey = this.authorityRecoveryKey();
     const bundle = await createAuthorityRecoveryBundle({ snapshot, bundleId: crypto.randomUUID(), recoveryKeyId: recoveryKey.keyId, secret: recoveryKey.secret });
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-exported", ownerPrincipalId: session.principalId, bundle, recoveryKeyId: recoveryKey.keyId, snapshotVersion: snapshot.version, credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=exported; protocol=${AUTHORITY_RECOVERY_PROTOCOL}; version=${snapshot.version}; auditChain=signed; recoveryKeyId=${recoveryKey.keyId}; credentialMaterialStored=false; canonicalWrite=false` });
@@ -1046,284 +1089,172 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-activated", ownerPrincipalId: session.principalId, bundleId, snapshotVersion: stored.snapshotVersion, recoveryStatus: "active", credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=activated; bundleId=${bundleId}; recoveryStatus=active; passkey=verified; credentialMaterialStored=false; canonicalWrite=false` });
   }
 
-  private authorityProjectSummary(snapshot: AuthorityPlaneSnapshot, projectId: string) {
-    const project = snapshot.projects[projectId];
-    if (!project) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${projectId} is not available in this Realm.`, recoveryAction: "verify the Project identifier without probing undiscoverable resources", receipt: `project=${projectId}; operation=project.inspect; discoverable=false` });
-    const canonicalId = snapshot.canonicalByProject[projectId];
-    const canonicalRevision = canonicalId ? snapshot.projectRevisions[canonicalId] : undefined;
-    if (!canonicalRevision) throw new AuthorityPlaneError({ code: "indeterminate", message: `Project ${projectId} has no readable canonical Project Revision.`, recoveryAction: "reconcile the Authority snapshot before exposing the Project summary", receipt: `project=${projectId}; canonicalRevision=missing; operation=project.inspect` });
-    const sourceSpaces = project.sourceSpaceIds.map((sourceSpaceId) => snapshot.sourceSpaces[sourceSpaceId]).filter((sourceSpace): sourceSpace is NonNullable<typeof sourceSpace> => sourceSpace !== undefined);
-    const projectIds = (value: { projectId?: string } | undefined): boolean => value?.projectId === projectId;
-    const counts = {
-      workspaces: Object.values(snapshot.workspaces).filter(projectIds).length,
-      intents: Object.values(snapshot.intents).filter(projectIds).length,
-      intentComments: Object.values(snapshot.intentComments).filter((comment) => comment.projectId === projectId).length,
-      pullRequests: Object.values(snapshot.pullRequests).filter(projectIds).length,
-      changes: Object.values(snapshot.changes).filter(projectIds).length,
-      revisions: Object.values(snapshot.changeRevisions).filter((revision) => snapshot.changes[revision.changeId]?.projectId === projectId).length,
-      runs: Object.values(snapshot.runs).filter((run) => snapshot.projectRevisions[run.projectRevisionId]?.projectId === projectId).length,
-      evidence: Object.values(snapshot.evidence).filter((evidence) => snapshot.projectRevisions[evidence.projectRevisionId]?.projectId === projectId).length,
-      artifacts: Object.values(snapshot.artifacts).filter((artifact) => snapshot.projectRevisions[artifact.projectRevisionId]?.projectId === projectId).length,
-      releases: Object.values(snapshot.releases).filter((release) => snapshot.projectRevisions[release.projectRevisionId]?.projectId === projectId).length,
-      targets: Object.values(snapshot.targets).filter(projectIds).length,
-      promotions: Object.values(snapshot.promotions).filter(projectIds).length,
-    };
-    return { project, canonicalRevision, sourceSpaces, counts };
+  private authorityDisclosure(snapshot: AuthorityPlaneSnapshot, session: AuthoritySession) {
+    const identity = this.requireIdentity();
+    identity.validateSession(session.sessionId);
+    return new AuthorityDisclosure(snapshot, {
+      realmOwner: () => { try { this.authorityOwnerSession(session.sessionId); return true; } catch (error) { if (error instanceof RealmIdentityError) return false; throw error; } },
+      capabilities: resource => identity.activeCapabilitiesForPrincipal({ principalId: session.principalId, resource }),
+      sourceReadable: (projectId, sourceSpaceId, capability = "source.read") => {
+        const source = snapshot.sourceSpaces[sourceSpaceId];
+        return !!source && identity.canReadSourceSpaceMetadata({ sessionId: session.sessionId, resource: { realmId: snapshot.realmId, projectId, sourceSpaceId }, classification: source.classification, capability });
+      },
+    });
   }
 
-  private authorityWorkspaceSummary(snapshot: AuthorityPlaneSnapshot, workspaceId: string) {
-    const workspace = snapshot.workspaces[workspaceId];
-    if (!workspace) throw new AuthorityPlaneError({ code: "not_found", message: `Workspace ${workspaceId} is not available in this Realm.`, recoveryAction: "verify the Workspace identifier without probing undiscoverable resources", receipt: `workspace=${workspaceId}; operation=workspace.inspect; discoverable=false` });
-    const project = snapshot.projects[workspace.projectId];
-    if (!project) throw new AuthorityPlaneError({ code: "indeterminate", message: `Workspace ${workspaceId} refers to a Project that is not readable.`, recoveryAction: "reconcile the Authority snapshot before exposing the Workspace summary", receipt: `workspace=${workspaceId}; project=missing; operation=workspace.inspect` });
-    return {
-      workspace: {
-        protocol: workspace.protocol,
-        id: workspace.id,
-        projectId: workspace.projectId,
-        projectRevisionId: workspace.projectRevisionId,
-        projectViewId: workspace.projectViewId,
-        state: workspace.state,
-        ...(workspace.changeId ? { changeId: workspace.changeId } : {}),
-      },
-      project: {
-        protocol: project.protocol,
-        id: project.id,
-        name: project.name,
-        referenceType: project.referenceType,
-      },
-      mountCount: workspace.mounts.length,
-    };
+  private authorityReadNotFound(): never {
+    throw new AuthorityPlaneError({ code: "not_found", message: "The requested resource is unavailable.", recoveryAction: "use a currently disclosed resource; inaccessible resources are not discoverable", receipt: "authorityRead=not-found; discoverable=false" });
+  }
+  private authorityReadResponse(session: AuthoritySession, value: Record<string, unknown>, operation: string) {
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", ...value, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=${operation}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+  }
+  private async authorityReadContext(body: CoordinatorRequestBody) {
+    const snapshot = await this.authoritySnapshot();
+    if (body.surface === "mcp") {
+      const { session, disclosure } = delegatedSelectorContext(this.requireIdentity(), snapshot, body);
+      return { session, snapshot, disclosure };
+    }
+    const session = this.authorityHumanSession(coordinatorString(body, "sessionId"));
+    return { session, snapshot, disclosure: this.authorityDisclosure(snapshot, session) };
   }
 
-  private authorityChangeRevisionSummary(revision: AuthorityPlaneSnapshot["changeRevisions"][string]) {
-    return {
-      protocol: revision.protocol,
-      id: revision.id,
-      changeId: revision.changeId,
-      projectRevisionId: revision.projectRevisionId,
-      projectViewId: revision.projectViewId,
-      sequence: revision.sequence,
-      ...(revision.parentRevisionId ? { parentRevisionId: revision.parentRevisionId } : {}),
-      ...(revision.baseProjectRevisionId ? { baseProjectRevisionId: revision.baseProjectRevisionId } : {}),
-      ...(revision.workspaceId ? { workspaceId: revision.workspaceId } : {}),
-      declaredEffects: [...revision.declaredEffects],
-      ...(revision.affectedModuleIds ? { affectedModuleIds: [...revision.affectedModuleIds] } : {}),
-      ...(revision.affectedTargetIds ? { affectedTargetIds: [...revision.affectedTargetIds] } : {}),
-      ...(revision.conflictIds ? { conflictIds: [...revision.conflictIds] } : {}),
-      ...(revision.kind ? { kind: revision.kind } : {}),
-    };
+  private delegatedSelectorFailure(error: unknown): Response {
+    const code = error instanceof AuthorityPlaneError && error.code === "invalid_request" ? "invalid_request" : error instanceof AuthorityPlaneError && ["conflict", "idempotency_conflict"].includes(error.code) ? "conflict" : error instanceof RealmIdentityError || error instanceof AuthorityPlaneError && error.code === "not_found" ? "not_found" : undefined;
+    if (!code) return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "command_unavailable", receipt: "delegatedSelector=unavailable; details=not-disclosed; transition=not-applied" }, 503);
+    const safe = disclosedCommandFailure(code);
+    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code, message: safe.message, recoveryAction: safe.recoveryAction, receipt: safe.receipt }, code === "not_found" ? 404 : code === "conflict" ? 409 : 422);
   }
 
-  private authorityChangeSummary(snapshot: AuthorityPlaneSnapshot, changeId: string) {
-    const change = snapshot.changes[changeId];
-    if (!change) throw new AuthorityPlaneError({ code: "not_found", message: `Change ${changeId} is not available in this Realm.`, recoveryAction: "verify the Change identifier without probing undiscoverable resources", receipt: `change=${changeId}; operation=change.inspect; discoverable=false` });
-    const project = snapshot.projects[change.projectId];
-    if (!project) throw new AuthorityPlaneError({ code: "indeterminate", message: `Change ${changeId} refers to a Project that is not readable.`, recoveryAction: "reconcile the Authority snapshot before exposing the Change summary", receipt: `change=${changeId}; project=missing; operation=change.inspect` });
-    const revisions = Object.values(snapshot.changeRevisions)
-      .filter((revision) => revision.changeId === changeId)
-      .sort((left, right) => left.sequence - right.sequence || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
-      .map((revision) => this.authorityChangeRevisionSummary(revision));
-    return {
-      change: {
-        protocol: change.protocol,
-        id: change.id,
-        projectId: change.projectId,
-        intentId: change.intentId,
-        baseProjectRevisionId: change.baseProjectRevisionId,
-        status: change.status,
-        latestRevisionId: change.latestRevisionId,
-        ...(change.workspaceId ? { workspaceId: change.workspaceId } : {}),
-        ...(change.revertsChangeRevisionId ? { revertsChangeRevisionId: change.revertsChangeRevisionId } : {}),
-      },
-      project: {
-        protocol: project.protocol,
-        id: project.id,
-        name: project.name,
-        referenceType: project.referenceType,
-      },
-      revisions,
-    };
+  private async authorityMcpRead(body: CoordinatorRequestBody): Promise<Response> {
+    await this.requireAuthorityActive();
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const restore = this.requireIdentity().captureOperationalRollback();
+      try {
+        if (body.surface !== "mcp") disclosedCommandError();
+        const operations: Record<string, () => Promise<Response>> = {
+          project: () => this.authorityProject(body), projects: () => this.authorityProjects(body), workspaces: () => this.authorityWorkspaces(body), changes: () => this.authorityChanges(body), revisions: () => this.authorityRevision(body), intents: () => this.authorityIntents(body), "pull-requests": () => this.authorityPullRequests(body), runs: () => this.authorityRun(body),
+        };
+        const operation = typeof body.operation === "string" && Object.hasOwn(operations, body.operation) ? operations[body.operation] : undefined;
+        if (!operation) disclosedCommandError("invalid_request");
+        return await operation();
+      } catch (error) { return this.delegatedSelectorFailure(error); } finally { restore(); }
+    });
   }
 
-  private authorityIntentSummary(snapshot: AuthorityPlaneSnapshot, intentId: string) {
-    const intent = snapshot.intents[intentId];
-    if (!intent) throw new AuthorityPlaneError({ code: "not_found", message: `Intent ${intentId} is not available in this Realm.`, recoveryAction: "verify the Intent identifier without probing undiscoverable resources", receipt: `intent=${intentId}; operation=intent.inspect; discoverable=false` });
-    const project = snapshot.projects[intent.projectId];
-    if (!project) throw new AuthorityPlaneError({ code: "indeterminate", message: `Intent ${intentId} refers to a Project that is not readable.`, recoveryAction: "reconcile the Authority snapshot before exposing the Intent summary", receipt: `intent=${intentId}; project=missing; operation=intent.inspect` });
-    const comments = Object.values(snapshot.intentComments)
-      .filter((comment) => comment.intentId === intentId)
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
-    return { intent, comments, project: { protocol: project.protocol, id: project.id, name: project.name, referenceType: project.referenceType } };
+  private async authorityMcpViewCommand(body: CoordinatorRequestBody): Promise<Response> {
+    await this.requireAuthorityActive();
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const identity = this.requireIdentity(); const restore = identity.captureOperationalRollback();
+      try {
+        return await this.ctx.storage.transaction(async () => {
+          const current = await this.authoritySnapshot();
+          const context = delegatedSelectorContext(identity, current, body);
+          const prepared = prepareDisclosedCommand({ snapshot: current, disclosure: context.disclosure, session: context.session, delegation: context.binding,
+            body: { command: body.command, payload: body.payload, idempotencyKey: body.idempotencyKey, ...(body.protocol ? { protocol: body.protocol } : {}) }, actorPrincipal: actorId => identity.getRecoverySnapshot().actors[actorId]?.principalId });
+          if (body.capability !== prepared.capability) disclosedCommandError();
+          context.authorize(prepared);
+          if (scanCredentialMaterial(body, "delegatedViewCommand") || identity.containsKnownCredentialMaterial(body)) disclosedCommandError("invalid_request");
+          if (prepared.requestConflict) disclosedCommandError("conflict");
+          let command = prepared.command;
+          if (!prepared.replay && command.command === "run.request") command = { ...command, payload: { ...command.payload, policyVersion: identity.realm.policyVersion, capabilityGrantId: context.session.capabilityGrantId } };
+          if (!prepared.replay && command.command === "revision.publish") command = await this.prepareHostedRevision(current, command);
+          if (scanCredentialMaterial(command, "delegatedPreparedCommand") || identity.containsKnownCredentialMaterial(command)) disclosedCommandError("invalid_request");
+          const fresh = delegatedSelectorContext(identity, current, body);
+          fresh.authorize({ ...prepared, command });
+          const coordinator = new AuthorityPlaneCoordinator(current);
+          const accepted = coordinator.execute(command, fresh.session);
+          const next = coordinator.snapshot();
+          const response = disclosedCommandResult(delegatedSelectorContext(identity, next, body).disclosure, { ...prepared, command }, accepted);
+          if (scanCredentialMaterial(response, "delegatedResult") || identity.containsKnownCredentialMaterial(response)) disclosedCommandError("invalid_request");
+          if (prepared.replay) restore();
+          else { await this.persistAuthoritySnapshot(current, next); await this.persistIdentity(); }
+          return coordinatorJson(response);
+        });
+      } catch (error) { restore(); return this.delegatedSelectorFailure(error); }
+    });
   }
 
   private async authorityProject(body: CoordinatorRequestBody): Promise<Response> {
-    const projectId = coordinatorString(body, "projectId");
-    const snapshot = await this.authoritySnapshot();
-    const session = this.authorityCapabilitySession(coordinatorString(body, "sessionId"), "project.inspect", { realmId: this.requireIdentity().realm.id, projectId });
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", ...this.authorityProjectSummary(snapshot, projectId), session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=project.inspect; project=${projectId}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+    const { session, disclosure } = await this.authorityReadContext(body);
+    const project = disclosure.project(coordinatorString(body, "projectId"));
+    if (!project) this.authorityReadNotFound();
+    return this.authorityReadResponse(session, project, "project.inspect");
   }
-
   private async authorityProjects(body: CoordinatorRequestBody): Promise<Response> {
-    const session = this.authorityHumanSession(coordinatorString(body, "sessionId"));
-    const snapshot = await this.authoritySnapshot();
-    const projectIds = Object.keys(snapshot.projects).sort().filter((projectId) => this.requireIdentity().activeCapabilitiesForPrincipal({ principalId: session.principalId, resource: { realmId: this.requireIdentity().realm.id, projectId } }).includes("project.inspect"));
-    const projects = projectIds.map((projectId) => this.authorityProjectSummary(snapshot, projectId));
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", projects, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=project.list; projectCount=${projects.length}; ordering=project-id-code-unit-ascending; readOnly=true; credentialFree=true; canonicalWrite=false` });
+    const { session, disclosure } = await this.authorityReadContext(body);
+    return this.authorityReadResponse(session, { projects: disclosure.projects() }, "project.list");
   }
-
   private async authorityWorkspaces(body: CoordinatorRequestBody): Promise<Response> {
-    const session = this.authorityHumanSession(coordinatorString(body, "sessionId"));
+    const { session, disclosure } = await this.authorityReadContext(body);
     const projectId = body.projectId === undefined ? undefined : coordinatorString(body, "projectId");
-    const workspaceId = body.workspaceId === undefined ? undefined : coordinatorString(body, "workspaceId");
-    const snapshot = await this.authoritySnapshot();
-    if (projectId !== undefined && !snapshot.projects[projectId]) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${projectId} is not available in this Realm.`, recoveryAction: "verify the Project identifier without probing undiscoverable resources", receipt: `project=${projectId}; operation=workspace.list; discoverable=false` });
-    if (workspaceId !== undefined) {
-      const summary = this.authorityWorkspaceSummary(snapshot, workspaceId);
-      this.authorityCapabilitySession(session.sessionId, "workspace.inspect", { realmId: this.requireIdentity().realm.id, projectId: summary.workspace.projectId, workspaceId });
-      if (projectId !== undefined && summary.workspace.projectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Workspace ${workspaceId} is not available for Project ${projectId}.`, recoveryAction: "verify the Workspace identifier within the requested Project without probing undiscoverable resources", receipt: `workspace=${workspaceId}; project=${projectId}; operation=workspace.inspect; discoverable=false` });
-      return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", ...summary, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=workspace.inspect; workspace=${workspaceId}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+    if (projectId && !disclosure.project(projectId)) this.authorityReadNotFound();
+    if (body.workspaceId !== undefined) {
+      const result = disclosure.workspace(coordinatorString(body, "workspaceId"));
+      if (!result || (projectId && result.workspace.projectId !== projectId)) this.authorityReadNotFound();
+      return this.authorityReadResponse(session, result, "workspace.inspect");
     }
-    const workspaceIds = Object.keys(snapshot.workspaces).filter((id) => {
-      const workspace = snapshot.workspaces[id];
-      return workspace !== undefined && (projectId === undefined || workspace.projectId === projectId) && this.requireIdentity().activeCapabilitiesForPrincipal({ principalId: session.principalId, resource: { realmId: this.requireIdentity().realm.id, projectId: workspace.projectId, workspaceId: workspace.id } }).includes("workspace.inspect");
-    }).sort();
-    const workspaces = workspaceIds.map((id) => this.authorityWorkspaceSummary(snapshot, id));
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", workspaces, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=workspace.list; workspaceCount=${workspaces.length}; ordering=workspace-id-code-unit-ascending;${projectId ? ` project=${projectId};` : ""} readOnly=true; credentialFree=true; canonicalWrite=false` });
+    return this.authorityReadResponse(session, { workspaces: disclosure.workspaces(projectId) }, "workspace.list");
   }
-
   private async authorityChanges(body: CoordinatorRequestBody): Promise<Response> {
-    const session = this.authorityHumanSession(coordinatorString(body, "sessionId"));
+    const { session, disclosure } = await this.authorityReadContext(body);
     const projectId = body.projectId === undefined ? undefined : coordinatorString(body, "projectId");
     const workspaceId = body.workspaceId === undefined ? undefined : coordinatorString(body, "workspaceId");
-    const changeId = body.changeId === undefined ? undefined : coordinatorString(body, "changeId");
-    const snapshot = await this.authoritySnapshot();
-    if (projectId !== undefined && !snapshot.projects[projectId]) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${projectId} is not available in this Realm.`, recoveryAction: "verify the Project identifier without probing undiscoverable resources", receipt: `project=${projectId}; operation=change.list; discoverable=false` });
-    if (workspaceId !== undefined && !snapshot.workspaces[workspaceId]) throw new AuthorityPlaneError({ code: "not_found", message: `Workspace ${workspaceId} is not available in this Realm.`, recoveryAction: "verify the Workspace identifier without probing undiscoverable resources", receipt: `workspace=${workspaceId}; operation=change.list; discoverable=false` });
-    if (changeId !== undefined) {
-      const summary = this.authorityChangeSummary(snapshot, changeId);
-      this.authorityCapabilitySession(session.sessionId, "change.inspect", { realmId: this.requireIdentity().realm.id, projectId: summary.change.projectId, ...(summary.change.workspaceId ? { workspaceId: summary.change.workspaceId } : {}), changeId });
-      if (projectId !== undefined && summary.change.projectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Change ${changeId} is not available for Project ${projectId}.`, recoveryAction: "verify the Change identifier within the requested Project without probing undiscoverable resources", receipt: `change=${changeId}; project=${projectId}; operation=change.inspect; discoverable=false` });
-      if (workspaceId !== undefined && summary.change.workspaceId !== workspaceId) throw new AuthorityPlaneError({ code: "not_found", message: `Change ${changeId} is not available for Workspace ${workspaceId}.`, recoveryAction: "verify the Change identifier within the requested Workspace without probing undiscoverable resources", receipt: `change=${changeId}; workspace=${workspaceId}; operation=change.inspect; discoverable=false` });
-      return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", ...summary, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=change.inspect; change=${changeId}; revisionCount=${summary.revisions.length}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+    if ((projectId && !disclosure.project(projectId)) || (workspaceId && !disclosure.workspace(workspaceId))) this.authorityReadNotFound();
+    if (body.changeId !== undefined) {
+      const result = disclosure.change(coordinatorString(body, "changeId"));
+      if (!result || (projectId && result.change.projectId !== projectId) || (workspaceId && result.change.workspaceId !== workspaceId)) this.authorityReadNotFound();
+      return this.authorityReadResponse(session, result, "change.inspect");
     }
-    const changeIds = Object.keys(snapshot.changes)
-      .filter((id) => {
-        const change = snapshot.changes[id];
-        return change !== undefined && (projectId === undefined || change.projectId === projectId) && (workspaceId === undefined || change.workspaceId === workspaceId) && this.requireIdentity().activeCapabilitiesForPrincipal({ principalId: session.principalId, resource: { realmId: this.requireIdentity().realm.id, projectId: change.projectId, ...(change.workspaceId ? { workspaceId: change.workspaceId } : {}), changeId: change.id } }).includes("change.inspect");
-      })
-      .sort();
-    const changes = changeIds.map((id) => {
-      const summary = this.authorityChangeSummary(snapshot, id);
-      return { change: summary.change, project: summary.project, revisionCount: summary.revisions.length };
-    });
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", changes, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=change.list; changeCount=${changes.length}; ordering=change-id-code-unit-ascending;${projectId ? ` project=${projectId};` : ""}${workspaceId ? ` workspace=${workspaceId};` : ""} readOnly=true; credentialFree=true; canonicalWrite=false` });
+    const changes = disclosure.changes(projectId, workspaceId).map(({ change, project, revisions }) => ({ change, project, revisionCount: revisions.length }));
+    return this.authorityReadResponse(session, { changes }, "change.list");
   }
-
   private async authorityIntents(body: CoordinatorRequestBody): Promise<Response> {
-    const session = this.authorityHumanSession(coordinatorString(body, "sessionId"));
+    const { session, disclosure } = await this.authorityReadContext(body);
     const projectId = body.projectId === undefined ? undefined : coordinatorString(body, "projectId");
-    const intentId = body.intentId === undefined ? undefined : coordinatorString(body, "intentId");
-    const snapshot = await this.authoritySnapshot();
-    if (projectId !== undefined && !snapshot.projects[projectId]) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${projectId} is not available in this Realm.`, recoveryAction: "verify the Project identifier without probing undiscoverable resources", receipt: `project=${projectId}; operation=intent.list; discoverable=false` });
-    if (intentId !== undefined) {
-      const summary = this.authorityIntentSummary(snapshot, intentId);
-      this.authorityCapabilitySession(session.sessionId, "intent.inspect", { realmId: this.requireIdentity().realm.id, projectId: summary.intent.projectId });
-      if (projectId !== undefined && summary.intent.projectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Intent ${intentId} is not available for Project ${projectId}.`, recoveryAction: "verify the Intent identifier within the requested Project", receipt: `intent=${intentId}; project=${projectId}; operation=intent.inspect; discoverable=false` });
-      return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", ...summary, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=intent.inspect; intent=${intentId}; commentCount=${summary.comments.length}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+    if (projectId && !disclosure.project(projectId)) this.authorityReadNotFound();
+    if (body.intentId !== undefined) {
+      const result = disclosure.intent(coordinatorString(body, "intentId"));
+      if (!result || (projectId && result.intent.projectId !== projectId)) this.authorityReadNotFound();
+      return this.authorityReadResponse(session, result, "intent.inspect");
     }
-    const intentIds = Object.keys(snapshot.intents).filter((id) => {
-      const intent = snapshot.intents[id];
-      return intent !== undefined && (projectId === undefined || intent.projectId === projectId) && this.requireIdentity().activeCapabilitiesForPrincipal({ principalId: session.principalId, resource: { realmId: this.requireIdentity().realm.id, projectId: intent.projectId } }).includes("intent.inspect");
-    }).sort();
-    const intents = intentIds.map((id) => {
-      const summary = this.authorityIntentSummary(snapshot, id);
-      return { intent: summary.intent, project: summary.project, commentCount: summary.comments.length };
-    });
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", intents, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=intent.list; intentCount=${intents.length}; ordering=intent-id-code-unit-ascending;${projectId ? ` project=${projectId};` : ""} readOnly=true; credentialFree=true; canonicalWrite=false` });
+    const intents = disclosure.intents(projectId).map(({ intent, comments, project }) => ({ intent, project, commentCount: comments.length }));
+    return this.authorityReadResponse(session, { intents }, "intent.list");
   }
-
-  private authorityPullRequestSummary(snapshot: AuthorityPlaneSnapshot, pullRequestId: string) {
-    const pullRequest = snapshot.pullRequests[pullRequestId];
-    if (!pullRequest) throw new AuthorityPlaneError({ code: "not_found", message: `Pull Request ${pullRequestId} is not available in this Realm.`, recoveryAction: "verify the Pull Request identifier without probing undiscoverable resources", receipt: `pullRequest=${pullRequestId}; operation=pullRequest.inspect; discoverable=false` });
-    const project = snapshot.projects[pullRequest.projectId];
-    const change = snapshot.changes[pullRequest.changeId];
-    if (!project || !change || change.projectId !== pullRequest.projectId) throw new AuthorityPlaneError({ code: "indeterminate", message: `Pull Request ${pullRequestId} has incomplete Project or Change lineage.`, recoveryAction: "reconcile the Pull Request snapshot before exposing its compatibility projection", receipt: `pullRequest=${pullRequestId}; project=${pullRequest.projectId}; change=${pullRequest.changeId}; lineage=incomplete` });
-    const revisions = pullRequest.revisionIds.map((revisionId) => snapshot.changeRevisions[revisionId]).filter((revision): revision is NonNullable<typeof revision> => revision !== undefined).map((revision) => ({ id: revision.id, sequence: revision.sequence, projectRevisionId: revision.projectRevisionId, kind: revision.kind }));
-    return { pullRequest, change: { protocol: change.protocol, id: change.id, projectId: change.projectId, intentId: change.intentId, status: change.status, latestRevisionId: change.latestRevisionId }, project: { protocol: project.protocol, id: project.id, name: project.name, referenceType: project.referenceType }, revisions };
-  }
-
   private async authorityPullRequests(body: CoordinatorRequestBody): Promise<Response> {
-    const session = this.authorityHumanSession(coordinatorString(body, "sessionId"));
+    const { session, disclosure } = await this.authorityReadContext(body);
     const projectId = body.projectId === undefined ? undefined : coordinatorString(body, "projectId");
-    const pullRequestId = body.pullRequestId === undefined ? undefined : coordinatorString(body, "pullRequestId");
-    const snapshot = await this.authoritySnapshot();
-    if (projectId !== undefined && !snapshot.projects[projectId]) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${projectId} is not available in this Realm.`, recoveryAction: "verify the Project identifier without probing undiscoverable resources", receipt: `project=${projectId}; operation=pullRequest.list; discoverable=false` });
-    if (pullRequestId !== undefined) {
-      const summary = this.authorityPullRequestSummary(snapshot, pullRequestId);
-      this.authorityCapabilitySession(session.sessionId, "project.inspect", { realmId: this.requireIdentity().realm.id, projectId: summary.pullRequest.projectId });
-      if (projectId !== undefined && summary.pullRequest.projectId !== projectId) throw new AuthorityPlaneError({ code: "not_found", message: `Pull Request ${pullRequestId} is not available for Project ${projectId}.`, recoveryAction: "verify the Pull Request identifier within the requested Project", receipt: `pullRequest=${pullRequestId}; project=${projectId}; operation=pullRequest.inspect; discoverable=false` });
-      return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", ...summary, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=pullRequest.inspect; pullRequest=${pullRequestId}; revisionCount=${summary.revisions.length}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+    if (projectId && !disclosure.project(projectId)) this.authorityReadNotFound();
+    if (body.pullRequestId !== undefined) {
+      const result = disclosure.pullRequest(coordinatorString(body, "pullRequestId"));
+      if (!result || (projectId && result.pullRequest.projectId !== projectId)) this.authorityReadNotFound();
+      return this.authorityReadResponse(session, result, "pullRequest.inspect");
     }
-    const pullRequestIds = Object.keys(snapshot.pullRequests).filter((id) => {
-      const pullRequest = snapshot.pullRequests[id];
-      return pullRequest !== undefined && (projectId === undefined || pullRequest.projectId === projectId) && this.requireIdentity().activeCapabilitiesForPrincipal({ principalId: session.principalId, resource: { realmId: this.requireIdentity().realm.id, projectId: pullRequest.projectId } }).includes("project.inspect");
-    }).sort();
-    const pullRequests = pullRequestIds.map((id) => {
-      const summary = this.authorityPullRequestSummary(snapshot, id);
-      return { pullRequest: summary.pullRequest, change: summary.change, project: summary.project, revisionCount: summary.revisions.length };
-    });
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", pullRequests, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=pullRequest.list; pullRequestCount=${pullRequests.length}; ordering=pull-request-id-code-unit-ascending;${projectId ? ` project=${projectId};` : ""} readOnly=true; credentialFree=true; canonicalWrite=false` });
+    const pullRequests = disclosure.pullRequests(projectId).map(({ pullRequest, change, project, revisions }) => ({ pullRequest, change, project, revisionCount: revisions.length }));
+    return this.authorityReadResponse(session, { pullRequests }, "pullRequest.list");
   }
-
   private async authorityRun(body: CoordinatorRequestBody): Promise<Response> {
-    const runId = coordinatorString(body, "runId");
-    const snapshot = await this.authoritySnapshot();
-    const run = snapshot.runs[runId];
-    if (!run) throw new AuthorityPlaneError({ code: "not_found", message: `Run ${runId} is not available in this Realm.`, recoveryAction: "verify the Run identifier without probing undiscoverable resources", receipt: `run=${runId}; operation=run.inspect; discoverable=false` });
-    const projectId = snapshot.projectRevisions[run.projectRevisionId]?.projectId;
-    if (!projectId) throw new AuthorityPlaneError({ code: "indeterminate", message: `Run ${runId} has incomplete Project lineage.`, recoveryAction: "reconcile the Run Project Revision before exposing its status", receipt: `run=${runId}; project=missing; operation=run.inspect` });
-    const changeId = run.changeRevisionId ? snapshot.changeRevisions[run.changeRevisionId]?.changeId : undefined;
-    const session = this.authorityCapabilitySession(coordinatorString(body, "sessionId"), "evidence.read", { realmId: this.requireIdentity().realm.id, projectId, ...(run.workspaceId ? { workspaceId: run.workspaceId } : {}), ...(changeId ? { changeId } : {}) });
-    const safeRun = {
-      protocol: run.protocol,
-      id: run.id,
-      actionId: run.actionId,
-      projectRevisionId: run.projectRevisionId,
-      projectViewId: run.projectViewId,
-      runnerId: run.runnerId,
-      status: run.status,
-      ...(run.attemptId ? { attemptId: run.attemptId } : {}),
-      ...(run.verifierId ? { verifierId: run.verifierId } : {}),
-      ...(run.actionContractDigest ? { actionContractDigest: run.actionContractDigest } : {}),
-      ...(run.verifierContractDigest ? { verifierContractDigest: run.verifierContractDigest } : {}),
-      ...(run.changeRevisionId ? { changeRevisionId: run.changeRevisionId } : {}),
-      ...(run.workspaceId ? { workspaceId: run.workspaceId } : {}),
-      ...(run.outputDigest ? { outputDigest: run.outputDigest } : {}),
-      ...(run.inputDigests ? { inputDigests: [...run.inputDigests] } : {}),
-      ...(run.outputDigests ? { outputDigests: [...run.outputDigests] } : {}),
-    };
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", run: safeRun, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=run.inspect; run=${run.id}; readOnly=true; completion=runner-only; credentialFree=true; canonicalWrite=false` });
+    const { session, disclosure } = await this.authorityReadContext(body);
+    const run = disclosure.run(coordinatorString(body, "runId"));
+    if (!run) this.authorityReadNotFound();
+    return this.authorityReadResponse(session, { run }, "run.inspect");
   }
-
+  private async authorityRevision(body: CoordinatorRequestBody): Promise<Response> {
+    const { session, disclosure } = await this.authorityReadContext(body);
+    const review = disclosure.revisionReview(coordinatorString(body, "changeRevisionId"));
+    if (!review) this.authorityReadNotFound();
+    return this.authorityReadResponse(session, review, "change.revision.inspect");
+  }
   private async authorityMirrors(body: CoordinatorRequestBody): Promise<Response> {
-    const session = this.authorityHumanSession(coordinatorString(body, "sessionId"));
+    const { session, disclosure } = await this.authorityReadContext(body);
     const projectId = body.projectId === undefined ? undefined : coordinatorString(body, "projectId");
-    const mirrorId = body.mirrorId === undefined ? undefined : coordinatorString(body, "mirrorId");
-    const snapshot = await this.authoritySnapshot();
-    if (projectId !== undefined && !snapshot.projects[projectId]) throw new AuthorityPlaneError({ code: "not_found", message: `Project ${projectId} is not available in this Realm.`, recoveryAction: "verify the Project identifier without probing undiscoverable resources", receipt: `project=${projectId}; operation=mirror.list; discoverable=false` });
-    if (mirrorId !== undefined) {
-      const mirror = snapshot.mirrors[mirrorId];
-      if (!mirror || (projectId !== undefined && mirror.projectId !== projectId)) throw new AuthorityPlaneError({ code: "not_found", message: `Repository Mirror ${mirrorId} is not available for this Project.`, recoveryAction: "verify the Mirror identifier within the requested Project without probing undiscoverable resources", receipt: `mirror=${mirrorId}; project=${projectId ?? "not-supplied"}; operation=mirror.inspect; discoverable=false` });
-      this.authorityCapabilitySession(session.sessionId, "project.inspect", { realmId: this.requireIdentity().realm.id, projectId: mirror.projectId });
-      const operation = mirror.lastOperationId ? snapshot.mirrorOperations[mirror.lastOperationId] : undefined;
-      const checkpoint = mirror.checkpointId ? snapshot.mirrorCheckpoints[mirror.checkpointId] : undefined;
-      const proposals = Object.values(snapshot.externalProposals).filter((proposal) => proposal.mirrorId === mirror.id).map((proposal) => ({ ...proposal, observedHeadCommits: [...proposal.observedHeadCommits], changeRevisionIds: [...proposal.changeRevisionIds] }));
-      const deliveries = Object.values(snapshot.mirrorDeliveries).filter((delivery) => delivery.mirrorId === mirror.id).map((delivery) => ({ ...delivery }));
-      return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", mirror: { ...mirror, refMappings: mirror.refMappings.map((mapping) => ({ ...mapping })), canonicalRefs: mirror.canonicalRefs.map((ref) => ({ ...ref })), remoteRefs: mirror.remoteRefs.map((ref) => ({ ...ref })), pendingInboundChangeIds: [...mirror.pendingInboundChangeIds] }, ...(operation ? { operation } : {}), ...(checkpoint ? { checkpoint } : {}), proposals, deliveries, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=mirror.inspect; mirror=${mirror.id}; proposals=${proposals.length}; deliveries=${deliveries.length}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+    if (projectId && !disclosure.project(projectId)) this.authorityReadNotFound();
+    if (body.mirrorId !== undefined) {
+      const id = coordinatorString(body, "mirrorId");
+      const mirror = disclosure.mirror(id);
+      if (!mirror || (projectId && mirror.projectId !== projectId)) this.authorityReadNotFound();
+      return this.authorityReadResponse(session, { mirror, proposals: [], deliveries: [] }, "mirror.inspect");
     }
-    const mirrors = Object.values(snapshot.mirrors).filter((mirror) => (projectId === undefined || mirror.projectId === projectId) && this.requireIdentity().activeCapabilitiesForPrincipal({ principalId: session.principalId, resource: { realmId: this.requireIdentity().realm.id, projectId: mirror.projectId } }).includes("project.inspect")).sort((left, right) => left.id.localeCompare(right.id)).map((mirror) => ({ id: mirror.id, projectId: mirror.projectId, sourceSpaceId: mirror.sourceSpaceId, provider: mirror.provider, remoteRepository: mirror.remoteRepository, disclosure: mirror.disclosure, state: mirror.state, canonicalProjectRevisionId: mirror.canonicalProjectRevisionId, remoteGeneration: mirror.remoteGeneration, pendingInboundChangeIds: [...mirror.pendingInboundChangeIds], ...(mirror.lastOperationId ? { lastOperationId: mirror.lastOperationId } : {}), ...(mirror.checkpointId ? { checkpointId: mirror.checkpointId } : {}) }));
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "ready", mirrors, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: `authority=coordinator; operation=mirror.list; mirrorCount=${mirrors.length}; readOnly=true; credentialFree=true; canonicalWrite=false` });
+    return this.authorityReadResponse(session, { mirrors: disclosure.mirrors(projectId) }, "mirror.list");
   }
 
   private async authorityMirrorProducerContext(body: CoordinatorRequestBody): Promise<Response> {
@@ -1432,47 +1363,14 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   private async authorityPromotionStatus(body: CoordinatorRequestBody): Promise<Response> {
     const promotionId = coordinatorString(body, "promotionId");
     const snapshot = await this.authoritySnapshot();
-    const promotion = snapshot.promotions[promotionId];
-    if (!promotion) throw new AuthorityPlaneError({ code: "not_found", message: `Promotion ${promotionId} is not available in this Realm.`, recoveryAction: "verify the Promotion identifier without probing undiscoverable resources", receipt: `promotion=${promotionId}; operation=promotion.status; discoverable=false` });
-    const target = snapshot.targets[promotion.targetId];
-    const release = snapshot.releases[promotion.releaseId];
-    if (!target || !release) throw new AuthorityPlaneError({ code: "indeterminate", message: `Promotion ${promotionId} has incomplete Target or Release lineage.`, recoveryAction: "reconcile the Authority snapshot before exposing Promotion status", receipt: `promotion=${promotionId}; target=${promotion.targetId}; release=${promotion.releaseId}; operation=promotion.status; lineage=incomplete` });
-    const session = this.authorityCapabilitySession(coordinatorString(body, "sessionId"), "target.read", { realmId: this.requireIdentity().realm.id, projectId: promotion.projectId, targetId: target.id });
-    const safePromotion = {
-      protocol: promotion.protocol,
-      id: promotion.id,
-      projectId: promotion.projectId,
-      targetId: promotion.targetId,
-      releaseId: promotion.releaseId,
-      releaseDigest: promotion.releaseDigest,
-      previousReleaseId: promotion.previousReleaseId,
-      expectedCurrentReleaseId: promotion.expectedCurrentReleaseId,
-      state: promotion.state,
-      attempt: promotion.attempt,
-      kind: promotion.kind,
-      ...(promotion.previewId ? { previewId: promotion.previewId } : {}),
-      ...(promotion.deploymentId ? { deploymentId: promotion.deploymentId } : {}),
-      ...(promotion.providerOperationId ? { providerOperationId: promotion.providerOperationId } : {}),
-      ...(promotion.rollbackDeploymentId ? { rollbackDeploymentId: promotion.rollbackDeploymentId } : {}),
-      ...(promotion.rollbackProviderOperationId ? { rollbackProviderOperationId: promotion.rollbackProviderOperationId } : {}),
-      ...(promotion.health ? { health: promotion.health } : {}),
-      ...(promotion.rollbackHealth ? { rollbackHealth: promotion.rollbackHealth } : {}),
-      ...(promotion.healthFailure ? { healthFailure: promotion.healthFailure } : {}),
-      ...(promotion.recoveryAction ? { recoveryAction: promotion.recoveryAction } : {}),
-      ...(promotion.executionIdempotencyKey ? { executionIdempotencyKey: promotion.executionIdempotencyKey } : {}),
-      ...(promotion.reconciliationCheckpoint ? { reconciliationCheckpoint: promotion.reconciliationCheckpoint } : {}),
-    };
-    return coordinatorJson({
-      protocol: AUTHORITY_PLANE_PROTOCOL,
-      status: "ready",
-      version: snapshot.version,
-      promotion: safePromotion,
-      target: { protocol: target.protocol, id: target.id, projectId: target.projectId, name: target.name, adapterId: target.adapterId, state: target.state, currentReleaseId: target.currentReleaseId ?? null, releaseHistory: [...(target.releaseHistory ?? [])], ...(target.lastPromotionId ? { lastPromotionId: target.lastPromotionId } : {}), ...(target.deploymentProfile ? { deploymentProfile: target.deploymentProfile } : {}) },
-      release: { protocol: release.protocol, id: release.id, projectRevisionId: release.projectRevisionId, status: release.status },
-      ...(promotion.reconciliationCheckpoint ? { checkpoint: promotion.reconciliationCheckpoint } : {}),
-      session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch },
-      receipt: `authority=coordinator; operation=promotion.status; promotion=${promotion.id}; state=${promotion.state}; readOnly=true; credentialFree=true; canonicalWrite=false`,
-    });
+    const session = this.authorityHumanSession(coordinatorString(body, "sessionId"));
+    const disclosure = this.authorityDisclosure(snapshot, session);
+    const promotion = disclosure.promotion(promotionId);
+    if (!promotion) this.authorityReadNotFound();
+    const target = disclosure.target(promotion.targetId);
+    const release = disclosure.release(promotion.releaseId);
+    if (!target || !release) this.authorityReadNotFound();
+    return this.authorityReadResponse(session, { promotion, target, release }, "promotion.status");
   }
 
   /**
@@ -1498,7 +1396,8 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const handoffValue = body.handoff;
     const handoffCredentialFinding = scanCredentialMaterial(handoffValue, "mirrorHandoff");
     if (handoffCredentialFinding) throw new AuthorityPlaneError({ code: "invalid_request", message: "The signed Mirror handoff contains credential material.", recoveryAction: "remove provider credentials from the handoff and submit only typed identities, digests, and receipts", receipt: `mirrorIngestion=credential-material; field=${handoffCredentialFinding.path}; providerInvocation=false; transition=not-applied` });
-    const candidateMirrorId = handoffValue !== null && typeof handoffValue === "object" && !Array.isArray(handoffValue) && typeof (handoffValue as Record<string, unknown>).mirrorId === "string" ? (handoffValue as Record<string, unknown>).mirrorId.trim() : "";
+    const candidateMirrorValue = handoffValue !== null && typeof handoffValue === "object" && !Array.isArray(handoffValue) ? (handoffValue as Record<string, unknown>).mirrorId : undefined;
+    const candidateMirrorId = typeof candidateMirrorValue === "string" ? candidateMirrorValue.trim() : "";
     const current = await this.authoritySnapshot();
     const mirror = candidateMirrorId ? current.mirrors[candidateMirrorId] : undefined;
     if (!mirror) throw new AuthorityPlaneError({ code: "not_found", message: "The signed Mirror handoff names an unavailable Mirror.", recoveryAction: "configure the Mirror in this Realm and request a fresh signed handoff", receipt: `mirror=${candidateMirrorId || "missing"}; mirrorIngestion=not-found; providerInvocation=false; transition=not-applied` });
@@ -1556,6 +1455,86 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     });
   }
 
+  private async authorityRunDetails(body: CoordinatorRequestBody): Promise<Response> {
+    const sessionId = coordinatorString(body, "sessionId");
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      try {
+        const session = this.authorityHumanSession(sessionId); const snapshot = await this.authoritySnapshot();
+        const value = await acceptedOwnerRunDetail(snapshot, this.authorityDisclosure(snapshot, session), coordinatorString(body, "runId"));
+        const current = this.authorityDisclosure(snapshot, this.authorityHumanSession(sessionId));
+        if (!value || !current.ownerDetails() || !current.run(coordinatorString(body, "runId"))) this.authorityReadNotFound();
+        // Typed identifiers/digests are still caller-controlled strings. A
+        // signed alias must not turn a credential-free DTO into a Session leak.
+        const identity = this.requireIdentity().getRecoverySnapshot();
+        const protectedHandles = [...Object.keys(identity.sessions), ...Object.keys(identity.grants),
+          ...Object.keys(identity.passkeys),
+          ...Object.values(snapshot.runnerAttempts).flatMap(attempt => attempt.jobCredentialDigest ? [attempt.jobCredentialDigest] : [])];
+        if (scanCredentialMaterial(value, "runDetail") || this.requireIdentity().containsKnownCredentialMaterial(value)
+          || containsKnownTextMaterial(value, text => protectedHandles.some(handle => text.includes(handle)))) this.authorityReadNotFound();
+        return coordinatorJson(value);
+      } catch (error) {
+        if (!(error instanceof RealmIdentityError) && !(error instanceof AuthorityPlaneError && error.code === "not_found")) return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "detail_unavailable", recoveryAction: "ask the Realm operator to restore detail verification or storage, then retry", receipt: "runDetail=unavailable; details=not-disclosed" }, 503);
+        const safe = disclosedCommandFailure();
+        return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: safe.code, message: safe.message, recoveryAction: "use a currently authorized accepted Run detail", receipt: "runDetail=unavailable; discoverable=false; rawDetails=not-disclosed" }, 404);
+      }
+    });
+  }
+
+  private async authorityViewCommand(body: CoordinatorRequestBody): Promise<Response> {
+    await this.requireAuthorityActive();
+    const authenticated = this.authorityHumanSession(coordinatorString(body, "sessionId"));
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      const current = await this.authoritySnapshot();
+      const identity = this.requireIdentity();
+      const before = identity.getRecoverySnapshot();
+      const rollback = identity.captureOperationalRollback();
+      try {
+        return await this.ctx.storage.transaction(async () => {
+          const session = identity.validateSession(authenticated.sessionId);
+          const prepared = prepareDisclosedCommand({ snapshot: current, disclosure: this.authorityDisclosure(current, authenticated), body, session: authenticated,
+            actorPrincipal: actorId => before.actors[actorId]?.principalId });
+          const resource = { ...prepared.resource, ...(prepared.sourceSpaceIds.length === 1 ? { sourceSpaceId: prepared.sourceSpaceIds[0]! } : {}) };
+          const effectsValue = prepared.command.command === "revision.publish" ? prepared.command.payload.declaredEffects ?? [] : [];
+          if (!Array.isArray(effectsValue) || effectsValue.some(value => typeof value !== "string" || !value.trim())) disclosedCommandError("invalid_request");
+          const issued = identity.createOwnerTaskGrant({ sessionId: session.id, purpose: "Authenticated disclosed Authority command", resource,
+            sourceSpaceIds: prepared.sourceSpaceIds, actions: ["source.read", prepared.capability], effects: effectsValue as string[], expiresAt: session.expiresAt });
+          const authorize = () => {
+            for (const sourceSpaceId of prepared.sourceSpaceIds) for (const capability of ["source.read", prepared.capability] as const) identity.authorize({
+              operation: prepared.command.command, capability, principalId: session.principalId, actorId: session.actorId, clientId: session.clientId,
+              sessionId: session.id, taskId: issued.task.id, grantId: issued.grant.id, resource: { ...prepared.resource, sourceSpaceId }, sourceSpaceId, protected: true,
+            });
+          };
+          authorize();
+          if (scanCredentialMaterial(body, "viewCommand") || identity.containsKnownCredentialMaterial(body)) disclosedCommandError("invalid_request");
+          if (prepared.requestConflict) disclosedCommandError("conflict");
+          let command = prepared.command;
+          if (!prepared.replay && command.command === "run.request") command = { ...command, payload: { ...command.payload, policyVersion: identity.realm.policyVersion, capabilityGrantId: issued.grant.id } };
+          if (!prepared.replay && command.command === "revision.publish") command = await this.prepareHostedRevision(current, command);
+          if (scanCredentialMaterial(command, "preparedCommand") || identity.containsKnownCredentialMaterial(command)) disclosedCommandError("invalid_request");
+          authorize();
+          const coordinator = new AuthorityPlaneCoordinator(current);
+          const accepted = coordinator.execute(command, { ...authenticated, taskId: issued.task.id, capabilityGrantId: issued.grant.id });
+          const next = coordinator.snapshot();
+          const response = disclosedCommandResult(this.authorityDisclosure(next, authenticated), { ...prepared, command }, accepted);
+          if (prepared.replay) rollback();
+          else {
+            await this.persistAuthoritySnapshot(current, next);
+            await this.persistIdentity();
+          }
+          return coordinatorJson(response);
+        });
+      } catch (error) {
+        rollback();
+        const code = error instanceof AuthorityPlaneError && error.code === "invalid_request" ? "invalid_request" : error instanceof AuthorityPlaneError && (error.code === "conflict" || error.code === "idempotency_conflict") ? "conflict" : error instanceof RealmIdentityError || error instanceof AuthorityPlaneError && error.code === "not_found" ? "not_found" : "command_unavailable";
+        // Return expected denials inside blockConcurrencyWhile. Throwing out of
+        // the callback breaks the Durable Object instead of returning a denial.
+        if (code === "command_unavailable") return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, recoveryAction: "ask the Realm operator to restore repository observation or storage before retrying the same disclosed command", receipt: "viewCommand=unavailable; transition=not-applied; details=not-disclosed; canonicalWrite=false" }, 503);
+        const safe = disclosedCommandFailure(code);
+        return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, message: safe.message, recoveryAction: safe.recoveryAction, receipt: safe.receipt }, code === "not_found" ? 404 : code === "conflict" ? 409 : 422);
+      }
+    });
+  }
+
   private async authorityCommand(body: CoordinatorRequestBody): Promise<Response> {
     await this.requireAuthorityActive();
     const command = coordinatorString(body, "command") as AuthorityCommandName;
@@ -1569,6 +1548,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       ...(typeof payloadRecord.projectId === "string" ? { projectId: payloadRecord.projectId } : {}),
       ...(typeof payloadRecord.workspaceId === "string" ? { workspaceId: payloadRecord.workspaceId } : {}),
       ...(typeof payloadRecord.changeId === "string" ? { changeId: payloadRecord.changeId } : {}),
+      ...(typeof payloadRecord.runId === "string" ? { runId: payloadRecord.runId } : {}),
       ...(typeof payloadRecord.pullRequestId === "string" ? { pullRequestId: payloadRecord.pullRequestId } : {}),
       ...(typeof payloadRecord.targetId === "string" ? { targetId: payloadRecord.targetId } : {}),
       ...(typeof payloadRecord.sourceSpaceId === "string" ? { sourceSpaceId: payloadRecord.sourceSpaceId } : {}),
@@ -1577,6 +1557,8 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const session = capability
       ? this.authorityCapabilitySession(coordinatorString(body, "sessionId"), capability, resource, command === "landing.apply" || command === "release.create" || command === "target.configure" || command === "promotion.request")
       : this.authorityOwnerSession(coordinatorString(body, "sessionId"));
+    const rawSourceCommand = ["workspace.create", "change.create", "revision.publish", "run.request"].includes(command);
+    if (rawSourceCommand) this.authorityOwnerSession(coordinatorString(body, "sessionId"));
     const envelope: AuthorityCommand = {
       protocol: body.protocol === undefined ? AUTHORITY_COMMAND_PROTOCOL : coordinatorString(body, "protocol") as typeof AUTHORITY_COMMAND_PROTOCOL,
       command,
@@ -1584,6 +1566,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       ...(typeof body.expectedVersion === "number" ? { expectedVersion: body.expectedVersion } : {}),
       payload: payloadRecord,
     };
+    if (rawSourceCommand) return await this.authorityRawSourceCommand(envelope, session);
     return await this.ctx.blockConcurrencyWhile(async () => {
       const current = await this.authoritySnapshot();
       const coordinator = new AuthorityPlaneCoordinator(current);
@@ -1591,6 +1574,51 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       const result = coordinator.execute(prepared, session);
       await this.persistAuthoritySnapshot(current, coordinator.snapshot());
       return coordinatorJson({ ...result, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, credentialFree: true, canonicalWrite: "landing-only" }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
+    });
+  }
+
+  /** Retained exact-selector compatibility API. Full owner disclosure is not
+   * a write grant: every contributing Source still requires the current kernel. */
+  private async authorityRawSourceCommand(command: AuthorityCommand, session: AuthoritySession): Promise<Response> {
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      const identity = this.requireIdentity(); const rollback = identity.captureOperationalRollback();
+      try {
+        return await this.ctx.storage.transaction(async () => {
+          const current = await this.authoritySnapshot();
+          const owner = this.authorityOwnerSession(session.sessionId);
+          if (!this.authorityDisclosure(current, owner).completeRealm()) disclosedCommandError();
+          const prepared = prepareRawSourceCommand({ snapshot: current, command, session: owner,
+            actorPrincipal: actorId => identity.getRecoverySnapshot().actors[actorId]?.principalId });
+          const { resource, sourceSpaceIds, capability } = prepared;
+          const p = prepared.command.payload;
+          const effects = command.command === "revision.publish" ? p.declaredEffects ?? [] : [];
+          if (!Array.isArray(effects) || effects.some(effect => typeof effect !== "string" || !effect.trim())) disclosedCommandError("invalid_request");
+          const live = identity.validateSession(owner.sessionId);
+          const issued = identity.createOwnerTaskGrant({ sessionId: live.id, purpose: "Authenticated exact-selector Source command", resource: { ...resource, ...(sourceSpaceIds.length === 1 ? { sourceSpaceId: sourceSpaceIds[0]! } : {}) }, sourceSpaceIds, actions: ["source.read", capability], effects: effects as string[], expiresAt: live.expiresAt });
+          const authorize = () => {
+            for (const sourceSpaceId of sourceSpaceIds) for (const action of ["source.read", capability] as const) identity.authorize({ operation: command.command, capability: action, principalId: live.principalId, actorId: live.actorId, clientId: live.clientId, sessionId: live.id, taskId: issued.task.id, grantId: issued.grant.id, resource: { ...resource, sourceSpaceId }, sourceSpaceId, protected: true });
+          };
+          authorize();
+          if (scanCredentialMaterial(command, "sourceCommand") || identity.containsKnownCredentialMaterial(command)) disclosedCommandError("invalid_request");
+          if (prepared.requestConflict) disclosedCommandError("conflict");
+          let acceptedCommand = prepared.command;
+          if (!prepared.replay && acceptedCommand.command === "run.request") acceptedCommand = { ...acceptedCommand, payload: { ...acceptedCommand.payload, policyVersion: identity.realm.policyVersion, capabilityGrantId: issued.grant.id } };
+          if (!prepared.replay && acceptedCommand.command === "revision.publish") acceptedCommand = await this.prepareHostedRevision(current, acceptedCommand);
+          if (scanCredentialMaterial(acceptedCommand, "preparedCommand") || identity.containsKnownCredentialMaterial(acceptedCommand)) disclosedCommandError("invalid_request");
+          authorize();
+          const coordinator = new AuthorityPlaneCoordinator(current);
+          const result = coordinator.execute(acceptedCommand, { ...owner, taskId: issued.task.id, capabilityGrantId: issued.grant.id });
+          if (prepared.replay) rollback();
+          else { await this.persistAuthoritySnapshot(current, coordinator.snapshot()); await this.persistIdentity(); }
+          return coordinatorJson({ ...result, credentialFree: true, canonicalWrite: false }, result.status === "succeeded" ? 200 : 409);
+        });
+      } catch (error) {
+        rollback();
+        const code = error instanceof RealmIdentityError ? "not_found" : error instanceof AuthorityPlaneError && ["not_found", "invalid_request", "conflict", "idempotency_conflict"].includes(error.code) ? error.code === "idempotency_conflict" ? "conflict" : error.code as "not_found" | "invalid_request" | "conflict" : undefined;
+        if (!code) return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "command_unavailable", receipt: "sourceCommand=unavailable; details=not-disclosed; transition=not-applied" }, 503);
+        const safe = disclosedCommandFailure(code);
+        return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, message: safe.message, recoveryAction: safe.recoveryAction, receipt: safe.receipt }, code === "not_found" ? 404 : code === "conflict" ? 409 : 422);
+      }
     });
   }
 
@@ -1631,6 +1659,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return await this.ctx.blockConcurrencyWhile(async () => {
       const current = await this.authoritySnapshot();
       const coordinator = new AuthorityPlaneCoordinator(current);
+      if (this.requireIdentity().containsKnownCredentialMaterial(completionValue)) return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "invalid_request", receipt: "runnerCompletion=not-accepted; details=not-disclosed; credentialMaterialStored=false" }, 422);
       const result = await coordinator.completeRunner(command, session);
       await this.persistAuthoritySnapshot(current, coordinator.snapshot());
       return coordinatorJson({ ...result, provenance: { runnerId, clientId: session.clientId, sessionId: session.sessionId, authorizationEpoch: session.authorizationEpoch }, credentialFree: true, canonicalWrite: false, receipt: `${result.receipt}; authority=runner-completion; runner=${runnerId}; canonicalWrite=false` }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
@@ -1928,6 +1957,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/intents/internal") return await this.authorityIntents(body);
       if (url.pathname === "/authority/pull-requests/internal") return await this.authorityPullRequests(body);
       if (url.pathname === "/authority/runs/internal") return await this.authorityRun(body);
+      if (url.pathname === "/authority/revisions/internal") return await this.authorityRevision(body);
       if (url.pathname === "/authority/mirrors/internal") return await this.authorityMirrors(body);
       if (url.pathname === "/authority/mirror-producer-context/internal") return await this.authorityMirrorProducerContext(body);
       if (url.pathname === "/authority/promotion/execute/internal") return await this.authorityPromotionExecute(body);
@@ -1945,10 +1975,14 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/mirror-ingest/internal") return await this.authorityMirrorIngest(body);
       if (url.pathname === "/authority/qualification/mirror/internal") return await this.authorityQualificationMirror(body);
       if (url.pathname === "/authority/mcp-command/internal") return await this.authorityMcpCommand(body);
+      if (url.pathname === "/authority/mcp-view-command/internal") return await this.authorityMcpViewCommand(body);
+      if (url.pathname === "/authority/mcp-read/internal") return await this.authorityMcpRead(body);
       if (url.pathname === "/authority/runner-profile/internal") return await this.authorityRunnerProfile(body);
       if (url.pathname === "/authority/runner-complete/internal") return await this.authorityRunnerComplete(body);
       if (url.pathname === "/public-gateway/authorize") return await this.publicGatewayAuthorize(body);
       if (url.pathname === "/authority/command/internal") return await this.authorityCommand(body);
+      if (url.pathname === "/authority/view-command/internal") return await this.authorityViewCommand(body);
+      if (url.pathname === "/authority/run-details/internal") return await this.authorityRunDetails(body);
 
       if (url.pathname === "/identity/passkey-challenge/issue") {
         return await this.ctx.blockConcurrencyWhile(async () => {

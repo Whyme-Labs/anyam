@@ -1,3 +1,5 @@
+import type { RunnerJob, RunnerAttempt } from "../kernel/contracts.ts";
+
 /**
  * Portable parts of the Runner Result protocol.
  *
@@ -20,6 +22,35 @@ function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   const record = value as Record<string, unknown>;
   return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
+}
+
+/** Shared credential-free signed context; callers must verify the enrolled
+ * network boundary before issuing or accepting it. */
+export function runnerResultContextClaims(input: { job: RunnerJob; attempt: RunnerAttempt }) {
+  const { job, attempt } = input;
+  return {
+    protocol: "anyam.runner-result-context/v1" as const,
+    replayId: `${job.id}:${attempt.id}`,
+    jobId: job.id,
+    attemptId: attempt.id,
+    runnerId: attempt.runnerId ?? job.currentRunnerId ?? "runner:unassigned",
+    leaseExpiresAt: attempt.leaseExpiresAt,
+    inputManifestDigest: job.inputManifestDigest,
+    sourceSpaceSnapshots: { ...job.sourceSpaceSnapshots },
+    actionId: job.actionId,
+    actionContractDigest: job.actionContractDigest,
+    ...(job.verifierId ? { verifierId: job.verifierId } : {}),
+    ...(job.verifierContractDigest ? { verifierContractDigest: job.verifierContractDigest } : {}),
+    projectRevisionId: job.projectRevisionId,
+    projectViewId: job.projectViewId,
+    ...(job.changeRevisionId ? { changeRevisionId: job.changeRevisionId } : {}),
+    ...(job.workspaceId ? { workspaceId: job.workspaceId } : {}),
+    policyVersion: job.policyVersion,
+    authorizationEpoch: job.authorizationEpoch,
+    capabilityGrantId: job.capabilityGrantId,
+    networkEnforcement: job.networkEnforcement,
+    networkBoundaryReceipt: job.networkBoundaryReceipt,
+  };
 }
 
 export function runnerResultMessage(input: RunnerResultMessageInput): string {

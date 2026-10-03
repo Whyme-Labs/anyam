@@ -1,3 +1,4 @@
+import { parseActionArtifactOutputContract, validateActionArtifactOutputs, ActionArtifactOutputError, type ActionArtifactOutputContract } from "../portability/action-artifact-output.ts";
 import { createHash, createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
 
 import {
@@ -104,6 +105,7 @@ export type RunnerResultContext = {
   sourceSpaceSnapshots: Readonly<Record<string, string>>;
   actionId: string;
   actionContractDigest: string;
+  artifactOutputContract?: ActionArtifactOutputContract;
   verifierId?: string;
   verifierContractDigest?: string;
   projectRevisionId: string;
@@ -340,6 +342,7 @@ function copyProfile(profile: RunnerProfile): RunnerProfile {
 function copyJob(job: RunnerJob): RunnerJob {
   return {
     ...job,
+    ...(job.artifactOutputContract ? { artifactOutputContract: parseActionArtifactOutputContract(job.artifactOutputContract, job.outputPaths) } : {}),
     sourceSpaceSnapshots: { ...job.sourceSpaceSnapshots },
     inputDigests: [...job.inputDigests],
     outputPaths: [...job.outputPaths],
@@ -361,6 +364,7 @@ function copyAttempt(attempt: RunnerAttempt): RunnerAttempt {
 function copyRun(run: Run): Run {
   return {
     ...run,
+    ...(run.artifactOutputContract ? { artifactOutputContract: parseActionArtifactOutputContract(run.artifactOutputContract) } : {}),
     ...(run.inputDigests ? { inputDigests: [...run.inputDigests] } : {}),
     ...(run.outputDigests ? { outputDigests: [...run.outputDigests] } : {}),
     ...(run.effectDigests ? { effectDigests: [...run.effectDigests] } : {}),
@@ -538,6 +542,12 @@ export class ExternalRunnerCoordinator {
     const existingId = this.idempotency.get(input.idempotencyKey);
     const secretUseAliases = unique([...(input.secretUseAliases ?? [])], "secretUseAliases");
     const outputLocations = normalizeOutputLocations(input.outputLocations);
+    let artifactOutputContract: ActionArtifactOutputContract | undefined;
+    try { artifactOutputContract = input.actionInput.action.artifactOutputContract === undefined ? undefined : parseActionArtifactOutputContract(input.actionInput.action.artifactOutputContract, input.actionInput.action.outputPaths); }
+    catch (failure) {
+      if (!(failure instanceof ActionArtifactOutputError)) throw failure;
+      error({ code: "invalid-input", message: failure.message, affectedObject: input.actionInput.action.id, recoveryAction: "declare unique typed paths within the Action output paths", receipt: `artifactOutputContract=${failure.reason}; job=not-created` });
+    }
     const requestDigest = runnerInputManifestDigest({
       actionInput: input.actionInput,
       runnerRequirements: input.runnerRequirements,
@@ -585,6 +595,7 @@ export class ExternalRunnerCoordinator {
       attemptId,
       ...(input.actionInput.verifier ? { verifierId: input.actionInput.verifier.id } : {}),
       actionContractDigest: input.actionInput.action.contractDigest,
+      ...(artifactOutputContract ? { artifactOutputContract } : {}),
       ...(input.actionInput.verifier ? { verifierContractDigest: input.actionInput.verifier.contractDigest } : {}),
       status: "queued",
       outputDigest: undefined,
@@ -607,6 +618,7 @@ export class ExternalRunnerCoordinator {
       runId,
       actionId: input.actionInput.action.id,
       actionContractDigest: input.actionInput.action.contractDigest,
+      ...(artifactOutputContract ? { artifactOutputContract } : {}),
       ...(input.actionInput.verifier ? { verifierId: input.actionInput.verifier.id } : {}),
       ...(input.actionInput.verifier ? { verifierContractDigest: input.actionInput.verifier.contractDigest } : {}),
       projectRevisionId: input.actionInput.projectRevisionId,
@@ -817,6 +829,7 @@ export class ExternalRunnerCoordinator {
       runId: stored.run.id,
       attemptId: attempt.id,
       location: safeLocation(output.location, "runnerOutput.location", "result-output-scope"),
+      ...(output.outputPath === undefined ? {} : { outputPath: output.outputPath }),
       digest: output.digest,
       disclosure: { ...output.disclosure },
       receipt: output.receipt,
@@ -1016,6 +1029,11 @@ export class ExternalRunnerCoordinator {
   }
 
   private validateOutput(job: RunnerJob, attempt: RunnerAttempt, result: RunnerResult): void {
+    try { validateActionArtifactOutputs({ contract: job.artifactOutputContract, declaredPaths: job.outputPaths, status: result.status, outputDigests: result.output.outputDigests, outputs: result.outputs }); }
+    catch (failure) {
+      if (!(failure instanceof ActionArtifactOutputError)) throw failure;
+      error({ code: "result-output-invalid", message: failure.message, affectedObject: job.id, recoveryAction: "return exactly the declared Artifact paths with their matching normalized Action digests", receipt: `artifactOutputContract=${failure.reason}; result=not-accepted` });
+    }
     const expectedPaths = new Set(job.outputPaths);
     const receivedPaths = result.output.outputDigests.map(pathFromDigest);
     if (result.output.status !== result.status) {

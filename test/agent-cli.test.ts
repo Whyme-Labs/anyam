@@ -907,3 +907,12 @@ test("change.inspect summarizes exact local candidate Evidence and exposes unkno
     await rm(join(directory, ".."), { recursive: true, force: true });
   }
 });
+
+test("native Agent validates typed Artifact declarations before starting an Action", async () => {
+  const directory = await projectDirectory();
+  try {
+    await replaceCheckAction(directory, { command: "node -e \"process.exit(0)\"", inputs: ["anyam.json"], outputs: [], artifactOutputContract: { protocol: "anyam.action-artifact-outputs/v1", outputs: [{ path: "dist/undeclared.js", type: "worker.bundle" }] } });
+    const agentManager = manager(directory); await agentManager.startSession({ agent: "codex" });
+    await assert.rejects(agentManager.invokeTool("run.start", { actionId: "action:check" }), (error: unknown) => error instanceof LocalAgentError && error.code === "run.manifest_invalid" && /outside Action outputs/u.test(error.message));
+  } finally { await rm(join(directory, ".."), { recursive: true, force: true }); }
+});

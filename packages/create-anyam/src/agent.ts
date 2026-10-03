@@ -1,3 +1,4 @@
+import { parseActionArtifactOutputContract, ActionArtifactOutputError, type ActionArtifactOutputContract } from "./action-artifact-output.js";
 import { localReviewPacket } from "./review-packet.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { access, lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
@@ -292,6 +293,7 @@ type LocalDeclaredAction = {
   command: string;
   inputGlobs: readonly string[];
   outputPaths: readonly string[];
+  artifactOutputContract?: ActionArtifactOutputContract;
   network: readonly string[];
   resources: Readonly<Record<string, string | number | boolean>>;
   contractDigest: string;
@@ -974,6 +976,13 @@ export class LocalAgentManager {
           network: declaredStringArray(actionValue.network, `modules[${moduleIndex}].actions[${actionIndex}].network`),
           resources: declaredResources(actionValue.resources, `modules[${moduleIndex}].actions[${actionIndex}].resources`),
         };
+        if (actionValue.artifactOutputContract !== undefined) {
+          try { actionWithoutDigest.artifactOutputContract = parseActionArtifactOutputContract(actionValue.artifactOutputContract, actionWithoutDigest.outputPaths); }
+          catch (failure) {
+            if (!(failure instanceof ActionArtifactOutputError)) throw failure;
+            throw new LocalAgentError({ code: "run.manifest_invalid", message: failure.message, affectedObject: actionWithoutDigest.id, recoveryAction: "declare unique typed Artifact paths within the Action outputs", receipt: `artifactOutputContract=${failure.reason}; run=not-started` });
+          }
+        }
         if (actions.some((candidate) => candidate.id === actionWithoutDigest.id)) throw new LocalAgentError({ code: "run.manifest_invalid", message: `Project Manifest declares duplicate Action ${actionWithoutDigest.id}; no run was started.`, affectedObject: actionWithoutDigest.id, recoveryAction: "give every Action a unique id and rerun anyam check", receipt: `action=${actionWithoutDigest.id}; rule=unique-action-id` });
         actions.push({ ...actionWithoutDigest, contractDigest: localActionContractDigest(actionWithoutDigest) });
       }

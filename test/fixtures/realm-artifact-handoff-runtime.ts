@@ -34,12 +34,12 @@ type Persist = (previous: AuthorityPlaneSnapshot, next: AuthorityPlaneSnapshot) 
 /** Node-only bindings and authentication/persistence fixtures. The caller
  * installs constructor shims before importing this module. Actual Realm fetch,
  * Authority proof/closure, custody and gate ordering execute unchanged. */
-export async function createRealmArtifactHandoffFixture({ configured = true, outputs = true, runStatus = "succeeded" }: { configured?: boolean; outputs?: boolean; runStatus?: "succeeded" | "failed" | "indeterminate" } = {}) {
-  const authority = setup(); const runner = makeRunner(authority.input, authority.runId);
+export async function createRealmArtifactHandoffFixture({ configured = true, outputs = true, runStatus = "succeeded", artifactOutputContract, canonical = false }: { artifactOutputContract?: import("../../src/kernel/contracts.ts").Action["artifactOutputContract"]; canonical?: boolean; configured?: boolean; outputs?: boolean; runStatus?: "succeeded" | "failed" | "indeterminate" } = {}) {
+  const authority = setup({ artifactOutputContract, canonical }); const runner = makeRunner(authority.input, authority.runId);
   const result = structuredClone(runner.result);
   result.status = runStatus; result.output.status = runStatus; result.output.exitCode = runStatus === "succeeded" ? 0 : 1;
   result.output.outputDigest = sha256(artifactBytes); result.output.outputDigests = [`dist/result.txt=${sha256(artifactBytes)}`];
-  result.outputs = outputs ? result.outputs.map(output => ({ ...output, digest: sha256(artifactBytes) })) : [];
+  result.outputs = outputs ? result.outputs.map(output => ({ ...output, digest: sha256(artifactBytes), ...(artifactOutputContract ? { outputPath: "dist/result.txt" } : {}) })) : [];
   result.signature = Buffer.from(sign(null, Buffer.from(runnerResultMessage(result)), runner.keys.privateKey)).toString("base64url");
   const completion = runner.runner.submit({ credential: runner.lease.credential, result });
   authority.authority.registerRunnerProfile(runner.profile, runnerSession);

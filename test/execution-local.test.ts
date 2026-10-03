@@ -612,3 +612,25 @@ test("local Worker Artifact digests are raw-byte digests compatible with provide
     await rm(copied.directory, { recursive: true, force: true });
   }
 });
+
+test("explicit typed paths govern local Artifacts independently of module type ordering and cache reuse", async () => {
+  const copied = await copyFixture("worker");
+  try {
+    const value = copied.manifest as { modules: Array<{ artifactTypes: string[]; actions: Array<Record<string, unknown>> }> };
+    value.modules[0]!.artifactTypes = ["worker.text"];
+    value.modules[0]!.actions[1]!.artifactOutputContract = { protocol: "anyam.action-artifact-outputs/v1", outputs: [{ path: "dist/worker.bundle", type: "worker.bundle" }] };
+    const manifest = normalizeProjectManifest(value);
+    const engine = new LocalExecutionEngine({ manifest, context: context(copied.directory, "target:worker") });
+    const first = await engine.runAction({ actionId: "action:build" });
+    assert.equal(first.artifacts[0]!.type, "worker.bundle");
+    assert.equal(first.artifacts[0]!.outputPath, "dist/worker.bundle");
+    assert.deepEqual(first.run.artifactOutputContract, manifest.actions[1]!.artifactOutputContract);
+    first.runnerInput.action.artifactOutputContract!.outputs[0]!.type = "worker.module";
+    first.run.artifactOutputContract!.outputs[0]!.type = "worker.module";
+    const cached = await engine.runAction({ actionId: "action:build" });
+    assert.equal(cached.cacheHit, true);
+    assert.equal(cached.runnerInput.action.artifactOutputContract!.outputs[0]!.type, "worker.bundle");
+    assert.equal(cached.run.artifactOutputContract!.outputs[0]!.type, "worker.bundle");
+    assert.equal(cached.artifacts[0]!.type, "worker.bundle");
+  } finally { await rm(copied.directory, { recursive: true, force: true }); }
+});

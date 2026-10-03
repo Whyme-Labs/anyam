@@ -130,7 +130,7 @@ function signedResult(lease: ReturnType<ExternalRunnerCoordinator["claim"]>, pri
   };
 }
 
-export function setup() {
+export function setup({ artifactOutputContract, canonical = false }: { artifactOutputContract?: import("../src/kernel/contracts.ts").Action["artifactOutputContract"]; canonical?: boolean } = {}) {
   const authority = new AuthorityPlaneCoordinator(emptyAuthorityPlaneSnapshot(realmId));
   authorityCommand(authority, "project.create", "authority:project", {
     projectId,
@@ -147,15 +147,23 @@ export function setup() {
   assert.equal(revision.status, "succeeded");
   const input = actionInput();
   input.projectViewId = actualProjectViewId;
+  if (artifactOutputContract) input.action.artifactOutputContract = structuredClone(artifactOutputContract);
+  if (canonical) {
+    input.projectRevisionId = baseRevisionId;
+    delete input.changeRevisionId;
+    delete input.workspaceId;
+    input.sourceSpaceSnapshots = { [sourceSpaceId]: "snapshot:runner-authority:base" };
+  }
   input.disclosure = { projectionId: actualProjectViewId, classification: "project" };
   const runRequest = authorityCommand(authority, "run.request", "authority:run-request", {
     projectId,
     runId: "run:runner-authority",
     actionId: input.action.id,
-    projectRevisionId: candidateRevisionId,
+    projectRevisionId: input.projectRevisionId,
     projectViewId: actualProjectViewId,
-    changeRevisionId,
-    workspaceId,
+    ...(input.changeRevisionId ? { changeRevisionId: input.changeRevisionId } : {}),
+    ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+    ...(artifactOutputContract ? { artifactOutputContract } : {}),
     verifierId: input.verifier?.id,
     actionContractDigest: input.action.contractDigest,
     verifierContractDigest: input.verifier?.contractDigest,
@@ -170,7 +178,7 @@ export function setup() {
     capabilityGrantId: input.capabilityGrantId,
   });
   assert.equal(runRequest.status, "succeeded");
-  return { authority, input, runId: (runRequest.value.run as { id: string }).id, projectViewId: actualProjectViewId };
+  return { authority, ownerSession, projectId, input, runId: (runRequest.value.run as { id: string }).id, projectViewId: actualProjectViewId };
 }
 
 export function makeRunner(input: NormalizedActionInput, runId: string) {

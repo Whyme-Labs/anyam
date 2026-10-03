@@ -1,3 +1,4 @@
+import { parseActionArtifactOutputContract, validateActionArtifactOutputs, ActionArtifactOutputError } from "../portability/action-artifact-output.ts";
 import { createHash } from "node:crypto";
 import { retainRunnerArtifacts, RunnerArtifactCustodyError, type RunnerArtifactCustody } from "./runner-artifact-custody.ts";
 import type { CollaborationAuditEvent } from "../change-control/collaboration.ts";
@@ -468,10 +469,19 @@ function pathFromDigest(value: string): string | undefined {
   return separator > 0 ? value.slice(0, separator) : undefined;
 }
 
+function actionArtifactContract<T>(operation: () => T): T {
+  try { return operation(); }
+  catch (failure) {
+    if (!(failure instanceof ActionArtifactOutputError)) throw failure;
+    throw new AuthorityPlaneError({ code: "conflict", message: failure.message, recoveryAction: "use the exact declared Artifact contract and matching signed logical paths and digests; no Authority state was changed", receipt: `artifactOutputContract=${failure.reason}; transition=not-applied` });
+  }
+}
+
 function validateRunnerCompletionOutputScope(job: RunnerJob, result: RunnerResult, outputs: readonly RunnerOutputReference[]): void {
   if (result.output.status !== result.status || !sameStrings(result.output.inputDigests, job.inputDigests)) {
     throw new AuthorityPlaneError({ code: "conflict", message: `Runner Result output does not match the immutable Job inputs or status.`, recoveryAction: "return the exact normalized output produced for this Runner Job; no Authority state was changed", receipt: `job=${job.id}; output=status-or-input-mismatch; runnerCompletion=not-applied` });
   }
+  actionArtifactContract(() => validateActionArtifactOutputs({ contract: job.artifactOutputContract, declaredPaths: job.outputPaths, status: result.status, outputDigests: result.output.outputDigests, outputs }));
   const expectedPaths = new Set(job.outputPaths);
   const receivedPaths = result.output.outputDigests.map(pathFromDigest);
   if (result.status === "succeeded" && (receivedPaths.some((path) => path === undefined || !expectedPaths.has(path)) || new Set(receivedPaths).size !== receivedPaths.length || receivedPaths.length !== expectedPaths.size)) {
@@ -910,6 +920,7 @@ export class AuthorityPlaneCoordinator {
     ];
     for (const [field, expected, received] of expectedRunFields) if (expected !== received) throw new AuthorityPlaneError({ code: "conflict", message: `Runner completion ${field} does not match queued Run ${run.id}.`, recoveryAction: "re-run the exact Authority Run request and submit its matching Runner Job; no Authority state was changed", receipt: `run=${run.id}; field=${field}; expected=${String(expected)}; received=${String(received)}; runnerCompletion=not-applied` });
     if (!sameStrings(run.inputDigests ?? [], job.inputDigests) || !sameStrings(run.effectDigests ?? [], job.effectDigests)) throw new AuthorityPlaneError({ code: "conflict", message: `Runner Job inputs or effects do not match queued Run ${run.id}.`, recoveryAction: "submit the result from the immutable input manifest recorded for this Run", receipt: `run=${run.id}; inputOrEffects=not-matched; runnerCompletion=not-applied` });
+    if (stableJson(run.artifactOutputContract) !== stableJson(job.artifactOutputContract)) throw new AuthorityPlaneError({ code: "conflict", message: "Runner Artifact contract differs from the queued Run.", recoveryAction: "submit the Job for the exact Run output declaration; no state was changed", receipt: "artifactOutputContract=queued-run-mismatch; runnerCompletion=not-applied" });
     const context = result.context;
     const expectedContext = runnerResultContextClaims({ job, attempt });
     if (!context || stableJson(context) !== stableJson(expectedContext)) throw new AuthorityPlaneError({ code: "conflict", message: `Runner Result context does not match Attempt ${attempt.id}.`, recoveryAction: "echo the exact signed context issued by the enrolled Runner coordinator; no Authority state was changed", receipt: `job=${job.id}; attempt=${attempt.id}; context=not-matched; runnerCompletion=not-applied` });
@@ -917,8 +928,8 @@ export class AuthorityPlaneCoordinator {
     if (!(await verifyRunnerResultSignature({ publicKey: registeredRunner.publicKey, message, signature: requiredString(result.signature, "completion.result.signature") }))) throw new AuthorityPlaneError({ code: "blocked", message: `Runner ${runnerId} signed Result verification failed.`, recoveryAction: "submit the exact Result signed by the enrolled Runner key before the Attempt lease expires", receipt: `runner=${runnerId}; attempt=${attempt.id}; resultSignature=invalid; runnerCompletion=not-applied` });
     const recomputedDigest = await runnerResultDigest({ jobId: job.id, attemptId: attempt.id, result });
     if (recomputedDigest !== resultDigest || (attempt.resultDigest && attempt.resultDigest !== resultDigest)) throw new AuthorityPlaneError({ code: "conflict", message: `Runner Result digest does not match Attempt ${attempt.id}.`, recoveryAction: "submit the unchanged signed Result returned by the Runner coordinator; no Authority state was changed", receipt: `job=${job.id}; attempt=${attempt.id}; expectedDigest=${attempt.resultDigest ?? recomputedDigest}; receivedDigest=${resultDigest}; runnerCompletion=not-applied` });
-    const signedOutputShape = result.outputs.map((output) => ({ kind: output.kind, location: output.location, digest: output.digest, disclosure: output.disclosure, receipt: output.receipt }));
-    const receivedOutputShape = outputs.map((output) => ({ kind: output.kind, location: output.location, digest: output.digest, disclosure: output.disclosure, receipt: output.receipt }));
+    const signedOutputShape = result.outputs.map((output) => ({ kind: output.kind, location: output.location, ...(output.outputPath === undefined ? {} : { outputPath: output.outputPath }), digest: output.digest, disclosure: output.disclosure, receipt: output.receipt }));
+    const receivedOutputShape = outputs.map((output) => ({ kind: output.kind, location: output.location, ...(output.outputPath === undefined ? {} : { outputPath: output.outputPath }), digest: output.digest, disclosure: output.disclosure, receipt: output.receipt }));
     if (stableJson(signedOutputShape) !== stableJson(receivedOutputShape)) throw new AuthorityPlaneError({ code: "conflict", message: `Runner completion outputs differ from the signed Result envelope.`, recoveryAction: "forward the exact output references returned by the Runner coordinator; no Authority state was changed", receipt: `job=${job.id}; attempt=${attempt.id}; outputs=signed-shape-mismatch; runnerCompletion=not-applied` });
     validateRunnerCompletionOutputScope(job, result, outputs);
     const producingView = next.projectViews[run.projectViewId];
@@ -991,7 +1002,7 @@ export class AuthorityPlaneCoordinator {
     const artifacts: Artifact[] = outputs.filter((output) => output.kind === "artifact").map((output, index) => {
       const id = output.id || `artifact:${attempt.id}:${index + 1}`;
       if (next.artifacts[id]) throw new AuthorityPlaneError({ code: "conflict", message: `Artifact ${id} already exists for Attempt ${attempt.id}.`, recoveryAction: "reuse the original Authority idempotency key or inspect the accepted completion; no state was changed", receipt: `artifact=${id}; attempt=${attempt.id}; runnerCompletion=not-applied` });
-      return { protocol: CONTRACT_VERSIONS.artifact, id, type: "runner.output", digest: output.digest, projectRevisionId: run.projectRevisionId, ...(run.changeRevisionId ? { changeRevisionId: run.changeRevisionId } : {}), runId: run.id, actionId: job.actionId, outputPath: output.location, provenanceDigest: resultDigest, disclosure: { ...output.disclosure } };
+      return { protocol: CONTRACT_VERSIONS.artifact, id, type: job.artifactOutputContract?.outputs.find(entry => entry.path === output.outputPath)?.type ?? "runner.output", digest: output.digest, projectRevisionId: run.projectRevisionId, ...(run.changeRevisionId ? { changeRevisionId: run.changeRevisionId } : {}), runId: run.id, actionId: job.actionId, outputPath: output.outputPath ?? output.location, provenanceDigest: resultDigest, disclosure: { ...output.disclosure } };
     });
     let custodyReceipt = "artifactByteCustody=runner-attested";
     if (artifactCustody) {
@@ -1664,9 +1675,11 @@ export class AuthorityPlaneCoordinator {
         const toolchainDigest = optionalString(payload.toolchainDigest);
         const environmentDigest = optionalString(payload.environmentDigest);
         const targetId = optionalString(payload.targetId);
+        const artifactOutputContract = payload.artifactOutputContract === undefined ? undefined : actionArtifactContract(() => parseActionArtifactOutputContract(payload.artifactOutputContract));
         const run: Run = {
           protocol: CONTRACT_VERSIONS.run,
           id: runId,
+          ...(artifactOutputContract ? { artifactOutputContract } : {}),
           actionId: requiredString(payload.actionId, "actionId"),
           projectRevisionId,
           projectViewId,

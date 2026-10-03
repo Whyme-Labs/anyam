@@ -1,3 +1,4 @@
+import { parseActionArtifactOutputContract } from "../portability/action-artifact-output.ts";
 import type { RunnerJob, RunnerAttempt } from "../kernel/contracts.ts";
 
 /**
@@ -39,6 +40,7 @@ export function runnerResultContextClaims(input: { job: RunnerJob; attempt: Runn
     sourceSpaceSnapshots: { ...job.sourceSpaceSnapshots },
     actionId: job.actionId,
     actionContractDigest: job.actionContractDigest,
+    ...(job.artifactOutputContract ? { artifactOutputContract: parseActionArtifactOutputContract(job.artifactOutputContract, job.outputPaths) } : {}),
     ...(job.verifierId ? { verifierId: job.verifierId } : {}),
     ...(job.verifierContractDigest ? { verifierContractDigest: job.verifierContractDigest } : {}),
     projectRevisionId: job.projectRevisionId,

@@ -15,7 +15,8 @@ import { createHash } from "node:crypto";
 // The already-strict/probed LocalDisclosureRealm fixture seeds auth/Authority;
 // actual workerd, Realm fetch, SQLite and Miniflare R2 bindings execute here.
 // All storage and processes are owned locally; outbound service is denied.
-test("Realm Artifact handoff uses actual local workerd, SQLite and R2 with tamper denial, conditional retention and durable replay", async () => {
+for (const typed of [false, true]) {
+test(`Realm ${typed ? "typed Worker" : "legacy"} Artifact handoff uses actual local workerd, SQLite and R2 with tamper denial, conditional retention and durable replay`, async () => {
   const directory = await mkdtemp(join(tmpdir(), "anyam-realm-artifact-handoff-")); let runtime;
   try {
     const bundle = await build({ entryPoints: ["test/fixtures/authority-disclosure-runtime.ts"], bundle: true, write: false, format: "esm", platform: "browser", target: "es2022", external: ["cloudflare:workers", "node:*"] });
@@ -23,10 +24,11 @@ test("Realm Artifact handoff uses actual local workerd, SQLite and R2 with tampe
     options.telemetry = { enabled: false }; options.resourcePersistencePath = join(directory, "storage");
     runtime = new Miniflare(options); await runtime.ready;
     const source = await runtime.getR2Bucket("ANYAM_RUNNER_OUTPUTS"); const destination = await runtime.getR2Bucket("ANYAM_PROMOTION_ARTIFACTS");
-    const f = setup(); const runner = makeRunner(f.input, f.runId);
+    const artifactOutputContract = typed ? { protocol: "anyam.action-artifact-outputs/v1", outputs: [{ path: "dist/result.txt", type: "worker.bundle" }] } : undefined;
+    const f = setup({ ...(artifactOutputContract ? { artifactOutputContract } : {}), canonical: typed }); const runner = makeRunner(f.input, f.runId);
     const bytes = new TextEncoder().encode("retained by actual local Realm/R2; no process execution claim\n");
     const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-    const result = structuredClone(runner.result); result.output.outputDigest = digest; result.output.outputDigests = [`dist/result.txt=${digest}`]; result.outputs[0].digest = digest;
+    const result = structuredClone(runner.result); result.output.outputDigest = digest; result.output.outputDigests = [`dist/result.txt=${digest}`]; result.outputs[0].digest = digest; if (typed) result.outputs[0].outputPath = "dist/result.txt";
     result.signature = sign(null, Buffer.from(runnerResultMessage(result)), runner.keys.privateKey).toString("base64url");
     const completion = runner.runner.submit({ credential: runner.lease.credential, result });
     f.authority.registerRunnerProfile(runner.profile, runnerSession); const state = f.authority.snapshot();
@@ -52,6 +54,9 @@ test("Realm Artifact handoff uses actual local workerd, SQLite and R2 with tampe
     assert.deepEqual(await snapshot(), before); assert.equal(await destination.get(key), null);
     await source.put(sourceKey, bytes);
     const accepted = await complete(); assert.equal(accepted.status, 200, JSON.stringify(accepted)); assert.match(accepted.value.receipt, /artifactByteCustody=realm-verified/u);
+    assert.equal(accepted.value.value.artifacts[0].type, typed ? "worker.bundle" : "runner.output");
+    assert.equal(accepted.value.value.artifacts[0].outputPath, typed ? "dist/result.txt" : sourceKey);
+    if (typed) assert.deepEqual(accepted.value.value.run.artifactOutputContract, artifactOutputContract);
     const retained = await destination.get(key); assert.ok(retained); assert.deepEqual(new Uint8Array(await retained.arrayBuffer()), bytes);
     const terminal = await snapshot(); assert.equal(terminal.runs[f.runId].status, "succeeded"); assert.match(terminal.evidence[accepted.value.value.evidence.id].receipt, /artifactByteCustody=realm-verified/u);
     await source.delete(sourceKey); assert.deepEqual(await complete(), accepted); assert.deepEqual(await snapshot(), terminal);
@@ -64,3 +69,5 @@ test("Realm Artifact handoff uses actual local workerd, SQLite and R2 with tampe
     assert.deepEqual(new Uint8Array(await (await destination.get(key)).arrayBuffer()), bytes);
   } finally { await runtime?.dispose(); await rm(directory, { recursive: true, force: true }); }
 });
+
+}

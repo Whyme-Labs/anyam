@@ -7,7 +7,7 @@ without obtaining canonical IDs or an owner recovery export.
 
 ## Human CLI
 
-`anyam realm project|workspace|change|run inspect` requires `--realm`, `--id`
+`anyam realm project|workspace|change|revision|run inspect` requires `--realm`, `--id`
 and `--session-stdin`. Supply an existing active human host Session on stdin
 from a trusted credential helper. The input ends at EOF. These commands do
 not perform a login or adapt a stored OAuth token into a human Session.
@@ -79,6 +79,39 @@ identity audit or Authority transition. Responses use current disclosure
 DTOs, including after hidden-only canonical activity. Credential guards and
 transaction rollback apply before persistence.
 
+## Review a selected candidate after reconnecting
+
+Use `realm change inspect` to recover its disclosed Revision IDs, then
+`anyam realm revision inspect --realm <url> --id <change-revision-id>
+--session-stdin --json`. Delegated MCP exposes `change.revision.inspect` with
+exactly `{ "changeRevisionId": "<disclosed-revision-id>" }` under the existing
+`change.inspect` OAuth scope. Both paths use current native authority and
+record-local Source disclosure; selectors do not grant access.
+
+The response contains the selected Revision, stable Change,
+`revision.isLatestForChange`, its disclosed `projectViewRevision` with exact
+`sourceSpaceSnapshots`, and visible associated `runs`. Each coarse Run has
+only its currently visible recorded `evidence` IDs/outcomes. An older selected
+candidate retains its own snapshots and reports `isLatestForChange: false`;
+an empty Run/Evidence array makes no statement about inaccessible records.
+Queued Runs remain queued. Recorded passed/failed/stale/indeterminate outcomes
+do not verify signatures, input-manifest or artifact bytes, execution, or
+present validity. The accepted signed Realm-owner detail contract remains
+separate.
+
+Reads resolve no canonical/global selectors, perform no repository observation,
+create no Task/Grant, and cache no result. They require the candidate's whole
+current Source/resource closure and existing whole-Change eligibility, because
+the response includes current Change/latest metadata. A sibling Revision that
+changes that eligibility can remove access to an older selection; unrelated
+hidden-only canonical or Evidence activity does not. A Task/Grant limited to a Run, PR, Release or
+Target cannot supply broader candidate-level authority. Source read, typed
+metadata denies and every native ancestor still apply. Write-only revocation
+can preserve an independently authorized read. Hidden, mixed or absent
+candidates remain indistinguishable; malformed selectors and unknown caller
+authority fields are rejected safely. Human REST is the bounded
+`GET /api/authority/revisions/{encodedChangeRevisionId}` route.
+
 ## Local evidence and remaining qualification
 
 `npm run qualification:selector-clients-local` runs actual Node CLI processes
@@ -88,6 +121,13 @@ Agents sharing an owner, scoped metadata omission, two-Source containment,
 hidden/absent equivalence, hidden-only changes, changed-input replay, parent
 and child revocation/cancellation/expiry, stale epoch, model/role/Source deny,
 expiry after real observation, safe parse errors and unchanged denied state.
+Revision review assertions additionally cover exact selected snapshots,
+queued versus recorded outcomes, older/latest recovery through both transports,
+hidden candidate equivalence, native scope
+closure and revocation with peer continuity. Pure projection checks cover
+older/latest candidates, malformed producer lineage and hidden-only additions.
+Timing diagnostics measure synthetic localhost reads; they are not live-service
+latency or a production capacity receipt.
 
 The owned fixture supplies synthetic host authentication, OAuth context,
 clock and repository observation; outbound access is denied and telemetry is

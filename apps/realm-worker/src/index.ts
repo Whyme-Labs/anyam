@@ -1132,7 +1132,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       try {
         if (body.surface !== "mcp") disclosedCommandError();
         const operations: Record<string, () => Promise<Response>> = {
-          project: () => this.authorityProject(body), projects: () => this.authorityProjects(body), workspaces: () => this.authorityWorkspaces(body), changes: () => this.authorityChanges(body), intents: () => this.authorityIntents(body), "pull-requests": () => this.authorityPullRequests(body), runs: () => this.authorityRun(body),
+          project: () => this.authorityProject(body), projects: () => this.authorityProjects(body), workspaces: () => this.authorityWorkspaces(body), changes: () => this.authorityChanges(body), revisions: () => this.authorityRevision(body), intents: () => this.authorityIntents(body), "pull-requests": () => this.authorityPullRequests(body), runs: () => this.authorityRun(body),
         };
         const operation = typeof body.operation === "string" && Object.hasOwn(operations, body.operation) ? operations[body.operation] : undefined;
         if (!operation) disclosedCommandError("invalid_request");
@@ -1237,6 +1237,12 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const run = disclosure.run(coordinatorString(body, "runId"));
     if (!run) this.authorityReadNotFound();
     return this.authorityReadResponse(session, { run }, "run.inspect");
+  }
+  private async authorityRevision(body: CoordinatorRequestBody): Promise<Response> {
+    const { session, disclosure } = await this.authorityReadContext(body);
+    const review = disclosure.revisionReview(coordinatorString(body, "changeRevisionId"));
+    if (!review) this.authorityReadNotFound();
+    return this.authorityReadResponse(session, review, "change.revision.inspect");
   }
   private async authorityMirrors(body: CoordinatorRequestBody): Promise<Response> {
     const { session, disclosure } = await this.authorityReadContext(body);
@@ -1951,6 +1957,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/intents/internal") return await this.authorityIntents(body);
       if (url.pathname === "/authority/pull-requests/internal") return await this.authorityPullRequests(body);
       if (url.pathname === "/authority/runs/internal") return await this.authorityRun(body);
+      if (url.pathname === "/authority/revisions/internal") return await this.authorityRevision(body);
       if (url.pathname === "/authority/mirrors/internal") return await this.authorityMirrors(body);
       if (url.pathname === "/authority/mirror-producer-context/internal") return await this.authorityMirrorProducerContext(body);
       if (url.pathname === "/authority/promotion/execute/internal") return await this.authorityPromotionExecute(body);

@@ -52,6 +52,7 @@ const MCP_PULL_REQUEST_BLOCK_TOOL = "pullRequest.block";
 const MCP_PULL_REQUEST_MERGE_TOOL = "pullRequest.merge";
 const MCP_RUN_REQUEST_TOOL = "run.request";
 const MCP_RUN_INSPECT_TOOL = "run.inspect";
+const MCP_REVISION_INSPECT_TOOL = "change.revision.inspect";
 const LEGACY_RUN_MUTATION_TOOLS = new Set(["run.record", "evidence.record", "artifact.record"]);
 const MCP_RUN_SCOPE = "run.invoke";
 const MCP_LANDING_SCOPE = "landing.request";
@@ -435,6 +436,17 @@ async function mcpRunInspect(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, r
   return { protocol: ANYAM_MCP_PROTOCOL, status: "ready", run: result.run, receipt: `${typeof result.receipt === "string" ? result.receipt : "authority=coordinator; operation=run.inspect"}; oauth=audience-validated; mcp=read-only; credentialFree=true; canonicalWrite=false` };
 }
 
+async function mcpRevisionInspect(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, input: unknown): Promise<Record<string, unknown>> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("revision_inspect_arguments_invalid");
+  const args = input as Record<string, unknown>;
+  if (Object.keys(args).some(key => key !== "changeRevisionId") || typeof args.changeRevisionId !== "string" || !args.changeRevisionId.trim()) throw new Error("revision_inspect_arguments_invalid");
+  if (!props.kernelSessionId) throw new McpBootstrapError("auth", "The MCP grant has no Realm session.", "reauthorize through the authenticated Realm session", "mcp=change.revision.inspect; read=not-accepted");
+  const result = await requestMcpReadCoordinator(env, props, "/authority/revisions/internal", { sessionId: props.kernelSessionId, changeRevisionId: args.changeRevisionId });
+  return { protocol: ANYAM_MCP_PROTOCOL, status: "ready", change: result.change, revision: result.revision,
+    projectViewRevision: result.projectViewRevision, runs: result.runs,
+    receipt: "mcp=change.revision.inspect; readOnly=true; outcomes=recorded; signedProof=not-disclosed; credentialFree=true; canonicalWrite=false" };
+}
+
 async function mcpRunRequest(env: AnyamRealmMcpEnv, props: AnyamRealmMcpProps, argumentsValue: unknown): Promise<Record<string, unknown>> {
   if (!props.kernelSessionId) throw new RunEvidenceInputError("The MCP grant is not bound to an authenticated Realm session.", "reauthorize the MCP client through the authenticated Realm owner session; no transition was accepted", "mcp=run.request; kernelSession=missing; transition=not-applied", "auth");
   let input: ReturnType<typeof runRequestCommand>;
@@ -756,6 +768,7 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
       tools.push(
         { name: MCP_CHANGE_LIST_TOOL, description: "List safe Change summaries through the authenticated Realm Coordinator.", inputSchema: { type: "object", additionalProperties: false, properties: { projectId: { type: "string", minLength: 1 }, workspaceId: { type: "string", minLength: 1 } } } },
         { name: MCP_CHANGE_READ_TOOL, description: "Inspect a safe Change and its immutable Revision summaries through the authenticated Realm Coordinator.", inputSchema: { type: "object", additionalProperties: false, required: ["changeId"], properties: { changeId: { type: "string", minLength: 1 } } } },
+        { name: MCP_REVISION_INSPECT_TOOL, description: "Review one selected immutable Change Revision's exact disclosed Source snapshots, latest marker, coarse Runs and recorded Evidence outcomes. Recorded outcomes do not verify signed execution proof.", inputSchema: { type: "object", additionalProperties: false, required: ["changeRevisionId"], properties: { changeRevisionId: { type: "string", minLength: 1 } } } },
       );
     }
     if (canWriteChanges) {
@@ -846,7 +859,8 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
     const isProjectTool = name === MCP_READ_TOOL || name === MCP_LIST_TOOL || isProjectBootstrap;
     const isWorkspaceTool = name === MCP_WORKSPACE_READ_TOOL || name === MCP_WORKSPACE_LIST_TOOL || isWorkspaceBootstrap;
     const isRevisionPublish = name === MCP_CHANGE_REVISION_PUBLISH_TOOL;
-    const isChangeTool = name === MCP_CHANGE_READ_TOOL || name === MCP_CHANGE_LIST_TOOL || isChangeBootstrap || isRevisionPublish;
+    const isRevisionInspect = name === MCP_REVISION_INSPECT_TOOL;
+    const isChangeTool = name === MCP_CHANGE_READ_TOOL || name === MCP_CHANGE_LIST_TOOL || isChangeBootstrap || isRevisionPublish || isRevisionInspect;
     const isIntentRead = name === MCP_INTENT_READ_TOOL || name === MCP_INTENT_LIST_TOOL;
     const isIntentWrite = name === MCP_INTENT_CREATE_TOOL || name === MCP_INTENT_ASSIGN_TOOL || name === MCP_INTENT_COMMENT_TOOL || name === MCP_INTENT_CLOSE_TOOL || name === MCP_INTENT_REOPEN_TOOL;
     const isIntentTool = isIntentRead || isIntentWrite;
@@ -871,6 +885,8 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
           ? await mcpPullRequestMutation(env, props, name as "pullRequest.open" | "pullRequest.update" | "pullRequest.review" | "pullRequest.close" | "pullRequest.reopen" | "pullRequest.block" | "pullRequest.merge", params.arguments)
         : isPullRequestRead
           ? name === MCP_PULL_REQUEST_LIST_TOOL ? await mcpPullRequestList(env, props, params.arguments) : await mcpPullRequestInspect(env, props, params.arguments)
+        : isRevisionInspect
+          ? await mcpRevisionInspect(env, props, params.arguments)
         : isRevisionPublish
           ? await mcpRevisionPublish(env, props, params.arguments)
         : isRunRequest
@@ -921,8 +937,8 @@ export async function handleAnyamRealmMcpRequest(request: Request, env: AnyamRea
       const isRun = isRunTool;
       const isDelivery = isDeliveryTool;
       const isList = name === MCP_LIST_TOOL || name === MCP_WORKSPACE_LIST_TOOL;
-      const operation = isDelivery ? name : isRun ? (isRunRequest ? RUN_REQUEST_COMMAND : "run.inspect") : isPullRequest ? name : isIntent ? name : isChange ? (name === MCP_CHANGE_LIST_TOOL ? "change.list" : name === MCP_CHANGE_READ_TOOL ? "change.inspect" : "revision.publish") : isWorkspace ? (isList ? "workspace.list" : "workspace.inspect") : (isList ? "project.list" : "project.inspect");
-      const resource = isDelivery ? "Delivery" : isRun ? "Run" : isPullRequest ? "Pull Request" : isIntent ? "Intent" : isChange ? "Change" : isWorkspace ? "Workspace" : "Project";
+      const operation = isDelivery ? name : isRun ? (isRunRequest ? RUN_REQUEST_COMMAND : "run.inspect") : isPullRequest ? name : isIntent ? name : isRevisionInspect ? MCP_REVISION_INSPECT_TOOL : isChange ? (name === MCP_CHANGE_LIST_TOOL ? "change.list" : name === MCP_CHANGE_READ_TOOL ? "change.inspect" : "revision.publish") : isWorkspace ? (isList ? "workspace.list" : "workspace.inspect") : (isList ? "project.list" : "project.inspect");
+      const resource = isDelivery ? "Delivery" : isRun ? "Run" : isPullRequest ? "Pull Request" : isIntent ? "Intent" : isRevisionInspect ? "Revision" : isChange ? "Change" : isWorkspace ? "Workspace" : "Project";
       return mcpError(id, notFound ? -32004 : -32602, notFound ? `${resource} is not available in this Realm.` : `${operation} arguments are invalid or the coordinator rejected the read.`, { code: notFound ? `mcp.${resource.toLowerCase()}_not_found` : `mcp.${resource.toLowerCase()}_read_failed`, recoveryAction: notFound ? `verify the ${resource} identifier without probing undiscoverable resources` : "inspect the coordinator receipt and retry the same read", receipt: `mcp=${operation}; errorClass=${errorClass}; credentialFree=true; canonicalWrite=false; ${coordinatorDetailReceipt(error)}` });
     }
   }

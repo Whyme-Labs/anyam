@@ -2,11 +2,12 @@ import { createHash } from "node:crypto";
 import { summarizeIntentForAudience, summarizePullRequestForAudience } from "../../../src/disclosure/hybrid.ts";
 import type { AuthorityPlaneSnapshot } from "../../../src/cloudflare/authority-plane.ts";
 import type { Capability, SourceMetadataReadCapability } from "../../../src/identity/realm.ts";
-import type { DisclosureClassification, ResourceRef } from "../../../src/kernel/contracts.ts";
+import type { DisclosureClassification, Evidence, ResourceRef } from "../../../src/kernel/contracts.ts";
 
 type ReadContext = {
   capabilities(resource: ResourceRef): readonly Capability[];
   sourceReadable(projectId: string, sourceSpaceId: string, capability?: SourceMetadataReadCapability): boolean;
+  resourceReadable?: (resource: ResourceRef) => boolean;
   realmOwner?: () => boolean;
 };
 export type DisclosedProjectViewRevision = {
@@ -209,6 +210,32 @@ export class AuthorityDisclosure {
       ...(c.revertsChangeRevisionId && this.revisionEligible(c.revertsChangeRevisionId) ? { revertsChangeRevisionId: c.revertsChangeRevisionId } : {}) }, project: this.projectDescriptor(c.projectId)!, revisions };
   }
   changes(projectId?: string, workspaceId?: string) { return sorted(Object.values(this.state.changes)).filter(c => (!projectId || c.projectId === projectId) && (!workspaceId || c.workspaceId === workspaceId)).flatMap(c => { const value = this.change(c.id); return value ? [value] : []; }); }
+
+  /** Record-local candidate review. Recorded outcomes are not signed proof. */
+  revisionReview(id: string) {
+    const record = this.state.changeRevisions[id];
+    const selected = record?.id === id && this.change(record.changeId);
+    const revision = selected && selected.revisions.find(value => value.id === id);
+    if (!record || !selected || !revision || !record.sourceSpaceSnapshots) return undefined;
+    const resource = { realmId: this.state.realmId, projectId: selected.change.projectId, changeId: selected.change.id,
+      ...(record.workspaceId ? { workspaceId: record.workspaceId } : {}) };
+    if (Object.keys(record.sourceSpaceSnapshots).some(sourceSpaceId => this.context.resourceReadable?.({ ...resource, sourceSpaceId }) === false)) return undefined;
+    const projectViewRevision = this.disclosedRevision(selected.change.projectId, record.sourceSpaceSnapshots, Object.keys(record.sourceSpaceSnapshots));
+    if (!projectViewRevision) return undefined;
+    const runs = sorted(Object.values(this.state.runs).filter(run => run.changeRevisionId === id)).flatMap(run => {
+      const visible = this.run(run.id);
+      const evidence: { id: string; outcome: Evidence["outcome"] }[] = [];
+      return visible ? [{ ...visible, evidence }] : [];
+    });
+    const byRun = new Map(runs.map(run => [run.id, run]));
+    for (const record of sorted(Object.values(this.state.evidence).filter(record => record.changeRevisionId === id && byRun.has(record.runId)))) {
+      const run = byRun.get(record.runId);
+      if (!run) continue;
+      const visible = this.evidence(record.id);
+      if (visible) run.evidence.push(visible);
+    }
+    return { change: selected.change, revision: { ...revision, isLatestForChange: selected.change.latestRevisionId === id }, projectViewRevision, runs };
+  }
 
   intent(id: string) {
     const i = this.state.intents[id];

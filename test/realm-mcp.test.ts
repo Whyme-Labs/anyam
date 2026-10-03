@@ -6,6 +6,19 @@ import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } f
 
 type JsonRpcBody = Record<string, unknown>;
 
+test("Revision review is discoverable with change.inspect and rejects caller authority fields before forwarding", async () => {
+  const fixture = env(); const reader = { ...props, scopes: ["change.inspect"] };
+  const listed = await body(await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }), fixture.env, reader));
+  const tools = (listed.result as { tools: { name: string }[] }).tools;
+  assert.ok(tools.some(tool => tool.name === "change.revision.inspect"));
+  const invalid = await body(await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "change.revision.inspect", arguments: { changeRevisionId: "revision:public", capabilityGrantId: "PRIVATE-caller-grant" } } }), fixture.env, reader));
+  assert.equal((invalid.error as { code: number }).code, -32602);
+  assert.doesNotMatch(JSON.stringify(invalid), /PRIVATE-caller-grant/u);
+  const denied = await body(await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "change.revision.inspect", arguments: { changeRevisionId: "revision:public" } } }), fixture.env, { ...props, scopes: ["project.read"] }));
+  assert.equal((denied.error as { code: number }).code, -32001);
+  assert.equal(fixture.calls.length, 0);
+});
+
 function env(): { env: AnyamRealmMcpEnv; calls: Array<{ path: string; body: Record<string, unknown> }> } {
   const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
   const idempotency = new Map<string, { fingerprint: string; result: Record<string, unknown> }>();
@@ -247,7 +260,7 @@ test("remote MCP exposes an authenticated read-only project tool through the coo
   const listed = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 2, method: "tools/list" }), fixture.env, props);
   const listedBody = await body(listed);
   const tools = (listedBody.result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
-  assert.deepEqual(tools.map((tool) => tool.name), ["project.list", "project.inspect", "workspace.list", "workspace.inspect", "change.list", "change.inspect"]);
+  assert.deepEqual(tools.map((tool) => tool.name), ["project.list", "project.inspect", "workspace.list", "workspace.inspect", "change.list", "change.inspect", "change.revision.inspect"]);
 
   const discovered = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "project.list", arguments: {} } }), fixture.env, props);
   const discoveredBody = await body(discovered);
@@ -483,7 +496,7 @@ test("remote MCP exposes scope-filtered typed bootstrap mutations with idempoten
 
   const readOnly = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 10, method: "tools/list" }), fixture.env, props);
   const readOnlyTools = ((await body(readOnly)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
-  assert.deepEqual(readOnlyTools.map((tool) => tool.name), ["project.list", "project.inspect", "workspace.list", "workspace.inspect", "change.list", "change.inspect"]);
+  assert.deepEqual(readOnlyTools.map((tool) => tool.name), ["project.list", "project.inspect", "workspace.list", "workspace.inspect", "change.list", "change.inspect", "change.revision.inspect"]);
   const projectWriteOnly = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: 11, method: "tools/list" }), fixture.env, { ...writeProps, scopes: ["project.write"] });
   const projectWriteOnlyBody = await body(projectWriteOnly);
   assert.equal((projectWriteOnlyBody.error as Record<string, unknown>).code, -32001);
@@ -665,7 +678,7 @@ test("remote MCP fails closed for malformed requests, unknown methods, mutations
 
   const changeOnly = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: "change-scope", method: "tools/list" }), fixture.env, { ...props, scopes: ["change.inspect"] });
   const changeOnlyTools = ((await body(changeOnly)).result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
-  assert.deepEqual(changeOnlyTools.map((tool) => tool.name), ["change.list", "change.inspect"]);
+  assert.deepEqual(changeOnlyTools.map((tool) => tool.name), ["change.list", "change.inspect", "change.revision.inspect"]);
   const deniedWorkspace = await handleAnyamRealmMcpRequest(post({ jsonrpc: "2.0", id: "denied-workspace", method: "tools/call", params: { name: "workspace.list", arguments: {} } }), fixture.env, { ...props, scopes: ["change.inspect"] });
   assert.equal(((await body(deniedWorkspace)).error as Record<string, unknown>).code, -32001);
 });

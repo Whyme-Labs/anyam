@@ -60,6 +60,12 @@ export function delegatedSelectorContext(identity: RealmIdentityPolicy, snapshot
   const readable = new Map<string, boolean>();
   const disclosure = new AuthorityDisclosure(snapshot, {
     realmOwner: () => false,
+    resourceReadable: resource => {
+      if (!resource.sourceSpaceId || !inEnvelope(resource, false)
+        || (task.workspaceId && task.workspaceId !== resource.workspaceId) || (task.changeId && task.changeId !== resource.changeId)) return false;
+      validate(resource, [resource.sourceSpaceId], "source.read");
+      return identity.evaluateReadOnly(evaluation(resource, resource.sourceSpaceId, "source.read")).allowed;
+    },
     capabilities: resource => {
       if (!inEnvelope(resource, true)) return [];
       const capabilities = identity.activeCapabilitiesForPrincipal({ principalId: live.principalId, resource }).filter(capability => !parents.some(parent => parent.deniedActions.includes(capability)));

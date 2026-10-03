@@ -4,6 +4,7 @@ import { AuthorityDisclosure } from "../apps/realm-worker/src/authority-disclosu
 import { AUTHORITY_COMMAND_PROTOCOL, AuthorityPlaneCoordinator } from "../src/cloudflare/authority-plane.ts";
 import { RealmIdentityPolicy } from "../src/identity/realm.ts";
 import { disclosureClock, disclosureFixture } from "./fixtures/authority-disclosure-state.ts";
+import { delegatedSelectorContext } from "../apps/realm-worker/src/delegated-selector-context.ts";
 
 type Fixture = ReturnType<typeof disclosureFixture>;
 function read(f: Fixture, member = "public") {
@@ -18,6 +19,80 @@ function read(f: Fixture, member = "public") {
 function observation(d: AuthorityDisclosure) {
   return { projects: d.projects(), summary: d.summary(), workspaces: d.workspaces(), changes: d.changes(), intents: d.intents(), pullRequests: d.pullRequests(), mirrors: d.mirrors(), run: d.run("run:public"), release: d.release("release:public"), target: d.target("target:public"), promotion: d.promotion("promotion:public") };
 }
+test("selected Revision review recovers exact disclosed snapshots and recorded outcomes without proof metadata", () => {
+  const f = disclosureFixture(); const before = structuredClone(f);
+  const value = read(f).revisionReview("revision:public");
+  assert.ok(value);
+  assert.deepEqual(value.projectViewRevision.sourceSpaceSnapshots, { "source:public": "source:public:candidate" });
+  assert.equal(value.revision.id, "revision:public");
+  assert.equal(value.revision.isLatestForChange, true);
+  assert.equal(value.change.id, "change:public");
+  assert.deepEqual(value.runs.map(run => ({ id: run.id, status: run.status, evidence: run.evidence })), [
+    { id: "run:public", status: "succeeded", evidence: [{ id: "evidence:public", outcome: "passed" }] },
+  ]);
+  assert.doesNotMatch(JSON.stringify(value), /PRIVATE-|canonical:|candidate:public|source:hidden|projectRevisionId|projectViewId|signature|verified|Digest|"version"/u);
+  assert.deepEqual(f, before);
+});
+test("a Run-scoped native delegation cannot borrow that authority for a candidate-level Revision read", () => {
+  const f = disclosureFixture();
+  const identity = new RealmIdentityPolicy({ realmId: f.identity.realm.id, relyingPartyId: "fixture.local", now: () => new Date(disclosureClock) });
+  identity.restoreOperationalSnapshot(f.identity);
+  const owner = f.members.owner!.session;
+  const resource = { realmId: identity.realm.id, projectId: "project:fixture", runId: "run:public" };
+  const task = identity.createTask({ principalId: owner.principalId, actorId: owner.actorId, sessionId: owner.id, purpose: "Synthetic Run-only read" });
+  const parent = identity.createCapabilityGrant({ principalId: owner.principalId, actorId: owner.actorId, clientId: owner.clientId, sessionId: owner.id, taskId: task.id, resource, sourceSpaceIds: ["source:public"], actions: ["source.read", "agent.delegate"], effects: [], allowedModelProviders: ["synthetic-local"], allowedCredentialClasses: ["mcp"] });
+  identity.registerClient({ id: "client:review", kind: "mcp", allowedAudiences: ["mcp"], allowedOperations: ["source.read"] });
+  const agent = identity.registerAgent({ principalId: owner.principalId, clientId: "client:review", name: "Synthetic reviewer", runtime: "synthetic", modelProvider: "synthetic-local", allowedCredentialClasses: ["mcp"] });
+  const delegated = identity.delegateAgent({ humanSessionId: owner.id, parentGrantId: parent.id, agentId: agent.id, purpose: "Read only the selected Run", resource, sourceSpaceIds: ["source:public"], actions: ["source.read"], effects: [], allowedCredentialClasses: ["mcp"] });
+  const body = { surface: "mcp", sessionId: delegated.session.id, agentId: agent.id, taskId: delegated.task.id, capabilityGrantId: delegated.grant.id, delegatedBySessionId: owner.id, resource, sourceSpaceIds: ["source:public"] };
+  assert.ok(delegatedSelectorContext(identity, f.state, body).disclosure.run("run:public"));
+  assert.equal(delegatedSelectorContext(identity, f.state, body).disclosure.revisionReview("revision:public"), undefined);
+});
+test("Revision review preserves older candidate identity and distinguishes recorded failed or stale outcomes", () => {
+  const f = disclosureFixture();
+  const original = f.state.changeRevisions["revision:public"]!;
+  const base = f.state.projectRevisions["canonical:base"]!;
+  f.state.changeRevisions["revision:next"] = { ...original, id: "revision:next", sequence: 2, parentRevisionId: original.id,
+    projectRevisionId: "candidate:next", sourceSpaceSnapshots: { "source:public": "source:public:next-candidate" } };
+  f.state.projectRevisions["candidate:next"] = { ...base, id: "candidate:next",
+    sourceSpaceSnapshots: { ...base.sourceSpaceSnapshots, "source:public": "source:public:next-candidate" } };
+  f.state.changes["change:public"]!.latestRevisionId = "revision:next";
+  f.state.runs["run:public"]!.status = "failed";
+  for (const outcome of ["failed", "stale", "indeterminate"] as const) {
+    f.state.evidence["evidence:public"]!.outcome = outcome;
+    const older = read(f).revisionReview("revision:public")!;
+    assert.equal(older.revision.isLatestForChange, false);
+    assert.deepEqual(older.projectViewRevision.sourceSpaceSnapshots, { "source:public": "source:public:candidate" });
+    assert.equal(older.runs[0]!.status, "failed");
+    assert.equal(older.runs[0]!.evidence[0]!.outcome, outcome);
+  }
+  const latest = read(f).revisionReview("revision:next")!;
+  assert.equal(latest.revision.isLatestForChange, true);
+  assert.deepEqual(latest.projectViewRevision.sourceSpaceSnapshots, { "source:public": "source:public:next-candidate" });
+  assert.deepEqual(latest.runs, []);
+});
+test("Revision review omits invisible or inconsistent Runs and Evidence and preserves hidden-state noninterference", () => {
+  const f = disclosureFixture(); const expected = read(f).revisionReview("revision:public");
+  for (const id of ["revision:hidden", "revision:mixed", "revision:absent"]) assert.equal(read(f).revisionReview(id), undefined);
+  const hidden = structuredClone(f);
+  hidden.state.version += 99;
+  hidden.state.projectRevisions["canonical:base"]!.sourceSpaceSnapshots = {
+    ...hidden.state.projectRevisions["canonical:base"]!.sourceSpaceSnapshots, "source:hidden": "PRIVATE-new-hidden-snapshot",
+  };
+  hidden.state.evidence["evidence:extra-hidden"] = { ...hidden.state.evidence["evidence:public"]!, id: "evidence:extra-hidden",
+    disclosure: { ...hidden.state.evidence["evidence:public"]!.disclosure, classification: "restricted" } };
+  hidden.state.evidence["evidence:wrong-view"] = { ...hidden.state.evidence["evidence:public"]!, id: "evidence:wrong-view", projectViewId: hidden.state.workspaces["workspace:hidden"]!.projectViewId };
+  hidden.state.runs["run:wrong-revision"] = { ...hidden.state.runs["run:public"]!, id: "run:wrong-revision", projectRevisionId: "candidate:hidden" };
+  assert.deepEqual(read(hidden).revisionReview("revision:public"), expected);
+  const changedClosure = structuredClone(f);
+  changedClosure.state.changeRevisions["revision:unreadable-sibling"] = {
+    ...changedClosure.state.changeRevisions["revision:hidden"]!, id: "revision:unreadable-sibling", changeId: "change:public", sequence: 2,
+  };
+  changedClosure.state.changes["change:public"]!.latestRevisionId = "revision:unreadable-sibling";
+  assert.equal(read(changedClosure).revisionReview("revision:public"), undefined, "current whole-Change eligibility still applies when a sibling changes its Source closure");
+  f.identity.sourceSpacePolicies["source:public"]!.deniedCapabilities = ["source.read"];
+  assert.equal(read(f).revisionReview("revision:public"), undefined);
+});
 test("partial reader retains public Workspace/Change/candidate Run while all private verifier details are withheld", () => {
   const f = disclosureFixture(); const d = read(f); const value = observation(d);
   assert.equal(d.project("project:fixture")?.counts.runs, 1);

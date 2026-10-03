@@ -14,8 +14,8 @@ const mutations: Record<string, DisclosedSourceOperation> = {
 export async function runRealmSourceCommand(args: readonly string[], input: Readable): Promise<unknown> {
   const [, target, operation] = args;
   const mutation = mutations[`${target}.${operation}`];
-  if (!mutation && !(operation === "inspect" && ["project", "workspace", "change", "run"].includes(target ?? ""))) {
-    throw new Error("realm_source_operation_invalid; use project/workspace/change/run inspect or workspace create/change create/revision publish/run request");
+  if (!mutation && !(operation === "inspect" && ["project", "workspace", "change", "revision", "run"].includes(target ?? ""))) {
+    throw new Error("realm_source_operation_invalid; use project/workspace/change/revision/run inspect or workspace create/change create/revision publish/run request");
   }
   const allowed = new Set(["--realm", "--session-stdin", "--json", ...(mutation ? ["--input", "--idempotency-key"] : ["--id"])]);
   const options = new Map<string, string>();
@@ -51,5 +51,6 @@ export async function runRealmSourceCommand(args: readonly string[], input: Read
   if (target === "project") return client.inspectProject(selector);
   if (target === "workspace") return client.inspectWorkspace(selector);
   if (target === "change") return client.inspectChange(selector);
+  if (target === "revision") return client.inspectRevision(selector);
   return client.inspectRun(selector);
 }

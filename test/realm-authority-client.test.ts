@@ -1,7 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Readable } from "node:stream";
+import { runRealmSourceCommand } from "../packages/create-anyam/src/realm-source-command.ts";
 
 import { RealmAuthorityHttpClient, RealmAuthorityRequestError } from "../src/portability/realm-authority-client.ts";
+
+test("Realm Authority client inspects a selected Revision with an encoded selector and no request body", async () => {
+  const calls: { url: string; method: string; body: unknown; cache: unknown; redirect: unknown }[] = [];
+  const client = new RealmAuthorityHttpClient({ baseUrl: "https://realm.example", ownerSession: "synthetic-session", fetchImpl: async (url, options) => {
+    calls.push({ url: String(url), method: options?.method ?? "", body: options?.body, cache: options?.cache, redirect: options?.redirect });
+    return Response.json({ status: "ready", revision: { id: "revision:public" } });
+  } });
+  assert.deepEqual(await client.inspectRevision("revision:public"), { status: "ready", revision: { id: "revision:public" } });
+  assert.deepEqual(calls, [{ url: "https://realm.example/api/authority/revisions/revision%3Apublic", method: "GET", body: undefined, cache: "no-store", redirect: "error" }]);
+});
+test("hosted CLI recognizes Revision inspection and requires the documented safe input options", async () => {
+  await assert.rejects(() => runRealmSourceCommand(["realm", "revision", "inspect"], Readable.from([])), /realm_source_option_required; supply --realm/u);
+});
 
 test("Realm Authority client sends the owner session as a host cookie and preserves typed mirror routes", async () => {
   const calls: Array<{ url: string; method: string; cookie: string; body?: Record<string, unknown> }> = [];

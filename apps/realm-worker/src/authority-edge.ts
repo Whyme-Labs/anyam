@@ -912,13 +912,15 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   let sourceWriteRequest = false;
   try {
     if (url.pathname === "/api/authority/view-command" && request.method === "POST") return json(await requestAnyamRealmCoordinator(env, "/authority/view-command/internal", { ...(await readBody(request)), sessionId }));
-    if (url.pathname.startsWith("/api/authority/runs/")) {
-      const unavailable = () => json({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "not_found", receipt: "runRead=unavailable; discoverable=false" }, 404);
-      if (request.method !== "GET") return json({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "method_not_allowed", receipt: "runRead=get-required; canonicalWrite=false" }, 405);
-      let runId: string;
-      try { runId = decodeURIComponent(url.pathname.slice("/api/authority/runs/".length)); } catch { return unavailable(); }
-      if (!runId.trim() || runId.includes("/") || runId.includes("\\") || runId === "." || runId === ".." || url.search) return unavailable();
-      return json(await requestAnyamRealmCoordinator(env, "/authority/runs/internal", { sessionId, runId }));
+    const revisionRead = url.pathname.startsWith("/api/authority/revisions/");
+    if (url.pathname.startsWith("/api/authority/runs/") || revisionRead) {
+      const collection = revisionRead ? "revisions" : "runs"; const operation = revisionRead ? "revision" : "run";
+      const unavailable = () => json({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "not_found", receipt: `${operation}Read=unavailable; discoverable=false` }, 404);
+      if (request.method !== "GET") return json({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "method_not_allowed", receipt: `${operation}Read=get-required; canonicalWrite=false` }, 405);
+      let id: string;
+      try { id = decodeURIComponent(url.pathname.slice(`/api/authority/${collection}/`.length)); } catch { return unavailable(); }
+      if (!id.trim() || id.includes("/") || id.includes("\\") || id === "." || id === ".." || url.search) return unavailable();
+      return json(await requestAnyamRealmCoordinator(env, `/authority/${collection}/internal`, { sessionId, [revisionRead ? "changeRevisionId" : "runId"]: id }));
     }
     if (url.pathname.startsWith("/api/authority/run-details/") && request.method === "GET") {
       const encoded = url.pathname.slice("/api/authority/run-details/".length);

@@ -33,7 +33,9 @@ test("Realm Artifact handoff uses actual local workerd, SQLite and R2 with tampe
     const identity = new RealmIdentityPolicy({ realmId: state.realmId, relyingPartyId: "fixture.local" }).getRecoverySnapshot(); identity.realm.authorizationEpoch = 4;
     const invoke = async (path, body) => {
       const response = await runtime.dispatchFetch(`http://localhost${path}`, { method: "POST", headers: { "content-type": "application/json", ...(path.startsWith("/authority/") ? { [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE } : {}) }, body: JSON.stringify(body) });
-      return { status: response.status, value: await response.json() };
+      const text = await response.text();
+      try { return { status: response.status, value: JSON.parse(text) }; }
+      catch { throw new Error(`non-JSON owned fixture response at ${path}: status=${response.status}; ${text}`); }
     };
     const seed = async () => { assert.equal((await invoke("/fixture/seed", { identity, state, members: {} })).status, 200); };
     const snapshot = async () => (await invoke("/fixture/checkpoint", {})).value.authority;
@@ -41,6 +43,10 @@ test("Realm Artifact handoff uses actual local workerd, SQLite and R2 with tampe
     const complete = () => invoke("/authority/runner-complete/internal", command);
     const key = `artifacts/${digest}`; const sourceKey = completion.outputs[0].location;
     await seed(); const before = await snapshot();
+    const invalid = structuredClone(command); invalid.completion.result.signature = "invalid-signature";
+    const invalidProof = await invoke("/authority/runner-complete/internal", invalid);
+    assert.equal(invalidProof.status, 409); assert.match(invalidProof.value.receipt, /resultSignature=invalid/u);
+    assert.deepEqual(await snapshot(), before);
     await source.put(sourceKey, "tampered Attempt bytes");
     const denied = await complete(); assert.equal(denied.status, 409); assert.match(denied.value.receipt, /source-digest-mismatch/u);
     assert.deepEqual(await snapshot(), before); assert.equal(await destination.get(key), null);

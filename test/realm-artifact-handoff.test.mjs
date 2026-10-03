@@ -190,3 +190,10 @@ test("an invalid second Artifact is preflighted before any source read or destin
   assert.equal((await f.invoke()).status, 409); unchanged(f, before);
   assert.deepEqual(f.source.calls, []); assert.deepEqual(f.destination.calls, []);
 });
+
+test("unknown Authority read failure returns a safe unavailable response from inside the gate", async () => {
+  const f = await fixture(); const before = f.snapshot();
+  f.setAuthorityReader(async () => { throw new Error(sensitiveFailure); });
+  assert.equal((await f.invoke()).status, 503); unchanged(f, before);
+  assert.deepEqual(f.source.calls, []); assert.deepEqual(f.destination.calls, []);
+});

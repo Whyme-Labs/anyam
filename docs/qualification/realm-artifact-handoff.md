@@ -77,10 +77,12 @@ owned fixtures. They prove boundary ordering, immutable conditional writes,
 readback, safe failures, replay, retry and serialized completion. They do not
 qualify live workerd, SQLite, R2 conditional-write behavior or deployed services.
 The second command separately runs the actual local workerd Realm handler and
-SQLite store with Miniflare R2. It covers source tampering, conditional retention,
+SQLite store with Miniflare R2. It covers invalid proof, source tampering, conditional retention,
 immutable destination conflict, operator restoration and durable replay after
 Attempt cleanup. Its authentication state and process output are synthetic,
 and all storage is disposable and local. It is not a live Cloudflare claim.
+Completion errors are translated inside the Durable Object concurrency gate
+so a rejected proof or custody conflict does not escape and reset the Object.
 
 Required gates are core/Worker/test typechecks, the ordinary full repository
 check, the local workerd/R2/SQLite flow and a customer-approved disposable live

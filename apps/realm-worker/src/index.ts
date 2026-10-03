@@ -1661,15 +1661,22 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const payload: Record<string, unknown> = { completion: completionValue };
     const command: AuthorityCommand = { protocol: body.protocol === undefined ? AUTHORITY_COMMAND_PROTOCOL : coordinatorString(body, "protocol") as typeof AUTHORITY_COMMAND_PROTOCOL, command: "runner.complete", idempotencyKey: coordinatorString(body, "idempotencyKey"), ...(typeof body.expectedVersion === "number" ? { expectedVersion: body.expectedVersion } : {}), payload };
     return await this.ctx.blockConcurrencyWhile(async () => {
-      const current = await this.authoritySnapshot();
-      const coordinator = new AuthorityPlaneCoordinator(current);
-      if (this.requireIdentity().containsKnownCredentialMaterial(completionValue)) return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "invalid_request", receipt: "runnerCompletion=not-accepted; details=not-disclosed; credentialMaterialStored=false" }, 422);
-      const result = await coordinator.completeRunner(command, session, { source: this.env.ANYAM_RUNNER_OUTPUTS, destination: this.env.ANYAM_PROMOTION_ARTIFACTS });
-      try { await this.persistAuthoritySnapshot(current, coordinator.snapshot()); }
-      catch {
-        return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "runner_completion_unconfirmed", recoveryAction: "retry the same signed completion and idempotency key to confirm persisted Authority state", receipt: "runnerCompletion=unconfirmed; artifactWrite=may-have-occurred; authorityCommit=unconfirmed; details=not-disclosed; credentialMaterialStored=false" }, 503);
+      // A rejected blockConcurrencyWhile callback resets the live DO. Convert
+      // completion failures inside the gate so conflict/retry responses survive.
+      try {
+        const current = await this.authoritySnapshot();
+        const coordinator = new AuthorityPlaneCoordinator(current);
+        if (this.requireIdentity().containsKnownCredentialMaterial(completionValue)) return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "invalid_request", receipt: "runnerCompletion=not-accepted; details=not-disclosed; credentialMaterialStored=false" }, 422);
+        const result = await coordinator.completeRunner(command, session, { source: this.env.ANYAM_RUNNER_OUTPUTS, destination: this.env.ANYAM_PROMOTION_ARTIFACTS });
+        try { await this.persistAuthoritySnapshot(current, coordinator.snapshot()); }
+        catch {
+          return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "runner_completion_unconfirmed", recoveryAction: "retry the same signed completion and idempotency key to confirm persisted Authority state", receipt: "runnerCompletion=unconfirmed; artifactWrite=may-have-occurred; authorityCommit=unconfirmed; details=not-disclosed; credentialMaterialStored=false" }, 503);
+        }
+        return coordinatorJson({ ...result, provenance: { runnerId, clientId: session.clientId, sessionId: session.sessionId, authorizationEpoch: session.authorizationEpoch }, credentialFree: true, canonicalWrite: false, receipt: `${result.receipt}; authority=runner-completion; runner=${runnerId}; canonicalWrite=false` }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
+      } catch (error) {
+        if (error instanceof AuthorityPlaneError) return coordinatorError(error);
+        return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "runner_completion_unavailable", recoveryAction: "retry the same signed completion and idempotency key after reconciling Authority storage", receipt: "runnerCompletion=unavailable; details=not-disclosed; authorityCommit=unconfirmed; credentialMaterialStored=false" }, 503);
       }
-      return coordinatorJson({ ...result, provenance: { runnerId, clientId: session.clientId, sessionId: session.sessionId, authorizationEpoch: session.authorizationEpoch }, credentialFree: true, canonicalWrite: false, receipt: `${result.receipt}; authority=runner-completion; runner=${runnerId}; canonicalWrite=false` }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
     });
   }
 

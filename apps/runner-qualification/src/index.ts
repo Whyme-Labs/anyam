@@ -487,8 +487,8 @@ class QualificationCoordinator extends DurableObject<Env> {
           if (!isRecord(item)) return json({ code: "result_output_manifest_mismatch", recoveryAction: "return structured output references matching the accepted output manifest", receipt: `job=${jobId}; output=not-object` }, 422);
           const path = typeof item.path === "string" ? safePath(item.path) : "";
           const accepted = record.outputs.find((output) => output.path === path);
-          const itemDisclosure = typeof item.disclosure === "string" ? disclosure(item.disclosure, "outputs.disclosure") : "project";
-          if (!accepted || seenPaths.has(path) || item.kind !== accepted.kind || item.digest !== accepted.digest || item.bytes !== accepted.bytes || itemDisclosure !== accepted.disclosure || !disclosureAllows(maximumDisclosure, itemDisclosure) || !disclosureAllows(record.manifest.disclosure, itemDisclosure)) return json({ code: "result_output_manifest_mismatch", recoveryAction: "return only the exact, disclosure-safe outputs accepted for this Attempt", receipt: `job=${jobId}; path=${path}; manifest=not-matched` }, 422);
+          const itemDisclosure = typeof item.disclosure === "string" ? disclosure(item.disclosure, "outputs.disclosure") : undefined;
+          if (!accepted || item.path !== accepted.path || itemDisclosure === undefined || seenPaths.has(path) || item.kind !== accepted.kind || item.digest !== accepted.digest || item.bytes !== accepted.bytes || itemDisclosure !== accepted.disclosure || !disclosureAllows(maximumDisclosure, itemDisclosure) || !disclosureAllows(record.manifest.disclosure, itemDisclosure)) return json({ code: "result_output_manifest_mismatch", recoveryAction: "return only the exact, disclosure-safe outputs accepted for this Attempt", receipt: `job=${jobId}; path=${path}; manifest=not-matched` }, 422);
           seenPaths.add(path);
         }
         const recoveryAction = optionalString(body, "recoveryAction");

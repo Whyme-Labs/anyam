@@ -4,7 +4,8 @@ The existing `apps/runner-qualification` coordinator accepts bytes through the
 Attempt credential, stores them under the owner-bound output root in its R2
 binding, and verifies the Runner's signed result against accepted references.
 The protocol now requires every declared output before a successful result,
-unique signed output paths, and exact accepted disclosure/kind/digest/size.
+unique canonical signed output paths, and explicit disclosure labels matching
+the exact accepted disclosure/kind/digest/size.
 Failed or indeterminate results may contain the exact partial accepted set.
 Context, manifest, Attempt, lease and credential restrictions still apply.
 
@@ -43,6 +44,7 @@ The test invokes actual production HTTP handlers with real Ed25519 signing and
 raw-byte hashes. Only the Cloudflare DurableObject constructor, durable storage,
 R2 and concurrency boundary are replaced by explicitly offline fixtures. Tests
 cover incomplete success, duplicate signed references, disclosure drift,
+omitted/malformed disclosure labels, signed path aliases,
 healthy verified serve/accept, missing/tampered/previous-Attempt object bytes,
 stale signed references/context, current credential/Attempt/path/disclosure
 denial, failed partial output, exact-byte recovery, credential-safe storage

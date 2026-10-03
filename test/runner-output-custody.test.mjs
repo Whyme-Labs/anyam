@@ -154,6 +154,29 @@ test("qualification custody rejects a signed disclosure different from the accep
   assert.deepEqual(f.snapshot(), before);
 });
 
+for (const [label, change] of [
+  ["omitted disclosure", { disclosure: undefined }],
+  ["null disclosure", { disclosure: null }],
+  ["numeric disclosure", { disclosure: 1 }],
+  ["absolute path alias", { path: "/dist/result.txt" }],
+  ["backslash path alias", { path: "dist\\result.txt" }],
+]) {
+  test(`qualification custody rejects signed ${label} instead of normalizing the accepted reference`, async () => {
+    const f = await fixture();
+    const output = await f.upload("dist/result.txt");
+    const before = f.snapshot();
+    let storageReads = 0;
+    const originalGet = f.store.get;
+    f.store.get = async (key) => { storageReads += 1; return originalGet(key); };
+    const response = await f.submit([{ ...output, ...change }]);
+    assert.equal(response.status, 422);
+    assert.equal((await response.json()).code, "result_output_manifest_mismatch");
+    assert.equal(storageReads, 0, "a signed reference mismatch must precede object reads");
+    assert.deepEqual(f.snapshot(), before);
+    assert.equal((await f.submit([output])).status, 200, "an exact signed retry can finalize the unchanged Attempt");
+  });
+}
+
 test("qualification custody serves actual verified bytes and then accepts their exact signed result", async () => {
   const f = await fixture();
   const output = await f.upload("dist/result.txt");

@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
-import { createHash, sign } from "node:crypto";
+import { sign } from "node:crypto";
 import { registerHooks } from "node:module";
 import test from "node:test";
-import { setup, makeRunner } from "./realm-artifact-handoff-fixture.ts";
 import { runnerResultMessage } from "../src/execution/runner.ts";
-import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "../apps/realm-worker/src/coordinator-protocol.ts";
 
 // This replaces only Cloudflare constructors. It is a Node boundary test,
 // not a workerd, live Durable Object, R2, Runner or deployment qualification.
@@ -12,58 +10,12 @@ const fakeBase = "data:text/javascript," + encodeURIComponent("export class Dura
 const hook = registerHooks({ resolve(specifier, context, nextResolve) {
   return specifier === "cloudflare:workers" ? { url: fakeBase, shortCircuit: true } : nextResolve(specifier, context);
 } });
-let AnyamRealmCoordinator;
-try { ({ AnyamRealmCoordinator } = await import("../apps/realm-worker/src/index.ts")); }
-finally { hook.deregister(); }
-
-const sha256 = bytes => `sha256:${createHash("sha256").update(bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : bytes).digest("hex")}`;
-const bytes = Buffer.from("export default { fetch() { return new Response('retained artifact'); } };\n");
-const sensitiveFailure = "SYNTHETIC-PROVIDER-PRIVATE-ERROR";
-
-function store() {
-  const objects = new Map(); const calls = [];
-  return {
-    objects, calls,
-    async get(key) { calls.push(["get", key]); const body = objects.get(key); return body === undefined ? null : { async arrayBuffer() { return Uint8Array.from(body).buffer; } }; },
-    async put(key, body, options) {
-      calls.push(["put", key, options]);
-      if (options?.onlyIf?.etagDoesNotMatch === "*" && objects.has(key)) return null;
-      objects.set(key, Buffer.from(body)); return { key };
-    },
-  };
-}
-
-async function fixture({ configured = true, outputs = true, runStatus = "succeeded" } = {}) {
-  const authority = setup(); const runner = makeRunner(authority.input, authority.runId);
-  const result = structuredClone(runner.result);
-  result.status = runStatus; result.output.status = runStatus; result.output.exitCode = runStatus === "succeeded" ? 0 : 1;
-  result.output.outputDigest = sha256(bytes); result.output.outputDigests = [`dist/result.txt=${sha256(bytes)}`];
-  result.outputs = outputs ? result.outputs.map(output => ({ ...output, digest: sha256(bytes) })) : [];
-  result.signature = sign(null, Buffer.from(runnerResultMessage(result)), runner.keys.privateKey).toString("base64url");
-  const completion = runner.runner.submit({ credential: runner.lease.credential, result });
-  authority.authority.registerRunnerProfile(runner.profile, { ...completion.job.actor, realmId: authority.authority.snapshot().realmId, clientId: "anyam-runner-coordinator", authorizationEpoch: 4, kind: "runner" });
-  let state = authority.authority.snapshot();
-  const source = store(); const destination = store(); const records = new Map(); let commits = 0;
-  for (const output of completion.outputs) source.objects.set(output.location, bytes);
-  let chain = Promise.resolve();
-  const ctx = { storage: { async get(key) { return records.get(key); } }, blockConcurrencyWhile(callback) {
-    const operation = chain.then(callback); chain = operation.then(() => undefined, () => undefined); return operation;
-  } };
-  const env = configured ? { ANYAM_RUNNER_OUTPUTS: source, ANYAM_PROMOTION_ARTIFACTS: destination } : {};
-  const worker = new AnyamRealmCoordinator(ctx, env);
-  // Authentication and SQL persistence are fixtures; all actual Runner proof,
-  // scope, custody, Authority transitions, route handling and gate ordering run.
-  worker.requireIdentity = () => ({ realm: { id: authority.authority.snapshot().realmId }, getRecoverySnapshot: () => ({ realm: { id: authority.authority.snapshot().realmId, authorizationEpoch: 4 } }), containsKnownCredentialMaterial: () => false });
-  worker.authoritySnapshot = async () => structuredClone(state);
-  worker.persistAuthoritySnapshot = async (_previous, next) => { if (next.version !== state.version) commits += 1; state = structuredClone(next); };
-  const body = { idempotencyKey: "realm:artifact-handoff", completion };
-  const invoke = async (value = body, internal = true) => {
-    const response = await worker.fetch(new Request("https://realm/authority/runner-complete/internal", { method: "POST", headers: { "content-type": "application/json", ...(internal ? { [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE } : {}) }, body: JSON.stringify(value) }));
-    const valueResult = await response.json(); assert.doesNotMatch(JSON.stringify(valueResult), new RegExp(sensitiveFailure));
-    return { status: response.status, value: valueResult };
-  };
-  return { authority, runner, worker, source, destination, body, completion, invoke, snapshot: () => structuredClone(state), commits: () => commits };
-}
+let fixture; let bytes; let sha256; let sensitiveFailure;
+try {
+  const module = await import("./fixtures/realm-artifact-handoff-runtime.ts");
+  fixture = module.createRealmArtifactHandoffFixture; bytes = module.artifactBytes;
+  sha256 = module.sha256; sensitiveFailure = module.sensitiveFailure;
+} finally { hook.deregister(); }
 
 function unchanged(f, before) { assert.deepEqual(f.snapshot(), before); assert.equal(f.commits(), 0); }
 
@@ -147,11 +99,11 @@ test("unconfirmed destination write can retry the same completion without overwr
 });
 
 test("Authority persistence fault leaves reusable digest bytes, not an accepted Run", async () => {
-  const f = await fixture(); const before = f.snapshot(); const persist = f.worker.persistAuthoritySnapshot;
-  f.worker.persistAuthoritySnapshot = async () => { throw new Error(sensitiveFailure); };
+  const f = await fixture(); const before = f.snapshot(); const persist = f.getPersistence();
+  f.setPersistence(async () => { throw new Error(sensitiveFailure); });
   assert.equal((await f.invoke()).status, 503); unchanged(f, before);
   assert.ok(f.destination.objects.has(`artifacts/${f.completion.outputs[0].digest}`));
-  f.worker.persistAuthoritySnapshot = persist;
+  f.setPersistence(persist);
   assert.equal((await f.invoke()).status, 200); assert.equal(f.commits(), 1);
   assert.equal(f.destination.calls.filter(call => call[0] === "put").length, 1);
 });
@@ -208,13 +160,13 @@ for (const runStatus of ["failed", "indeterminate"]) {
 }
 
 test("an uncertain response after Authority commit is confirmed by replay even after Attempt cleanup", async () => {
-  const f = await fixture(); const persist = f.worker.persistAuthoritySnapshot;
-  f.worker.persistAuthoritySnapshot = async (...args) => { await persist(...args); throw new Error(sensitiveFailure); };
+  const f = await fixture(); const persist = f.getPersistence();
+  f.setPersistence(async (...args) => { await persist(...args); throw new Error(sensitiveFailure); });
   const uncertain = await f.invoke(); assert.equal(uncertain.status, 503);
   assert.match(uncertain.value.receipt, /authorityCommit=unconfirmed/u);
   assert.equal(f.snapshot().runs[f.completion.run.id].status, "succeeded"); assert.equal(f.commits(), 1);
   const checkpoint = f.snapshot(); const calls = structuredClone([f.source.calls, f.destination.calls]);
-  f.worker.persistAuthoritySnapshot = persist; f.source.objects.clear();
+  f.setPersistence(persist); f.source.objects.clear();
   assert.equal((await f.invoke()).status, 200); assert.deepEqual(f.snapshot(), checkpoint);
   assert.deepEqual([f.source.calls, f.destination.calls], calls); assert.equal(f.commits(), 1);
 });
@@ -222,7 +174,19 @@ test("an uncertain response after Authority commit is confirmed by replay even a
 test("metadata conflict is rejected before reading any Artifact bytes", async () => {
   const f = await fixture(); const checkpoint = f.snapshot(); const output = f.completion.outputs[0];
   checkpoint.artifacts[output.id] = { protocol: "anyam.artifact/v1", id: output.id, type: "runner.output", digest: output.digest, projectRevisionId: f.completion.job.projectRevisionId };
-  f.worker.authoritySnapshot = async () => structuredClone(checkpoint);
+  f.setAuthorityReader(async () => structuredClone(checkpoint));
   const rejected = await f.invoke(); assert.equal(rejected.status, 409);
   assert.deepEqual(f.source.calls, []); assert.deepEqual(f.destination.calls, []); assert.equal(f.commits(), 0);
+});
+
+test("an invalid second Artifact is preflighted before any source read or destination write", async () => {
+  const f = await fixture(); const before = f.snapshot(); const result = f.body.completion.result;
+  const second = { ...result.outputs[0], location: result.outputs[0].location.replace(f.completion.attempt.id, `other-${f.completion.attempt.id}-other`) };
+  result.outputs.push(second); result.signature = sign(null, Buffer.from(runnerResultMessage(result)), f.runner.keys.privateKey).toString("base64url");
+  f.body.completion.outputs.push({ ...f.body.completion.outputs[0], ...second, id: "runner-output:second" });
+  const { runnerResultDigest } = await import("../src/execution/runner-proof.ts");
+  const resultDigest = await runnerResultDigest({ jobId: f.completion.job.id, attemptId: f.completion.attempt.id, result });
+  f.body.completion.resultDigest = resultDigest; f.body.completion.attempt.resultDigest = resultDigest;
+  assert.equal((await f.invoke()).status, 409); unchanged(f, before);
+  assert.deepEqual(f.source.calls, []); assert.deepEqual(f.destination.calls, []);
 });

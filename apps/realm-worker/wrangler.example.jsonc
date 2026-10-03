@@ -63,8 +63,8 @@
     },
     {
       "binding": "ANYAM_PROMOTION_ARTIFACTS",
-      "bucket_name": "replace-with-customer-digest-addressed-promotion-artifacts",
-      "preview_bucket_name": "replace-with-customer-digest-addressed-promotion-artifacts-preview"
+      "bucket_name": "replace-with-customer-anyam-artifacts",
+      "preview_bucket_name": "replace-with-customer-anyam-artifacts-preview"
     },
     {
       "binding": "ANYAM_EXPORTS",

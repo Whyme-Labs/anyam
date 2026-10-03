@@ -8,7 +8,7 @@ export type RunnerArtifactStore = RunnerArtifactSource & {
 };
 
 /** Customer bindings are supplied by the Realm, never by the signed Result. */
-export type RunnerArtifactCustody = { source?: RunnerArtifactSource; destination?: RunnerArtifactStore };
+export type RunnerArtifactCustody = { source: RunnerArtifactSource | undefined; destination: RunnerArtifactStore | undefined };
 
 export class RunnerArtifactCustodyError extends Error {
   constructor(readonly code: "blocked" | "conflict" | "indeterminate", readonly reason: string) {
@@ -44,13 +44,15 @@ export async function retainRunnerArtifacts(job: RunnerJob, outputs: readonly Ru
   const artifacts = outputs.filter(output => output.kind === "artifact");
   if (artifacts.length === 0) return "artifactByteCustody=not-required; artifactBytes=0";
   if (!custody.source || !custody.destination) throw new RunnerArtifactCustodyError("blocked", "bindings-unconfigured");
-  let byteCount = 0;
   for (const output of artifacts) {
     const root = job.outputLocations.artifacts;
     if (!canonicalKey(root) || !canonicalKey(output.location) || !output.location.startsWith(`${root}/`)
       || !output.location.slice(root.length + 1).split("/").includes(output.attemptId)
       || output.attemptId !== job.currentAttemptId || output.runId !== job.runId) conflict("output-scope-mismatch");
     if (!/^sha256:[a-f0-9]{64}$/u.test(output.digest)) conflict("digest-format-invalid");
+  }
+  let byteCount = 0;
+  for (const output of artifacts) {
     const source = await read(custody.source, output.location, "source");
     if (source === null) conflict("source-object-missing");
     if (digest(source) !== output.digest) conflict("source-digest-mismatch");

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptsDirectory = dirname(fileURLToPath(import.meta.url));
 const repository = dirname(scriptsDirectory);
-const sources = ["test/pull-request-rest.test.ts", "test/fixtures/artifacts-realm-runtime.ts", "test/fixtures/authority-disclosure-runtime.ts", "test/fixtures/selector-clients-runtime.ts"];
+const sources = ["test/pull-request-rest.test.ts", "test/fixtures/artifacts-realm-runtime.ts", "test/fixtures/authority-disclosure-runtime.ts", "test/fixtures/selector-clients-runtime.ts", "test/fixtures/realm-artifact-handoff-runtime.ts"];
 const probes = [];
 
 function runTypeScript(configPath) {

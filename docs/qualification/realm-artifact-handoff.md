@@ -65,6 +65,10 @@ the Runner executed an Action or that a failed/indeterminate Run passed.
 node --import ./node_modules/tsx/dist/loader.mjs --test test/realm-artifact-handoff.test.mjs
 ```
 
+The Worker-driving `test/fixtures/realm-artifact-handoff-runtime.ts` is included
+in the strict Worker-test project and intentional-error boundary qualifier.
+The `.mjs` launcher installs the Node constructor shims and registers cases.
+
 These Node tests call the actual Realm HTTP handler and Authority completion
 with real Ed25519 envelopes and raw SHA-256 hashing. They substitute Cloudflare
 constructors, authentication state, Authority persistence and R2 bindings with

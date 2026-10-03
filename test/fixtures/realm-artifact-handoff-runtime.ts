@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { createHash, sign } from "node:crypto";
 import { AnyamRealmCoordinator, type Env } from "../../apps/realm-worker/src/index.ts";
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "../../apps/realm-worker/src/coordinator-protocol.ts";
@@ -11,9 +12,12 @@ export const artifactBytes = Buffer.from("export default { fetch() { return new 
 export const sensitiveFailure = "SYNTHETIC-PROVIDER-PRIVATE-ERROR";
 export const sha256 = (bytes: Uint8Array | ArrayBuffer) => `sha256:${createHash("sha256").update(bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : bytes).digest("hex")}`;
 
+type StoreCall = ["get", string] | ["put", string, Parameters<RunnerArtifactStore["put"]>[2]];
+type OwnedArtifactStore = RunnerArtifactStore & { objects: Map<string, Buffer>; calls: StoreCall[] };
+
 function store() {
   const objects = new Map<string, Buffer>();
-  const calls: Array<["get", string] | ["put", string, Parameters<RunnerArtifactStore["put"]>[2]]> = [];
+  const calls: StoreCall[] = [];
   return {
     objects, calls,
     async get(key: string) { calls.push(["get", key]); const body = objects.get(key); return body === undefined ? null : { async arrayBuffer() { return Uint8Array.from(body).buffer; } }; },
@@ -22,7 +26,7 @@ function store() {
       if (options.onlyIf.etagDoesNotMatch === "*" && objects.has(key)) return null;
       objects.set(key, Buffer.from(body)); return { key };
     },
-  } satisfies RunnerArtifactStore;
+  } satisfies OwnedArtifactStore;
 }
 
 type Persist = (previous: AuthorityPlaneSnapshot, next: AuthorityPlaneSnapshot) => Promise<void>;

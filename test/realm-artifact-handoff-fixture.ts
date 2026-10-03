@@ -1,6 +1,7 @@
 // Synthetic execution fixture derived from runner-authority-completion.test.ts.
 // Real signing, Authority validation and Realm handlers; no provider execution.
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { generateKeyPairSync, sign } from "node:crypto";
 
 import {

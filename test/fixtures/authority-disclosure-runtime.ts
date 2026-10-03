@@ -78,7 +78,8 @@ export default { async fetch(request: Request, bindings: { REALM_COORDINATOR: Du
   if (url.pathname === "/fixture/issue-synthetic-credential") return Response.json(await realm.issueSyntheticCredential());
   if (url.pathname === "/fixture/validate-synthetic-credential") return Response.json(await realm.validateSyntheticCredential((await request.json() as { token: string }).token));
   if (url.pathname.startsWith("/authority/")) return realm.fetch(request);
-  const name = request.headers.get("x-fixture-member") ?? "public";
+  const cookieMember = request.headers.get("cookie")?.match(/(?:^|;\s*)anyam_owner_session=synthetic-([A-Za-z]+)(?:;|$)/u)?.[1];
+  const name = request.headers.get("x-fixture-member") ?? cookieMember ?? "public";
   const member = (await realm.members())?.[name];
   if (!member) return Response.json({ code: "fixture-member-missing" }, { status: 401 });
   const env = { ANYAM_HOSTING_MODE: "customer-operated", ANYAM_INSTALLATION_ID: "disclosure-local", ANYAM_PROTOCOL_VERSION: "anyam.customer-realm-worker/v1", ANYAM_REALM_RP_ID: "fixture.local", REALM_COORDINATOR: bindings.REALM_COORDINATOR,

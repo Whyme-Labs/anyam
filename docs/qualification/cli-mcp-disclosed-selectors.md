@@ -112,6 +112,34 @@ candidates remain indistinguishable; malformed selectors and unknown caller
 authority fields are rejected safely. Human REST is the bounded
 `GET /api/authority/revisions/{encodedChangeRevisionId}` route.
 
+## Inspect accepted signed Run context as a Realm owner
+
+Use `anyam realm run detail --realm <url> --id <run-id> --session-stdin --json`
+with the same explicit existing human Session input. This GET uses
+`/api/authority/run-details/{encodedRunId}` and returns the existing
+`anyam.owner-run-detail/v1` contract without a new audience or policy path.
+Only an active human Realm-wide owner with complete current Source access and
+Run `evidence.read` authority can read it. Project ownership or complete Project
+Source access alone does not qualify. Ordinary Run inspection and delegated
+MCP continue to expose coarse status/recorded outcomes.
+
+The server re-verifies the accepted enrolled signature and exact producing
+context on each read. Detail includes accepted action/verifier contracts,
+producing snapshots, Job/Attempt/Runner identity, digest references and verified
+result digest. It omits native credential coordinates, unsigned metadata and
+raw logs/provider receipts. This CLI does not independently verify the signature,
+recompute manifest/artifact bytes, attest real execution or establish present
+Evidence validity. Unknown/unsigned/tampered or inaccessible detail is safely
+unavailable; verification/storage failure remains a typed 503. No coarse-read
+fallback conceals that failure. Session input is stdin only and is never saved.
+
+The existing disclosed-write workerd/SQLite journey additionally exercises actual
+CLI owner detail and exact DTO equality, recovery, non-owner/Project-owner
+denial, tampered and credential-bearing proof rejection, current Source/Evidence
+and Session revocation, coarse-reader continuity and unchanged read checkpoints.
+Its host authentication and producing execution are synthetic; its enrolled
+Ed25519 signature verification and Coordinator persistence are real local code.
+
 ## Local evidence and remaining qualification
 
 `npm run qualification:selector-clients-local` runs actual Node CLI processes

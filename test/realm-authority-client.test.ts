@@ -1,6 +1,52 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Readable } from "node:stream";
+
+test("Realm owner Run-detail client returns the accepted contract through one encoded read without request payload", async () => {
+  const detail = { protocol: "anyam.owner-run-detail/v1", status: "ready", run: { id: "run:accepted" }, proof: { signatureVerified: true, resultDigest: "sha256:recorded-result" } };
+  const calls: { url: string; method: string; body: unknown; cache: unknown; redirect: unknown }[] = [];
+  const client = new RealmAuthorityHttpClient({ baseUrl: "https://realm.example", ownerSession: "synthetic-session", fetchImpl: async (url, options) => {
+    calls.push({ url: String(url), method: options?.method ?? "", body: options?.body, cache: options?.cache, redirect: options?.redirect });
+    return Response.json(detail);
+  } });
+  assert.deepEqual(await client.inspectRunDetail("run:accepted"), detail);
+  assert.deepEqual(calls, [{ url: "https://realm.example/api/authority/run-details/run%3Aaccepted", method: "GET", body: undefined, cache: "no-store", redirect: "error" }]);
+});
+test("hosted CLI Run detail uses only explicit Session stdin and preserves the accepted owner DTO", async t => {
+  const detail = { protocol: "anyam.owner-run-detail/v1", status: "ready", proof: { signatureVerified: true, resultDigest: "sha256:recorded-result" } };
+  t.mock.method(globalThis, "fetch", async (url: string, options: RequestInit) => {
+    assert.equal(String(url), "https://realm.example/api/authority/run-details/run%3Aaccepted");
+    assert.equal(new Headers(options.headers).get("cookie"), "anyam_owner_session=synthetic-owner");
+    assert.equal(options.method, "GET"); assert.equal(options.body, undefined);
+    return Response.json(detail);
+  });
+  const value = await runRealmSourceCommand(["realm", "run", "detail", "--realm", "https://realm.example", "--id", "run:accepted", "--session-stdin", "--json"], Readable.from(["synthetic-owner\n"]));
+  assert.deepEqual(value, detail);
+});
+test("hosted CLI Run detail rejects credential options and unrelated detail commands before reading stdin", async () => {
+  for (const extra of [["--owner-session", "PRIVATE-session"], ["--session", "PRIVATE-session"], ["--input", "PRIVATE-path"], ["--id", "duplicate"], ["--unknown", "PRIVATE-field"]]) {
+    const input = Readable.from(["PRIVATE-session"]);
+    await assert.rejects(() => runRealmSourceCommand(["realm", "run", "detail", "--realm", "https://realm.example", "--id", "run:accepted", "--session-stdin", ...extra], input), error => {
+      assert.ok(error instanceof Error); assert.match(error.message, /realm_source_options_invalid/u); assert.doesNotMatch(error.message, /PRIVATE-/u);
+      return true;
+    });
+    assert.equal(input.readableDidRead, false);
+  }
+  await assert.rejects(() => runRealmSourceCommand(["realm", "revision", "detail"], Readable.from([])), /realm_source_operation_invalid/u);
+  await assert.rejects(() => runRealmSourceCommand(["realm", "run", "detail", "--realm", "https://realm.example", "--id", "run:accepted"], Readable.from([])), /supply --session-stdin/u);
+});
+test("Realm owner Run-detail failure preserves typed status without disclosing response payload or falling back", async () => {
+  for (const status of [401, 404, 503]) {
+    let calls = 0;
+    const client = new RealmAuthorityHttpClient({ baseUrl: "https://realm.example", ownerSession: "synthetic-owner", fetchImpl: async () => {
+      calls++; return Response.json({ code: status === 503 ? "run_detail_unavailable" : "not_found", recoveryAction: "inspect current authority", receipt: "detail=unavailable; credentialMaterialStored=false", secret: "PRIVATE-proof-payload" }, { status });
+    } });
+    await assert.rejects(() => client.inspectRunDetail("run:accepted"), error => {
+      assert.ok(error instanceof RealmAuthorityRequestError); assert.equal(error.status, status); assert.doesNotMatch(error.message, /PRIVATE-/u); return true;
+    });
+    assert.equal(calls, 1);
+  }
+});
 import { runRealmSourceCommand } from "../packages/create-anyam/src/realm-source-command.ts";
 
 import { RealmAuthorityHttpClient, RealmAuthorityRequestError } from "../src/portability/realm-authority-client.ts";

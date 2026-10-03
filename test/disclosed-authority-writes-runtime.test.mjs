@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { isDeepStrictEqual } from "node:util";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -28,6 +29,16 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
     };
     const options = convertV4MiniflareOptions({ name: "disclosed-writes-owned-local", modules: true, script: bundle.outputFiles[0].text, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], bindings: { ANYAM_AUTHORITY_RECOVERY_KEY_ID: "key:synthetic-runtime-only", ANYAM_AUTHORITY_RECOVERY_SECRET: "synthetic-runtime-recovery-only" }, durableObjects: { REALM_COORDINATOR: { className: "LocalDisclosureRealm", useSQLite: true } }, serviceBindings: { ANYAM_REPOSITORY_OBSERVER: observer }, outboundService: () => new Response("outbound disabled", { status: 403 }) });
     options.telemetry = { enabled: false }; options.resourcePersistencePath = join(directory, "storage"); runtime = new Miniflare(options);
+    const base = (await runtime.ready).toString();
+    const cliRun = async (runId, member = "owner", operation = "detail") => {
+      const child = spawn(process.execPath, ["--import", "./node_modules/tsx/dist/loader.mjs", "packages/create-anyam/src/anyam.ts", "realm", "run", operation, "--realm", base, "--id", runId, "--session-stdin", "--json"], { cwd: process.cwd(), env: { ...process.env, ANYAM_STATE_HOME: join(directory, "cli-state") }, stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = ""; let stderr = "";
+      child.stdout.on("data", data => { stdout += data; }); child.stderr.on("data", data => { stderr += data; });
+      child.stdin.on("error", error => { if (error.code !== "EPIPE") throw error; }); child.stdin.end(`synthetic-${member}\n`);
+      const code = await new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+      assert.doesNotMatch(stdout + stderr, /synthetic-(owner|public|private|projectOwner|unrelated)|sessionId|capabilityGrantId|publicKey|privateKey|credentialId|unsigned-|source:hidden|PRIVATE-|projectRevisionId|projectViewId|networkBoundaryReceipt/u);
+      return { code, value: JSON.parse(code === 0 ? stdout : stderr) };
+    };
     const invoke = async (path, body, member = "public") => {
       const response = await runtime.dispatchFetch(`http://localhost${path}`, { method: body === undefined ? "GET" : "POST", headers: { "content-type": "application/json", "x-fixture-member": member, ...(path.startsWith("/authority/") ? { [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       const text = await response.text();
@@ -147,11 +158,19 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
     const rich = await invoke(path, undefined, "owner"); assert.equal(rich.status, 200, JSON.stringify(rich));
     assert.equal(rich.value.proof.signatureVerified, true); assert.equal(rich.value.proof.resultDigest, completion.resultDigest);
     assert.deepEqual(rich.value.context.sourceSpaceSnapshots, { "source:public": candidateOid });
+    const beforeCli = (await invoke("/fixture/checkpoint", {})).value;
+    const cliDetail = await cliRun(queuedRun.id);
+    assert.equal(cliDetail.code, 0); assert.deepEqual(cliDetail.value, rich.value, "actual CLI returns the exact accepted owner contract");
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, beforeCli, "CLI proof read preserves identity/audit/SQL/KV");
+    const missingCli = await cliRun("run:absent");
+    assert.equal(missingCli.code, 1);
+    assert.deepEqual(await cliRun("run:public"), missingCli, "unsigned legacy Run cannot fabricate proof through CLI");
     assert.doesNotMatch(JSON.stringify(rich), /sessionId|capabilityGrantId|publicKey|privateKey|credentialId|unsigned-|source:hidden|PRIVATE-|projectRevisionId|projectViewId|networkBoundaryReceipt/u);
     const knownProofCredential = (await invoke("/fixture/issue-synthetic-credential", {})).value;
     const opaqueRun = await command("run.request", "opaque-proof-run", runPayload); assert.equal(opaqueRun.status, 200);
     await complete(opaqueRun.value.value.run.id, "opaque-proof", knownProofCredential.token, 422);
     assert.equal((await invoke(`/api/authority/run-details/${encodeURIComponent(opaqueRun.value.value.run.id)}`, undefined, "owner")).status, 404);
+    assert.deepEqual(await cliRun(opaqueRun.value.value.run.id), missingCli, "a rejected credential-bearing completion cannot expose CLI proof");
     const aliasState = structuredClone((await invoke("/fixture/checkpoint", {})).value.authority);
     const aliasDetail = aliasState.runDetails[queuedRun.id];
     aliasDetail.result.output.outputDigest = knownProofCredential.token;
@@ -165,6 +184,9 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
     const proofState = (await invoke("/fixture/checkpoint", {})).value.authority;
     await invoke("/fixture/replace-authority", aliasState);
     assert.equal((await invoke(path, undefined, "owner")).status, 404, "otherwise valid signed proof cannot project a known opaque credential");
+    const beforeAliasCli = (await invoke("/fixture/checkpoint", {})).value;
+    assert.deepEqual(await cliRun(queuedRun.id), missingCli, "CLI cannot project an otherwise valid stored signed credential-bearing proof");
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, beforeAliasCli);
     await invoke("/fixture/replace-authority", proofState);
     assert.equal((await invoke("/fixture/validate-synthetic-credential", { token: knownProofCredential.token })).value.valid, true);
     const sealedCheckpoint = (await invoke("/fixture/checkpoint", {})).value;
@@ -176,6 +198,7 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
       const activated = await invoke("/authority/recovery/activate/internal", { sessionId: fixture.members.owner.session.id, idempotencyKey: `activate:${bundle.bundleId}`, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest }); assert.equal(activated.status, 200, JSON.stringify(activated));
     };
     await restore(exported.value.bundle); assert.deepEqual(await invoke(path, undefined, "owner"), rich, "signed detail survives actual recovery restore");
+    assert.deepEqual(await cliRun(queuedRun.id), cliDetail, "CLI recovers the same accepted signed context after restore");
     const legacy = structuredClone(sealedCheckpoint.authority); delete legacy.runDetails;
     const legacyBundle = await createAuthorityRecoveryBundle({ snapshot: legacy, bundleId: "bundle:synthetic-legacy", recoveryKeyId: "key:synthetic-runtime-only", secret: "synthetic-runtime-recovery-only" });
     await restore(legacyBundle);
@@ -185,20 +208,36 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
     for (const member of ["public", "private", "projectOwner", "unrelated"]) {
       const denied = await invoke(path, undefined, member); assert.equal(denied.status, 404, member);
       assert.deepEqual(denied, await invoke("/api/authority/run-details/run%3Aabsent", undefined, member), `${member} cannot discover detail presence`);
+      const beforeDenied = (await invoke("/fixture/checkpoint", {})).value;
+      const deniedCli = await cliRun(queuedRun.id, member);
+      assert.deepEqual(deniedCli, await cliRun("run:absent", member), `${member} CLI detail cannot discover proof presence`);
+      assert.equal(deniedCli.code, 1);
+      assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, beforeDenied);
     }
     const reseed = (state, identity = sealedCheckpoint.identity) => invoke("/fixture/seed", { ...fixture, state, identity });
     const tampered = structuredClone(sealedCheckpoint.authority); tampered.runDetails[queuedRun.id].result.signature = "tampered";
     await reseed(tampered); assert.equal((await invoke(path, undefined, "owner")).status, 404);
+    assert.deepEqual(await cliRun(queuedRun.id), missingCli, "tampered signed proof remains unavailable through CLI");
     const coarse = await invoke("/authority/runs/internal", { sessionId: fixture.members.public.session.id, runId: queuedRun.id }); assert.equal(coarse.value.run.status, "succeeded");
     assert.doesNotMatch(JSON.stringify(coarse), /Digest|runnerId|verifierId|source:hidden/u);
+    const cliCoarse = await cliRun(queuedRun.id, "public", "inspect");
+    assert.equal(cliCoarse.code, 0); assert.equal(cliCoarse.value.run.status, "succeeded");
+    assert.doesNotMatch(JSON.stringify(cliCoarse.value), /proof|Digest|runnerId|verifierId/u);
     for (const kind of ["source-read", "scoped-evidence"]) {
       const deniedIdentity = structuredClone(sealedCheckpoint.identity);
       if (kind === "source-read") deniedIdentity.sourceSpacePolicies["source:hidden"].readerPrincipalIds = [fixture.members.private.principal.id];
       else for (const relationship of Object.values(deniedIdentity.relationships)) if (relationship.principalId === fixture.members.owner.principal.id) relationship.deniedCapabilities = ["evidence.read"];
       await reseed(sealedCheckpoint.authority, deniedIdentity); assert.equal((await invoke(path, undefined, "owner")).status, 404, kind);
+      const beforeDenied = (await invoke("/fixture/checkpoint", {})).value;
+      assert.deepEqual(await cliRun(queuedRun.id), missingCli, `${kind} removes current CLI detail access`);
+      assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, beforeDenied);
     }
     await reseed(sealedCheckpoint.authority); await invoke("/fixture/revoke", { sessionId: fixture.members.owner.session.id });
     assert.notEqual((await invoke(path, undefined, "owner")).status, 200);
+    const revokedBefore = (await invoke("/fixture/checkpoint", {})).value;
+    const revokedCli = await cliRun(queuedRun.id);
+    assert.equal(revokedCli.code, 1); assert.deepEqual(revokedCli, await cliRun("run:absent"), "revoked Session cannot discover CLI proof presence");
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value, revokedBefore);
     await reseed(sealedCheckpoint.authority);
     assert.equal((await invoke("/api/authority/run-details/run%3Apublic", undefined, "owner")).status, 404, "unsigned legacy Run cannot fabricate accepted rich detail");
     for (const [kind, handle] of [["session-uri-malformed", encodeURIComponent(fixture.members.private.session.id) + "%ZZ"], ["session-uri-invalid-utf8", "%FF" + encodeURIComponent(fixture.members.private.session.id) + "%"], ["session-base64-whitespace", Buffer.from(fixture.members.private.session.id).toString("base64url").match(/.{1,4}/gu).join("\r\n")], ["session-encoded", Buffer.from(fixture.members.private.session.id).toString("base64url")], ["session-encoded-substring", "prefix" + Buffer.from(fixture.members.private.session.id).toString("base64url") + "suffix"], ["session-uri", encodeURIComponent(fixture.members.private.session.id)], ["session", fixture.members.private.session.id], ["grant", queuedRun.capabilityGrantId], ["passkey", "synthetic-private-passkey"]]) {

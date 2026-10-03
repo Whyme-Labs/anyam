@@ -14,6 +14,14 @@ for authentication, payloads, native delegation and local qualification limits.
 Source snapshots, latest marker, coarse Runs and recorded Evidence outcomes.
 Recorded outcomes are separate from signed execution proof.
 
+An active human Realm-wide owner can use `realm run detail --realm <url>
+--id <run-id> --session-stdin --json` to inspect the existing
+`anyam.owner-run-detail/v1` accepted signed-context contract. Complete current
+Source access and Run `evidence.read` authority still apply. The server verifies
+the enrolled signature and producing context on each read; this CLI does not
+independently verify execution or manifest/artifact bytes. Ordinary Run inspection
+and delegated MCP retain their coarse disclosure.
+
 Start with the [Anyam Quickstart](https://github.com/Whyme-Labs/anyam/blob/main/docs/guides/quickstart.md). Read the
 [documentation index](https://github.com/Whyme-Labs/anyam/blob/main/docs/README.md) for the design, Realm, and example guides.
 

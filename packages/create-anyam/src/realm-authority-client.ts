@@ -105,6 +105,7 @@ export class RealmAuthorityHttpClient {
   inspectWorkspace(workspaceId: string): Promise<JsonObject> { return this.request(`/api/workspaces/${encodeURIComponent(workspaceId)}`, { method: "GET" }); }
   inspectChange(changeId: string): Promise<JsonObject> { return this.request(`/api/changes/${encodeURIComponent(changeId)}`, { method: "GET" }); }
   inspectRun(runId: string): Promise<JsonObject> { return this.request(`/api/authority/runs/${encodeURIComponent(runId)}`, { method: "GET" }); }
+  inspectRunDetail(runId: string): Promise<JsonObject> { return this.request(`/api/authority/run-details/${encodeURIComponent(runId)}`, { method: "GET" }); }
   inspectRevision(changeRevisionId: string): Promise<JsonObject> { return this.request(`/api/authority/revisions/${encodeURIComponent(changeRevisionId)}`, { method: "GET" }); }
   viewCommand<C extends DisclosedSourceOperation>(command: C, payload: DisclosedSourcePayloads[C], idempotencyKey: string): Promise<JsonObject> {
     if (!idempotencyKey.trim()) throw new Error("disclosed_source_idempotency_key_required");

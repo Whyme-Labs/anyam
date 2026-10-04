@@ -112,6 +112,16 @@ candidates remain indistinguishable; malformed selectors and unknown caller
 authority fields are rejected safely. Human REST is the bounded
 `GET /api/authority/revisions/{encodedChangeRevisionId}` route.
 
+Ordinary Workspace, Change, Intent and Pull Request inspect/list projections,
+their Project discovery counts and Mirror service reads preserve the same
+native resource restrictions. Partial Source closure/Project discovery checks
+cannot supply omitted record coordinates to metadata capabilities. An exact
+Run-scoped read still exposes that Run and its producer-bound Evidence/Artifact
+references; it supplies no broader Change or Workspace authority. The local
+MCP/Coordinator routing regression also preserves owner, general Source,
+Source-specific and legitimate Workspace/Change reads. Its authentication
+state is synthetic; it does not qualify a live OAuth ceremony or provider.
+
 ## Inspect accepted signed Run context as a Realm owner
 
 Use `anyam realm run detail --realm <url> --id <run-id> --session-stdin --json`

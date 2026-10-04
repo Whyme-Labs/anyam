@@ -10,6 +10,7 @@ import { disclosureFixture } from "./fixtures/authority-disclosure-state.ts";
 import { repositoryObservationDigest } from "../src/portability/repository-observation.ts";
 import { isDeepStrictEqual } from "node:util";
 import { RealmIdentityPolicy } from "../src/identity/realm.ts";
+import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "../apps/realm-worker/src/coordinator-protocol.ts";
 
 const prepareFixture = () => {
   const fixture = disclosureFixture();
@@ -28,6 +29,82 @@ function repositoryObserver() {
     return Response.json({ protocol: claims.protocol, status: "succeeded", observation: { ...claims, manifestDigest: await repositoryObservationDigest(claims) }, receipt: "synthetic observer response; no live provider" });
   } };
 }
+test("native Run-only reads cannot widen through ordinary metadata routes", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "anyam-native-read-scope-")); let runtime;
+  try {
+    const bundle = await build({ entryPoints: ["test/fixtures/selector-clients-runtime.ts"], bundle: true, write: false, format: "esm", platform: "browser", target: "es2022", external: ["cloudflare:workers", "node:*"] });
+    const observer = repositoryObserver();
+    const options = convertV4MiniflareOptions({ name: "native-read-scope-owned-local", modules: true, script: bundle.outputFiles[0].text, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], durableObjects: { REALM_COORDINATOR: { className: "LocalSelectorRealm", useSQLite: true } }, serviceBindings: { ANYAM_REPOSITORY_OBSERVER: observer.fetch }, outboundService: () => new Response("outbound disabled", { status: 403 }) });
+    options.telemetry = { enabled: false }; options.resourcePersistencePath = join(directory, "storage"); runtime = new Miniflare(options);
+    const base = (await runtime.ready).toString(); const fixture = prepareFixture();
+    // An unrelated, valid same-Source graph: disclosure alone must not authorize it.
+    const ids = Object.fromEntries(["workspace", "change", "revision", "candidate", "intent", "run", "evidence", "artifact", "release", "target", "promotion", "pr", "mirror"].map(kind => [`${kind}:public`, `${kind}:peer`]));
+    const remap = value => typeof value === "string" ? ids[value] ?? value : Array.isArray(value) ? value.map(remap) : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, remap(entry)])) : value;
+    for (const [collection, kind] of [["workspaces", "workspace"], ["changes", "change"], ["changeRevisions", "revision"], ["projectRevisions", "candidate"], ["intents", "intent"], ["runs", "run"], ["evidence", "evidence"], ["artifacts", "artifact"], ["releases", "release"], ["targets", "target"], ["promotions", "promotion"], ["pullRequests", "pr"], ["mirrors", "mirror"]]) fixture.state[collection][`${kind}:peer`] = remap(fixture.state[collection][`${kind}:public`]);
+    const identity = new RealmIdentityPolicy({ realmId: fixture.identity.realm.id, relyingPartyId: "fixture.local", now: () => new Date("2026-10-02T12:00:00Z") }); identity.restoreOperationalSnapshot(fixture.identity);
+    const owner = fixture.members.owner.session; const resource = { realmId: identity.realm.id, projectId: "project:fixture" };
+    const task = identity.createTask({ principalId: owner.principalId, actorId: owner.actorId, sessionId: owner.id, purpose: "Synthetic native metadata read regression" });
+    const parent = identity.createCapabilityGrant({ principalId: owner.principalId, actorId: owner.actorId, clientId: owner.clientId, sessionId: owner.id, taskId: task.id, resource, sourceSpaceIds: ["source:public"], actions: ["source.read", "agent.delegate"], effects: [], allowedModelProviders: ["synthetic-local"], allowedCredentialClasses: ["mcp"] });
+    identity.registerClient({ id: "client:native-read-scope", kind: "mcp", allowedAudiences: ["mcp"], allowedOperations: ["source.read"] });
+    const agent = identity.registerAgent({ principalId: owner.principalId, clientId: "client:native-read-scope", name: "Synthetic read agent", runtime: "synthetic", modelProvider: "synthetic-local", allowedCredentialClasses: ["mcp"] });
+    const delegate = selected => identity.delegateAgent({ humanSessionId: owner.id, parentGrantId: parent.id, agentId: agent.id, purpose: "Synthetic selected read scope", resource: selected, sourceSpaceIds: ["source:public"], actions: ["source.read"], effects: [], allowedCredentialClasses: ["mcp"] });
+    const narrow = delegate({ ...resource, runId: "run:public" }); const general = delegate(resource);
+    const source = delegate({ ...resource, sourceSpaceId: "source:public" });
+    const workspace = delegate({ ...resource, workspaceId: "workspace:public" });
+    const change = delegate({ ...resource, changeId: "change:public" });
+    const props = d => ({ scopes: ["project.read", "workspace.inspect", "change.inspect", "intent.inspect", "pullRequest.inspect", "run.invoke"], realmId: identity.realm.id, kernelSessionId: d.session.id, agentId: agent.id, taskId: d.task.id, capabilityGrantId: d.grant.id, delegatedBySessionId: owner.id, resource: d.grant.resource, sourceSpaceIds: ["source:public"] });
+    fixture.identity = identity.getRecoverySnapshot();
+    const invoke = async (path, body, headers = {}) => { const response = await fetch(new URL(path, base), { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) }); return await response.json(); };
+    await invoke("/fixture/seed", fixture); await invoke("/fixture/selector-bindings", { narrow: props(narrow), general: props(general), source: props(source), workspace: props(workspace), change: props(change) });
+    const call = (name, input, actor = "narrow") => invoke("/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: input } }, actor === "owner" ? { "x-fixture-member": "owner" } : { "x-fixture-agent": actor });
+    const before = await invoke("/fixture/checkpoint", {});
+    assert.ok((await call("run.inspect", { runId: "run:public" })).result, "selected Run remains readable");
+    assert.equal((await call("run.inspect", { runId: "run:peer" })).error?.code, -32004, "unrelated Run remains unavailable");
+    for (const [name, key, peer, hidden, resultKey] of [["change.inspect", "changeId", "change:peer", "change:hidden", "change"], ["workspace.inspect", "workspaceId", "workspace:peer", "workspace:hidden", "workspace"], ["intent.inspect", "intentId", "intent:peer", "intent:hidden", "intent"], ["pullRequest.inspect", "pullRequestId", "pr:peer", "pr:hidden", "pullRequest"]]) {
+      await t.test(name + " rejects unrelated same-Source metadata", async () => {
+        const denied = await call(name, { [key]: peer });
+        assert.equal(denied.error?.code, -32004, "Run-only delegation must not disclose " + peer);
+        assert.deepEqual(denied, await call(name, { [key]: hidden }));
+        assert.deepEqual(denied, await call(name, { [key]: "absent:resource" }));
+        for (const actor of ["general", "owner"]) assert.equal((await call(name, { [key]: peer }, actor)).result?.structuredContent[resultKey]?.id, peer, actor + " retains authorized access");
+      });
+    }
+    for (const [name, resultKey] of [["change.list", "changes"], ["workspace.list", "workspaces"], ["intent.list", "intents"], ["pullRequest.list", "pullRequests"]]) {
+      await t.test(name + " omits broader records", async () => {
+        assert.deepEqual((await call(name, { projectId: "project:fixture" })).result?.structuredContent[resultKey], [], "Run-only list must not disclose broader records");
+        assert.ok((await call(name, { projectId: "project:fixture" }, "general")).result?.structuredContent[resultKey].length, "general native reads remain usable");
+      });
+    }
+    await t.test("Project discovery counts respect the native record scope", async () => {
+      const project = (await call("project.inspect", { projectId: "project:fixture" })).result?.structuredContent;
+      assert.deepEqual(project.project.sourceSpaceIds, ["source:public"], "permitted Project discovery survives");
+      for (const key of ["workspaces", "changes", "revisions", "intents", "intentComments", "pullRequests", "releases", "targets", "promotions"]) assert.equal(project.counts[key], 0, key + " must omit broader metadata");
+      assert.equal(project.counts.runs, 1, "the authorized selected Run remains counted");
+      assert.equal(project.counts.evidence, 1, "selected Run Evidence remains counted");
+      assert.equal(project.counts.artifacts, 1, "selected Run producer-bound Artifact remains counted");
+      assert.deepEqual((await call("project.list", {})).result?.structuredContent.projects[0].counts, project.counts);
+    });
+    await t.test("Mirror service reads cannot borrow partial Project/Source authority", async () => {
+      const mirrorRead = (selected, fields) => invoke("/authority/mirrors/internal", { surface: "mcp", sessionId: selected.session.id, agentId: agent.id, taskId: selected.task.id, capabilityGrantId: selected.grant.id, delegatedBySessionId: owner.id, resource: selected.grant.resource, sourceSpaceIds: ["source:public"], ...fields }, { [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE });
+      const denied = await mirrorRead(narrow, { mirrorId: "mirror:peer" });
+      assert.equal(denied.code, "not_found");
+      for (const mirrorId of ["mirror:hidden", "mirror:absent"]) assert.deepEqual(await mirrorRead(narrow, { mirrorId }), denied);
+      assert.deepEqual((await mirrorRead(narrow, { projectId: "project:fixture" })).mirrors, []);
+      assert.equal((await mirrorRead(general, { mirrorId: "mirror:peer" })).mirror?.id, "mirror:peer");
+    });
+    await t.test("Source, Workspace and Change reads preserve their actual resource closure", async () => {
+      assert.equal((await call("change.inspect", { changeId: "change:peer" }, "source")).result?.structuredContent.change.id, "change:peer");
+      for (const actor of ["workspace", "change"]) {
+        assert.equal((await call("change.inspect", { changeId: "change:public" }, actor)).result?.structuredContent.change.id, "change:public");
+        assert.equal((await call("change.inspect", { changeId: "change:peer" }, actor)).error?.code, -32004);
+        assert.equal((await call("run.inspect", { runId: "run:public" }, actor)).result?.structuredContent.run.id, "run:public");
+        assert.equal((await call("pullRequest.inspect", { pullRequestId: "pr:public" }, actor)).result?.structuredContent.pullRequest.id, "pr:public");
+      }
+    });
+    assert.deepEqual(await invoke("/fixture/checkpoint", {}), before, "reads preserve identity, SQL, KV and credential records");
+    assert.equal(observer.calls(), 0, "metadata reads do not inspect provider source");
+  } finally { await runtime?.dispose(); await rm(directory, { recursive: true, force: true }); }
+});
 async function cli(directory, base, target, operation, payload, key, extra = []) {
   const path = join(directory, "request.json");
   if (payload !== undefined) await writeFile(path, typeof payload === "string" ? payload : JSON.stringify(payload));

@@ -48,6 +48,29 @@ test("a Run-scoped native delegation cannot borrow that authority for a candidat
   assert.ok(delegatedSelectorContext(identity, f.state, body).disclosure.run("run:public"));
   assert.equal(delegatedSelectorContext(identity, f.state, body).disclosure.revisionReview("revision:public"), undefined);
 });
+test("record-scoped native grants cannot supply broader metadata capabilities", () => {
+  const f = disclosureFixture();
+  const identity = new RealmIdentityPolicy({ realmId: f.identity.realm.id, relyingPartyId: "fixture.local", now: () => new Date(disclosureClock) });
+  identity.restoreOperationalSnapshot(f.identity);
+  const owner = f.members.owner!.session;
+  identity.registerClient({ id: "client:scoped-metadata", kind: "mcp", allowedAudiences: ["mcp"], allowedOperations: ["source.read"] });
+  const agent = identity.registerAgent({ principalId: owner.principalId, clientId: "client:scoped-metadata", name: "Synthetic scoped metadata reader", runtime: "synthetic", modelProvider: "synthetic-local", allowedCredentialClasses: ["mcp"] });
+  for (const [coordinate, id] of [["runId", "run:public"], ["pullRequestId", "pr:public"], ["releaseId", "release:public"], ["targetId", "target:public"]] as const) {
+    const resource = { realmId: identity.realm.id, projectId: "project:fixture", [coordinate]: id };
+    const task = identity.createTask({ principalId: owner.principalId, actorId: owner.actorId, sessionId: owner.id, purpose: "Synthetic selected-record parent task" });
+    const parent = identity.createCapabilityGrant({ principalId: owner.principalId, actorId: owner.actorId, clientId: owner.clientId, sessionId: owner.id, taskId: task.id, resource, sourceSpaceIds: ["source:public"], actions: ["source.read", "agent.delegate"], effects: [], allowedModelProviders: ["synthetic-local"], allowedCredentialClasses: ["mcp"] });
+    const delegated = identity.delegateAgent({ humanSessionId: owner.id, parentGrantId: parent.id, agentId: agent.id, purpose: "Read only the selected record", resource, sourceSpaceIds: ["source:public"], actions: ["source.read"], effects: [], allowedCredentialClasses: ["mcp"] });
+    const body = { surface: "mcp", sessionId: delegated.session.id, agentId: agent.id, taskId: delegated.task.id, capabilityGrantId: delegated.grant.id, delegatedBySessionId: owner.id, resource, sourceSpaceIds: ["source:public"] };
+    const d = delegatedSelectorContext(identity, f.state, body).disclosure;
+    assert.equal(d.change("change:public"), undefined, coordinate);
+    assert.equal(d.workspace("workspace:public"), undefined, coordinate);
+    assert.equal(d.intent("intent:collaboration"), undefined, coordinate);
+    assert.equal(d.revisionReview("revision:public"), undefined, coordinate);
+    assert.equal(d.mirror("mirror:public"), undefined, coordinate);
+    assert.deepEqual(d.changes(), [], coordinate);
+    if (coordinate === "runId") assert.ok(d.run("run:public"), "the exact authorized Run remains readable");
+  }
+});
 test("Revision review preserves older candidate identity and distinguishes recorded failed or stale outcomes", () => {
   const f = disclosureFixture();
   const original = f.state.changeRevisions["revision:public"]!;

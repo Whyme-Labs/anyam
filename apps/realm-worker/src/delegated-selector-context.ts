@@ -69,7 +69,14 @@ export function delegatedSelectorContext(identity: RealmIdentityPolicy, snapshot
     capabilities: resource => {
       if (!inEnvelope(resource, true)) return [];
       const capabilities = identity.activeCapabilitiesForPrincipal({ principalId: live.principalId, resource }).filter(capability => !parents.some(parent => parent.deniedActions.includes(capability)));
-      return capabilities.includes("source.read") ? capabilities : [];
+      if (!capabilities.includes("source.read")) return [];
+      // Source closure and Project discovery may omit record coordinates. A
+      // metadata projection must preserve every native resource restriction;
+      // its Source is checked again by scopedCapability for each actual Source.
+      const selected = { ...resource, ...(resource.sourceSpaceId === undefined && envelope.sourceSpaceId ? { sourceSpaceId: envelope.sourceSpaceId } : {}) };
+      const complete = inEnvelope(selected, false);
+      if (complete) validate(selected, resource.sourceSpaceId ? [resource.sourceSpaceId] : sourceSpaceIds, "source.read");
+      return capabilities.filter(capability => capability === "source.read" || capability === "project.inspect" || complete);
     },
     sourceReadable: (projectId, sourceSpaceId, capability = "source.read") => {
       if (projectId !== envelope.projectId || !sourceSpaceIds.includes(sourceSpaceId)) return false;

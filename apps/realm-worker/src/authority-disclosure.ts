@@ -251,7 +251,7 @@ export class AuthorityDisclosure {
   pullRequest(id: string) {
     const p = this.state.pullRequests[id];
     const c = p && this.change(p.changeId);
-    if (!p || !c || c.change.projectId !== p.projectId || !this.capable(p.projectId, "pullRequest.inspect", { pullRequestId: p.id, changeId: p.changeId })) return undefined;
+    if (!p || !c || c.change.projectId !== p.projectId || !this.capable(p.projectId, "pullRequest.inspect", { pullRequestId: p.id, changeId: p.changeId, ...(c.change.workspaceId ? { workspaceId: c.change.workspaceId } : {}) })) return undefined;
     const revisions = Object.values(this.state.changeRevisions).filter(r => r.changeId === p.changeId);
     const workspace = c.change.workspaceId && this.workspaceScope(c.change.workspaceId);
     const ids = [...new Set([...revisions.flatMap(r => Object.keys(r.sourceSpaceSnapshots!)), ...(workspace ? workspace.view.visibleSourceSpaceIds : [])])];
@@ -310,7 +310,7 @@ export class AuthorityDisclosure {
     // sharing a projection label cannot supply or revoke that authority.
     if (!viewId || !this.disclosureMatches(viewId, a.disclosure.projectionId)) return undefined;
     const scope = this.recordScope(a.projectRevisionId, viewId, a.changeRevisionId);
-    if (!scope || !this.scopedCapability(scope.projectId, "evidence.read", scope.ids, { ...(scope.changeId ? { changeId: scope.changeId } : {}) })
+    if (!scope || !this.scopedCapability(scope.projectId, "evidence.read", scope.ids, { ...(scope.changeId ? { changeId: scope.changeId } : {}), ...(r ? { runId: r.id, ...(r.workspaceId ? { workspaceId: r.workspaceId } : {}) } : {}) })
       || !this.classification(scope.projectId, a.disclosure.classification, scope.ids)
       || (a.runId && (!r || !this.run(r.id) || r.projectRevisionId !== a.projectRevisionId || r.projectViewId !== viewId || r.changeRevisionId !== a.changeRevisionId))) return undefined;
     return scope;
@@ -368,6 +368,7 @@ export class AuthorityDisclosure {
   mirror(id: string) {
     const m = this.state.mirrors[id];
     if (!m || !this.capable(m.projectId, "project.inspect") || !this.sourceReadable(m.projectId, m.sourceSpaceId)
+      || this.context.resourceReadable?.({ realmId: this.state.realmId, projectId: m.projectId, sourceSpaceId: m.sourceSpaceId }) === false
       || !this.classification(m.projectId, m.disclosure, [m.sourceSpaceId])) return undefined;
     const revision = this.revision(m.canonicalProjectRevisionId, [m.sourceSpaceId]);
     if (!revision || revision.projectId !== m.projectId) return undefined;

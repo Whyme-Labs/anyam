@@ -92,6 +92,25 @@ function validationCode(result: ReturnType<RealmIdentityPolicy["validateCredenti
   return result.valid ? undefined : result.code;
 }
 
+test("known opaque credential matching is pure and covers string, key and encoded aliases", () => {
+  const { realm, passkeySession } = createRealm(); const { task, grant } = taskAndGrant(realm, passkeySession);
+  const issued = realm.issueCredential({ class: "realm-api", principalId: passkeySession.principalId, actorId: passkeySession.actorId, clientId: passkeySession.clientId, sessionId: passkeySession.id, taskId: task.id, grantId: grant.id, resource: grant.resource });
+  const before = realm.snapshot();
+  const encodedAliases = ["base64", "base64url"].flatMap(encoding => ["", "p", "pr", "pre", "prefix"].flatMap(prefix => {
+    const encoded = prefix + Buffer.from(issued.token).toString(encoding as "base64" | "base64url") + "suffix";
+    return [encoded, { [encoded]: "encoded-key" }];
+  }));
+  const percentEncoded = [...issued.token].map(character => `%${character.charCodeAt(0).toString(16)}`).join("");
+  const uriAliases = ["%ZZ", "%FF", "%", "prefix%ZZ"].flatMap(prefix => [prefix + percentEncoded + "%ZZsuffix", { [prefix + percentEncoded + "%FFsuffix"]: "key" }]);
+  const wrappedAliases = [" ", "\t", "\n", "\r\n"].flatMap(whitespace => { const encoded = Buffer.from(issued.token).toString("base64").match(/.{1,4}/gu)!.join(whitespace); return [encoded, { [encoded]: "key" }]; });
+  const aliases: unknown[] = [...encodedAliases, ...uriAliases, ...wrappedAliases, issued.token, `input=${issued.token}`, `prefix${issued.token}suffix`, { [issued.token]: "alias-key" }, Buffer.from(issued.token).toString("base64"), [...issued.token].map(character => `%${character.charCodeAt(0).toString(16)}`).join("")];
+  for (const alias of aliases) assert.equal(realm.containsKnownCredentialMaterial(alias), true);
+  for (const value of [issued.tokenDigest, "sha256:" + "a".repeat(64), "action:ordinary", "b".repeat(43), { output: "ordinary metadata" }]) assert.equal(realm.containsKnownCredentialMaterial(value), false);
+  assert.deepEqual(realm.snapshot(), before, "checking never validates, audits or revokes credentials");
+  realm.revokeCredential(issued.id);
+  assert.equal(realm.containsKnownCredentialMaterial(`input=${issued.token}`), true, "retained revoked records remain protected");
+});
+
 test("authenticates through passkey and OIDC while retaining Realm-local identity state", () => {
   const { realm, principal, passkeySession, oidcSession } = createRealm();
 
@@ -210,6 +229,17 @@ test("returns a disclosure-safe not_found explanation for hidden Source Spaces",
     sourceSpaceId: "private-codec",
     protected: true,
   }), (error: unknown) => error instanceof RealmIdentityError && error.code === "not_found" && !JSON.stringify(error).includes("private-codec"));
+});
+
+test("operational rollback preserves credential digests while recovery snapshots remain credential-free", () => {
+  const { realm, passkeySession } = createRealm(); const { task, grant } = taskAndGrant(realm, passkeySession);
+  const credential = realm.issueCredential({ class: "git", principalId: passkeySession.principalId, actorId: passkeySession.actorId, clientId: passkeySession.clientId, sessionId: passkeySession.id, taskId: task.id, grantId: grant.id, resource: grant.resource });
+  const before = realm.snapshot(); const rollback = realm.captureOperationalRollback();
+  realm.revokeCredential(credential.id); assert.equal(realm.validateCredential(credential.token).valid, false);
+  rollback(); assert.deepEqual(realm.snapshot(), before); assert.equal(realm.validateCredential(credential.token).valid, true);
+  const recovery = realm.getRecoverySnapshot(); assert.equal(Object.hasOwn(recovery, "credentials"), false);
+  assert.equal(JSON.stringify(before).includes(credential.token), false);
+  assert.equal(typeof rollback, "function"); assert.equal(JSON.stringify({ rollback }), "{}");
 });
 
 test("issues separate audience credentials and revokes each path independently", () => {

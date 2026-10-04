@@ -8,6 +8,7 @@ import {
   type ResourceRef,
 } from "../kernel/contracts.ts";
 import { base64Url } from "../kernel/encoding.ts";
+import { containsKnownTextMaterial } from "../security/credential-material.ts";
 
 export type AuthenticationMethod = "passkey" | "oidc";
 export type AuthenticationStrength = "oidc" | "passkey";
@@ -517,15 +518,19 @@ export class RealmIdentityError extends Error {
   }
 }
 
+/** Semantic read capabilities accepted by the trusted human metadata observer. */
+export type SourceMetadataReadCapability = Extract<Capability,
+  "project.inspect" | "intent.inspect" | "source.read" | "workspace.inspect" | "change.inspect" | "pullRequest.inspect" | "evidence.read" | "target.read">;
+
 const ROLE_CAPABILITIES: Readonly<Record<RealmRole, readonly Capability[]>> = {
-  viewer: ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "pullRequest.inspect", "evidence.read", "target.read"],
-  contributor: ["project.inspect", "source.read", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "run.invoke", "evidence.read", "target.read", "agent.delegate"],
-  reviewer: ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "evidence.read", "target.read"],
-  maintainer: ["project.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "landing.request", "target.read", "extension.install", "extension.manage", "extension.invoke", "governance.profile.evaluate", "agent.delegate"],
-  "release-manager": ["project.inspect", "source.read", "change.inspect", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "evidence.read", "target.read", "target.promote", "landing.request", "release.create", "promotion.request", "extension.invoke"],
-  "security-reviewer": ["project.inspect", "source.read", "workspace.inspect", "change.inspect", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "target.read", "governance.profile.evaluate"],
-  moderator: ["project.inspect", "change.inspect", "pullRequest.inspect", "evidence.read", "public.moderate"],
-  owner: ["project.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "secret.use", "landing.request", "release.create", "target.configure", "promotion.request", "target.read", "target.promote", "extension.install", "extension.manage", "extension.invoke", "governance.profile.manage", "governance.profile.evaluate", "agent.delegate", "policy.manage", "identity.manage"],
+  viewer: ["project.inspect", "intent.inspect", "source.read", "workspace.inspect", "change.inspect", "pullRequest.inspect", "evidence.read", "target.read"],
+  contributor: ["project.inspect", "intent.inspect", "source.read", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "run.invoke", "evidence.read", "target.read", "agent.delegate"],
+  reviewer: ["project.inspect", "intent.inspect", "source.read", "workspace.inspect", "change.inspect", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "evidence.read", "target.read"],
+  maintainer: ["project.inspect", "intent.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "landing.request", "target.read", "extension.install", "extension.manage", "extension.invoke", "governance.profile.evaluate", "agent.delegate"],
+  "release-manager": ["project.inspect", "intent.inspect", "source.read", "change.inspect", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "evidence.read", "target.read", "target.promote", "landing.request", "release.create", "promotion.request", "extension.invoke"],
+  "security-reviewer": ["project.inspect", "intent.inspect", "source.read", "workspace.inspect", "change.inspect", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "target.read", "governance.profile.evaluate"],
+  moderator: ["project.inspect", "intent.inspect", "change.inspect", "pullRequest.inspect", "evidence.read", "public.moderate"],
+  owner: ["project.inspect", "intent.inspect", "source.read", "source.propose", "workspace.inspect", "workspace.write", "change.inspect", "change.publish_revision", "pullRequest.inspect", "pullRequest.write", "review.submit_finding", "change.approve", "run.invoke", "evidence.read", "secret.use", "landing.request", "release.create", "target.configure", "promotion.request", "target.read", "target.promote", "extension.install", "extension.manage", "extension.invoke", "governance.profile.manage", "governance.profile.evaluate", "agent.delegate", "policy.manage", "identity.manage"],
 };
 
 function clone<T>(value: T): T {
@@ -693,6 +698,22 @@ export class RealmIdentityPolicy {
     return [...allowed].filter((capability) => !denied.has(capability)).sort();
   }
 
+  /** Current disclosure observation for authenticated human read adapters.
+   * This does not mint a Task/Grant or authorize source transfer or effects. */
+  canReadSourceSpaceMetadata(input: { sessionId: string; resource: ResourceRef; classification: SourceSpacePolicy["classification"]; capability?: SourceMetadataReadCapability }): boolean {
+    const session = this.validateSession(input.sessionId);
+    const actor = this.state.actors[session.actorId];
+    const sourceId = input.resource.sourceSpaceId;
+    const policy = sourceId ? this.state.sourceSpacePolicies[sourceId] : undefined;
+    if (!actor || actor.kind !== "human" || input.resource.realmId !== this.realm.id || !policy || policy.classification !== input.classification || policy.policyVersion !== this.realm.policyVersion) return false;
+    const capabilities = this.activeCapabilitiesForPrincipal({ principalId: session.principalId, resource: input.resource });
+    const capability = input.capability ?? "source.read";
+    if (!capabilities.includes("source.read") || !capabilities.includes(capability)) return false;
+    return policy.allowedCapabilities.includes("source.read") && !policy.deniedCapabilities.includes("source.read") && !policy.deniedCapabilities.includes(capability)
+      && (policy.discoverable || policy.readerPrincipalIds.includes(session.principalId))
+      && (policy.readerPrincipalIds.length === 0 || policy.readerPrincipalIds.includes(session.principalId));
+  }
+
   getRecoverySnapshot(): RealmRecoverySnapshot {
     return {
       realm: clone(this.state.realm),
@@ -711,6 +732,14 @@ export class RealmIdentityPolicy {
       audit: this.state.audit.map((event) => clone(event)),
       credentialFree: true,
     };
+  }
+
+  /** In-memory rollback only. Recovery/hydration intentionally omit live
+   * credential digests; an operational no-op must retain them. This closure
+   * cannot be serialized as a recovery export or persisted as a credential. */
+  captureOperationalRollback(): () => void {
+    const before = clone(this.state);
+    return () => { Object.assign(this.state, clone(before)); };
   }
 
   restoreRecoverySnapshot(snapshot: RealmRecoverySnapshot): Realm {
@@ -1465,6 +1494,22 @@ export class RealmIdentityPolicy {
     return { valid: true, credential: clone(record) };
   }
 
+  /** Recognize our opaque tokens in arbitrary JSON strings/keys without
+   * validating, auditing, exposing, or changing credential records. Issuance
+   * uses 32 random bytes, encoded as exactly 43 base64url characters. Retained
+   * expired/revoked digests are also protected from accidental persistence. */
+  containsKnownCredentialMaterial(value: unknown): boolean {
+    const known = new Set(Object.values(this.state.credentials).map(record => record.tokenDigest));
+    if (!known.size) return false;
+    return containsKnownTextMaterial(value, (text: string): boolean => {
+      for (const match of text.matchAll(/[A-Za-z0-9_-]{43,}/gu)) {
+        const candidate = match[0];
+        for (let start = 0; start + 43 <= candidate.length; start++) if (known.has(tokenDigest(candidate.slice(start, start + 43)))) return true;
+      }
+      return false;
+    });
+  }
+
   activatePolicy(policyVersion: string): Realm {
     if (!policyVersion.trim()) throw new RealmIdentityError({ code: "policy.version_invalid", message: "Policy version must not be empty.", recoveryAction: "activate an immutable, named policy version", receipt: "policy version validation" });
     this.state.realm.policyVersion = policyVersion;
@@ -1473,7 +1518,16 @@ export class RealmIdentityPolicy {
     return clone(this.state.realm);
   }
 
+  /** The same current kernel decision, without audit/expiry state mutation. */
+  evaluateReadOnly(input: PolicyEvaluationInput): PolicyDecision {
+    return this.evaluateDecision(input, false);
+  }
+
   evaluate(input: PolicyEvaluationInput): PolicyDecision {
+    return this.evaluateDecision(input, true);
+  }
+
+  private evaluateDecision(input: PolicyEvaluationInput, observe: boolean): PolicyDecision {
     const capability = capabilityForOperation(input.operation, input.capability);
     const requestedSourceSpaceId = input.sourceSpaceId ?? input.resource.sourceSpaceId;
     const sourcePolicy = requestedSourceSpaceId ? this.state.sourceSpacePolicies[requestedSourceSpaceId] : undefined;
@@ -1521,7 +1575,7 @@ export class RealmIdentityPolicy {
       factors.push(factor("session-chain", "unknown", safeProjection ? "session does not match the request chain" : undefined));
       unknown = true;
     } else if (!this.sessionChainIsActive(session)) {
-      if (session.status === "active" && expired(session.expiresAt, this.now)) session.status = "expired";
+      if (observe && session.status === "active" && expired(session.expiresAt, this.now)) session.status = "expired";
       factors.push(factor("session", "denied", safeProjection ? session.status === "active" ? "the delegated Session chain is inactive" : `session is ${session.status}` : undefined));
       denied = true;
     } else if (input.requiredAuthStrength === "passkey" && session.strength !== "passkey") {
@@ -1593,7 +1647,7 @@ export class RealmIdentityPolicy {
         factors.push(factor("task-grant", "unknown", safeProjection ? "Capability Grant and Task chain do not match" : undefined));
         unknown = true;
       } else if (!this.grantChainIsActive(grant)) {
-        if (grant.status === "active" && expired(grant.expiresAt, this.now)) grant.status = "expired";
+        if (observe && grant.status === "active" && expired(grant.expiresAt, this.now)) grant.status = "expired";
         factors.push(factor("task-grant", "denied", safeProjection ? "Capability Grant is expired, revoked, or stale" : undefined));
         denied = true;
       } else if (!resourceMatches(grant.resource, input.resource)) {
@@ -1661,7 +1715,7 @@ export class RealmIdentityPolicy {
       recheckAt: nowIso(this.now),
       safeProjection: !hidden,
     };
-    this.audit({
+    if (observe) this.audit({
       eventType: "policy.evaluated",
       outcome: decision === "allow" ? "succeeded" : "denied",
       principalId: input.principalId,

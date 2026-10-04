@@ -1,3 +1,5 @@
+import type { ActionArtifactOutputContract } from "../portability/action-artifact-output.ts";
+export type { ActionArtifactOutputContract } from "../portability/action-artifact-output.ts";
 import { randomUUID } from "node:crypto";
 
 export const CONTRACT_VERSIONS = {
@@ -210,6 +212,7 @@ export type Action = {
   command: string;
   inputGlobs: readonly string[];
   outputPaths: readonly string[];
+  artifactOutputContract?: ActionArtifactOutputContract;
   network: readonly string[];
   resources: Readonly<Record<string, string | number | boolean>>;
   contractDigest: string;
@@ -419,6 +422,7 @@ export type Run = {
   attemptId?: string;
   verifierId?: string;
   actionContractDigest?: string;
+  artifactOutputContract?: ActionArtifactOutputContract;
   verifierContractDigest?: string;
   status: RunStatus;
   outputDigest: string | undefined;
@@ -495,6 +499,7 @@ export type RunnerJob = {
   inputManifestDigest: string;
   inputDigests: readonly string[];
   outputPaths: readonly string[];
+  artifactOutputContract?: ActionArtifactOutputContract;
   effectDigests: readonly string[];
   dependencyDigest: string;
   toolchainDigest: string;
@@ -551,6 +556,8 @@ export type RunnerOutputReference = {
   runId: string;
   attemptId: string;
   location: string;
+  /** Logical Action output path; covered by the signed Result, never an R2 key. */
+  outputPath?: string;
   digest: string;
   disclosure: DisclosurePolicyRef;
   receipt: string;

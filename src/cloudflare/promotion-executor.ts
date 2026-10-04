@@ -466,7 +466,14 @@ export function createPromotionExecutor(config: PromotionExecutorConfig): { exec
     credentialBroker: route.credentialBroker,
     artifactReader,
     ...((route.workerReleaseManifest ?? config.workerReleaseManifest) ? { workerReleaseManifest: route.workerReleaseManifest ?? config.workerReleaseManifest } : {}),
-    previewUrlForVersion: (versionId) => `https://${versionId.slice(0, 8)}-${route.scriptName}.${route.previewSubdomain}.workers.dev/?anyam_preview=1`,
+    previewUrlForVersion: (versionId) => {
+      const healthRoute = new URL(route.healthUrl ?? config.healthUrl ?? `https://${route.scriptName}.${route.previewSubdomain}.workers.dev/health`);
+      const previewUrl = new URL(`https://${versionId.slice(0, 8)}-${route.scriptName}.${route.previewSubdomain}.workers.dev/`);
+      previewUrl.pathname = healthRoute.pathname;
+      previewUrl.search = healthRoute.search;
+      previewUrl.searchParams.set("anyam_preview", "1");
+      return previewUrl.href;
+    },
     healthUrl: route.healthUrl ?? config.healthUrl ?? `https://${route.scriptName}.${route.previewSubdomain}.workers.dev/health`,
     healthResponseValidator: workerHealthValidator(),
     routeReadinessRetry: routeRetry(config),

@@ -268,7 +268,7 @@ test("owner Promotion status is a read-only credential-free surface", async () =
             reconciliationCheckpoint: { idempotencyKey: "execute:edge:1", attempt: 1, stage: "reconcile", providerOperationIds: [], executionDigest: "sha256:execution", releaseId: "release:edge", targetId: "target:edge", status: "indeterminate", updatedAt: new Date().toISOString(), receipt: "checkpoint=durable" },
           },
           target: { protocol: "anyam.target/v1", id: "target:edge", projectId: "project:edge", name: "Edge Target", adapterId: "cloudflare.worker", state: "degraded", currentReleaseId: null, releaseHistory: [] },
-          release: { protocol: "anyam.release/v1", id: "release:edge", projectRevisionId: "project-revision:edge", status: "ready" },
+          release: { protocol: "anyam.release/v1", id: "release:edge", projectViewRevisionId: "project-view-revision:sha256:edge", status: "ready" },
           checkpoint: { idempotencyKey: "execute:edge:1", attempt: 1, stage: "reconcile", providerOperationIds: [], executionDigest: "sha256:execution", releaseId: "release:edge", targetId: "target:edge", status: "indeterminate", updatedAt: new Date().toISOString(), receipt: "checkpoint=durable" },
           receipt: "operation=promotion.status; readOnly=true; credentialFree=true; canonicalWrite=false",
         }), { status: 200, headers: { "content-type": "application/json" } });
@@ -299,6 +299,10 @@ test("owner Promotion status is a read-only credential-free surface", async () =
   assert.equal(value.status, "ready");
   assert.equal(value.credentialFree, true);
   assert.equal(value.canonicalWrite, false);
+  assert.equal(value.version, undefined);
+  assert.equal(value.checkpoint, undefined);
+  assert.equal((value.promotion as Record<string, unknown>).releaseDigest, undefined);
+  assert.equal((value.release as Record<string, unknown>).projectRevisionId, undefined);
   assert.equal((value.promotion as Record<string, unknown>).state, "degraded");
   assert.equal(((value.target as Record<string, unknown>).currentReleaseId), null);
   assert.equal(forwardedPath, "/authority/promotion/status/internal");

@@ -1,3 +1,4 @@
+import { parseActionArtifactOutputContract, ActionArtifactOutputError, type ActionArtifactOutputContract } from "./action-artifact-output.js";
 import { localReviewPacket } from "./review-packet.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { access, lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
@@ -292,6 +293,7 @@ type LocalDeclaredAction = {
   command: string;
   inputGlobs: readonly string[];
   outputPaths: readonly string[];
+  artifactOutputContract?: ActionArtifactOutputContract;
   network: readonly string[];
   resources: Readonly<Record<string, string | number | boolean>>;
   contractDigest: string;
@@ -974,6 +976,13 @@ export class LocalAgentManager {
           network: declaredStringArray(actionValue.network, `modules[${moduleIndex}].actions[${actionIndex}].network`),
           resources: declaredResources(actionValue.resources, `modules[${moduleIndex}].actions[${actionIndex}].resources`),
         };
+        if (actionValue.artifactOutputContract !== undefined) {
+          try { actionWithoutDigest.artifactOutputContract = parseActionArtifactOutputContract(actionValue.artifactOutputContract, actionWithoutDigest.outputPaths); }
+          catch (failure) {
+            if (!(failure instanceof ActionArtifactOutputError)) throw failure;
+            throw new LocalAgentError({ code: "run.manifest_invalid", message: failure.message, affectedObject: actionWithoutDigest.id, recoveryAction: "declare unique typed Artifact paths within the Action outputs", receipt: `artifactOutputContract=${failure.reason}; run=not-started` });
+          }
+        }
         if (actions.some((candidate) => candidate.id === actionWithoutDigest.id)) throw new LocalAgentError({ code: "run.manifest_invalid", message: `Project Manifest declares duplicate Action ${actionWithoutDigest.id}; no run was started.`, affectedObject: actionWithoutDigest.id, recoveryAction: "give every Action a unique id and rerun anyam check", receipt: `action=${actionWithoutDigest.id}; rule=unique-action-id` });
         actions.push({ ...actionWithoutDigest, contractDigest: localActionContractDigest(actionWithoutDigest) });
       }
@@ -1286,6 +1295,8 @@ export class LocalAgentManager {
   }
 
   async launchAgent(input: AgentLaunchInput): Promise<AgentLaunchResult> {
+    const command = input.command;
+    const args = [...(input.args ?? [])];
     const mode = input.mode ?? "enforceable";
     const started = input.sessionId
       ? await this.withStateLock(async () => {
@@ -1297,26 +1308,28 @@ export class LocalAgentManager {
           mode,
           ...(input.authorizedPaths ? { authorizedPaths: input.authorizedPaths } : {}),
           ...(input.network ? { network: input.network } : {}),
-          executablePaths: [input.command],
+          executablePaths: [command],
           ...(input.workspaceDirectory ? { workspaceDirectory: input.workspaceDirectory } : {}),
           ...(input.resourceLimits ? { resourceLimits: input.resourceLimits } : {}),
         });
     const boundary = this.boundaries.get(started.session.id);
-    if (!boundary) throw new LocalAgentError({ code: "workspace.boundary_missing", message: `Agent session ${started.session.id} has no live Workspace boundary; no process was started.`, affectedObject: started.session.id, recoveryAction: "revoke the session and start the agent again through the boundary launcher", receipt: `mode=${mode}; boundary=missing` });
-    await this.withStateLock(async () => {
-      const state = await this.readState();
-      this.record(state, { operation: "agent.process.started", outcome: "observed", sessionId: started.session.id, grantId: started.grant.id, taskId: started.session.taskId, projectId: started.session.projectId, changeId: started.session.changeId, workspaceId: started.session.workspaceId, actorId: started.session.actorId, agent: started.session.agent, details: { command: input.command, args: input.args ?? [], mode, enforcement: boundary.enforcement, workspaceDirectory: boundary.workspaceDirectory, canonicalWrite: false, receipt: boundary.receipt } });
-      await this.writeState(state);
-    });
+    if (!boundary) throw new LocalAgentError({ code: "workspace.boundary_missing", message: `Agent session ${started.session.id} has no live Workspace boundary; no process was started.`, affectedObject: started.session.id, recoveryAction: "revoke the session and start the agent again through the boundary launcher", receipt: `mode=${started.session.workspaceMode ?? mode}; boundary=missing` });
     let commandResult: Awaited<ReturnType<typeof runWorkspaceCommand>>;
     try {
       commandResult = await runWorkspaceCommand({
         boundary,
-        command: input.command,
-        ...(input.args ? { args: input.args } : {}),
-        onProcess: (child) => {
+        command,
+        args,
+        onProcess: async (child) => {
           this.runningProcesses.set(started.session.id, child);
-          return this.registerWorkspaceProcess(started.session.id, child);
+          await this.registerWorkspaceProcess(started.session.id, child);
+          await this.withStateLock(async () => {
+            const active = await this.requireActiveSessionUnlocked(started.session.id);
+            // POSIX custody is registered before it releases the workload. Keep
+            // requested intent distinct from the observed completion invocation.
+            this.record(active.state, { operation: "agent.process.started", outcome: "observed", sessionId: started.session.id, grantId: started.grant.id, taskId: started.session.taskId, projectId: started.session.projectId, changeId: started.session.changeId, workspaceId: started.session.workspaceId, actorId: started.session.actorId, agent: started.session.agent, details: { requestedCommand: command, requestedArgs: args, processId: child.pid, phase: process.platform === "win32" ? "direct-child-spawned" : "registered-before-workload-release", mode: boundary.mode, enforcement: boundary.enforcement, workspaceDirectory: boundary.workspaceDirectory, canonicalWrite: false, receipt: boundary.receipt } });
+            await this.writeState(active.state);
+          });
         },
       });
     } finally {
@@ -1333,7 +1346,7 @@ export class LocalAgentManager {
     }
     await this.withStateLock(async () => {
       const state = await this.readState();
-      this.record(state, { operation: "agent.process.completed", outcome: "observed", sessionId: started.session.id, grantId: started.grant.id, taskId: started.session.taskId, projectId: started.session.projectId, changeId: started.session.changeId, workspaceId: started.session.workspaceId, actorId: started.session.actorId, agent: started.session.agent, details: { command: input.command, args: input.args ?? [], status: commandResult.status, exitCode: commandResult.exitCode, signal: commandResult.signal, mode, enforcement: boundary.enforcement, receipt: commandResult.receipt } });
+      this.record(state, { operation: "agent.process.completed", outcome: "observed", sessionId: started.session.id, grantId: started.grant.id, taskId: started.session.taskId, projectId: started.session.projectId, changeId: started.session.changeId, workspaceId: started.session.workspaceId, actorId: started.session.actorId, agent: started.session.agent, details: { command: commandResult.command, args: commandResult.args, shell: commandResult.shell, status: commandResult.status, exitCode: commandResult.exitCode, signal: commandResult.signal, mode: boundary.mode, enforcement: boundary.enforcement, receipt: commandResult.receipt } });
       await this.writeState(state);
     });
     return { session: clone(started.session), boundary, command: commandResult };

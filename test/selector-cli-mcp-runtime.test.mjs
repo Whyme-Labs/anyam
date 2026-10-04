@@ -41,6 +41,10 @@ test("native Run-only reads cannot widen through ordinary metadata routes", asyn
     const ids = Object.fromEntries(["workspace", "change", "revision", "candidate", "intent", "run", "evidence", "artifact", "release", "target", "promotion", "pr", "mirror"].map(kind => [`${kind}:public`, `${kind}:peer`]));
     const remap = value => typeof value === "string" ? ids[value] ?? value : Array.isArray(value) ? value.map(remap) : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, remap(entry)])) : value;
     for (const [collection, kind] of [["workspaces", "workspace"], ["changes", "change"], ["changeRevisions", "revision"], ["projectRevisions", "candidate"], ["intents", "intent"], ["runs", "run"], ["evidence", "evidence"], ["artifacts", "artifact"], ["releases", "release"], ["targets", "target"], ["promotions", "promotion"], ["pullRequests", "pr"], ["mirrors", "mirror"]]) fixture.state[collection][`${kind}:peer`] = remap(fixture.state[collection][`${kind}:public`]);
+    for (const producer of ["public", "peer"]) {
+      const artifact = { ...fixture.state.artifacts[`artifact:${producer}`], id: `artifact:change-${producer}` }; delete artifact.runId;
+      fixture.state.artifacts[artifact.id] = artifact;
+    }
     const identity = new RealmIdentityPolicy({ realmId: fixture.identity.realm.id, relyingPartyId: "fixture.local", now: () => new Date("2026-10-02T12:00:00Z") }); identity.restoreOperationalSnapshot(fixture.identity);
     const owner = fixture.members.owner.session; const resource = { realmId: identity.realm.id, projectId: "project:fixture" };
     const task = identity.createTask({ principalId: owner.principalId, actorId: owner.actorId, sessionId: owner.id, purpose: "Synthetic native metadata read regression" });
@@ -100,6 +104,24 @@ test("native Run-only reads cannot widen through ordinary metadata routes", asyn
         assert.equal((await call("run.inspect", { runId: "run:public" }, actor)).result?.structuredContent.run.id, "run:public");
         assert.equal((await call("pullRequest.inspect", { pullRequestId: "pr:public" }, actor)).result?.structuredContent.pullRequest.id, "pr:public");
       }
+    });
+    const artifactCount = async actor => (await call("project.inspect", { projectId: "project:fixture" }, actor)).result?.structuredContent.counts.artifacts;
+    await t.test("Change-produced Artifacts retain their exact Workspace without a Run", async () => {
+      assert.equal(await artifactCount("owner"), 6, "owner retains both public graphs and the fixture's hidden/mixed Artifacts");
+      for (const actor of ["general", "source"]) assert.equal(await artifactCount(actor), 4, actor + " sees both valid producer graphs");
+      for (const actor of ["workspace", "change"]) assert.equal(await artifactCount(actor), 2, actor + " sees its Run and Change Artifacts, omitting the unrelated peer");
+      assert.equal(await artifactCount("narrow"), 1, "a Run-only grant cannot read a Change-only Artifact");
+    });
+    await t.test("Workspace metadata denies cover Change-produced Artifacts without a Run", async () => {
+      const denied = structuredClone(fixture); const id = "relationship:artifact-workspace-deny";
+      denied.identity.relationships[id] = { ...Object.values(denied.identity.relationships).find(entry => entry.principalId === owner.principalId), id, resource: { ...resource, workspaceId: "workspace:public" }, deniedCapabilities: ["evidence.read"] };
+      await invoke("/fixture/seed", denied);
+      try {
+        const checkpoint = await invoke("/fixture/checkpoint", {});
+        for (const actor of ["general", "source"]) assert.equal(await artifactCount(actor), 2, actor + " retains only the peer Artifacts outside the denied Workspace");
+        for (const actor of ["workspace", "change", "narrow"]) assert.equal(await artifactCount(actor), 0, actor + " respects the producing Workspace deny");
+        assert.deepEqual(await invoke("/fixture/checkpoint", {}), checkpoint, "denied metadata reads preserve all recorded state");
+      } finally { await invoke("/fixture/seed", fixture); }
     });
     assert.deepEqual(await invoke("/fixture/checkpoint", {}), before, "reads preserve identity, SQL, KV and credential records");
     assert.equal(observer.calls(), 0, "metadata reads do not inspect provider source");

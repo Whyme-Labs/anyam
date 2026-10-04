@@ -310,7 +310,8 @@ export class AuthorityDisclosure {
     // sharing a projection label cannot supply or revoke that authority.
     if (!viewId || !this.disclosureMatches(viewId, a.disclosure.projectionId)) return undefined;
     const scope = this.recordScope(a.projectRevisionId, viewId, a.changeRevisionId);
-    if (!scope || !this.scopedCapability(scope.projectId, "evidence.read", scope.ids, { ...(scope.changeId ? { changeId: scope.changeId } : {}), ...(r ? { runId: r.id, ...(r.workspaceId ? { workspaceId: r.workspaceId } : {}) } : {}) })
+    const workspaceId = r?.workspaceId ?? change?.workspaceId;
+    if (!scope || !this.scopedCapability(scope.projectId, "evidence.read", scope.ids, { ...(scope.changeId ? { changeId: scope.changeId } : {}), ...(r ? { runId: r.id } : {}), ...(workspaceId ? { workspaceId } : {}) })
       || !this.classification(scope.projectId, a.disclosure.classification, scope.ids)
       || (a.runId && (!r || !this.run(r.id) || r.projectRevisionId !== a.projectRevisionId || r.projectViewId !== viewId || r.changeRevisionId !== a.changeRevisionId))) return undefined;
     return scope;

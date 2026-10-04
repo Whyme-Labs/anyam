@@ -116,10 +116,12 @@ Ordinary Workspace, Change, Intent and Pull Request inspect/list projections,
 their Project discovery counts and Mirror service reads preserve the same
 native resource restrictions. Partial Source closure/Project discovery checks
 cannot supply omitted record coordinates to metadata capabilities. An exact
-Run-scoped read still exposes that Run and its producer-bound Evidence/Artifact
-references; it supplies no broader Change or Workspace authority. The local
-MCP/Coordinator routing regression also preserves owner, general Source,
-Source-specific and legitimate Workspace/Change reads. Its authentication
+Run-scoped read still exposes that Run and counts its producer-bound
+Evidence/Artifacts; it supplies no broader Change or Workspace authority.
+Artifacts bound only to a Change preserve the producing Revision's Workspace
+for scoped access and metadata denies. The local MCP/Coordinator routing
+regression also preserves owner, general Source, Source-specific and
+legitimate Workspace/Change reads. Its authentication
 state is synthetic; it does not qualify a live OAuth ceremony or provider.
 
 ## Inspect accepted signed Run context as a Realm owner

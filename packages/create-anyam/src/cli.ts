@@ -8,6 +8,7 @@ import { RealmAuthorityHttpClient } from "./realm-authority-client.js";
 import type { WorkspaceBoundaryMode } from "./workspace-boundary.js";
 import type { Readable } from "node:stream";
 import { runRealmSourceCommand } from "./realm-source-command.js";
+import { executeThroughWorkspaceBroker, removeWorkspaceBrokerLocator, startWorkspaceCommandBroker } from "./workspace-broker.js";
 
 function valueAfter(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
@@ -322,10 +323,10 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
     const sessionId = requiredValue(args, "--session", "workspace exec");
     const executable = executableArgs[0];
     if (!executable) throw new Error("workspace exec requires --session <id> -- <command> [args...]; no process was started.");
-    const mode = (valueAfter(args, "--mode") ?? "enforceable") as WorkspaceBoundaryMode;
-    if (mode !== "enforceable" && mode !== "supervised") throw new Error(`--mode must be enforceable or supervised; asked=${mode}.`);
-    const result = await new LocalAgentManager({ directory: valueAfter(args, "--directory") ?? cwd }).launchAgent({ sessionId, command: executable, args: executableArgs.slice(1), mode });
-    printResult(disclosedAgentLaunch(result), json, `Workspace process ${result.command.status} in ${result.boundary.mode} Workspace (${result.boundary.enforcement}).\nWorkspace: ${result.boundary.workspaceDirectory}\nReceipt: ${result.command.receipt}`);
+    const mode = valueAfter(args, "--mode") as WorkspaceBoundaryMode | undefined;
+    if (mode !== undefined && mode !== "enforceable" && mode !== "supervised") throw new Error(`--mode must be enforceable or supervised; asked=${mode}.`);
+    const result = await executeThroughWorkspaceBroker({ manager: new LocalAgentManager({ directory: valueAfter(args, "--directory") ?? cwd }), sessionId, command: executable, args: executableArgs.slice(1), ...(mode ? { mode } : {}) });
+    printResult(result, json, `Workspace process ${result.command.status} in ${result.boundary.mode} Workspace (${result.boundary.enforcement}).\nWorkspace: ${result.boundary.workspaceDirectory}\nReceipt: ${result.command.receipt}`);
     return result.command.status === "passed" ? 0 : 1;
   }
 
@@ -378,7 +379,10 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
   if ((command === "agent" && subcommand === "revoke") || (command === "auth" && subcommand === "revoke")) {
     const selectedSession = valueAfter(args, "--session");
     if (args.includes("--session") && (!selectedSession?.trim() || selectedSession.startsWith("--"))) throw new Error("revoke --session requires an explicit session ID; no session was revoked.");
-    const result = await new LocalAgentManager({ directory: valueAfter(args, "--directory") ?? cwd }).revoke(selectedSession ?? subcommandPositionals(args)[0]);
+    const manager = new LocalAgentManager({ directory: valueAfter(args, "--directory") ?? cwd });
+    const selected = selectedSession ?? subcommandPositionals(args)[0];
+    const result = await manager.revoke(selected);
+    if (result.status === "revoked") await removeWorkspaceBrokerLocator(manager.statePathname, result.sessionId);
     printResult(result, json, result.status === "revoked" ? `Revoked agent session ${result.sessionId} and Grant ${result.grantId}.` : "No local agent session was active.");
     return 0;
   }
@@ -418,9 +422,13 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
     const authorizedActionIds = valuesAfter(args, "--allow-action");
     if (selectedSessionId && (valueAfter(args, "--mode") || authorizedPaths.length || authorizedActionIds.length)) throw new Error("MCP --session cannot be combined with new-session scope options.");
     if (authorizedPaths.length && mode !== "enforceable") throw new Error("MCP path restrictions require --mode enforceable; supervised mode cannot claim source isolation.");
-    await runMcpStdio({ directory: valueAfter(args, "--directory") ?? cwd, agent, input: process.stdin, output: process.stdout,
+    const directory = valueAfter(args, "--directory") ?? cwd;
+    const manager = new LocalAgentManager({ directory });
+    const handoff: { current: Awaited<ReturnType<typeof startWorkspaceCommandBroker>> } = { current: undefined };
+    try { await runMcpStdio({ directory, manager, agent, input: process.stdin, output: process.stdout,
       ...(selectedSessionId ? { sessionId: selectedSessionId } : { sessionOptions: { mode, ...(authorizedPaths.length ? { authorizedPaths } : {}), ...(authorizedActionIds.length ? { authorizedActionIds } : {}) } }),
-    });
+      onBound: async sessionId => { handoff.current = await startWorkspaceCommandBroker({ manager, sessionId, agent }); },
+    }); } finally { await handoff.current?.close(); }
     return 0;
   }
 

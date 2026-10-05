@@ -24,10 +24,27 @@ Completion audit records use the observed invocation, rather than mutable caller
 intent, and use the actual selected boundary mode. Start audit occurs after
 successful process creation and registration, and labels requested invocation and
 pre-release phase explicitly;
-rejected qualification or registration cannot leave an observed start. A persisted
-Session without its live broker boundary still fails closed: a separate
-`workspace exec --session ...` CLI process cannot resume that Workspace. This
-existing path remains unqualified and requires authorized live broker selection.
+rejected qualification or registration cannot leave an observed start.
+On POSIX hosts, `workspace exec --session ...` sends an owner-local command
+request to the already running stdio broker for that exact Session. The broker
+retains its live Workspace boundary and rechecks the binding, current Session,
+Grant, expiry and mode; the CLI receives no runtime environment. The endpoint
+locator is non-secret metadata, protected by owner-only filesystem permissions,
+not a credential or a restored boundary. This owner CLI handoff adds no raw
+execution tool to the semantic MCP surface. It inherits the command deadline
+and provisional byte budget, without claiming measured production capacity.
+
+A persisted Session without its live broker boundary still fails closed.
+After broker death, revoke that interrupted Session and explicitly start a fresh
+scoped broker; neither the CLI nor a restarted broker recreates execution
+authority from saved metadata. Concurrent execution within one Session is
+refused so that command custody cannot overwrite an existing process record.
+Focused macOS subprocess qualification covers fresh owner CLI execution,
+sibling denial, Session and Grant expiry, revocation, broker death, explicit
+fresh-session recovery, rejected-frame cleanup and shared CLI/MCP process
+custody. The enforceable handoff retains its Source projection and protects
+canonical and sibling paths. Linux handoff was not exercised by this macOS
+qualification; Windows local socket handoff remains unqualified.
 POSIX supervised commands use the existing trusted custodian and their
 own process group. Registration releases the workload; exit, timeout, output
 overflow, revocation or parent-pipe loss cleans the owned group. Custody does not

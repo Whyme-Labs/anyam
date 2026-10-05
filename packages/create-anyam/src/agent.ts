@@ -829,6 +829,7 @@ export class LocalAgentManager {
   private readonly resourceLimits: WorkspaceResourceLimits | undefined;
   private readonly boundaries = new Map<string, WorkspaceBoundary>();
   private readonly runningProcesses = new Map<string, ChildProcess>();
+  private readonly executingSessions = new Set<string>();
 
   constructor(options: LocalAgentManagerOptions) {
     this.directory = resolve(options.directory);
@@ -1036,7 +1037,8 @@ export class LocalAgentManager {
   }
 
   private expireIfNeeded(state: AgentState, session: LocalAgentSession, grant: LocalCapabilityGrant): boolean {
-    if (session.status === "active" && !isExpired(session.expiresAt, this.now)) return false;
+    if (session.status === "active" && !isExpired(session.expiresAt, this.now)
+      && (grant.status !== "active" || !isExpired(grant.expiresAt, this.now))) return false;
     if (session.status === "active") session.status = "expired";
     if (grant.status === "active") grant.status = "expired";
     return true;
@@ -1294,6 +1296,12 @@ export class LocalAgentManager {
     });
   }
 
+  private async withWorkspaceExecution<T>(sessionId: string, execute: () => Promise<T>): Promise<T> {
+    if (this.executingSessions.has(sessionId)) throw new LocalAgentError({ code: "workspace.process_active", message: "The selected Workspace already has an execution in this broker; no second process was started.", recoveryAction: "wait for that execution or revoke the selected session", receipt: `session=${sessionId}; concurrent-execution=denied` });
+    this.executingSessions.add(sessionId);
+    try { return await execute(); } finally { this.executingSessions.delete(sessionId); }
+  }
+
   async launchAgent(input: AgentLaunchInput): Promise<AgentLaunchResult> {
     const command = input.command;
     const args = [...(input.args ?? [])];
@@ -1314,42 +1322,44 @@ export class LocalAgentManager {
         });
     const boundary = this.boundaries.get(started.session.id);
     if (!boundary) throw new LocalAgentError({ code: "workspace.boundary_missing", message: `Agent session ${started.session.id} has no live Workspace boundary; no process was started.`, affectedObject: started.session.id, recoveryAction: "revoke the session and start the agent again through the boundary launcher", receipt: `mode=${started.session.workspaceMode ?? mode}; boundary=missing` });
-    let commandResult: Awaited<ReturnType<typeof runWorkspaceCommand>>;
-    try {
-      commandResult = await runWorkspaceCommand({
-        boundary,
-        command,
-        args,
-        onProcess: async (child) => {
-          this.runningProcesses.set(started.session.id, child);
-          await this.registerWorkspaceProcess(started.session.id, child);
-          await this.withStateLock(async () => {
-            const active = await this.requireActiveSessionUnlocked(started.session.id);
-            // POSIX custody is registered before it releases the workload. Keep
-            // requested intent distinct from the observed completion invocation.
-            this.record(active.state, { operation: "agent.process.started", outcome: "observed", sessionId: started.session.id, grantId: started.grant.id, taskId: started.session.taskId, projectId: started.session.projectId, changeId: started.session.changeId, workspaceId: started.session.workspaceId, actorId: started.session.actorId, agent: started.session.agent, details: { requestedCommand: command, requestedArgs: args, processId: child.pid, phase: process.platform === "win32" ? "direct-child-spawned" : "registered-before-workload-release", mode: boundary.mode, enforcement: boundary.enforcement, workspaceDirectory: boundary.workspaceDirectory, canonicalWrite: false, receipt: boundary.receipt } });
-            await this.writeState(active.state);
-          });
-        },
-      });
-    } finally {
-      this.runningProcesses.delete(started.session.id);
+    return this.withWorkspaceExecution(started.session.id, async () => {
+      let commandResult: Awaited<ReturnType<typeof runWorkspaceCommand>>;
+      try {
+        commandResult = await runWorkspaceCommand({
+          boundary,
+          command,
+          args,
+          onProcess: async (child) => {
+            this.runningProcesses.set(started.session.id, child);
+            await this.registerWorkspaceProcess(started.session.id, child);
+            await this.withStateLock(async () => {
+              const active = await this.requireActiveSessionUnlocked(started.session.id);
+              // POSIX custody is registered before it releases the workload. Keep
+              // requested intent distinct from the observed completion invocation.
+              this.record(active.state, { operation: "agent.process.started", outcome: "observed", sessionId: started.session.id, grantId: started.grant.id, taskId: started.session.taskId, projectId: started.session.projectId, changeId: started.session.changeId, workspaceId: started.session.workspaceId, actorId: started.session.actorId, agent: started.session.agent, details: { requestedCommand: command, requestedArgs: args, processId: child.pid, phase: process.platform === "win32" ? "direct-child-spawned" : "registered-before-workload-release", mode: boundary.mode, enforcement: boundary.enforcement, workspaceDirectory: boundary.workspaceDirectory, canonicalWrite: false, receipt: boundary.receipt } });
+              await this.writeState(active.state);
+            });
+          },
+        });
+      } finally {
+        this.runningProcesses.delete(started.session.id);
+        await this.withStateLock(async () => {
+          const state = await this.readState();
+          const session = state.sessions[started.session.id];
+          if (session) {
+            delete session.processPid;
+            delete session.processGroupId;
+            await this.writeState(state);
+          }
+        });
+      }
       await this.withStateLock(async () => {
         const state = await this.readState();
-        const session = state.sessions[started.session.id];
-        if (session) {
-          delete session.processPid;
-          delete session.processGroupId;
-          await this.writeState(state);
-        }
+        this.record(state, { operation: "agent.process.completed", outcome: "observed", sessionId: started.session.id, grantId: started.grant.id, taskId: started.session.taskId, projectId: started.session.projectId, changeId: started.session.changeId, workspaceId: started.session.workspaceId, actorId: started.session.actorId, agent: started.session.agent, details: { command: commandResult.command, args: commandResult.args, shell: commandResult.shell, status: commandResult.status, exitCode: commandResult.exitCode, signal: commandResult.signal, mode: boundary.mode, enforcement: boundary.enforcement, receipt: commandResult.receipt } });
+        await this.writeState(state);
       });
-    }
-    await this.withStateLock(async () => {
-      const state = await this.readState();
-      this.record(state, { operation: "agent.process.completed", outcome: "observed", sessionId: started.session.id, grantId: started.grant.id, taskId: started.session.taskId, projectId: started.session.projectId, changeId: started.session.changeId, workspaceId: started.session.workspaceId, actorId: started.session.actorId, agent: started.session.agent, details: { command: commandResult.command, args: commandResult.args, shell: commandResult.shell, status: commandResult.status, exitCode: commandResult.exitCode, signal: commandResult.signal, mode: boundary.mode, enforcement: boundary.enforcement, receipt: commandResult.receipt } });
-      await this.writeState(state);
+      return { session: clone(started.session), boundary, command: commandResult };
     });
-    return { session: clone(started.session), boundary, command: commandResult };
   }
 
   async handoff(input: { agent: string; changeId?: string; sessionId?: string }): Promise<{ previousSessionId: string | null; next: Awaited<ReturnType<LocalAgentManager["startSession"]>> }> {
@@ -1508,109 +1518,111 @@ export class LocalAgentManager {
 
   private async invokeRunStart(args: Record<string, unknown>, sessionId?: string): Promise<Record<string, unknown>> {
     const prepared = await this.prepareRunStart(args, sessionId);
-    let processRegistration: Promise<void> | undefined;
-    let commandResult: LocalActionCommandResult;
-    try {
-      commandResult = prepared.inputs.missing.length === 0
-        ? await executeDeclaredAction(prepared.boundary, prepared.action.command, (child) => {
-          this.runningProcesses.set(prepared.session.id, child);
-          processRegistration = this.registerWorkspaceProcess(prepared.session.id, child);
-          return processRegistration;
-        })
-        : { exitCode: undefined, stdout: "", stderr: "", timedOut: false, outputLimitExceeded: false };
-      if (processRegistration) await processRegistration;
-    } finally {
-      this.runningProcesses.delete(prepared.session.id);
-    }
-    let sourceMutated = false;
-    if (prepared.boundary.mode === "enforceable") {
+    return this.withWorkspaceExecution(prepared.session.id, async () => {
+      let processRegistration: Promise<void> | undefined;
+      let commandResult: LocalActionCommandResult;
       try {
-        const after = await inspectGitSource(prepared.boundary.workspaceDirectory);
-        const allowedOutputs = new Set(prepared.action.outputPaths);
-        sourceMutated = after.commitId !== prepared.source.commitId
-          || after.treeId !== prepared.source.treeId
-          || after.changedPaths.some((path) => !path.startsWith(".anyam/") && !allowedOutputs.has(path));
-      } catch {
-        sourceMutated = true;
+        commandResult = prepared.inputs.missing.length === 0
+          ? await executeDeclaredAction(prepared.boundary, prepared.action.command, (child) => {
+            this.runningProcesses.set(prepared.session.id, child);
+            processRegistration = this.registerWorkspaceProcess(prepared.session.id, child);
+            return processRegistration;
+          })
+          : { exitCode: undefined, stdout: "", stderr: "", timedOut: false, outputLimitExceeded: false };
+        if (processRegistration) await processRegistration;
+      } finally {
+        this.runningProcesses.delete(prepared.session.id);
       }
-    }
-    const outputs = commandResult.exitCode === 0 && !commandResult.timedOut && !commandResult.outputLimitExceeded
-      ? await localOutputDigests(prepared.boundary.workspaceDirectory, prepared.action.outputPaths)
-      : { digests: [], missing: [] };
-    const failureReason = prepared.inputs.missing.length > 0
-      ? `missing-input-patterns=${prepared.inputs.missing.join(",")}`
-      : sourceMutated
-        ? "source-mutated-during-run"
-        : commandResult.timedOut
-          ? `budget=action.timeout; limit=${LOCAL_ACTION_POLICY.timeoutMs}ms; asked=command exceeded the execution boundary`
-          : commandResult.outputLimitExceeded
-            ? `budget=action.output; limit=${LOCAL_ACTION_POLICY.maxOutputBytes}bytes; asked=stdout or stderr exceeded the execution boundary`
-            : outputs.error
-              ? outputs.error
-            : commandResult.exitCode !== 0
-              ? `exit-code=${commandResult.exitCode ?? "unknown"}`
-              : outputs.missing.length > 0
-                ? `missing-output-paths=${outputs.missing.join(",")}`
-                : undefined;
-    const inputDigests = prepared.inputs.digests;
-    const outputDigests = outputs.digests;
-    const stdoutDigest = digest(commandResult.stdout);
-    const stderrDigest = digest(commandResult.stderr);
-    const outputDigest = digest({ outputDigests, stdoutDigest, stderrDigest, exitCode: commandResult.exitCode });
+      let sourceMutated = false;
+      if (prepared.boundary.mode === "enforceable") {
+        try {
+          const after = await inspectGitSource(prepared.boundary.workspaceDirectory);
+          const allowedOutputs = new Set(prepared.action.outputPaths);
+          sourceMutated = after.commitId !== prepared.source.commitId
+            || after.treeId !== prepared.source.treeId
+            || after.changedPaths.some((path) => !path.startsWith(".anyam/") && !allowedOutputs.has(path));
+        } catch {
+          sourceMutated = true;
+        }
+      }
+      const outputs = commandResult.exitCode === 0 && !commandResult.timedOut && !commandResult.outputLimitExceeded
+        ? await localOutputDigests(prepared.boundary.workspaceDirectory, prepared.action.outputPaths)
+        : { digests: [], missing: [] };
+      const failureReason = prepared.inputs.missing.length > 0
+        ? `missing-input-patterns=${prepared.inputs.missing.join(",")}`
+        : sourceMutated
+          ? "source-mutated-during-run"
+          : commandResult.timedOut
+            ? `budget=action.timeout; limit=${LOCAL_ACTION_POLICY.timeoutMs}ms; asked=command exceeded the execution boundary`
+            : commandResult.outputLimitExceeded
+              ? `budget=action.output; limit=${LOCAL_ACTION_POLICY.maxOutputBytes}bytes; asked=stdout or stderr exceeded the execution boundary`
+              : outputs.error
+                ? outputs.error
+              : commandResult.exitCode !== 0
+                ? `exit-code=${commandResult.exitCode ?? "unknown"}`
+                : outputs.missing.length > 0
+                  ? `missing-output-paths=${outputs.missing.join(",")}`
+                  : undefined;
+      const inputDigests = prepared.inputs.digests;
+      const outputDigests = outputs.digests;
+      const stdoutDigest = digest(commandResult.stdout);
+      const stderrDigest = digest(commandResult.stderr);
+      const outputDigest = digest({ outputDigests, stdoutDigest, stderrDigest, exitCode: commandResult.exitCode });
 
-    return this.withStateLock(async () => {
-      const state = await this.readState();
-      const session = state.sessions[prepared.session.id];
-      const grant = session ? state.grants[session.grantId] : undefined;
-      const completedAt = nowIso(this.now);
-      const completionClock = () => new Date(completedAt);
-      const revokedDuringRun = !session || !grant || session.status === "revoked" || grant.status === "revoked";
-      const expiredDuringRun = !!session && !!grant && !revokedDuringRun
-        && (session.status === "expired" || grant.status === "expired" || isExpired(session.expiresAt, completionClock) || isExpired(grant.expiresAt, completionClock));
-      if (expiredDuringRun && session && grant) {
-        session.status = "expired";
-        grant.status = "expired";
-        if (state.currentSessionId === session.id) state.currentSessionId = null;
-      }
-      const status = revokedDuringRun || expiredDuringRun ? "blocked" : failureReason ? "failed" : "passed";
-      const finalReason = revokedDuringRun ? "session-revoked-during-run" : expiredDuringRun ? "session-expired-during-run" : failureReason;
-      const evidenceDigest = digest({ actionId: prepared.action.id, verifierId: prepared.verifier?.id ?? "verifier:missing", sourceRevision: gitCommitIdentity(prepared.source.commitId), sourceSnapshot: `git:snapshot:${prepared.source.commitId}`, inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, status, sourceMutated, actorId: prepared.session.actorId, grantId: prepared.grant.id });
-      const observation: LocalRunObservation = {
-        id: prepared.runId,
-        actionId: prepared.action.id,
-        status,
-        evidenceId: prepared.evidenceId,
-        evidenceDigest,
-        startedAt: prepared.startedAt,
-        completedAt,
-        sourceRevision: gitCommitIdentity(prepared.source.commitId),
-        sourceSnapshot: `git:snapshot:${prepared.source.commitId}`,
-        actionContractDigest: prepared.action.contractDigest,
-        verifierId: prepared.verifier?.id ?? "verifier:missing",
-        ...(prepared.verifier ? { verifierContractDigest: prepared.verifier.contractDigest } : {}),
-        ...(commandResult.exitCode !== undefined ? { exitCode: commandResult.exitCode } : {}),
-        stdoutDigest,
-        stderrDigest,
-        inputDigests,
-        outputDigests,
-        outputDigest,
-        toolchainDigest: prepared.toolchainDigest,
-        environmentDigest: prepared.environmentDigest,
-        actorId: prepared.session.actorId,
-        grantId: prepared.grant.id,
-        taskId: prepared.session.taskId,
-        receipt: `${LOCAL_ACTION_POLICY.receipt}; action=${prepared.action.id}; verifier=${prepared.verifier?.id ?? "verifier:missing"}; source=${gitCommitIdentity(prepared.source.commitId)}; boundary=${prepared.boundary.id}; enforcement=${prepared.boundary.enforcement}; networkEnforcement=${prepared.boundary.networkEnforcement}; inputs=${inputDigests.length}; outputs=${outputDigests.length}; ${finalReason ?? "status=passed"}`,
-      };
-      state.runs[prepared.runId] = observation;
-      this.record(state, { operation: "run.completed", outcome: "observed", sessionId: prepared.session.id, grantId: prepared.grant.id, taskId: prepared.session.taskId, projectId: prepared.project.id, changeId: prepared.change.id, workspaceId: prepared.change.workspaceId, actorId: prepared.session.actorId, agent: prepared.session.agent, details: { runId: prepared.runId, evidenceId: prepared.evidenceId, actionId: prepared.action.id, verifierId: prepared.verifier?.id ?? "verifier:missing", status, sourceRevision: gitCommitIdentity(prepared.source.commitId), inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, toolchainDigest: prepared.toolchainDigest, environmentDigest: prepared.environmentDigest, exitCode: commandResult.exitCode, failureReason: finalReason } });
-      this.record(state, { operation: "tool.invoked", outcome: "allowed", sessionId: prepared.session.id, grantId: prepared.grant.id, taskId: prepared.session.taskId, projectId: prepared.project.id, changeId: prepared.change.id, workspaceId: prepared.change.workspaceId, actorId: prepared.session.actorId, agent: prepared.session.agent, details: { tool: "run.start", boundary: prepared.boundary.id, enforcement: prepared.boundary.enforcement, networkEnforcement: prepared.boundary.networkEnforcement } });
-      const currentSession = state.sessions[prepared.session.id];
-      if (currentSession) {
-        delete currentSession.processPid;
-        delete currentSession.processGroupId;
-      }
-      await this.writeState(state);
-      return { run: observation, evidence: { id: prepared.evidenceId, digest: evidenceDigest, status, actionId: prepared.action.id, verifierId: prepared.verifier?.id ?? "verifier:missing", sourceRevision: gitCommitIdentity(prepared.source.commitId), actionContractDigest: prepared.action.contractDigest, ...(prepared.verifier ? { verifierContractDigest: prepared.verifier.contractDigest } : {}), inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, toolchainDigest: prepared.toolchainDigest, environmentDigest: prepared.environmentDigest, exitCode: commandResult.exitCode, actorId: prepared.session.actorId, grantId: prepared.grant.id, receipt: observation.receipt }, canonicalWrite: false };
+      return this.withStateLock(async () => {
+        const state = await this.readState();
+        const session = state.sessions[prepared.session.id];
+        const grant = session ? state.grants[session.grantId] : undefined;
+        const completedAt = nowIso(this.now);
+        const completionClock = () => new Date(completedAt);
+        const revokedDuringRun = !session || !grant || session.status === "revoked" || grant.status === "revoked";
+        const expiredDuringRun = !!session && !!grant && !revokedDuringRun
+          && (session.status === "expired" || grant.status === "expired" || isExpired(session.expiresAt, completionClock) || isExpired(grant.expiresAt, completionClock));
+        if (expiredDuringRun && session && grant) {
+          session.status = "expired";
+          grant.status = "expired";
+          if (state.currentSessionId === session.id) state.currentSessionId = null;
+        }
+        const status = revokedDuringRun || expiredDuringRun ? "blocked" : failureReason ? "failed" : "passed";
+        const finalReason = revokedDuringRun ? "session-revoked-during-run" : expiredDuringRun ? "session-expired-during-run" : failureReason;
+        const evidenceDigest = digest({ actionId: prepared.action.id, verifierId: prepared.verifier?.id ?? "verifier:missing", sourceRevision: gitCommitIdentity(prepared.source.commitId), sourceSnapshot: `git:snapshot:${prepared.source.commitId}`, inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, status, sourceMutated, actorId: prepared.session.actorId, grantId: prepared.grant.id });
+        const observation: LocalRunObservation = {
+          id: prepared.runId,
+          actionId: prepared.action.id,
+          status,
+          evidenceId: prepared.evidenceId,
+          evidenceDigest,
+          startedAt: prepared.startedAt,
+          completedAt,
+          sourceRevision: gitCommitIdentity(prepared.source.commitId),
+          sourceSnapshot: `git:snapshot:${prepared.source.commitId}`,
+          actionContractDigest: prepared.action.contractDigest,
+          verifierId: prepared.verifier?.id ?? "verifier:missing",
+          ...(prepared.verifier ? { verifierContractDigest: prepared.verifier.contractDigest } : {}),
+          ...(commandResult.exitCode !== undefined ? { exitCode: commandResult.exitCode } : {}),
+          stdoutDigest,
+          stderrDigest,
+          inputDigests,
+          outputDigests,
+          outputDigest,
+          toolchainDigest: prepared.toolchainDigest,
+          environmentDigest: prepared.environmentDigest,
+          actorId: prepared.session.actorId,
+          grantId: prepared.grant.id,
+          taskId: prepared.session.taskId,
+          receipt: `${LOCAL_ACTION_POLICY.receipt}; action=${prepared.action.id}; verifier=${prepared.verifier?.id ?? "verifier:missing"}; source=${gitCommitIdentity(prepared.source.commitId)}; boundary=${prepared.boundary.id}; enforcement=${prepared.boundary.enforcement}; networkEnforcement=${prepared.boundary.networkEnforcement}; inputs=${inputDigests.length}; outputs=${outputDigests.length}; ${finalReason ?? "status=passed"}`,
+        };
+        state.runs[prepared.runId] = observation;
+        this.record(state, { operation: "run.completed", outcome: "observed", sessionId: prepared.session.id, grantId: prepared.grant.id, taskId: prepared.session.taskId, projectId: prepared.project.id, changeId: prepared.change.id, workspaceId: prepared.change.workspaceId, actorId: prepared.session.actorId, agent: prepared.session.agent, details: { runId: prepared.runId, evidenceId: prepared.evidenceId, actionId: prepared.action.id, verifierId: prepared.verifier?.id ?? "verifier:missing", status, sourceRevision: gitCommitIdentity(prepared.source.commitId), inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, toolchainDigest: prepared.toolchainDigest, environmentDigest: prepared.environmentDigest, exitCode: commandResult.exitCode, failureReason: finalReason } });
+        this.record(state, { operation: "tool.invoked", outcome: "allowed", sessionId: prepared.session.id, grantId: prepared.grant.id, taskId: prepared.session.taskId, projectId: prepared.project.id, changeId: prepared.change.id, workspaceId: prepared.change.workspaceId, actorId: prepared.session.actorId, agent: prepared.session.agent, details: { tool: "run.start", boundary: prepared.boundary.id, enforcement: prepared.boundary.enforcement, networkEnforcement: prepared.boundary.networkEnforcement } });
+        const currentSession = state.sessions[prepared.session.id];
+        if (currentSession) {
+          delete currentSession.processPid;
+          delete currentSession.processGroupId;
+        }
+        await this.writeState(state);
+        return { run: observation, evidence: { id: prepared.evidenceId, digest: evidenceDigest, status, actionId: prepared.action.id, verifierId: prepared.verifier?.id ?? "verifier:missing", sourceRevision: gitCommitIdentity(prepared.source.commitId), actionContractDigest: prepared.action.contractDigest, ...(prepared.verifier ? { verifierContractDigest: prepared.verifier.contractDigest } : {}), inputDigests, outputDigests, outputDigest, stdoutDigest, stderrDigest, toolchainDigest: prepared.toolchainDigest, environmentDigest: prepared.environmentDigest, exitCode: commandResult.exitCode, actorId: prepared.session.actorId, grantId: prepared.grant.id, receipt: observation.receipt }, canonicalWrite: false };
+      });
     });
   }
 
@@ -1887,6 +1899,7 @@ export type McpStdioOptions = {
   manager?: LocalAgentManager;
   sessionId?: string;
   sessionOptions?: Omit<LocalAgentSessionOptions, "agent" | "parallel">;
+  onBound?: (sessionId: string) => Promise<void>;
 };
 
 export class LocalMcpBroker {
@@ -1895,12 +1908,14 @@ export class LocalMcpBroker {
   private binding: Promise<string> | null = null;
   private readonly selectedSessionId: string | undefined;
   private readonly sessionOptions: Omit<LocalAgentSessionOptions, "agent" | "parallel"> | undefined;
+  private readonly onBound: ((sessionId: string) => Promise<void>) | undefined;
 
-  constructor(input: { manager: LocalAgentManager; agent: string; sessionId?: string; sessionOptions?: Omit<LocalAgentSessionOptions, "agent" | "parallel"> }) {
+  constructor(input: { manager: LocalAgentManager; agent: string; sessionId?: string; sessionOptions?: Omit<LocalAgentSessionOptions, "agent" | "parallel">; onBound?: (sessionId: string) => Promise<void> }) {
     this.manager = input.manager;
     this.agent = ensureAgent(input.agent);
     this.selectedSessionId = input.sessionId;
     this.sessionOptions = input.sessionOptions;
+    this.onBound = input.onBound;
     if (input.sessionId && input.sessionOptions) throw new Error("select an existing session or create a fresh scoped session, not both");
   }
 
@@ -1911,6 +1926,7 @@ export class LocalMcpBroker {
         : this.sessionOptions
           ? await this.manager.startSession({ ...this.sessionOptions, agent: this.agent, parallel: true })
           : await this.manager.ensureActiveSession(this.agent);
+      await this.onBound?.(selected.session.id);
       return selected.session.id;
     })();
     return this.binding;
@@ -1955,7 +1971,7 @@ export class LocalMcpBroker {
 
 export async function runMcpStdio(options: McpStdioOptions): Promise<void> {
   const manager = options.manager ?? new LocalAgentManager({ directory: options.directory });
-  const broker = new LocalMcpBroker({ manager, agent: options.agent, ...(options.sessionId ? { sessionId: options.sessionId } : {}), ...(options.sessionOptions ? { sessionOptions: options.sessionOptions } : {}) });
+  const broker = new LocalMcpBroker({ manager, agent: options.agent, ...(options.sessionId ? { sessionId: options.sessionId } : {}), ...(options.sessionOptions ? { sessionOptions: options.sessionOptions } : {}), ...(options.onBound ? { onBound: options.onBound } : {}) });
   const lines = createInterface({ input: options.input, crlfDelay: Infinity });
   for await (const line of lines) {
     if (!line.trim()) continue;

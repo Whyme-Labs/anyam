@@ -5,7 +5,9 @@ import { connectGitHubActions } from "./github-actions-bridge.js";
 import { realmDestroy, realmDoctor, realmExport, realmInstall, realmPlan, realmRestore, realmUpgrade } from "./realm.js";
 import { randomUUID } from "node:crypto";
 import { RealmAuthorityHttpClient } from "./realm-authority-client.js";
-import type { WorkspaceBoundaryMode } from "./workspace-boundary.js";
+import { parseWorkspaceResourceLimits, type WorkspaceBoundaryMode, type WorkspaceResourceLimits } from "./workspace-boundary.js";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { Readable } from "node:stream";
 import { runRealmSourceCommand } from "./realm-source-command.js";
 import { executeThroughWorkspaceBroker, removeWorkspaceBrokerLocator, startWorkspaceCommandBroker } from "./workspace-broker.js";
@@ -34,6 +36,17 @@ function requiredValue(args: readonly string[], flag: string, command: string): 
   return value;
 }
 
+async function resourcePolicyOptions(args: readonly string[], cwd: string): Promise<{ resourceLimits?: WorkspaceResourceLimits }> {
+  if (!args.includes("--resource-policy")) return {};
+  const path = valueAfter(args, "--resource-policy");
+  if (!path?.trim() || path.startsWith("--") || args.filter(value => value === "--resource-policy").length !== 1) throw new Error("--resource-policy requires one explicit JSON file; no session or process was started.");
+  const source = await readFile(resolve(cwd, path), "utf8");
+  let value: unknown;
+  try { value = JSON.parse(source) as unknown; }
+  catch { throw new Error("--resource-policy must contain valid JSON; no session or process was started."); }
+  return { resourceLimits: parseWorkspaceResourceLimits(value) };
+}
+
 function kindFrom(args: readonly string[]): ProjectTemplateKind {
   const value = valueAfter(args, "--type");
   if (!args.includes("--type") || value === "worker") return "worker";
@@ -43,7 +56,7 @@ function kindFrom(args: readonly string[]): ProjectTemplateKind {
 
 function positionalArgs(args: readonly string[], command: string): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--allow-path", "--allow-action", "--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
+  const valueFlags = new Set(["--resource-policy", "--allow-path", "--allow-action", "--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -58,7 +71,7 @@ function positionalArgs(args: readonly string[], command: string): readonly stri
 
 function subcommandPositionals(args: readonly string[]): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--allow-path", "--allow-action", "--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
+  const valueFlags = new Set(["--resource-policy", "--allow-path", "--allow-action", "--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
   for (let index = 2; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -81,6 +94,7 @@ function printHelp(): void {
   console.log("intent list|inspect|create|assign|comment|close|reopen  hosted Realm Intent lifecycle (--realm, --owner-session or ANYAM_OWNER_SESSION)");
   console.log("pr list|inspect|open|update|review|close|reopen|block|merge  hosted Pull Request compatibility projection (--realm, --owner-session or ANYAM_OWNER_SESSION)");
   console.log("workspace start|list|inspect|exec  explicit concurrent local Workspace controls (use --session for selection)");
+  console.log("--resource-policy <json-file>  measured Linux limits and receipt for workspace start, agent start|exec, or fresh mcp serve; requires enforceable Linux execution");
   console.log(`Anyam local CLI\n\nCommands:\n  init [directory]                 create a local TypeScript Project\n  doctor [directory]               inspect manifest and source metadata locally\n  check [directory]                compatibility alias for doctor\n  change start <title>             start a local Change\n  workspace list                   list all active local Workspaces\n  workspace inspect --session <id> inspect one explicit Workspace session\n  workspace exec --session <id> -- <command>  run in one existing Workspace\n  agent setup <agent>              configure the local MCP broker and instructions\n  agent start [agent]              start or resume an agent session\n  agent exec <agent> -- <command>  launch an agent through the Workspace boundary\n  agent handoff <agent>            revoke one selected session and start another\n  agent status [--session <id>]    inspect one selected or current session\n  agent revoke [--session <id>]    revoke one selected session\n  mcp serve --stdio                serve the semantic MCP tools over stdio\n  auth login --realm <url>         authenticate through OAuth PKCE and the OS keychain\n  auth logout --realm <url>        remove the Realm OAuth credential from the OS keychain\n  auth revoke                      revoke the current local session\n  git-credential-anyam get         issue a context-bound memory-only Workspace Git credential\n\nOptions:\n  --type worker|library             choose the template (default: worker)\n  --name <name>                     choose the Project name\n  --agent codex|claude|cursor|cli   choose the local coding agent\n  --mode enforceable|supervised     choose the Workspace boundary mode\n  --session <id>                    select one explicit local Workspace/session\n  --directory <path>               choose a Project directory\n  --json                            print machine-readable output\n  --dry-run                         print the proposed manifest without writing\n\nThe local broker never stores bearer credentials, writes canonical Git refs, reads secret values, approves Changes, or promotes production.`);
 }
 
@@ -142,6 +156,7 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
   const args = executionCommand && separator >= 0 ? inputArgs.slice(0, separator) : inputArgs;
   const executableArgs = executionCommand && separator >= 0 ? inputArgs.slice(separator + 1) : [];
   const json = args.includes("--json");
+  if (args.includes("--resource-policy") && !((command === "agent" && (subcommand === "start" || subcommand === "exec")) || (command === "workspace" && subcommand === "start") || (command === "mcp" && subcommand === "serve"))) throw new Error("--resource-policy is a new-session option for workspace start, agent start|exec, or fresh mcp serve; no session was changed or process started.");
   if (!command || command === "--help" || command === "-h") {
     printHelp();
     return 0;
@@ -306,7 +321,7 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
     const agent = agentValue(args, "cli");
     const mode = valueAfter(args, "--mode") as WorkspaceBoundaryMode | undefined;
     if (mode && mode !== "enforceable" && mode !== "supervised") throw new Error(`--mode must be enforceable or supervised; asked=${mode}.`);
-    const result = await new LocalAgentManager({ directory: agentDirectory(args, cwd) }).startSession({ agent, parallel: true, ...(mode ? { mode } : {}) });
+    const result = await new LocalAgentManager({ directory: agentDirectory(args, cwd) }).startSession({ agent, parallel: true, ...(mode ? { mode } : {}), ...await resourcePolicyOptions(args, cwd) });
     printResult(result, json, `Workspace ${result.session.workspaceId} started for ${result.session.agent}.\nSession: ${result.session.id}\nChange: ${result.session.changeId}\nCanonical write: denied`);
     return 0;
   }
@@ -343,7 +358,7 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
     const agent = agentValue(args, "cli");
     const mode = valueAfter(args, "--mode") as WorkspaceBoundaryMode | undefined;
     if (mode && mode !== "enforceable" && mode !== "supervised") throw new Error(`--mode must be enforceable or supervised; asked=${mode}.`);
-    const result = await new LocalAgentManager({ directory: agentDirectory(args, cwd) }).startSession({ agent, ...(mode ? { mode } : {}) });
+    const result = await new LocalAgentManager({ directory: agentDirectory(args, cwd) }).startSession({ agent, ...(mode ? { mode } : {}), ...await resourcePolicyOptions(args, cwd) });
     printResult(result, json, `Agent session ${result.session.id} active for ${result.session.agent}.\nWorkspace: ${result.session.workspaceId}\nGrant: ${result.grant.id}\nCanonical write: denied`);
     return 0;
   }
@@ -356,7 +371,7 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
     const mode = (valueAfter(args, "--mode") ?? "enforceable") as WorkspaceBoundaryMode;
     if (mode !== "enforceable" && mode !== "supervised") throw new Error(`--mode must be enforceable or supervised; asked=${mode}.`);
     const directory = valueAfter(args, "--directory") ?? cwd;
-    const result = await new LocalAgentManager({ directory }).launchAgent({ agent, command: executable, args: executableArgs.slice(1), mode });
+    const result = await new LocalAgentManager({ directory }).launchAgent({ agent, command: executable, args: executableArgs.slice(1), mode, ...await resourcePolicyOptions(args, cwd) });
     printResult(disclosedAgentLaunch(result), json, `Agent process ${result.command.status} in ${result.boundary.mode} Workspace (${result.boundary.enforcement}).\nWorkspace: ${result.boundary.workspaceDirectory}\nReceipt: ${result.command.receipt}`);
     return result.command.status === "passed" ? 0 : 1;
   }
@@ -420,13 +435,14 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
     if (mode !== "enforceable" && mode !== "supervised") throw new Error("MCP --mode must be enforceable or supervised.");
     const authorizedPaths = valuesAfter(args, "--allow-path");
     const authorizedActionIds = valuesAfter(args, "--allow-action");
-    if (selectedSessionId && (valueAfter(args, "--mode") || authorizedPaths.length || authorizedActionIds.length)) throw new Error("MCP --session cannot be combined with new-session scope options.");
+    if (selectedSessionId && (valueAfter(args, "--mode") || authorizedPaths.length || authorizedActionIds.length || args.includes("--resource-policy"))) throw new Error("MCP --session cannot be combined with new-session scope options.");
     if (authorizedPaths.length && mode !== "enforceable") throw new Error("MCP path restrictions require --mode enforceable; supervised mode cannot claim source isolation.");
     const directory = valueAfter(args, "--directory") ?? cwd;
+    const resourceOptions = await resourcePolicyOptions(args, cwd);
     const manager = new LocalAgentManager({ directory });
     const handoff: { current: Awaited<ReturnType<typeof startWorkspaceCommandBroker>> } = { current: undefined };
     try { await runMcpStdio({ directory, manager, agent, input: process.stdin, output: process.stdout,
-      ...(selectedSessionId ? { sessionId: selectedSessionId } : { sessionOptions: { mode, ...(authorizedPaths.length ? { authorizedPaths } : {}), ...(authorizedActionIds.length ? { authorizedActionIds } : {}) } }),
+      ...(selectedSessionId ? { sessionId: selectedSessionId } : { sessionOptions: { mode, ...resourceOptions, ...(authorizedPaths.length ? { authorizedPaths } : {}), ...(authorizedActionIds.length ? { authorizedActionIds } : {}) } }),
       onBound: async sessionId => { handoff.current = await startWorkspaceCommandBroker({ manager, sessionId, agent }); },
     }); } finally { await handoff.current?.close(); }
     return 0;

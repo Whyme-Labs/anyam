@@ -10,7 +10,7 @@ import test from "node:test";
 import { localAgentStatePath, LOCAL_ACTION_POLICY, LocalAgentManager, LocalMcpBroker, type LocalAgentSession, type LocalCapabilityGrant } from "../packages/create-anyam/src/agent.ts";
 import { scaffoldProject, startChange } from "../packages/create-anyam/src/scaffold.ts";
 import { WORKSPACE_PROCESS_CUSTODY_SCRIPT } from "../packages/create-anyam/src/workspace-process-custody.ts";
-import { createWorkspaceBoundary, removeWorkspaceBoundary, runWorkspaceCommand } from "../packages/create-anyam/src/workspace-boundary.ts";
+import { createWorkspaceBoundary, measureLinuxWorkspaceResourceLimits, removeWorkspaceBoundary, runWorkspaceCommand } from "../packages/create-anyam/src/workspace-boundary.ts";
 
 const execFile = promisify(execFileCallback);
 const entrypoint = resolve("packages/create-anyam/src/anyam.ts");
@@ -24,9 +24,10 @@ class Broker {
   private sequence = 0;
   private readonly pending = new Map<number, { resolve: (value: Json) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private stderr = "";
-  constructor(readonly fixture: Fixture, agent: string, side: string, sessionId?: string, driver?: string) {
+  constructor(readonly fixture: Fixture, agent: string, side: string, sessionId?: string, driver?: string, resourcePolicyPath?: string) {
     const args = ["--import", "tsx", driver ?? entrypoint, "mcp", "serve", "--stdio", "--agent", agent, "--directory", fixture.directory,
-      ...(sessionId ? ["--session", sessionId] : ["--mode", "enforceable", "--allow-path", side, "--allow-path", "package.json", "--allow-action", `action:${side}`])];
+      ...(sessionId ? ["--session", sessionId] : ["--mode", "enforceable", "--allow-path", side, "--allow-path", "package.json", "--allow-action", `action:${side}`]),
+      ...(resourcePolicyPath ? ["--resource-policy", resourcePolicyPath] : [])];
     this.process = spawn(process.execPath, args, { cwd: process.cwd(), env: fixture.environment, stdio: "pipe" });
     this.process.stderr.on("data", chunk => { this.stderr += String(chunk); });
     const lines = createInterface({ input: this.process.stdout });
@@ -123,6 +124,35 @@ function assertAttribution(result: ToolResult, session: LocalAgentSession, statu
   assert.equal(run.actorId, session.actorId); assert.equal(run.taskId, session.taskId);
   assert.equal(evidence.actorId, session.actorId); assert.equal(evidence.grantId, session.grantId);
 }
+
+test("Linux MCP to CLI handoff enforces the requested measured resource policy", { skip: process.platform !== "linux" ? "requires Linux bwrap and prlimit; macOS does not qualify Linux enforcement" : false, timeout: LOCAL_ACTION_POLICY.timeoutMs }, async () => {
+  const f = await fixture();
+  try {
+    await writeFile(join(f.directory, "a/limits.cjs"), "const fs=require('node:fs');fs.writeFileSync('a/limits.json',JSON.stringify({limits:fs.readFileSync('/proc/self/limits','utf8'),pidIsolated:process.ppid===1}));");
+    await execFile("git", ["add", "a/limits.cjs"], { cwd: f.directory, env: f.environment });
+    await execFile("git", ["commit", "-m", "fixture: observe Linux kernel limits"], { cwd: f.directory, env: f.environment });
+    const canonical = (await execFile("git", ["rev-parse", "HEAD"], { cwd: f.directory, env: f.environment })).stdout;
+    const limits = await measureLinuxWorkspaceResourceLimits(f.directory); const policyPath = join(f.root, "resource-policy.json");
+    await writeFile(policyPath, JSON.stringify(limits));
+    const broker = new Broker(f, "cli", "a", undefined, undefined, policyPath); await broker.initialize(); const session = await f.session(broker);
+    assert.equal(session.workspaceEnforcement, "linux-bwrap"); assert.deepEqual(session.workspaceScope?.resourceLimits, limits);
+    const executed = await execFile(process.execPath, ["--import", "tsx", entrypoint, "workspace", "exec", "--directory", f.directory, "--session", session.id, "--json", "--", process.execPath, "a/limits.cjs"], { cwd: process.cwd(), env: f.environment });
+    const result = JSON.parse(executed.stdout) as Json;
+    assert.deepEqual((result.boundary as Json).resourceLimits, limits); assert.equal((result.boundary as Json).id, session.workspaceBoundaryId);
+    assert.equal((result.boundary as Json).enforcement, "linux-bwrap"); assert.equal((result.command as Json).status, "passed");
+    assert.match(String((result.command as Json).receipt), /resourceLimits=enforced/);
+    const observed = JSON.parse(await readFile(join(session.workspaceDirectory!, "a/limits.json"), "utf8")) as { limits: string; pidIsolated: boolean };
+    assert.equal(observed.pidIsolated, true);
+    for (const [name, expected] of [["Max processes", limits.maxProcesses], ["Max address space", limits.maxAddressSpaceBytes], ["Max cpu time", limits.maxCpuSeconds], ["Max open files", limits.maxOpenFiles], ["Max file size", limits.maxFileBytes]] as const) {
+      const line = observed.limits.split("\n").find(value => value.startsWith(name)); assert.ok(line, name);
+      const [soft, hard] = line.slice(name.length).trim().split(/\s+/u); assert.equal(Number(soft), expected, name); assert.equal(Number(hard), expected, name);
+    }
+    await f.revoke(session.id); await assert.rejects(access(session.workspaceDirectory!));
+    assert.equal((await f.state()).sessions[session.id]!.status, "revoked");
+    assert.equal((await execFile("git", ["rev-parse", "HEAD"], { cwd: f.directory, env: f.environment })).stdout, canonical);
+    assert.equal((await execFile("git", ["status", "--porcelain"], { cwd: f.directory, env: f.environment })).stdout, "");
+  } finally { await f.cleanup(); }
+});
 
 test("separate CLI MCP processes interleave scoped work without borrowing paths, Actions or attribution", platform, async () => {
   const f = await fixture();

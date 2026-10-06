@@ -223,20 +223,25 @@ function commandExists(command: string): boolean {
   return ["/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin"].some((root) => existsSync(join(root, command)));
 }
 
-function validateResourceLimits(value: WorkspaceResourceLimits): WorkspaceResourceLimits {
-  const fields: Readonly<Record<string, number>> = {
-    maxProcesses: value.maxProcesses,
-    maxAddressSpaceBytes: value.maxAddressSpaceBytes,
-    maxCpuSeconds: value.maxCpuSeconds,
-    maxOpenFiles: value.maxOpenFiles,
-    maxFileBytes: value.maxFileBytes,
-    maxWorkspaceBytes: value.maxWorkspaceBytes,
-    monitorIntervalMs: value.monitorIntervalMs,
+export function parseWorkspaceResourceLimits(value: unknown): WorkspaceResourceLimits {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new WorkspaceBoundaryError({ code: "workspace.resource_limits_invalid", message: "Resource policy must be a JSON object containing all measured Linux resource limits.", recoveryAction: "provide the measured WorkspaceResourceLimits object with its receipt", receipt: "resourceLimits=invalid-object; enforcement=not-started" });
+  const record = value as Record<string, unknown>;
+  const limit = (name: keyof Omit<WorkspaceResourceLimits, "receipt">): number => {
+    const requested = record[name];
+    if (typeof requested !== "number" || !Number.isSafeInteger(requested) || requested <= 0) throw new WorkspaceBoundaryError({ code: "workspace.resource_limits_invalid", message: `Linux resource limit ${name} must be a positive safe integer; asked=${String(requested)}.`, recoveryAction: "measure a healthy workload, size a tripwire above it, and provide all Linux resource limits", receipt: `resourceLimit=${name}; value=${String(requested)}; enforcement=not-started` });
+    return requested;
   };
-  const invalid = Object.entries(fields).find(([, fieldValue]) => !Number.isSafeInteger(fieldValue) || fieldValue <= 0);
-  if (invalid) throw new WorkspaceBoundaryError({ code: "workspace.resource_limits_invalid", message: `Linux resource limit ${invalid[0]} must be a positive safe integer; asked=${String(invalid[1])}.`, recoveryAction: "measure a healthy workload, size a tripwire above it, and provide all Linux resource limits", receipt: `resourceLimit=${invalid[0]}; value=${String(invalid[1])}; enforcement=not-started` });
-  if (typeof value.receipt !== "string" || !/(?:receipt|measure|qualification)/iu.test(value.receipt)) throw new WorkspaceBoundaryError({ code: "workspace.resource_receipt_missing", message: "Linux resource limits require a measurement receipt before an enforceable Workspace can start.", recoveryAction: "run the Linux workload measurement and provide its receipt with the resource policy", receipt: "resourceLimits=receipt-required; enforcement=not-started" });
-  return { ...value };
+  const fields = {
+    maxProcesses: limit("maxProcesses"),
+    maxAddressSpaceBytes: limit("maxAddressSpaceBytes"),
+    maxCpuSeconds: limit("maxCpuSeconds"),
+    maxOpenFiles: limit("maxOpenFiles"),
+    maxFileBytes: limit("maxFileBytes"),
+    maxWorkspaceBytes: limit("maxWorkspaceBytes"),
+    monitorIntervalMs: limit("monitorIntervalMs"),
+  };
+  if (typeof record.receipt !== "string" || !/(?:receipt|measure|qualification)/iu.test(record.receipt)) throw new WorkspaceBoundaryError({ code: "workspace.resource_receipt_missing", message: "Linux resource limits require a measurement receipt before an enforceable Workspace can start.", recoveryAction: "run the Linux workload measurement and provide its receipt with the resource policy", receipt: "resourceLimits=receipt-required; enforcement=not-started" });
+  return { ...fields, receipt: record.receipt };
 }
 
 function linuxPrlimitPath(): string | undefined {
@@ -496,9 +501,10 @@ export async function createWorkspaceBoundary(input: WorkspaceBoundaryInput): Pr
     ? (() => {
       if (!input.resourceLimits) throw new WorkspaceBoundaryError({ code: "workspace.resource_limits_required", message: "Linux enforceable Workspace execution requires an explicit measured resource policy; namespace isolation alone is not accepted.", affectedObject: input.workspaceId, recoveryAction: "measure the healthy workload and provide resourceLimits with a receipt before starting the Linux Workspace", receipt: "resourceLimits=required; enforcement=linux-bwrap; process-start=false" });
       if (!linuxPrlimitPath()) throw new WorkspaceBoundaryError({ code: "workspace.resource_prlimit_unavailable", message: "Linux enforceable Workspace execution requires prlimit for process and resource tripwires, but no qualified prlimit binary is available.", affectedObject: input.workspaceId, recoveryAction: "install util-linux prlimit or choose a qualified container runner; the agent was not started", receipt: "resourceLimits=unavailable; primitive=prlimit; enforcement=linux-bwrap; process-start=false" });
-      return validateResourceLimits(input.resourceLimits);
+      return parseWorkspaceResourceLimits(input.resourceLimits);
     })()
-    : input.resourceLimits ? validateResourceLimits(input.resourceLimits) : undefined;
+    : input.resourceLimits ? parseWorkspaceResourceLimits(input.resourceLimits) : undefined;
+  if (resourceLimits && enforcement !== "linux-bwrap") throw new WorkspaceBoundaryError({ code: "workspace.resource_enforcement_unsupported", message: `Requested Linux resource policy cannot be enforced in ${input.mode} mode on ${process.platform}; no Workspace or process was started.`, affectedObject: input.workspaceId, recoveryAction: "use enforceable mode on a Linux host with qualified bwrap and prlimit", receipt: `resourceLimits=unsupported; host=${process.platform}; mode=${input.mode}; process-start=false` });
   const resourceBoundaryReceipt = resourceLimits ? `resourceLimits=measured; ${resourceLimits.receipt};` : "resourceLimits=not-configured;";
   const executablePaths = input.mode === "enforceable" ? [...new Set(await Promise.all((input.executablePaths ?? []).map(resolveExecutablePath)))] : [];
   const executableRoots = executablePaths.map((path) => dirname(path));

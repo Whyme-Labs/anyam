@@ -210,6 +210,7 @@ test("concurrent fresh CLI file handoffs revoke only the selected enforceable Wo
     const [completed] = await runningB; assert.ok(completed?.status === "fulfilled", JSON.stringify(completed));
     const result = JSON.parse(completed.value.stdout) as Json;
     for (const key of ["id", "projectId", "changeId", "workspaceId", "actorId", "taskId", "grantId"] as const) assert.equal((result.session as Json)[key], sb[key]);
+    assert.equal((result.boundary as Json).id, sb.workspaceBoundaryId); assert.equal((result.boundary as Json).workspaceDirectory, sb.workspaceDirectory);
     assert.equal((result.boundary as Json).mode, "enforceable"); assert.equal((result.boundary as Json).enforcement, "macos-sandbox-exec");
     assert.equal(Object.hasOwn(result.boundary as object, "environment"), false);
     assert.equal((result.command as Json).status, "passed"); assert.equal((result.command as Json).shell, false);

@@ -1,3 +1,4 @@
+import { parseActionArtifactOutputContract, ActionArtifactOutputError } from "./action-artifact-output.js";
 import { execFile as execFileCallback } from "node:child_process";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -89,6 +90,13 @@ function manifestShapeProblems(value: unknown): readonly string[] {
             problems.push(`modules[${index}].actions[${actionIndex}]`);
             continue;
           }
+          if (action.artifactOutputContract !== undefined) {
+            try { parseActionArtifactOutputContract(action.artifactOutputContract, Array.isArray(action.outputs) ? action.outputs.filter((path): path is string => typeof path === "string") : []); }
+            catch (failure) {
+              if (!(failure instanceof ActionArtifactOutputError)) throw failure;
+              problems.push(`modules[${index}].actions[${actionIndex}].artifactOutputContract: ${failure.reason}`);
+            }
+          }
           for (const field of ["id", "command", "inputs", "outputs", "network", "resources"] as const) {
             if (field === "id" || field === "command") {
               if (typeof action[field] !== "string") problems.push(`modules[${index}].actions[${actionIndex}].${field}`);
@@ -140,7 +148,7 @@ function manifest(name: string, kind: ProjectTemplateKind, repositoryId: string)
     { id: "action:check", command: "npm run doctor", inputs: ["anyam.json", "package.json", "tsconfig.json", "src/**/*.ts"], outputs: [], network: [], resources: {} },
     { id: "action:typecheck", command: "npm run typecheck", inputs: ["package.json", "tsconfig.json", "src/**/*.ts"], outputs: [], network: [], resources: {} },
     { id: "action:test", command: "npm test", inputs: ["package.json", "test/**/*.test.js", "src/**/*.ts"], outputs: [], network: [], resources: {} },
-    { id: "action:build", command: "npm run build", inputs: ["package.json", "tsconfig.json", "src/**/*.ts"], outputs: ["dist/index.js"], network: [], resources: {} },
+    { id: "action:build", command: "npm run build", inputs: ["package.json", "tsconfig.json", "src/**/*.ts"], outputs: ["dist/index.js"], artifactOutputContract: { protocol: "anyam.action-artifact-outputs/v1", outputs: [{ path: "dist/index.js", type: artifactType }] }, network: [], resources: {} },
   ];
   return `${JSON.stringify({
     schema: projectSchema,

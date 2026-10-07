@@ -154,6 +154,46 @@ export function scanCredentialMaterial(value: unknown, rootPath = "value"): Cred
   return scan(value, rootPath, new WeakSet<object>());
 }
 
+/** Match known material without returning it. Visit JSON strings and keys,
+ * plus one URI or Base64 decoding layer. A Base64 substring can begin at any
+ * of its four character alignments inside a larger alphabet run. */
+export function containsKnownTextMaterial(value: unknown, matchesText: (text: string) => boolean): boolean {
+  const matches = (text: string): boolean => {
+    if (matchesText(text)) return true;
+    // Decode valid byte spans independently. Unrelated malformed escapes or
+    // invalid UTF-8 must not suppress an embedded known ASCII credential.
+    const uriDecoded = text.replace(/(?:%[0-9a-f]{2})+/giu, encoded => new TextDecoder().decode(Uint8Array.from(
+      [...encoded.matchAll(/%([0-9a-f]{2})/giu)], match => Number.parseInt(match[1]!, 16))));
+    if (uriDecoded !== text && matchesText(uriDecoded)) return true;
+    // Native Base64 permits ASCII whitespace between encoded characters.
+    const base64Text = text.replace(/[\t\n\f\r ]/gu, "");
+    for (const match of base64Text.matchAll(/[A-Za-z0-9+/_-]+={0,2}/gu)) {
+      const candidate = match[0].replace(/=+$/u, "").replaceAll("-", "+").replaceAll("_", "/");
+      for (let alignment = 0; alignment < 4 && alignment < candidate.length; alignment++) {
+        const substring = candidate.slice(alignment);
+        // A surrounding suffix can leave an invalid final one-character
+        // quantum. Discard only that quantum; complete preceding bytes still
+        // contain any embedded encoding.
+        const aligned = substring.length % 4 === 1 ? substring.slice(0, -1) : substring;
+        try {
+          const binary = atob(aligned + "=".repeat((4 - aligned.length % 4) % 4));
+          const decoded = new TextDecoder().decode(Uint8Array.from(binary, character => character.charCodeAt(0)));
+          if (matchesText(decoded)) return true;
+        } catch { /* malformed Base64 text */ }
+      }
+    }
+    return false;
+  };
+  const seen = new WeakSet<object>();
+  const contains = (entry: unknown): boolean => {
+    if (typeof entry === "string") return matches(entry);
+    if (!entry || typeof entry !== "object" || seen.has(entry)) return false;
+    seen.add(entry);
+    return Object.entries(entry).some(([key, nested]) => matches(key) || contains(nested));
+  };
+  return contains(value);
+}
+
 export function isCredentialFree(value: unknown): boolean {
   return scanCredentialMaterial(value) === undefined;
 }

@@ -21,7 +21,11 @@ test("remote MCP exposes Pull Request compatibility tools with stable Change lin
         const requestBody = await request.json() as Record<string, unknown>;
         calls.push({ path, body: requestBody });
         if (request.headers.get(REALM_COORDINATOR_INTERNAL_HEADER) !== REALM_COORDINATOR_INTERNAL_VALUE) return new Response(JSON.stringify({ code: "internal_binding_required" }), { status: 403 });
-        if (path === "/authority/pull-requests/internal") {
+        if (path === "/authority/pull-requests/internal" || path === "/authority/mcp-read/internal" && requestBody.operation === "pull-requests") {
+          if (path === "/authority/mcp-read/internal") {
+            assert.equal(requestBody.surface, "mcp"); assert.equal(requestBody.agentId, "agent:pull-request");
+            assert.equal(requestBody.taskId, "task:pull-request"); assert.equal(requestBody.capabilityGrantId, "grant:pull-request");
+          }
           const pullRequestId = typeof requestBody.pullRequestId === "string" ? requestBody.pullRequestId : undefined;
           const values = [...pullRequests.values()].filter((pullRequest) => pullRequestId === undefined || pullRequest.id === pullRequestId);
           if (pullRequestId !== undefined && values.length === 0) return new Response(JSON.stringify({ code: "not_found", receipt: "pullRequest=hidden; discoverable=false" }), { status: 404 });

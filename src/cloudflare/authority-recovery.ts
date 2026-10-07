@@ -23,6 +23,7 @@ export const AUTHORITY_RECOVERY_SNAPSHOT_FIELDS = [
   "runs",
   "runnerProfiles",
   "runnerAttempts",
+  "runDetails",
   "evidence",
   "artifacts",
   "landings",

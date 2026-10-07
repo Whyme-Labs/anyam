@@ -16,7 +16,7 @@ export type GitHubWebhookEnv = {
   readonly ANYAM_GITHUB_WEBHOOK_RATE_LIMITER?: { limit(input: { key: string }): Promise<{ success: boolean }> } | undefined;
   readonly ANYAM_GITHUB_WEBHOOK_RATE_LIMIT_RECEIPT?: string | undefined;
   readonly ANYAM_GITHUB_MIRROR_PRODUCER?: { fetch(request: Request): Promise<Response> } | undefined;
-  readonly ANYAM_EVENTS?: { send(message: GitHubWebhookIngressEnvelope): Promise<void> } | undefined;
+  readonly ANYAM_EVENTS?: { send(message: GitHubWebhookIngressEnvelope): Promise<unknown> } | undefined;
 };
 
 function json(body: unknown, status = 200): Response {

@@ -57,6 +57,16 @@
   ],
   "r2_buckets": [
     {
+      "binding": "ANYAM_RUNNER_OUTPUTS",
+      "bucket_name": "replace-with-customer-attempt-scoped-runner-outputs",
+      "preview_bucket_name": "replace-with-customer-attempt-scoped-runner-outputs-preview"
+    },
+    {
+      "binding": "ANYAM_PROMOTION_ARTIFACTS",
+      "bucket_name": "replace-with-customer-anyam-artifacts",
+      "preview_bucket_name": "replace-with-customer-anyam-artifacts-preview"
+    },
+    {
       "binding": "ANYAM_EXPORTS",
       "bucket_name": "replace-with-customer-anyam-exports",
       "preview_bucket_name": "replace-with-customer-anyam-exports-preview"

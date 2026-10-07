@@ -1,0 +1,13 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "anyam-artifacts-workspace-contract",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-02",
+  "workers_dev": false,
+  "preview_urls": false,
+  "artifacts": [{ "binding": "ARTIFACTS", "namespace": "anyam-contract-fixture", "remote": false }],
+  "vars": {
+    "ARTIFACTS_ACCOUNT_ID": "qualification-account",
+    "ARTIFACTS_NAMESPACE": "anyam-contract-fixture"
+  }
+}

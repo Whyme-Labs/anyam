@@ -280,20 +280,26 @@ export function promotionReconciliationValue(result: Record<string, unknown>, re
 }
 
 export function promotionStatusValue(result: Record<string, unknown>): Record<string, unknown> {
-  const promotion = safePromotion(result.promotion);
+  const promotion = object(result.promotion, "promotion");
+  const release = object(result.release, "release");
   const target = safeTarget(result.target);
-  const release = safeRelease(result.release);
-  const checkpoint = result.checkpoint === undefined ? undefined : safeCheckpoint(result.checkpoint);
   return {
     protocol: AUTHORITY_PLANE_PROTOCOL,
     status: string(result.status, "status"),
-    version: typeof result.version === "number" && Number.isSafeInteger(result.version) ? result.version : (() => { throw new Error("coordinator_version_malformed"); })(),
     credentialFree: true,
     canonicalWrite: false,
-    promotion,
+    promotion: {
+      protocol: string(promotion.protocol, "promotion.protocol"), id: string(promotion.id, "promotion.id"),
+      projectId: string(promotion.projectId, "promotion.projectId"), targetId: string(promotion.targetId, "promotion.targetId"),
+      releaseId: string(promotion.releaseId, "promotion.releaseId"), state: string(promotion.state, "promotion.state"),
+      attempt: typeof promotion.attempt === "number" && Number.isSafeInteger(promotion.attempt) ? promotion.attempt : (() => { throw new Error("coordinator_promotion.attempt_malformed"); })(),
+      kind: string(promotion.kind, "promotion.kind"),
+      previousReleaseId: promotion.previousReleaseId === null ? null : string(promotion.previousReleaseId, "promotion.previousReleaseId"),
+      expectedCurrentReleaseId: promotion.expectedCurrentReleaseId === null ? null : string(promotion.expectedCurrentReleaseId, "promotion.expectedCurrentReleaseId"),
+    },
     target,
-    release,
-    ...(checkpoint ? { checkpoint } : {}),
+    release: { protocol: string(release.protocol, "release.protocol"), id: string(release.id, "release.id"),
+      projectViewRevisionId: string(release.projectViewRevisionId, "release.projectViewRevisionId"), status: string(release.status, "release.status") },
     receipt: `operation=promotion.status; typedSurface=rest; readOnly=true; credentialFree=true; canonicalWrite=false`,
   };
 }

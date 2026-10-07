@@ -909,7 +909,24 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
   const sessionId = await anyamRealmOwnerSessionId(request, env);
   if (!sessionId) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "owner_authentication_required", recoveryAction: "Authenticate the Realm owner through /owner/login before issuing an Authority command.", receipt: "ownerSession=missing-or-invalid; authorityCommand=not-accepted" }, 401);
 
+  let sourceWriteRequest = false;
   try {
+    if (url.pathname === "/api/authority/view-command" && request.method === "POST") return json(await requestAnyamRealmCoordinator(env, "/authority/view-command/internal", { ...(await readBody(request)), sessionId }));
+    const revisionRead = url.pathname.startsWith("/api/authority/revisions/");
+    if (url.pathname.startsWith("/api/authority/runs/") || revisionRead) {
+      const collection = revisionRead ? "revisions" : "runs"; const operation = revisionRead ? "revision" : "run";
+      const unavailable = () => json({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "not_found", receipt: `${operation}Read=unavailable; discoverable=false` }, 404);
+      if (request.method !== "GET") return json({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "method_not_allowed", receipt: `${operation}Read=get-required; canonicalWrite=false` }, 405);
+      let id: string;
+      try { id = decodeURIComponent(url.pathname.slice(`/api/authority/${collection}/`.length)); } catch { return unavailable(); }
+      if (!id.trim() || id.includes("/") || id.includes("\\") || id === "." || id === ".." || url.search) return unavailable();
+      return json(await requestAnyamRealmCoordinator(env, `/authority/${collection}/internal`, { sessionId, [revisionRead ? "changeRevisionId" : "runId"]: id }));
+    }
+    if (url.pathname.startsWith("/api/authority/run-details/") && request.method === "GET") {
+      const encoded = url.pathname.slice("/api/authority/run-details/".length);
+      if (!encoded || encoded.includes("/")) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "not_found", receipt: "runDetail=unavailable; discoverable=false" }, 404);
+      return json(await requestAnyamRealmCoordinator(env, "/authority/run-details/internal", { sessionId, runId: decodeURIComponent(encoded) }));
+    }
     if (url.pathname === "/api/authority/state" && request.method === "GET") return json(await requestAnyamRealmCoordinator(env, "/authority/state/internal", { sessionId }));
     if (url.pathname === "/api/authority/recovery/export" && request.method === "POST") return json(await requestAnyamRealmCoordinator(env, "/authority/recovery/export/internal", { sessionId }));
     if (url.pathname === "/api/authority/recovery/restore" && request.method === "POST") {
@@ -922,10 +939,18 @@ export async function handleAuthorityRequest(request: Request, env: AnyamRealmOA
       if (!idempotencyKey) return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "invalid_request", recoveryAction: "send one non-empty Idempotency-Key header for Authority recovery activation", receipt: "authorityRecovery=activate; idempotencyKey=required; activation=not-applied; credentialMaterialStored=false" }, 422);
       return json(await requestAnyamRealmCoordinator(env, "/authority/recovery/activate/internal", { ...(await readBody(request)), idempotencyKey, sessionId }));
     }
-    if (url.pathname === "/api/authority/command" && request.method === "POST") return json(await requestAnyamRealmCoordinator(env, "/authority/command/internal", { ...(await readBody(request)), sessionId }));
+    if (url.pathname === "/api/authority/command" && request.method === "POST") {
+      const body = await readBody(request);
+      sourceWriteRequest = typeof body.command === "string" && ["workspace.create", "change.create", "revision.publish", "run.request"].includes(body.command);
+      return json(await requestAnyamRealmCoordinator(env, "/authority/command/internal", { ...body, sessionId }));
+    }
     return json({ protocol: AUTHORITY_PLANE_PROTOCOL, code: "not_found", recoveryAction: "Use GET /api/authority/state, POST /api/authority/command, or the owner-authenticated Authority recovery endpoints.", receipt: `authorityRoute=${url.pathname}; method=${request.method}; transition=not-started` }, 404);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "realm_coordinator_rejected";
+    if (sourceWriteRequest || url.pathname === "/api/authority/view-command" || url.pathname.startsWith("/api/authority/run-details/") || url.pathname.startsWith("/api/authority/runs/")) {
+      const status = detail.includes("not_found") ? 404 : detail.includes("conflict") ? 409 : detail.includes("invalid_request") ? 422 : detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : 503;
+      return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: status === 404 ? "not_found" : status === 409 ? "conflict" : status === 422 ? "invalid_request" : "command_unavailable", recoveryAction: "use a currently disclosed resource and retry an accepted command with its original payload", receipt: "viewCommand=not-accepted; details=not-disclosed; canonicalWrite=false" }, status);
+    }
     const status = detail.includes("realm_coordinator_invalid_request") ? 422 : detail.includes("owner_denied") || detail.includes("session.") || detail.includes("session_") ? 403 : detail.includes("idempotency_conflict") || detail.includes("stale_state") || detail.includes("conflict") || detail.includes("promotion=blocked") ? 409 : 503;
     return json({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "authority_coordinator_rejected", recoveryAction: "Inspect the Durable Object receipt and retry only the same idempotent command when safe.", receipt: `authority=coordinator-rejected; detail=${detail}; credentialFree=true` }, status);
   }

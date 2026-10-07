@@ -3,6 +3,25 @@
 Package-manager-neutral TypeScript scaffolding for Anyam Projects, with the
 local `anyam` command for inspection and Changes.
 
+Hosted human commands now also expose `realm project|workspace|change|revision|run
+inspect`, `realm workspace create`, `realm change create`, `realm revision
+publish` and `realm run request` using disclosed selectors, JSON payload files,
+stable idempotency keys and an existing human Session through stdin. See the
+[CLI and delegated MCP selector workflow](https://github.com/Whyme-Labs/anyam/blob/main/docs/qualification/cli-mcp-disclosed-selectors.md)
+for authentication, payloads, native delegation and local qualification limits.
+
+`realm revision inspect` recovers a selected Change Revision's exact disclosed
+Source snapshots, latest marker, coarse Runs and recorded Evidence outcomes.
+Recorded outcomes are separate from signed execution proof.
+
+An active human Realm-wide owner can use `realm run detail --realm <url>
+--id <run-id> --session-stdin --json` to inspect the existing
+`anyam.owner-run-detail/v1` accepted signed-context contract. Complete current
+Source access and Run `evidence.read` authority still apply. The server verifies
+the enrolled signature and producing context on each read; this CLI does not
+independently verify execution or manifest/artifact bytes. Ordinary Run inspection
+and delegated MCP retain their coarse disclosure.
+
 Start with the [Anyam Quickstart](https://github.com/Whyme-Labs/anyam/blob/main/docs/guides/quickstart.md). Read the
 [documentation index](https://github.com/Whyme-Labs/anyam/blob/main/docs/README.md) for the design, Realm, and example guides.
 

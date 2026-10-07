@@ -19,6 +19,17 @@ runtime monitor reports the named budget, configured limit, and observed ask
 for process/address-space/CPU/open-file/Workspace-disk pressure. Kernel
 `SIGXFSZ` is translated into the `workspace.file-bytes` budget receipt.
 
+The owner CLI accepts `--resource-policy <json-file>` on `workspace start`,
+`agent start`, `agent exec`, and fresh `mcp serve` startup. The file contains
+the measured `WorkspaceResourceLimits` object, including its receipt. Paths
+resolve relative to the invoking working directory. It is passed through the
+existing Session options into the live boundary; it supplies no new Action,
+source, credential, or canonical authority. Existing-session execution uses
+that live broker's policy and rejects a replacement policy option. MCP
+`--session` also rejects new policy options. A policy is rejected when the
+selected host or mode cannot enforce Linux resource limits; supervised and
+macOS execution do not silently accept it.
+
 The repository gate probes the same namespace feature set before running the
 Linux qualification. The qualification proves PID namespace behavior,
 deny-all networking, hostile Git metadata write protection, and cleanup. macOS

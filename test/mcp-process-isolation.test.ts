@@ -7,10 +7,10 @@ import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import type { Duplex } from "node:stream";
 import test from "node:test";
-import { localAgentStatePath, LocalAgentManager, LocalMcpBroker, type LocalAgentSession, type LocalCapabilityGrant } from "../packages/create-anyam/src/agent.ts";
+import { localAgentStatePath, LOCAL_ACTION_POLICY, LocalAgentManager, LocalMcpBroker, type LocalAgentSession, type LocalCapabilityGrant } from "../packages/create-anyam/src/agent.ts";
 import { scaffoldProject, startChange } from "../packages/create-anyam/src/scaffold.ts";
 import { WORKSPACE_PROCESS_CUSTODY_SCRIPT } from "../packages/create-anyam/src/workspace-process-custody.ts";
-import { createWorkspaceBoundary, removeWorkspaceBoundary, runWorkspaceCommand } from "../packages/create-anyam/src/workspace-boundary.ts";
+import { createWorkspaceBoundary, measureLinuxWorkspaceResourceLimits, removeWorkspaceBoundary, runWorkspaceCommand } from "../packages/create-anyam/src/workspace-boundary.ts";
 
 const execFile = promisify(execFileCallback);
 const entrypoint = resolve("packages/create-anyam/src/anyam.ts");
@@ -24,9 +24,10 @@ class Broker {
   private sequence = 0;
   private readonly pending = new Map<number, { resolve: (value: Json) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private stderr = "";
-  constructor(readonly fixture: Fixture, agent: string, side: string, sessionId?: string, driver?: string) {
+  constructor(readonly fixture: Fixture, agent: string, side: string, sessionId?: string, driver?: string, resourcePolicyPath?: string) {
     const args = ["--import", "tsx", driver ?? entrypoint, "mcp", "serve", "--stdio", "--agent", agent, "--directory", fixture.directory,
-      ...(sessionId ? ["--session", sessionId] : ["--mode", "enforceable", "--allow-path", side, "--allow-path", "package.json", "--allow-action", `action:${side}`])];
+      ...(sessionId ? ["--session", sessionId] : ["--mode", "enforceable", "--allow-path", side, "--allow-path", "package.json", "--allow-action", `action:${side}`]),
+      ...(resourcePolicyPath ? ["--resource-policy", resourcePolicyPath] : [])];
     this.process = spawn(process.execPath, args, { cwd: process.cwd(), env: fixture.environment, stdio: "pipe" });
     this.process.stderr.on("data", chunk => { this.stderr += String(chunk); });
     const lines = createInterface({ input: this.process.stdout });
@@ -83,7 +84,7 @@ class Fixture {
     try { state = await this.state(); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     const failures: string[] = [];
     for (const session of Object.values(state?.sessions ?? {})) {
-      if (session.status !== "revoked") { try { await this.revoke(session.id); } catch (error) { failures.push(String(error)); } }
+      try { await this.revoke(session.id); } catch (error) { failures.push(String(error)); }
     }
     await rm(this.root, { recursive: true, force: true });
     assert.deepEqual(failures, [], "fixture revocation/cleanup must succeed");
@@ -124,6 +125,35 @@ function assertAttribution(result: ToolResult, session: LocalAgentSession, statu
   assert.equal(evidence.actorId, session.actorId); assert.equal(evidence.grantId, session.grantId);
 }
 
+test("Linux MCP to CLI handoff enforces the requested measured resource policy", { skip: process.platform !== "linux" ? "requires Linux bwrap and prlimit; macOS does not qualify Linux enforcement" : false, timeout: LOCAL_ACTION_POLICY.timeoutMs }, async () => {
+  const f = await fixture();
+  try {
+    await writeFile(join(f.directory, "a/limits.cjs"), "const fs=require('node:fs');fs.writeFileSync('a/limits.json',JSON.stringify({limits:fs.readFileSync('/proc/self/limits','utf8'),pidIsolated:process.ppid===1}));");
+    await execFile("git", ["add", "a/limits.cjs"], { cwd: f.directory, env: f.environment });
+    await execFile("git", ["commit", "-m", "fixture: observe Linux kernel limits"], { cwd: f.directory, env: f.environment });
+    const canonical = (await execFile("git", ["rev-parse", "HEAD"], { cwd: f.directory, env: f.environment })).stdout;
+    const limits = await measureLinuxWorkspaceResourceLimits(f.directory); const policyPath = join(f.root, "resource-policy.json");
+    await writeFile(policyPath, JSON.stringify(limits));
+    const broker = new Broker(f, "cli", "a", undefined, undefined, policyPath); await broker.initialize(); const session = await f.session(broker);
+    assert.equal(session.workspaceEnforcement, "linux-bwrap"); assert.deepEqual(session.workspaceScope?.resourceLimits, limits);
+    const executed = await execFile(process.execPath, ["--import", "tsx", entrypoint, "workspace", "exec", "--directory", f.directory, "--session", session.id, "--json", "--", process.execPath, "a/limits.cjs"], { cwd: process.cwd(), env: f.environment });
+    const result = JSON.parse(executed.stdout) as Json;
+    assert.deepEqual((result.boundary as Json).resourceLimits, limits); assert.equal((result.boundary as Json).id, session.workspaceBoundaryId);
+    assert.equal((result.boundary as Json).enforcement, "linux-bwrap"); assert.equal((result.command as Json).status, "passed");
+    assert.match(String((result.command as Json).receipt), /resourceLimits=enforced/);
+    const observed = JSON.parse(await readFile(join(session.workspaceDirectory!, "a/limits.json"), "utf8")) as { limits: string; pidIsolated: boolean };
+    assert.equal(observed.pidIsolated, true);
+    for (const [name, expected] of [["Max processes", limits.maxProcesses], ["Max address space", limits.maxAddressSpaceBytes], ["Max cpu time", limits.maxCpuSeconds], ["Max open files", limits.maxOpenFiles], ["Max file size", limits.maxFileBytes]] as const) {
+      const line = observed.limits.split("\n").find(value => value.startsWith(name)); assert.ok(line, name);
+      const [soft, hard] = line.slice(name.length).trim().split(/\s+/u); assert.equal(Number(soft), expected, name); assert.equal(Number(hard), expected, name);
+    }
+    await f.revoke(session.id); await assert.rejects(access(session.workspaceDirectory!));
+    assert.equal((await f.state()).sessions[session.id]!.status, "revoked");
+    assert.equal((await execFile("git", ["rev-parse", "HEAD"], { cwd: f.directory, env: f.environment })).stdout, canonical);
+    assert.equal((await execFile("git", ["status", "--porcelain"], { cwd: f.directory, env: f.environment })).stdout, "");
+  } finally { await f.cleanup(); }
+});
+
 test("separate CLI MCP processes interleave scoped work without borrowing paths, Actions or attribution", platform, async () => {
   const f = await fixture();
   try {
@@ -151,6 +181,80 @@ test("separate CLI MCP processes interleave scoped work without borrowing paths,
     assert.ok(events.some(event => event.sessionId === sb.id && event.actorId === sb.actorId && event.grantId === sb.grantId));
     assert.equal((await execFile("git", ["status", "--porcelain"], { cwd: f.directory })).stdout, "");
   } finally { await f.cleanup(); }
+});
+
+test("fresh Workspace CLI handoff preserves its live broker's enforceable Source projection", platform, async () => {
+  const f = await fixture();
+  try {
+    const a = new Broker(f, "codex", "a"); await a.initialize(); const sa = await f.session(a);
+    const b = new Broker(f, "claude", "b"); await b.initialize(); const sb = await f.session(b);
+    const before = (await execFile("git", ["rev-parse", "HEAD"], { cwd: f.directory })).stdout;
+    const script = `const fs=require('node:fs');const assert=require('node:assert/strict');assert.equal(fs.readFileSync('a/input.txt','utf8'),'synthetic-a');assert.throws(()=>fs.readFileSync('b/input.txt'));assert.throws(()=>fs.readFileSync(${JSON.stringify(join(sb.workspaceDirectory!, "b/input.txt"))}));assert.throws(()=>fs.readFileSync(${JSON.stringify(join(f.directory, "a/input.txt"))}));fs.writeFileSync('.anyam/handoff-result','selected-a');process.stdout.write('selected-a');`;
+    const args = ["--import", "tsx", entrypoint, "workspace", "exec", "--directory", f.directory, "--session", sa.id, "--json"];
+    await assert.rejects(execFile(process.execPath, [...args, "--mode", "supervised", "--", process.execPath, "-e", script], { cwd: process.cwd(), env: f.environment }), /workspace\.broker\.mode_mismatch/u);
+    await assert.rejects(access(join(sa.workspaceDirectory!, ".anyam/handoff-result")));
+    const result = JSON.parse((await execFile(process.execPath, [...args, "--", process.execPath, "-e", script], { cwd: process.cwd(), env: f.environment })).stdout) as Json;
+    assert.equal((result.session as Json).id, sa.id); assert.equal((result.boundary as Json).enforcement, "macos-sandbox-exec");
+    assert.equal((result.command as Json).stdout, "selected-a"); assert.equal((result.command as Json).status, "passed");
+    assert.equal(await readFile(join(sa.workspaceDirectory!, ".anyam/handoff-result"), "utf8"), "selected-a");
+    assert.equal(Object.hasOwn(result.boundary as object, "environment"), false);
+    assert.equal((await execFile("git", ["rev-parse", "HEAD"], { cwd: f.directory })).stdout, before);
+    assertAttribution(await b.call("run.start", { actionId: "action:b" }), sb, "passed");
+  } finally { await f.cleanup(); }
+});
+
+test("concurrent fresh CLI file handoffs revoke only the selected enforceable Workspace", { ...platform, timeout: LOCAL_ACTION_POLICY.timeoutMs }, async () => {
+  const f = await fixture();
+  const executions: Promise<PromiseSettledResult<Awaited<ReturnType<typeof execFile>>>[]>[] = [];
+  try {
+    const a = new Broker(f, "codex", "a"); await a.initialize(); const sa = await f.session(a);
+    const b = new Broker(f, "claude", "b"); await b.initialize(); const sb = await f.session(b);
+    const canonical = (await execFile("git", ["rev-parse", "HEAD"], { cwd: f.directory })).stdout;
+    for (const [selected, peer, side] of [[sa, sb, "b"], [sb, sa, "a"]] as const) {
+      await writeFile(join(selected.workspaceDirectory!, ".anyam/peer-path"), join(peer.workspaceDirectory!, side, "input.txt"));
+      await writeFile(join(selected.workspaceDirectory!, ".anyam/wait"), "fixture barrier");
+    }
+    const execute = (selected: LocalAgentSession, side: string) => Promise.allSettled([execFile(process.execPath, [
+      "--import", "tsx", entrypoint, "workspace", "exec", "--directory", f.directory, "--session", selected.id, "--json",
+      "--", process.execPath, `${side}/action.cjs`,
+    ], { cwd: process.cwd(), env: f.environment })]);
+    const runningA = execute(sa, "a"); executions.push(runningA);
+    const runningB = execute(sb, "b"); executions.push(runningB);
+    // The tracked file entrypoints assert their own input and deny relative,
+    // absolute peer and canonical reads before signalling these barriers.
+    await Promise.all([waitFor(join(sa.workspaceDirectory!, ".anyam/started")), waitFor(join(sb.workspaceDirectory!, ".anyam/started"))]);
+    const during = await f.state();
+    const groupA = during.sessions[sa.id]!.processGroupId; const groupB = during.sessions[sb.id]!.processGroupId;
+    assert.ok(groupA); assert.ok(groupB); assert.notEqual(groupA, groupB);
+    await f.revoke(sa.id);
+    const [interrupted] = await runningA; assert.equal(interrupted?.status, "rejected", "revoked CLI cannot report successful execution");
+    assert.deepEqual(await groupMembers(groupA), [], "revocation removes only the selected owned process group");
+    await assert.rejects(access(sa.workspaceDirectory!));
+    const afterRevoke = await f.state();
+    assert.equal(afterRevoke.sessions[sa.id]!.status, "revoked");
+    assert.equal(afterRevoke.grants[sa.grantId]!.status, "revoked");
+    assert.equal(afterRevoke.sessions[sb.id]!.status, "active");
+    assert.equal(afterRevoke.sessions[sb.id]!.processGroupId, groupB, "peer retains its process custody");
+    assert.ok((await groupMembers(groupB)).length > 0, "peer workload remains live after selected revocation");
+    await writeFile(join(sb.workspaceDirectory!, ".anyam/finish"), "finish");
+    const [completed] = await runningB; assert.ok(completed?.status === "fulfilled", JSON.stringify(completed));
+    const result = JSON.parse(completed.value.stdout) as Json;
+    for (const key of ["id", "projectId", "changeId", "workspaceId", "actorId", "taskId", "grantId"] as const) assert.equal((result.session as Json)[key], sb[key]);
+    assert.equal((result.boundary as Json).id, sb.workspaceBoundaryId); assert.equal((result.boundary as Json).workspaceDirectory, sb.workspaceDirectory);
+    assert.equal((result.boundary as Json).mode, "enforceable"); assert.equal((result.boundary as Json).enforcement, "macos-sandbox-exec");
+    assert.equal(Object.hasOwn(result.boundary as object, "environment"), false);
+    assert.equal((result.command as Json).status, "passed"); assert.equal((result.command as Json).shell, false);
+    assert.deepEqual((result.command as Json).args, ["b/action.cjs"]);
+    assert.equal(await readFile(join(sb.workspaceDirectory!, "b/result.txt"), "utf8"), "result-b");
+    assert.deepEqual(await groupMembers(groupB), [], "peer completion releases its owned process group");
+    const final = await f.state(); assert.equal(final.sessions[sb.id]!.status, "active"); assert.equal(final.sessions[sb.id]!.processGroupId, undefined);
+    const completion = final.audit.find(event => event.operation === "agent.process.completed" && event.sessionId === sb.id);
+    assert.ok(completion); assert.equal(completion.actorId, sb.actorId); assert.equal(completion.grantId, sb.grantId);
+    assert.equal((await execFile("git", ["rev-parse", "HEAD"], { cwd: f.directory })).stdout, canonical);
+    assert.equal((await execFile("git", ["status", "--porcelain"], { cwd: f.directory })).stdout, "");
+  } finally {
+    try { await f.cleanup(); } finally { await Promise.all(executions); }
+  }
 });
 
 test("cross-process revocation blocks an in-flight scoped Action while the peer broker remains usable", platform, async () => {

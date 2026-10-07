@@ -1,3 +1,4 @@
+import { parseActionArtifactOutputContract, ActionArtifactOutputError } from "../portability/action-artifact-output.ts";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -438,6 +439,13 @@ export function normalizeProjectManifest(value: unknown): NormalizedProjectManif
         network: stringArray(actionValue.network, `modules[${moduleIndex}].actions[${actionIndex}].network`),
         resources: resources(actionValue.resources, `modules[${moduleIndex}].actions[${actionIndex}].resources`),
       };
+      if (actionValue.artifactOutputContract !== undefined) {
+        try { actionWithoutDigest.artifactOutputContract = parseActionArtifactOutputContract(actionValue.artifactOutputContract, actionWithoutDigest.outputPaths); }
+        catch (failure) {
+          if (!(failure instanceof ActionArtifactOutputError)) throw failure;
+          fail({ code: "manifest-invalid", message: failure.message, affectedObject: id, recoveryAction: "declare unique typed Artifact paths within the Action outputs", receipt: `artifactOutputContract=${failure.reason}` });
+        }
+      }
       actions.push({
         protocol: CONTRACT_VERSIONS.action,
         ...actionWithoutDigest,
@@ -819,6 +827,7 @@ function executeCommand(directory: string, command: string): Promise<CommandResu
 function cloneRun(run: Run): Run {
   return {
     ...run,
+    ...(run.artifactOutputContract ? { artifactOutputContract: parseActionArtifactOutputContract(run.artifactOutputContract) } : {}),
     ...(run.inputDigests ? { inputDigests: [...run.inputDigests] } : {}),
     ...(run.outputDigests ? { outputDigests: [...run.outputDigests] } : {}),
     ...(run.effectDigests ? { effectDigests: [...run.effectDigests] } : {}),
@@ -840,6 +849,7 @@ function cloneActionResult(result: LocalActionResult): LocalActionResult {
       ...result.runnerInput,
       action: {
         ...result.runnerInput.action,
+        ...(result.runnerInput.action.artifactOutputContract ? { artifactOutputContract: parseActionArtifactOutputContract(result.runnerInput.action.artifactOutputContract, result.runnerInput.action.outputPaths) } : {}),
         inputGlobs: [...result.runnerInput.action.inputGlobs],
         outputPaths: [...result.runnerInput.action.outputPaths],
         network: [...result.runnerInput.action.network],
@@ -1111,6 +1121,7 @@ export class LocalExecutionEngine {
     const runnerInput: NormalizedActionInput = {
       action: {
         ...action,
+        ...(action.artifactOutputContract ? { artifactOutputContract: parseActionArtifactOutputContract(action.artifactOutputContract, action.outputPaths) } : {}),
         inputGlobs: [...action.inputGlobs],
         outputPaths: [...action.outputPaths],
         network: [...action.network],
@@ -1139,13 +1150,20 @@ export class LocalExecutionEngine {
     };
     const cachePolicy = input.cachePolicy ?? "exact";
     const cached = cachePolicy === "none" ? undefined : this.cache.get(validityKey);
-    if (cached) {
-      appendCachedEvidence(this.ledger, cached.evidence);
-      return { ...cached, cacheHit: true };
-    }
-    if (cachePolicy === "reusable") {
-      const reusable = this.cache.getReusable(reuseKey);
-      if (reusable) return this.reuseActionResult({ reusable, action, verifier, runnerInput, runnerOutput: reusable.runnerOutput, inputDigests, effectDigests, effectiveDisclosure, validityKey, reuseKey });
+    const reusable = cachePolicy === "reusable" ? this.cache.getReusable(reuseKey) : undefined;
+    let cacheValidationReceipt: string | undefined;
+    if (cached || reusable) {
+      const materialized = await outputFiles(this.context.directory, action.outputPaths);
+      const materializedDigests = materialized.files.map((file) => `${file.path}=${file.digest}`);
+      const bytesMatch = (record: LocalActionResult) => materialized.missingPaths.length === 0
+        && record.runnerOutput.outputDigests.length === materializedDigests.length
+        && record.runnerOutput.outputDigests.every((value, index) => value === materializedDigests[index]);
+      if (cached && bytesMatch(cached)) {
+        appendCachedEvidence(this.ledger, cached.evidence);
+        return { ...cached, cacheHit: true };
+      }
+      if (reusable && bytesMatch(reusable)) return this.reuseActionResult({ reusable, action, verifier, runnerInput, runnerOutput: reusable.runnerOutput, inputDigests, effectDigests, effectiveDisclosure, validityKey, reuseKey });
+      cacheValidationReceipt = "cacheReuse=not-applied; cached-output-bytes=changed-or-missing";
     }
 
     const runId = opaqueId("run");
@@ -1184,6 +1202,7 @@ export class LocalExecutionEngine {
       protocol: CONTRACT_VERSIONS.run,
       id: runId,
       actionId: action.id,
+      ...(action.artifactOutputContract ? { artifactOutputContract: parseActionArtifactOutputContract(action.artifactOutputContract, action.outputPaths) } : {}),
       projectRevisionId: this.context.projectRevisionId,
       projectViewId: this.context.projectViewId,
       runnerId: this.context.runnerId,
@@ -1237,6 +1256,7 @@ export class LocalExecutionEngine {
         `exit-code=${commandResult.exitCode}`,
         `inputs=${inputDigests.length}`,
         `outputs=${outputDigests.length}`,
+        cacheValidationReceipt,
         failureReceipt,
       ].filter((part): part is string => part !== undefined).join("; "),
       invalidators: [
@@ -1261,10 +1281,10 @@ export class LocalExecutionEngine {
       ...(this.context.workspaceId ? { workspaceId: this.context.workspaceId } : {}),
     });
     const artifacts: Artifact[] = outcome === "passed"
-      ? outputs.files.map((file, index) => ({
+      ? outputs.files.filter(file => !action.artifactOutputContract || action.artifactOutputContract.outputs.some(output => output.path === file.path)).map((file, index) => ({
         protocol: CONTRACT_VERSIONS.artifact,
         id: opaqueId("artifact"),
-        type: moduleArtifactTypes[index] ?? moduleArtifactTypes[0] ?? "generic.output",
+        type: action.artifactOutputContract?.outputs.find(entry => entry.path === file.path)?.type ?? moduleArtifactTypes[index] ?? moduleArtifactTypes[0] ?? "generic.output",
         digest: file.digest,
         projectRevisionId: this.context.projectRevisionId,
         ...(this.context.changeRevisionId ? { changeRevisionId: this.context.changeRevisionId } : {}),
@@ -1346,6 +1366,11 @@ export async function runLocalRelease(input: {
       expectedDisclosureClassification,
     };
   });
+  for (const result of results) {
+    if (result.evidence.outcome === "failed" && !requiredEvidence.some((requirement) => requirement.key === result.evidence.key)) {
+      requiredEvidence.push({ key: result.evidence.key, currentValidityKey: result.validityKey });
+    }
+  }
   const gate = evaluateStageGate({
     gateId: `release:${input.releaseName}`,
     requiredEvidence,

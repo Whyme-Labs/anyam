@@ -1,3 +1,4 @@
+import { parseActionArtifactOutputContract, ActionArtifactOutputError } from "../../../src/portability/action-artifact-output.ts";
 import { AUTHORITY_PLANE_PROTOCOL } from "../../../src/cloudflare/authority-plane.ts";
 import type { DisclosureClassification, EvidenceOutcome, RunStatus } from "../../../src/kernel/contracts.ts";
 
@@ -121,13 +122,21 @@ export function runRecordCommand(value: unknown): TypedMutation {
 export function runRequestCommand(value: unknown): TypedMutation {
   const operation = RUN_REQUEST_COMMAND;
   const body = objectBody(value, operation);
-  assertAllowed(body, ["idempotencyKey", "expectedVersion", "projectId", "runId", "actionId", "actionContractDigest", "verifierId", "verifierContractDigest", "projectRevisionId", "projectViewId", "changeRevisionId", "workspaceId", "inputDigests", "outputDigests", "policyVersion", "authorizationEpoch", "capabilityGrantId"], operation);
+  assertAllowed(body, ["idempotencyKey", "expectedVersion", "projectId", "runId", "actionId", "actionContractDigest", "artifactOutputContract", "verifierId", "verifierContractDigest", "projectRevisionId", "projectViewId", "changeRevisionId", "workspaceId", "inputDigests", "outputDigests", "policyVersion", "authorizationEpoch", "capabilityGrantId"], operation);
   const idempotencyKey = requiredString(body.idempotencyKey, "idempotencyKey", operation);
   const version = expectedVersion(body.expectedVersion, operation);
   const projectId = safeIdentifier(body.projectId, "projectId", operation);
   const runId = optionalSafeIdentifier(body.runId, "runId", operation);
   const actionId = safeIdentifier(body.actionId, "actionId", operation);
   const actionContractDigest = requiredString(body.actionContractDigest, "actionContractDigest", operation);
+  let artifactOutputContract;
+  if (body.artifactOutputContract !== undefined) {
+    try { artifactOutputContract = parseActionArtifactOutputContract(body.artifactOutputContract); }
+    catch (failure) {
+      if (!(failure instanceof ActionArtifactOutputError)) throw failure;
+      invalid(failure.message, "use the documented typed Artifact path/type declaration", `operation=${operation}; artifactOutputContract=${failure.reason}; command=not-created`);
+    }
+  }
   const verifierId = optionalSafeIdentifier(body.verifierId, "verifierId", operation);
   const verifierContractDigest = body.verifierContractDigest === undefined ? undefined : requiredString(body.verifierContractDigest, "verifierContractDigest", operation);
   const projectRevisionId = safeIdentifier(body.projectRevisionId, "projectRevisionId", operation);
@@ -148,6 +157,7 @@ export function runRequestCommand(value: unknown): TypedMutation {
       ...(runId ? { runId } : {}),
       actionId,
       actionContractDigest,
+      ...(artifactOutputContract ? { artifactOutputContract } : {}),
       ...(verifierId ? { verifierId } : {}),
       ...(verifierContractDigest ? { verifierContractDigest } : {}),
       projectRevisionId,

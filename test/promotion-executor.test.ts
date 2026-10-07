@@ -8,6 +8,7 @@ import { createTargetDeploymentProfile } from "../src/delivery/target-deployment
 import { emptyAuthorityPlaneSnapshot } from "../src/cloudflare/authority-plane.ts";
 import { createHash } from "node:crypto";
 import { createCloudflareWorkerReleaseManifest } from "../src/cloudflare/worker-release-manifest.ts";
+import type { CloudflareWorkerCredentialBroker } from "../src/cloudflare/worker-target.ts";
 
 const session = {
   realmId: "realm:promotion-executor-test",
@@ -79,24 +80,28 @@ function fakeFetch(releaseId: string): typeof fetch {
   };
 }
 
-function handlerFor(context: ReturnType<typeof createPromotionExecutionContext>, artifactBytes: Uint8Array) {
+function handlerFor(context: ReturnType<typeof createPromotionExecutionContext>, artifactBytes: Uint8Array, options: { healthUrl?: string; targetHealthUrl?: string; fetch?: typeof fetch } = {}) {
   const claimed = new Set<string>();
+  const credentialBroker: CloudflareWorkerCredentialBroker = {
+    async probe() {
+      return { credentialId: "credential:fixture", expiresAt: "2099-01-01T00:00:00.000Z", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credentialBroker=fixture; providerAuthorization=observed; credentialMaterialStored=false" };
+    },
+    async issue(input) {
+      return { token: "provider-token-kept-in-executor", credentialId: `credential:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: `credentialBroker=fixture; operation=${input.operation}; providerAuthorization=observed; credentialMaterialStored=false` };
+    },
+  };
   return createPromotionExecutorHandler({
     accountId: "account:executor",
     scriptName: "worker-executor",
     targetId: "target:executor",
     previewSubdomain: "customer",
-    credentialBroker: {
-      async probe() {
-        return { credentialId: "credential:fixture", expiresAt: "2099-01-01T00:00:00.000Z", scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: "credentialBroker=fixture; providerAuthorization=observed; credentialMaterialStored=false" };
-      },
-      async issue(input) {
-        return { token: "provider-token-kept-in-executor", credentialId: `credential:${input.operation}`, expiresAt: "2099-01-01T00:00:00.000Z", audience: input.audience, scopes: ["workers:read", "workers:write"], providerAuthorization: "observed" as const, receipt: `credentialBroker=fixture; operation=${input.operation}; providerAuthorization=observed; credentialMaterialStored=false` };
-      },
-    },
+    credentialBroker,
+    ...(options.healthUrl ? { healthUrl: options.healthUrl } : {}),
+    ...(options.targetHealthUrl ? { targetRoutes: [{ targetId: "target:executor", accountId: "account:executor", scriptName: "worker-executor", previewSubdomain: "customer", credentialBroker, healthUrl: options.targetHealthUrl }] } : {}),
     handoffKeys: { active: { id: "handoff-key-v1", secret: "promotion-executor-test-handoff-secret" }, previous: { id: "handoff-key-v0", secret: "promotion-executor-test-previous-secret" } },
     handoffNonceStore: { async claim(input) { if (claimed.has(input.nonce)) return false; claimed.add(input.nonce); return true; } },
-    fetch: fakeFetch(context.release.id),
+    fetch: options.fetch ?? fakeFetch(context.release.id),
+    routeReadinessRetry: { maxAttempts: 1, delayMs: 0, retryStatuses: [404] },
     artifactStore: {
       async get(key) {
         return key === `artifacts/${context.artifacts[0]?.digest}` ? { arrayBuffer: async () => new Uint8Array(artifactBytes).buffer as ArrayBuffer } : null;
@@ -131,6 +136,69 @@ test("customer-operated executor runs the qualified Worker Target and returns a 
   assert.equal((result.target as Record<string, unknown>).currentReleaseId, "release:executor");
   assert.equal(JSON.stringify(result).includes("provider-token"), false);
   assert.equal(JSON.stringify(result).includes("credentialMaterialStored=false"), true);
+});
+
+for (const route of [
+  { name: "default health path", healthUrl: undefined, targetHealthUrl: undefined, expectedHealthUrl: "https://worker-executor.customer.workers.dev/health" },
+  { name: "configured health path and query", healthUrl: "https://health.example/ready?channel=beta&anyam_preview=0", targetHealthUrl: undefined, expectedHealthUrl: "https://health.example/ready?channel=beta&anyam_preview=0" },
+  { name: "Target health route ahead of executor fallback", healthUrl: "https://fallback.example/wrong", targetHealthUrl: "https://target.example/status?channel=target", expectedHealthUrl: "https://target.example/status?channel=target" },
+]) {
+  test(`customer-operated executor previews the ${route.name} on the candidate version`, async () => {
+    const { context, artifactBytes } = fixture();
+    const providerFetch = fakeFetch(context.release.id);
+    const observations: URL[] = [];
+    const expectedHealth = new URL(route.expectedHealthUrl);
+    const expectedPreviewQuery = new URLSearchParams(expectedHealth.search);
+    expectedPreviewQuery.set("anyam_preview", "1");
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.hostname === "api.cloudflare.com") return providerFetch(input, init);
+      observations.push(url);
+      const preview = url.hostname === "version--worker-executor.customer.workers.dev";
+      const matches = preview
+        ? url.pathname === expectedHealth.pathname && url.searchParams.toString() === expectedPreviewQuery.toString()
+        : url.href === expectedHealth.href;
+      return new Response(JSON.stringify(matches ? { status: "healthy", releaseId: context.release.id } : { error: "health route not found" }), { status: matches ? 200 : 404, headers: { "content-type": "application/json" } });
+    };
+    const response = await handlerFor(context, artifactBytes, {
+      fetch: fetcher,
+      ...(route.healthUrl ? { healthUrl: route.healthUrl } : {}),
+      ...(route.targetHealthUrl ? { targetHealthUrl: route.targetHealthUrl } : {}),
+    })(await signedRequest(context));
+    const body = await response.text();
+    assert.equal(response.status, 200, body);
+    const result = JSON.parse(body) as { status: string; target: { currentReleaseId: string | null } };
+    assert.equal(result.status, "succeeded", body);
+    assert.equal(result.target.currentReleaseId, context.release.id);
+    assert.equal(observations.length, 2);
+    const preview = observations[0];
+    assert.ok(preview);
+    assert.equal(preview.origin, "https://version--worker-executor.customer.workers.dev");
+    assert.equal(preview.pathname, expectedHealth.pathname);
+    assert.equal(preview.searchParams.toString(), expectedPreviewQuery.toString());
+    assert.equal(observations[1]?.href, expectedHealth.href);
+  });
+}
+
+test("customer-operated executor blocks stale Release health at the selected preview path before deployment", async () => {
+  const { context, artifactBytes } = fixture();
+  const providerFetch = fakeFetch(context.release.id);
+  const requests: URL[] = [];
+  const fetcher: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    requests.push(url);
+    if (url.hostname === "api.cloudflare.com") return providerFetch(input, init);
+    return new Response(JSON.stringify({ status: "healthy", releaseId: "release:stale" }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const response = await handlerFor(context, artifactBytes, { fetch: fetcher })(await signedRequest(context));
+  const body = await response.text();
+  assert.equal(response.status, 409, body);
+  const result = JSON.parse(body) as { status: string; target: { currentReleaseId: string | null }; promotion: { receipt: string } };
+  assert.equal(result.status, "blocked");
+  assert.equal(result.target.currentReleaseId, null);
+  assert.match(result.promotion.receipt, /healthValidation=release-mismatch/);
+  assert.equal(requests.filter((url) => url.pathname.endsWith("/deployments")).length, 0);
+  assert.equal(requests.find((url) => url.hostname !== "api.cloudflare.com")?.pathname, "/health");
 });
 
 test("customer-operated executor rejects caller-supplied provider credentials before provider invocation", async () => {

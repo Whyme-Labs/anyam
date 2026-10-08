@@ -6,7 +6,8 @@ import { realmDestroy, realmDoctor, realmExport, realmInstall, realmPlan, realmR
 import { randomUUID } from "node:crypto";
 import { RealmAuthorityHttpClient } from "./realm-authority-client.js";
 import { parseWorkspaceResourceLimits, type WorkspaceBoundaryMode, type WorkspaceResourceLimits } from "./workspace-boundary.js";
-import { readFile } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
 import { resolve } from "node:path";
 import type { Readable } from "node:stream";
 import { runRealmSourceCommand } from "./realm-source-command.js";
@@ -37,6 +38,30 @@ function requiredValue(args: readonly string[], flag: string, command: string): 
   return value;
 }
 
+async function intentCommentBody(args: readonly string[], cwd: string): Promise<string> {
+  const inline = args.filter(value => value === "--body").length;
+  const fromFile = args.filter(value => value === "--body-file").length;
+  if (inline + fromFile !== 1) throw new Error("intent comment requires exactly one --body <text> or --body-file <path>; no comment was sent.");
+  if (inline) {
+    const body = valueAfter(args, "--body");
+    if (!body?.trim()) throw new Error("intent comment requires --body <text>; no comment was sent.");
+    return body;
+  }
+  const path = valueAfter(args, "--body-file");
+  if (!path?.trim() || path.startsWith("--")) throw new Error("intent comment requires --body-file <path>; no comment was sent.");
+  let file: Awaited<ReturnType<typeof open>> | undefined;
+  let body: string;
+  try {
+    file = await open(resolve(cwd, path), constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+    if (!(await file.stat()).isFile()) throw new Error("draft_source_not_file");
+    body = new TextDecoder("utf-8", { fatal: true }).decode(await file.readFile());
+  } catch {
+    throw new Error("intent comment could not read a UTF-8 regular --body-file; check the draft path and permissions; no comment was sent.");
+  } finally { await file?.close(); }
+  if (!body.trim()) throw new Error("intent comment draft is empty; edit the draft before publishing; no comment was sent.");
+  return body;
+}
+
 async function resourcePolicyOptions(args: readonly string[], cwd: string): Promise<{ resourceLimits?: WorkspaceResourceLimits }> {
   if (!args.includes("--resource-policy")) return {};
   const path = valueAfter(args, "--resource-policy");
@@ -57,7 +82,7 @@ function kindFrom(args: readonly string[]): ProjectTemplateKind {
 
 function positionalArgs(args: readonly string[], command: string): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--resource-policy", "--allow-path", "--allow-action", "--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
+  const valueFlags = new Set(["--resource-policy", "--allow-path", "--allow-action", "--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--body-file", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -72,7 +97,7 @@ function positionalArgs(args: readonly string[], command: string): readonly stri
 
 function subcommandPositionals(args: readonly string[]): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--resource-policy", "--allow-path", "--allow-action", "--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
+  const valueFlags = new Set(["--resource-policy", "--allow-path", "--allow-action", "--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--body-file", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
   for (let index = 2; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -94,6 +119,7 @@ function printHelp(): void {
   console.log("realm run detail --realm <url> --id <run-id> --session-stdin [--json]  accepted signed detail for a current Realm owner");
   console.log("realm workspace create|change create|revision publish|run request --realm <url> --input <json-file> --idempotency-key <key> --session-stdin [--json]  disclosed hosted writes");
   console.log("intent list|inspect|create|assign|comment|close|reopen  hosted Realm Intent lifecycle (--realm, --owner-session or ANYAM_OWNER_SESSION)");
+  console.log("intent comment <id> --body <text>|--body-file <path>  explicitly publish a saved Intent note (use the same --idempotency-key when retrying)");
   console.log("pr list|inspect|open|update|review|close|reopen|block|merge  hosted Pull Request compatibility projection (--realm, --owner-session or ANYAM_OWNER_SESSION)");
   console.log("workspace start|list|inspect|exec  explicit concurrent local Workspace controls (use --session for selection)");
   console.log("--resource-policy <json-file>  measured Linux limits and receipt for workspace start, agent start|exec, or fresh mcp serve; requires enforceable Linux execution");
@@ -158,6 +184,7 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
   const args = executionCommand && separator >= 0 ? inputArgs.slice(0, separator) : inputArgs;
   const executableArgs = executionCommand && separator >= 0 ? inputArgs.slice(separator + 1) : [];
   const json = args.includes("--json");
+  if (args.includes("--body-file") && !(command === "intent" && subcommand === "comment")) throw new Error("--body-file is supported only by intent comment; no request was sent.");
   if (args.includes("--resource-policy") && !((command === "agent" && (subcommand === "start" || subcommand === "exec")) || (command === "workspace" && subcommand === "start") || (command === "mcp" && subcommand === "serve"))) throw new Error("--resource-policy is a new-session option for workspace start, agent start|exec, or fresh mcp serve; no session was changed or process started.");
   if (!command || command === "--help" || command === "-h") {
     printHelp();
@@ -247,9 +274,10 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
   }
 
   if (command === "intent") {
-    const client = intentClient(args);
     const operation = subcommand ?? "";
     const id = operation === "inspect" || operation === "assign" || operation === "comment" || operation === "close" || operation === "reopen" ? intentIdentifier(args) : "collection";
+    const commentBody = operation === "comment" ? await intentCommentBody(args, cwd) : undefined;
+    const client = intentClient(args);
     const idempotencyKey = intentIdempotency(args, operation, id);
     const result = operation === "list"
       ? await client.listIntents(valueAfter(args, "--project"))
@@ -260,7 +288,7 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
           : operation === "assign"
             ? await client.assignIntent(id, { assigneePrincipalIds: valuesAfter(args, "--assignee") }, idempotencyKey)
             : operation === "comment"
-              ? await client.commentIntent(id, { body: requiredValue(args, "--body", "intent comment"), ...(valueAfter(args, "--disclosure") ? { disclosure: valueAfter(args, "--disclosure") } : {}) }, idempotencyKey)
+              ? await client.commentIntent(id, { body: commentBody!, ...(valueAfter(args, "--disclosure") ? { disclosure: valueAfter(args, "--disclosure") } : {}) }, idempotencyKey)
               : operation === "close"
                 ? await client.closeIntent(id, idempotencyKey)
                 : operation === "reopen"

@@ -14,9 +14,34 @@ import { runRealmSourceCommand } from "./realm-source-command.js";
 import { executeThroughWorkspaceBroker, removeWorkspaceBrokerLocator, startWorkspaceCommandBroker } from "./workspace-broker.js";
 import { evaluateNativeRecording } from "./native-recording.js";
 
+const valueFlags = new Set([
+  "--resource-policy", "--allow-path", "--allow-action", "--type", "--name", "--agent", "--directory", "--mode", "--session", "--method",
+  "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource",
+  "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--body-file",
+  "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key",
+  "--remote-repository", "--review-state", "--review-digest", "--revision", "--id", "--scope", "--client-id", "--recording", "--thread", "--candidate-commit",
+  "--recording-root", "--input",
+]);
+
+function optionIndices(args: readonly string[], flag: string): readonly number[] {
+  const indices: number[] = [];
+  const executionCommand = (args[0] === "agent" || args[0] === "workspace") && args[1] === "exec";
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (executionCommand && argument === "--") break;
+    if (argument === flag) indices.push(index);
+    if (argument !== undefined && valueFlags.has(argument)) index += 1;
+  }
+  return indices;
+}
+
+export function hasCliOption(args: readonly string[], flag: string): boolean {
+  return optionIndices(args, flag).length > 0;
+}
+
 function valueAfter(args: readonly string[], flag: string): string | undefined {
-  const index = args.indexOf(flag);
-  return index >= 0 ? args[index + 1] : undefined;
+  const index = optionIndices(args, flag)[0];
+  return index === undefined ? undefined : args[index + 1];
 }
 
 function disclosedAgentLaunch(result: AgentLaunchResult) {
@@ -28,7 +53,7 @@ function disclosedAgentLaunch(result: AgentLaunchResult) {
 
 function valuesAfter(args: readonly string[], flag: string): readonly string[] {
   const values: string[] = [];
-  for (let index = 0; index < args.length; index += 1) if (args[index] === flag && args[index + 1]) values.push(args[index + 1]!);
+  for (const index of optionIndices(args, flag)) if (args[index + 1]) values.push(args[index + 1]!);
   return values;
 }
 
@@ -39,8 +64,8 @@ function requiredValue(args: readonly string[], flag: string, command: string): 
 }
 
 async function intentCommentBody(args: readonly string[], cwd: string): Promise<string> {
-  const inline = args.filter(value => value === "--body").length;
-  const fromFile = args.filter(value => value === "--body-file").length;
+  const inline = optionIndices(args, "--body").length;
+  const fromFile = optionIndices(args, "--body-file").length;
   if (inline + fromFile !== 1) throw new Error("intent comment requires exactly one --body <text> or --body-file <path>; no comment was sent.");
   if (inline) {
     const body = valueAfter(args, "--body");
@@ -63,9 +88,9 @@ async function intentCommentBody(args: readonly string[], cwd: string): Promise<
 }
 
 async function resourcePolicyOptions(args: readonly string[], cwd: string): Promise<{ resourceLimits?: WorkspaceResourceLimits }> {
-  if (!args.includes("--resource-policy")) return {};
+  if (!hasCliOption(args, "--resource-policy")) return {};
   const path = valueAfter(args, "--resource-policy");
-  if (!path?.trim() || path.startsWith("--") || args.filter(value => value === "--resource-policy").length !== 1) throw new Error("--resource-policy requires one explicit JSON file; no session or process was started.");
+  if (!path?.trim() || path.startsWith("--") || optionIndices(args, "--resource-policy").length !== 1) throw new Error("--resource-policy requires one explicit JSON file; no session or process was started.");
   const source = await readFile(resolve(cwd, path), "utf8");
   let value: unknown;
   try { value = JSON.parse(source) as unknown; }
@@ -75,14 +100,13 @@ async function resourcePolicyOptions(args: readonly string[], cwd: string): Prom
 
 function kindFrom(args: readonly string[]): ProjectTemplateKind {
   const value = valueAfter(args, "--type");
-  if (!args.includes("--type") || value === "worker") return "worker";
+  if (!hasCliOption(args, "--type") || value === "worker") return "worker";
   if (value === "library") return "library";
   throw new Error(`--type must be worker or library; asked=${value ?? "missing"}; fix the option and rerun anyam init.`);
 }
 
 function positionalArgs(args: readonly string[], command: string): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--resource-policy", "--allow-path", "--allow-action", "--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--body-file", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -97,7 +121,6 @@ function positionalArgs(args: readonly string[], command: string): readonly stri
 
 function subcommandPositionals(args: readonly string[]): readonly string[] {
   const values: string[] = [];
-  const valueFlags = new Set(["--resource-policy", "--allow-path", "--allow-action", "--type", "--name", "--agent", "--directory", "--mode", "--session", "--method", "--realm", "--project", "--change", "--connection", "--action-ref", "--workflow-path", "--remote", "--schedule", "--account", "--resource", "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--body-file", "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key", "--remote-repository", "--review-state", "--review-digest", "--revision"]);
   for (let index = 2; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -183,9 +206,9 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
   const executionCommand = (command === "agent" || command === "workspace") && subcommand === "exec";
   const args = executionCommand && separator >= 0 ? inputArgs.slice(0, separator) : inputArgs;
   const executableArgs = executionCommand && separator >= 0 ? inputArgs.slice(separator + 1) : [];
-  const json = args.includes("--json");
-  if (args.includes("--body-file") && !(command === "intent" && subcommand === "comment")) throw new Error("--body-file is supported only by intent comment; no request was sent.");
-  if (args.includes("--resource-policy") && !((command === "agent" && (subcommand === "start" || subcommand === "exec")) || (command === "workspace" && subcommand === "start") || (command === "mcp" && subcommand === "serve"))) throw new Error("--resource-policy is a new-session option for workspace start, agent start|exec, or fresh mcp serve; no session was changed or process started.");
+  const json = hasCliOption(args, "--json");
+  if (hasCliOption(args, "--body-file") && !(command === "intent" && subcommand === "comment")) throw new Error("--body-file is supported only by intent comment; no request was sent.");
+  if (hasCliOption(args, "--resource-policy") && !((command === "agent" && (subcommand === "start" || subcommand === "exec")) || (command === "workspace" && subcommand === "start") || (command === "mcp" && subcommand === "serve"))) throw new Error("--resource-policy is a new-session option for workspace start, agent start|exec, or fresh mcp serve; no session was changed or process started.");
   if (!command || command === "--help" || command === "-h") {
     printHelp();
     return 0;
@@ -194,16 +217,16 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
   if (command === "agent" && subcommand === "evaluate-recording") {
     const option = (flag: string) => {
       const value = valueAfter(args, flag);
-      if (!value?.trim() || value.startsWith("--") || args.filter(argument => argument === flag).length !== 1) {
+      if (!value?.trim() || value.startsWith("--") || optionIndices(args, flag).length !== 1) {
         throw new Error(`agent evaluate-recording requires one ${flag} <value>; no session was started.`);
       }
       return value;
     };
     const result = await evaluateNativeRecording({
-      directory: resolve(cwd, args.includes("--directory") ? option("--directory") : cwd),
+      directory: resolve(cwd, hasCliOption(args, "--directory") ? option("--directory") : cwd),
       recordingFile: resolve(cwd, option("--recording")), threadId: option("--thread"),
       baseCommit: option("--base-commit"), candidateCommit: option("--candidate-commit"),
-      ...(args.includes("--recording-root") ? { recordingRoot: resolve(cwd, option("--recording-root")) } : {}),
+      ...(hasCliOption(args, "--recording-root") ? { recordingRoot: resolve(cwd, option("--recording-root")) } : {}),
     });
     printResult(result, json, JSON.stringify(result, null, 2));
     return result.status === "matched" ? 0 : 1;
@@ -212,13 +235,13 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
   if (command === "init") {
     const directory = positionalArgs(args, "init")[0] ?? cwd;
     const name = valueAfter(args, "--name");
-    if (args.includes("--name") && !name) throw new Error("--name requires a Project name; fix the option and rerun anyam init.");
+    if (hasCliOption(args, "--name") && !name) throw new Error("--name requires a Project name; fix the option and rerun anyam init.");
     const scaffoldInput = {
       directory,
       kind: kindFrom(args),
       ...(name ? { name } : {}),
     };
-    if (args.includes("--dry-run")) {
+    if (hasCliOption(args, "--dry-run")) {
       const result = proposedManifest(scaffoldInput);
       console.log(JSON.stringify(result, null, 2));
       return 0;
@@ -341,7 +364,7 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
       ...(workflowPath ? { workflowPath } : {}),
       ...(remoteName ? { remoteName } : {}),
       ...(outboundSchedule ? { outboundSchedule } : {}),
-      ...(args.includes("--dry-run") ? { dryRun: true } : {}),
+      ...(hasCliOption(args, "--dry-run") ? { dryRun: true } : {}),
     });
     printResult(result, json, result.status === "blocked"
       ? `BLOCKED ${result.code}: ${result.message}\nRecovery: ${result.recoveryAction}\n${result.receipt}`
@@ -441,7 +464,7 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
 
   if ((command === "agent" && subcommand === "revoke") || (command === "auth" && subcommand === "revoke")) {
     const selectedSession = valueAfter(args, "--session");
-    if (args.includes("--session") && (!selectedSession?.trim() || selectedSession.startsWith("--"))) throw new Error("revoke --session requires an explicit session ID; no session was revoked.");
+    if (hasCliOption(args, "--session") && (!selectedSession?.trim() || selectedSession.startsWith("--"))) throw new Error("revoke --session requires an explicit session ID; no session was revoked.");
     const manager = new LocalAgentManager({ directory: valueAfter(args, "--directory") ?? cwd });
     const selected = selectedSession ?? subcommandPositionals(args)[0];
     const result = await manager.revoke(selected);
@@ -470,7 +493,7 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
   }
 
   if (command === "mcp" && subcommand === "serve") {
-    if (!args.includes("--stdio")) throw new Error("mcp serve currently requires --stdio; use anyam mcp serve --stdio --agent <agent>.");
+    if (!hasCliOption(args, "--stdio")) throw new Error("mcp serve currently requires --stdio; use anyam mcp serve --stdio --agent <agent>.");
     for (let index = 0; index < args.length; index += 1) {
       if (["--session", "--mode", "--allow-path", "--allow-action"].includes(args[index] ?? "")) {
         const value = args[index + 1];
@@ -483,7 +506,7 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
     if (mode !== "enforceable" && mode !== "supervised") throw new Error("MCP --mode must be enforceable or supervised.");
     const authorizedPaths = valuesAfter(args, "--allow-path");
     const authorizedActionIds = valuesAfter(args, "--allow-action");
-    if (selectedSessionId && (valueAfter(args, "--mode") || authorizedPaths.length || authorizedActionIds.length || args.includes("--resource-policy"))) throw new Error("MCP --session cannot be combined with new-session scope options.");
+    if (selectedSessionId && (valueAfter(args, "--mode") || authorizedPaths.length || authorizedActionIds.length || hasCliOption(args, "--resource-policy"))) throw new Error("MCP --session cannot be combined with new-session scope options.");
     if (authorizedPaths.length && mode !== "enforceable") throw new Error("MCP path restrictions require --mode enforceable; supervised mode cannot claim source isolation.");
     const directory = valueAfter(args, "--directory") ?? cwd;
     const resourceOptions = await resourcePolicyOptions(args, cwd);

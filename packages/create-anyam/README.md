@@ -14,6 +14,11 @@ for authentication, payloads, native delegation and local qualification limits.
 Source snapshots, latest marker, coarse Runs and recorded Evidence outcomes.
 Recorded outcomes are separate from signed execution proof.
 
+`agent evaluate-recording` inspects a saved Codex JSONL turn against a selected
+thread and exact local Git candidate without launching a harness. See
+[recorded-session evaluation](https://github.com/Whyme-Labs/anyam/blob/main/docs/qualification/native-recording-evaluation.md)
+for arguments, blocked outcomes and provenance limits.
+
 An active human Realm-wide owner can use `realm run detail --realm <url>
 --id <run-id> --session-stdin --json` to inspect the existing
 `anyam.owner-run-detail/v1` accepted signed-context contract. Complete current

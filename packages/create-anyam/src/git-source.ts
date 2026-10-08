@@ -69,6 +69,9 @@ function oid(value: string, field: string, directory: string): string {
 
 function inspectionEnvironment(directory: string, options?: GitInspectionOptions): NodeJS.ProcessEnv {
   const environment = trustedGitEnvironment();
+  // Inspection must not refresh the real index or fetch missing promisor objects.
+  environment.GIT_OPTIONAL_LOCKS = "0";
+  environment.GIT_NO_LAZY_FETCH = "1";
   if (options?.metadataDirectory) {
     environment.GIT_DIR = options.metadataDirectory;
     environment.GIT_WORK_TREE = directory;
@@ -214,6 +217,15 @@ export async function isGitAncestor(directoryInput: string, baseCommit: string, 
   } catch {
     return false;
   }
+}
+
+/** Exact changed paths between committed trees; no external diff or textconv executes. */
+export async function changedGitPaths(directoryInput: string, baseCommit: string, currentCommit: string): Promise<readonly string[]> {
+  const directory = resolve(directoryInput);
+  oid(baseCommit, "base commit id", directory);
+  oid(currentCommit, "candidate commit id", directory);
+  return (await gitRaw(directory, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", baseCommit, currentCommit, "--"]))
+    .split("\0").filter(Boolean).sort();
 }
 
 export function gitProjectRevisionId(commitId: string): string {

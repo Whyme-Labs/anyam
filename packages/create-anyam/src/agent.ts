@@ -2,7 +2,7 @@ import { parseActionArtifactOutputContract, ActionArtifactOutputError, type Acti
 import { localReviewPacket } from "./review-packet.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { access, lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import { homedir } from "node:os";
 import { execFile as execFileCallback, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -725,6 +725,35 @@ function mergeJsonObject(existing: unknown, key: string, value: unknown): Record
   return result;
 }
 
+async function validateAgentSetupPaths(directory: string, paths: readonly string[]): Promise<void> {
+  for (const path of paths) {
+    const components = path.split("/");
+    let current = directory;
+    for (let index = 0; index < components.length; index += 1) {
+      current = join(current, components[index]!);
+      let entry: Stats;
+      try {
+        entry = await lstat(current);
+      } catch (error) {
+        if (isNotFound(error)) break;
+        throw error;
+      }
+      const isFile = index === components.length - 1;
+      if (entry.isSymbolicLink() || (isFile ? !entry.isFile() : !entry.isDirectory())) {
+        const affectedPath = components.slice(0, index + 1).join("/");
+        const expected = isFile ? "regular file" : "directory";
+        throw new LocalAgentError({
+          code: "agent.setup.path_unsafe",
+          message: `Agent setup refuses ${affectedPath}: expected a ${expected} without symbolic links; no setup files were written.`,
+          affectedObject: affectedPath,
+          recoveryAction: `replace ${affectedPath} with a Project-local ${expected} and rerun anyam agent setup`,
+          receipt: `path=${affectedPath}; expected=${expected}; symbolic-link=${entry.isSymbolicLink()}; setup-written=false`,
+        });
+      }
+    }
+  }
+}
+
 export async function setupAgent(input: { directory: string; agent: string }): Promise<AgentSetupResult> {
   const directory = resolve(input.directory);
   const agent = ensureAgent(input.agent);
@@ -736,6 +765,16 @@ export async function setupAgent(input: { directory: string; agent: string }): P
       receipt: "anyam.json was not found",
     });
   }
+
+  await validateAgentSetupPaths(directory, [
+    "anyam.json",
+    ".anyam/agents/manifest.json",
+    ".anyam/agents/AGENTS.md",
+    ".anyam/agents/skills/anyam-change/SKILL.md",
+    ".anyam/agents/git-credential.json",
+    "AGENTS.md",
+    ...(agent === "codex" ? [".codex/config.toml"] : agent === "claude" ? [".mcp.json"] : agent === "cursor" ? [".cursor/mcp.json"] : []),
+  ]);
 
   const createdFiles: string[] = [];
   const agentsDirectory = join(directory, ".anyam", "agents");

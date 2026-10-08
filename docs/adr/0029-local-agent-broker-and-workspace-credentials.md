@@ -36,6 +36,13 @@ credential, access token, Git password, provider key, or secret is written to
 the Project. The Git helper contract is described as `memory-only` and
 Workspace-only.
 
+Within an initialized Project, setup checks every existing component of its
+selected client configuration and shared metadata paths before writing files.
+Symbolic links and incompatible file types fail with `agent.setup.path_unsafe`,
+naming the Project-relative path and how to replace it. Existing files remain
+unchanged after that failure. An explicitly selected Project directory alias is
+still supported.
+
 ### The local broker is a bounded semantic surface
 
 `anyam mcp serve --stdio --agent <agent>` speaks newline-delimited JSON-RPC and

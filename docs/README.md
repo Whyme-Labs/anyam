@@ -43,6 +43,8 @@ losing ordinary Git workflows.
 
 ## Operate and extend
 
+- [Offline Intent drafts](qualification/offline-intent-drafts.md) explains how
+  to keep a local note, inspect current discussion, and publish it explicitly.
 - [Production operations and recovery](adr/0092-production-operations-control-room.md)
   explains the state-first operator view and receipt requirements.
 - [Repository gate](ci/repository-gate.md) lists the checks that protect the

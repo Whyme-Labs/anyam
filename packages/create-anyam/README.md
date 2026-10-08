@@ -142,6 +142,11 @@ or paid model is run by these tests.
 
 ## Use the hosted Intent lifecycle
 
+Keep an unpublished note in your editor and later publish it explicitly with
+`intent comment <id> --body-file <path>`. See
+[offline Intent drafts](https://github.com/Whyme-Labs/anyam/blob/main/docs/qualification/offline-intent-drafts.md)
+for fresh inspection, saved-file behavior and same-key retry after a lost response.
+
 Issues are represented by a first-class hosted Intent. The Intent identity is
 stable when a Change is created from it, and the lifecycle is idempotent across
 the Realm REST surface, remote MCP, and this CLI:

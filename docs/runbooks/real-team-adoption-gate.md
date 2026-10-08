@@ -54,6 +54,13 @@ the `anyam.real-team-adoption-gate/v1` contract:
 Each receipt needs an owner, observation timestamp, next action, and
 credential-free receipt text. `not-verified` and `indeterminate` are blockers.
 
+For a preserved Codex session, the optional local
+[recorded-session evaluator](../qualification/native-recording-evaluation.md)
+checks its selected thread, terminal events and file-change claims against a
+committed Git candidate. Its `matched` result is bookkeeping inspection, not
+authenticated model origin, verifier success or adoption readiness. Keep the
+original recording and independent exact-source verification receipts.
+
 The gate also requires a signed Authority export and external attestation
 keyring. Keep the keyring files outside the repository; they contain public
 keys only and use this shape:

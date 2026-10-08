@@ -11,6 +11,7 @@ import { resolve } from "node:path";
 import type { Readable } from "node:stream";
 import { runRealmSourceCommand } from "./realm-source-command.js";
 import { executeThroughWorkspaceBroker, removeWorkspaceBrokerLocator, startWorkspaceCommandBroker } from "./workspace-broker.js";
+import { evaluateNativeRecording } from "./native-recording.js";
 
 function valueAfter(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
@@ -85,6 +86,7 @@ function subcommandPositionals(args: readonly string[]): readonly string[] {
 }
 
 function printHelp(): void {
+  console.log("agent evaluate-recording --recording <jsonl> --thread <id> --base-commit <sha> --candidate-commit <sha> [--recording-root <original-workspace>] [--directory <project>] [--json]  inspect recorded Codex claims against local Git; no harness launch");
   console.log("connect github --method actions  generate a reviewable GitHub Actions Bridge workflow");
   console.log("Bridge options: --realm <url> --project <id> --connection <id> --action-ref <owner/repo@sha> [--workflow-path <path>] [--remote <name>] [--schedule <cron>]");
   console.log("realm plan|install|upgrade|doctor|export|restore|destroy  customer-operated lifecycle");
@@ -160,6 +162,24 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
   if (!command || command === "--help" || command === "-h") {
     printHelp();
     return 0;
+  }
+
+  if (command === "agent" && subcommand === "evaluate-recording") {
+    const option = (flag: string) => {
+      const value = valueAfter(args, flag);
+      if (!value?.trim() || value.startsWith("--") || args.filter(argument => argument === flag).length !== 1) {
+        throw new Error(`agent evaluate-recording requires one ${flag} <value>; no session was started.`);
+      }
+      return value;
+    };
+    const result = await evaluateNativeRecording({
+      directory: resolve(cwd, args.includes("--directory") ? option("--directory") : cwd),
+      recordingFile: resolve(cwd, option("--recording")), threadId: option("--thread"),
+      baseCommit: option("--base-commit"), candidateCommit: option("--candidate-commit"),
+      ...(args.includes("--recording-root") ? { recordingRoot: resolve(cwd, option("--recording-root")) } : {}),
+    });
+    printResult(result, json, JSON.stringify(result, null, 2));
+    return result.status === "matched" ? 0 : 1;
   }
 
   if (command === "init") {

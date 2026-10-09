@@ -26,11 +26,6 @@ export class RealmAuthorityRequestError extends Error {
 
 export type JsonObject = Record<string, unknown>;
 
-function object(value: unknown, field: string): JsonObject {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`realm_authority_${field}_not_object`);
-  return value as JsonObject;
-}
-
 function safeField(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
 }
@@ -86,15 +81,23 @@ export class RealmAuthorityHttpClient {
       redirect: "error",
       ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
     });
-    const parsed: unknown = await response.json().catch(() => ({}));
-    const payload = object(parsed, "response");
-    const allowedStatus = (input.allowStatuses ?? []).includes(response.status) && (!input.allowBlocked || payload.status === "blocked");
+    const parsed: unknown = await response.json().catch(() => undefined);
+    const payload = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as JsonObject : undefined;
+    const allowedStatus = payload !== undefined && (input.allowStatuses ?? []).includes(response.status) && (!input.allowBlocked || payload.status === "blocked");
     if (!response.ok && !allowedStatus) {
       throw new RealmAuthorityRequestError({
         status: response.status,
-        code: safeField(payload.code, `http_${response.status}`),
-        recoveryAction: safeField(payload.recoveryAction, "inspect the customer Realm receipt and retry only the same idempotent request when safe"),
-        receipt: safeField(payload.receipt, "receipt=not-returned; credentialMaterialStored=false"),
+        code: safeField(payload?.code, `http_${response.status}`),
+        recoveryAction: safeField(payload?.recoveryAction, "inspect the customer Realm receipt and retry only the same idempotent request when safe"),
+        receipt: safeField(payload?.receipt, "receipt=not-returned; credentialMaterialStored=false"),
+      });
+    }
+    if (payload === undefined) {
+      throw new RealmAuthorityRequestError({
+        status: response.status,
+        code: "realm_authority_response_invalid",
+        recoveryAction: "inspect the customer Realm receipt; the outcome is unconfirmed; retry a mutation only explicitly with its original idempotency key when safe",
+        receipt: `httpStatus=${response.status}; response=invalid-json-object; outcome=unconfirmed; credentialMaterialStored=false`,
       });
     }
     return payload;

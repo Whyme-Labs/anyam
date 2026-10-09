@@ -18,8 +18,9 @@ the sanitized `recovery_storage_unconfirmed` result. Inspect the object at its
 recorded digest before deliberately retrying the same Recovery operation.
 There is no automatic retry.
 
-The adapter snapshots the verified bundle before asynchronous storage access,
-so caller mutation cannot change its payload or credential-free metadata.
+The adapter serializes the input once, then verifies that exact snapshot before
+any storage access. Caller mutation or a stateful serialization hook cannot
+change its verified payload or credential-free metadata.
 Neither storing nor reading a verified bundle resumes Realm authority. Restore
 continues to require the existing provider reconciliation and owner activation.
 

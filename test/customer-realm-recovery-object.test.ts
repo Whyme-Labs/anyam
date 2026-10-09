@@ -156,3 +156,29 @@ test("caller mutation during storage does not alter verified Recovery payload or
   assert.deepEqual(bucket.writes[0]?.options?.customMetadata, { protocol: original.protocol, digest: original.integrity.digest, credentialFree: "true" });
   assert.equal(JSON.stringify(bucket.writes).includes("fixture-caller-secret"), false);
 });
+
+test("a serialization hook cannot introduce credential-bearing Recovery bytes before storage", async () => {
+  const bundle = await recoveryBundle("installation:serialization-hook");
+  const serialized = { ...structuredClone(bundle), token: "fixture-serialization-secret" };
+  Object.defineProperty(bundle, "toJSON", { value: () => serialized });
+  const bucket = new ConditionalMemoryBucket();
+  await assert.rejects(new CustomerRealmRecoveryObjectStore(bucket).put(bundle), (error: unknown) => error instanceof CustomerRealmPersistenceError
+    && error.code === "recovery_invalid"
+    && !JSON.stringify(error.toJSON()).includes("fixture-serialization-secret"));
+  assert.equal(bucket.writes.length, 0, "verify the exact serialized snapshot before calling storage");
+  assert.equal(bucket.values.size, 0);
+});
+
+test("a stateful serialization hook is captured once and the exact stored snapshot is verified", async () => {
+  const bundle = await recoveryBundle("installation:stateful-serialization-hook");
+  const original = structuredClone(bundle);
+  let serializations = 0;
+  Object.defineProperty(bundle, "toJSON", { value: () => ++serializations === 1
+    ? original : { ...original, token: "fixture-stateful-serialization-secret" } });
+  const bucket = new ConditionalMemoryBucket();
+  const receipt = await new CustomerRealmRecoveryObjectStore(bucket).put(bundle);
+  assert.equal(serializations, 1);
+  assert.equal(bucket.values.get(receipt.key), JSON.stringify(original));
+  assert.equal(bucket.writes.length, 1);
+  assert.equal(JSON.stringify(bucket.writes).includes("fixture-stateful-serialization-secret"), false);
+});

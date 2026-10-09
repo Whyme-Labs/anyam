@@ -205,8 +205,13 @@ export class CustomerRealmRecoveryObjectStore {
   constructor(private readonly bucket: CustomerRealmR2Bucket) {}
 
   async put(bundle: CustomerRealmRecoveryBundle): Promise<CustomerRealmRecoveryObjectReceipt> {
-    assertRecoveryBundle(bundle);
-    const snapshot = clone(bundle);
+    let snapshot: CustomerRealmRecoveryBundle;
+    try {
+      snapshot = clone(bundle);
+    } catch {
+      throw invalidRecovery({ message: "Recovery bundle cannot be serialized; authority was not resumed.", receipt: "verification=unreadable-serialization" });
+    }
+    assertRecoveryBundle(snapshot);
     const digest = customerRealmRecoveryBundleDigest(snapshot);
     const payload = JSON.stringify(snapshot);
     const key = recoveryObjectKey(digest);

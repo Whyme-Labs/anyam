@@ -49,7 +49,7 @@ test("Recovery immutable creation and denial use actual local R2 with isolated s
       const retained = await original.text();
       assert.equal(retained, JSON.stringify(bundle));
       assert.equal(created.bytes, Buffer.byteLength(retained));
-      assert.deepEqual(original.customMetadata, { protocol: bundle.protocol, digest: created.digest, credentialFree: "true" });
+      assert.deepEqual(original.customMetadata, { protocol: bundle.protocol, digest: created.digest, credentialFree: "true", credentialScanner: "anyam.credential-material-scanner/v1", credentialScanScope: "known-patterns", credentialScanExhaustive: "false" });
       assert.deepEqual(await store.get(created.digest), bundle);
       assert.match((await store.put(bundle)).receipt, /idempotent=true/);
       assert.equal(await (await bucket.get(created.key)).text(), retained);

@@ -3,6 +3,7 @@ import {
   type CustomerRealmInstallationState,
   type CustomerRealmInstallationStore,
   type CustomerRealmRecoveryBundle,
+  type CustomerRealmRecoveryCredentialCheck,
   verifyCustomerRealmRecoveryBundle,
 } from "../installation/customer-realm.ts";
 
@@ -159,7 +160,9 @@ export type CustomerRealmRecoveryObjectReceipt = {
   digest: string;
   key: string;
   bytes: number;
+  /** Verified producer declaration; inspect credentialMaterialCheck for detection scope. */
   credentialFree: true;
+  credentialMaterialCheck: CustomerRealmRecoveryCredentialCheck;
   authority: "durable-object-coordinator";
   receipt: string;
 };
@@ -182,7 +185,7 @@ function unconfirmedRecoveryStorage(key: string, digest: string, operation: "rea
   });
 }
 
-function assertRecoveryBundle(bundle: CustomerRealmRecoveryBundle): void {
+function assertRecoveryBundle(bundle: CustomerRealmRecoveryBundle): ReturnType<typeof verifyCustomerRealmRecoveryBundle> {
   let verification: ReturnType<typeof verifyCustomerRealmRecoveryBundle>;
   try {
     verification = verifyCustomerRealmRecoveryBundle(bundle);
@@ -195,6 +198,7 @@ function assertRecoveryBundle(bundle: CustomerRealmRecoveryBundle): void {
   if (verification.status !== "verified") {
     throw invalidRecovery({ message: `Recovery bundle failed verification: ${verification.errors.join("; ")}.`, receipt: verification.receipt });
   }
+  return verification;
 }
 
 /**
@@ -211,7 +215,7 @@ export class CustomerRealmRecoveryObjectStore {
     } catch {
       throw invalidRecovery({ message: "Recovery bundle cannot be serialized; authority was not resumed.", receipt: "verification=unreadable-serialization" });
     }
-    assertRecoveryBundle(snapshot);
+    const verifiedInput = assertRecoveryBundle(snapshot);
     const digest = customerRealmRecoveryBundleDigest(snapshot);
     const payload = JSON.stringify(snapshot);
     const key = recoveryObjectKey(digest);
@@ -226,19 +230,23 @@ export class CustomerRealmRecoveryObjectStore {
           protocol: snapshot.protocol,
           digest,
           credentialFree: "true",
+          credentialScanner: verifiedInput.credentialMaterialCheck.scannerProtocol,
+          credentialScanScope: verifiedInput.credentialMaterialCheck.scope,
+          credentialScanExhaustive: "false",
         },
       });
     } catch {
       throw unconfirmedRecoveryStorage(key, digest, "write");
     }
-    const { bytes } = await this.readVerified(digest);
+    const { bytes, credentialMaterialCheck } = await this.readVerified(digest);
     return {
       digest,
       key,
       bytes,
       credentialFree: true,
+      credentialMaterialCheck,
       authority: "durable-object-coordinator",
-      receipt: `key=${key}; digest=${digest}; bytes=${bytes}; credentialFree=true; authority=durable-object-coordinator${created === null ? "; idempotent=true" : ""}`,
+      receipt: `key=${key}; digest=${digest}; bytes=${bytes}; credentialFreeDeclared=true; credentialScanner=${credentialMaterialCheck.scannerProtocol}; credentialScanScope=${credentialMaterialCheck.scope}; exhaustive=false; authority=durable-object-coordinator${created === null ? "; idempotent=true" : ""}`,
     };
   }
 
@@ -246,7 +254,7 @@ export class CustomerRealmRecoveryObjectStore {
     return (await this.readVerified(digest)).bundle;
   }
 
-  private async readVerified(digest: string): Promise<{ bundle: CustomerRealmRecoveryBundle; bytes: number }> {
+  private async readVerified(digest: string): Promise<{ bundle: CustomerRealmRecoveryBundle; bytes: number; credentialMaterialCheck: CustomerRealmRecoveryCredentialCheck }> {
     assertRecoveryDigest(digest);
     const key = recoveryObjectKey(digest);
     let object: CustomerRealmR2Object | null;
@@ -279,7 +287,7 @@ export class CustomerRealmRecoveryObjectStore {
       throw invalidRecovery({ message: "Recovery object is not a bundle object; authority was not resumed.", receipt: `key=${key}; object=not-an-object` });
     }
     const bundle = parsed as CustomerRealmRecoveryBundle;
-    assertRecoveryBundle(bundle);
+    const verification = assertRecoveryBundle(bundle);
     const actualDigest = customerRealmRecoveryBundleDigest(bundle);
     if (actualDigest !== digest || bundle.integrity.digest !== digest) {
       throw new CustomerRealmPersistenceError({
@@ -289,6 +297,6 @@ export class CustomerRealmRecoveryObjectStore {
         receipt: `key=${key}; expected=${digest}; actual=${actualDigest}; declared=${bundle.integrity.digest}`,
       });
     }
-    return { bundle: clone(bundle), bytes: bytes.byteLength };
+    return { bundle: clone(bundle), bytes: bytes.byteLength, credentialMaterialCheck: verification.credentialMaterialCheck };
   }
 }

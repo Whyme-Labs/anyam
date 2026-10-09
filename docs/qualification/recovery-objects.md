@@ -1,7 +1,13 @@
 # Immutable Recovery object boundary
 
-`CustomerRealmRecoveryObjectStore` stores verified, credential-free Recovery
-bundles at their existing semantic bundle digest. The customer storage adapter
+`CustomerRealmRecoveryObjectStore` stores verified Recovery bundles at their
+existing semantic bundle digest. Their producer's `credentialFree=true`
+declaration is checked against recognized credential material. Verification and
+storage receipts expose `credentialMaterialCheck` with scope `known-patterns`
+and `exhaustive=false`; a no-match result does not prove arbitrary data contains
+no secrets. R2 metadata records the same bounded scanner scope. See the
+[Recovery credential detection contract](recovery-credential-check.md).
+The customer storage adapter
 must honor atomic R2 conditional creation: `onlyIf: { etagDoesNotMatch: "*" }`.
 Cloudflare documents conditional writes and their `null` precondition result in
 the [R2 Workers API reference](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/#conditional-operations).

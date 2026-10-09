@@ -153,7 +153,7 @@ test("caller mutation during storage does not alter verified Recovery payload or
   };
   const receipt = await new CustomerRealmRecoveryObjectStore(mutableBoundary).put(bundle);
   assert.equal(bucket.values.get(receipt.key), JSON.stringify(original));
-  assert.deepEqual(bucket.writes[0]?.options?.customMetadata, { protocol: original.protocol, digest: original.integrity.digest, credentialFree: "true" });
+  assert.deepEqual(bucket.writes[0]?.options?.customMetadata, { protocol: original.protocol, digest: original.integrity.digest, credentialFree: "true", credentialScanner: "anyam.credential-material-scanner/v1", credentialScanScope: "known-patterns", credentialScanExhaustive: "false" });
   assert.equal(JSON.stringify(bucket.writes).includes("fixture-caller-secret"), false);
 });
 

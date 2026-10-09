@@ -16,6 +16,11 @@ import {
   RealmIdentityPolicy,
   type RealmRecoverySnapshot,
 } from "../identity/realm.ts";
+import {
+  CREDENTIAL_MATERIAL_SCANNER_PROTOCOL,
+  scanCredentialMaterial,
+  type CredentialMaterialFindingKind,
+} from "../security/credential-material.ts";
 
 export type CustomerRealmInstallationPhase =
   | "new"
@@ -207,9 +212,18 @@ export type CustomerRealmRecoveryBundle = {
   audit: readonly CustomerRealmAuditEvent[];
   integrity: {
     digest: string;
+    /** Producer declaration, checked against known material; not exhaustive secret detection. */
     credentialFree: true;
     receipt: string;
   };
+};
+
+export type CustomerRealmRecoveryCredentialCheck = {
+  scannerProtocol: typeof CREDENTIAL_MATERIAL_SCANNER_PROTOCOL;
+  scope: "known-patterns";
+  status: "detected" | "not-detected";
+  exhaustive: false;
+  kind?: CredentialMaterialFindingKind;
 };
 
 export type CustomerRealmRecoveryVerification = {
@@ -217,6 +231,7 @@ export type CustomerRealmRecoveryVerification = {
   errors: readonly string[];
   recoveryAction: string;
   receipt: string;
+  credentialMaterialCheck: CustomerRealmRecoveryCredentialCheck;
 };
 
 export type CustomerRealmProviderSuccess<T> = {
@@ -515,6 +530,26 @@ function recoveryBundleDigest(bundle: Omit<CustomerRealmRecoveryBundle, "integri
 }
 
 export function verifyCustomerRealmRecoveryBundle(bundle: CustomerRealmRecoveryBundle): CustomerRealmRecoveryVerification {
+  const finding = scanCredentialMaterial(bundle, "recovery");
+  const credentialMaterialCheck: CustomerRealmRecoveryCredentialCheck = {
+    scannerProtocol: CREDENTIAL_MATERIAL_SCANNER_PROTOCOL,
+    scope: "known-patterns",
+    status: finding ? "detected" : "not-detected",
+    exhaustive: false,
+    ...(finding ? { kind: finding.kind } : {}),
+  };
+  const scanReceipt = `credentialScanner=${credentialMaterialCheck.scannerProtocol}; credentialScanScope=${credentialMaterialCheck.scope}; exhaustive=false`;
+  if (finding) {
+    // Reject before constructing diagnostics from untrusted bundle IDs or
+    // scanner paths. Keys and values can both contain sensitive material.
+    return {
+      status: "failed",
+      errors: ["recovery bundle contains known credential material"],
+      recoveryAction: "remove detected credential material from the Recovery bundle, keep it in the owner-controlled credential store, and rerun verification",
+      receipt: `credentialFreeDeclared=not-confirmed; knownCredentialMaterial=detected; kind=${finding.kind}; ${scanReceipt}; errors=1`,
+      credentialMaterialCheck,
+    };
+  }
   const errors: string[] = [];
   if (bundle.protocol !== CONTRACT_VERSIONS.recovery || bundle.version !== "v1") errors.push("recovery protocol or version is unsupported");
   if (bundle.hostingMode !== "customer-operated") errors.push("recovery bundle is not for a customer-operated Realm");
@@ -522,8 +557,6 @@ export function verifyCustomerRealmRecoveryBundle(bundle: CustomerRealmRecoveryB
   if (!bundle.state.realmId || bundle.state.realmId !== bundle.realmSnapshot.realm.id) errors.push("Realm identity is missing or does not match the Realm snapshot");
   if (!bundle.state.realmSnapshot || digest(bundle.state.realmSnapshot) !== digest(bundle.realmSnapshot)) errors.push("installation and recovery Realm snapshots do not match");
   if (bundle.integrity.credentialFree !== true || bundle.realmSnapshot.credentialFree !== true) errors.push("recovery bundle is not explicitly credential-free");
-  const serialized = JSON.stringify(bundle);
-  if (/(?:\"token|\"password|\"secret|\"credentials|\"credential)\"\s*:/i.test(serialized)) errors.push("recovery bundle contains credential material");
   if (!bundle.state.account || !customerOwnershipValid(bundle.state.account)) errors.push("customer ownership or account credential boundary is invalid");
   if (!bundle.state.resources || bundle.state.resources.owner !== "customer" || bundle.state.resources.state === "verified" && bundle.state.resources.resourceIds.length === 0) errors.push("customer resource ownership or verification receipt is invalid");
   if (bundle.state.checkpoint.stateDigest !== stateDigest(bundle.state)) errors.push("installation Recovery Checkpoint digest does not match its state");
@@ -565,7 +598,8 @@ export function verifyCustomerRealmRecoveryBundle(bundle: CustomerRealmRecoveryB
     status: errors.length === 0 ? "verified" : "failed",
     errors,
     recoveryAction: errors.length === 0 ? "restore into a quarantined customer installation, reconcile provider resources, then require owner activation" : "repair the named export, ownership, identity, or pending-command inconsistency and rerun recovery verification",
-    receipt: `bundle=${bundle.bundleId}; credentialFree=${bundle.integrity.credentialFree}; errors=${errors.length}`,
+    receipt: `bundle=${bundle.bundleId}; credentialFreeDeclared=${bundle.integrity.credentialFree}; knownCredentialMaterial=not-detected; ${scanReceipt}; errors=${errors.length}`,
+    credentialMaterialCheck,
   };
 }
 
@@ -834,7 +868,7 @@ export class CustomerRealmInstallation {
       pendingCommands: clone(this.state.pendingCommands),
       audit: clone(this.state.audit),
     };
-    const bundle: CustomerRealmRecoveryBundle = { ...bundleWithoutIntegrity, integrity: { digest: recoveryBundleDigest(bundleWithoutIntegrity), credentialFree: true, receipt: `installation=${this.state.installationId}; realm=${this.state.realmId}; credentials=none; pendingCommands=${this.state.pendingCommands.length}; audit=${this.state.audit.length}` } };
+    const bundle: CustomerRealmRecoveryBundle = { ...bundleWithoutIntegrity, integrity: { digest: recoveryBundleDigest(bundleWithoutIntegrity), credentialFree: true, receipt: `installation=${this.state.installationId}; realm=${this.state.realmId}; credentialFreeDeclared=true; credentialScanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; credentialScanScope=known-patterns; exhaustive=false; pendingCommands=${this.state.pendingCommands.length}; audit=${this.state.audit.length}` } };
     const verification = verifyCustomerRealmRecoveryBundle(bundle);
     if (verification.status !== "verified") throw new CustomerRealmInstallationError({ code: "recovery_invalid", message: `Generated recovery bundle did not pass its own verification: ${verification.errors.join("; ")}.`, recoveryAction: verification.recoveryAction, receipt: verification.receipt });
     return bundle;

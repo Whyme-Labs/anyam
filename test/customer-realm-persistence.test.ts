@@ -39,8 +39,11 @@ class MemoryDurableObjectStorage implements CustomerRealmDurableObjectStorage {
 class MemoryR2Bucket implements CustomerRealmR2Bucket {
   private readonly objects = new Map<string, string>();
 
-  async put(key: string, value: string): Promise<void> {
+  async put(key: string, value: string, options: Parameters<CustomerRealmR2Bucket["put"]>[2]): Promise<object | null> {
+    assert.deepEqual(options.onlyIf, { etagDoesNotMatch: "*" });
+    if (this.objects.has(key)) return null;
     this.objects.set(key, value);
+    return {};
   }
 
   async get(key: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer> } | null> {

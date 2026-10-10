@@ -7,6 +7,7 @@
  */
 
 import { parseDisclosedSourcePayload, type DisclosedSourceOperation, type DisclosedSourcePayloads } from "./disclosed-source-command.js";
+import { containsKnownTextMaterial, scanCredentialMaterial } from "./credential-material.js";
 
 export class RealmAuthorityRequestError extends Error {
   readonly status: number;
@@ -26,8 +27,16 @@ export class RealmAuthorityRequestError extends Error {
 
 export type JsonObject = Record<string, unknown>;
 
-function safeField(value: unknown, fallback: string): string {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
+function unsafeDiagnostic(value: unknown, forwardedSession: string): boolean {
+  let decodedSession = forwardedSession;
+  try { decodedSession = decodeURIComponent(forwardedSession); } catch { /* Keep the exact forwarded cookie value. */ }
+  return scanCredentialMaterial(value) !== undefined || containsKnownTextMaterial(value, candidate => candidate.includes(forwardedSession) || candidate.includes(decodedSession));
+}
+
+function safeField(value: unknown, fallback: string, forwardedSession: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) return fallback;
+  const text = value.trim();
+  return unsafeDiagnostic(text, forwardedSession) ? fallback : text;
 }
 
 function ownerCookie(value: string): string {
@@ -84,12 +93,21 @@ export class RealmAuthorityHttpClient {
     const parsed: unknown = await response.json().catch(() => undefined);
     const payload = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as JsonObject : undefined;
     const allowedStatus = payload !== undefined && (input.allowStatuses ?? []).includes(response.status) && (!input.allowBlocked || payload.status === "blocked");
+    const forwardedSession = this.cookie.slice("anyam_owner_session=".length);
+    if (!response.ok && allowedStatus && unsafeDiagnostic(payload, forwardedSession)) {
+      throw new RealmAuthorityRequestError({
+        status: response.status,
+        code: "realm_authority_response_unsafe",
+        recoveryAction: "inspect the customer Realm receipt; the outcome is unconfirmed; retry a mutation only explicitly with its original idempotency key when safe",
+        receipt: `httpStatus=${response.status}; response=unsafe-diagnostics; outcome=unconfirmed; credentialMaterialStored=false`,
+      });
+    }
     if (!response.ok && !allowedStatus) {
       throw new RealmAuthorityRequestError({
         status: response.status,
-        code: safeField(payload?.code, `http_${response.status}`),
-        recoveryAction: safeField(payload?.recoveryAction, "inspect the customer Realm receipt and retry only the same idempotent request when safe"),
-        receipt: safeField(payload?.receipt, "receipt=not-returned; credentialMaterialStored=false"),
+        code: safeField(payload?.code, `http_${response.status}`, forwardedSession),
+        recoveryAction: safeField(payload?.recoveryAction, "inspect the customer Realm receipt and retry only the same idempotent request when safe", forwardedSession),
+        receipt: safeField(payload?.receipt, "receipt=not-returned; credentialMaterialStored=false", forwardedSession),
       });
     }
     if (payload === undefined) {

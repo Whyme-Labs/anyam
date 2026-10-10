@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -106,7 +107,7 @@ test("allowed HTTP error checkpoints still reject credential-bearing payloads wi
 });
 
 test("both actual CLI entrypoints hide unsafe HTTP error fields in terminal and JSON output without retry", async () => {
-  const root = await mkdtemp("/private/tmp/anyam-error-safety-");
+  const root = await mkdtemp(join(tmpdir(), "anyam-error-safety-"));
   let payload = safe, requests = 0;
   const server = createServer((request, response) => {
     requests++;

@@ -77,7 +77,7 @@ export class RealmAuthorityHttpClient {
     return new URL(pathname, this.baseUrl).toString();
   }
 
-  private async request(pathname: string, input: { method: "GET" | "POST"; body?: JsonObject; idempotencyKey?: string; allowStatuses?: readonly number[]; allowBlocked?: boolean }): Promise<JsonObject> {
+  private async request(pathname: string, input: { method: "GET" | "POST"; body?: JsonObject; idempotencyKey?: string; allowStatuses?: readonly number[]; allowBlocked?: boolean; requireSuccessReceipt?: true }): Promise<JsonObject> {
     const headers = new Headers({ accept: "application/json", cookie: this.cookie });
     if (input.body !== undefined) {
       headers.set("content-type", "application/json");
@@ -110,12 +110,12 @@ export class RealmAuthorityHttpClient {
         receipt: safeField(payload?.receipt, "receipt=not-returned; credentialMaterialStored=false", forwardedSession),
       });
     }
-    if (payload === undefined) {
+    if (payload === undefined || input.requireSuccessReceipt && (typeof payload.receipt !== "string" || payload.receipt.trim().length === 0)) {
       throw new RealmAuthorityRequestError({
         status: response.status,
         code: "realm_authority_response_invalid",
         recoveryAction: "inspect the customer Realm receipt; the outcome is unconfirmed; retry a mutation only explicitly with its original idempotency key when safe",
-        receipt: `httpStatus=${response.status}; response=invalid-json-object; outcome=unconfirmed; credentialMaterialStored=false`,
+        receipt: `httpStatus=${response.status}; response=${payload === undefined ? "invalid-json-object" : "invalid-success-receipt"}; outcome=unconfirmed; credentialMaterialStored=false`,
       });
     }
     return payload;
@@ -137,7 +137,7 @@ export class RealmAuthorityHttpClient {
   inspectIntent(intentId: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}`, { method: "GET" }); }
   createIntent(body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("/api/intents", { method: "POST", body, idempotencyKey }); }
   assignIntent(intentId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}/assign`, { method: "POST", body, idempotencyKey }); }
-  commentIntent(intentId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}/comment`, { method: "POST", body, idempotencyKey }); }
+  commentIntent(intentId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}/comment`, { method: "POST", body, idempotencyKey, requireSuccessReceipt: true }); }
   closeIntent(intentId: string, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}/close`, { method: "POST", body: {}, idempotencyKey }); }
   reopenIntent(intentId: string, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}/reopen`, { method: "POST", body: {}, idempotencyKey }); }
   listPullRequests(projectId?: string): Promise<JsonObject> { return this.request(`/api/pull-requests${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`, { method: "GET" }); }

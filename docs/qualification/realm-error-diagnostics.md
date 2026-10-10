@@ -28,5 +28,6 @@ opaque secret, repeated encoding, encryption or unsupported token format.
 entrypoints with synthetic owner sessions and an owned HTTP error fixture.
 These observations do not qualify live Realm authentication, server
 idempotency, all successful response schemas or live provider operation.
-Structurally valid success replies without usable mutation receipts remain
-a separate response-contract gap.
+The separate Intent-comment receipt check is documented in
+`offline-intent-drafts.md`; other successful response schemas remain outside
+this error-diagnostic qualification.

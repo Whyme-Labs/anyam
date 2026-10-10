@@ -39,6 +39,15 @@ CLI does not retry automatically. A changed note needs a new command identity.
 Without an explicit key, the existing CLI generates a new key for each
 invocation; repeating that invocation can create another comment.
 
+A successful HTTP status with an unreadable or non-object JSON reply still
+leaves the outcome unconfirmed. An Intent-comment success object must also
+contain a nonempty string `receipt`; missing, blank or wrongly typed receipts
+leave the outcome unconfirmed. The CLI reports an error and keeps the note;
+inspect the current Intent before deciding whether to retry with the original
+idempotency key. The response alone does not prove that the comment was rejected.
+Valid receipt-only replies retain their existing behavior. This transport check
+does not authenticate a server's receipt or prove production persistence.
+
 An Intent comment is discussion. It is not a Review Finding bound by Anyam to
 an exact Change Revision, a Review Approval, Evidence, a Landing, or a
 Promotion. A source-basis label inside the note is user-written context, not

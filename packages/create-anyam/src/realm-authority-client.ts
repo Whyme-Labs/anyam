@@ -7,6 +7,7 @@
  */
 
 import { parseDisclosedSourcePayload, type DisclosedSourceOperation, type DisclosedSourcePayloads } from "./disclosed-source-command.js";
+import { containsKnownTextMaterial, scanCredentialMaterial } from "./credential-material.js";
 
 export class RealmAuthorityRequestError extends Error {
   readonly status: number;
@@ -26,13 +27,16 @@ export class RealmAuthorityRequestError extends Error {
 
 export type JsonObject = Record<string, unknown>;
 
-function object(value: unknown, field: string): JsonObject {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`realm_authority_${field}_not_object`);
-  return value as JsonObject;
+function unsafeDiagnostic(value: unknown, forwardedSession: string): boolean {
+  let decodedSession = forwardedSession;
+  try { decodedSession = decodeURIComponent(forwardedSession); } catch { /* Keep the exact forwarded cookie value. */ }
+  return scanCredentialMaterial(value) !== undefined || containsKnownTextMaterial(value, candidate => candidate.includes(forwardedSession) || candidate.includes(decodedSession));
 }
 
-function safeField(value: unknown, fallback: string): string {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
+function safeField(value: unknown, fallback: string, forwardedSession: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) return fallback;
+  const text = value.trim();
+  return unsafeDiagnostic(text, forwardedSession) ? fallback : text;
 }
 
 function ownerCookie(value: string): string {
@@ -73,7 +77,7 @@ export class RealmAuthorityHttpClient {
     return new URL(pathname, this.baseUrl).toString();
   }
 
-  private async request(pathname: string, input: { method: "GET" | "POST"; body?: JsonObject; idempotencyKey?: string; allowStatuses?: readonly number[]; allowBlocked?: boolean }): Promise<JsonObject> {
+  private async request(pathname: string, input: { method: "GET" | "POST"; body?: JsonObject; idempotencyKey?: string; allowStatuses?: readonly number[]; allowBlocked?: boolean; requireSuccessReceipt?: true }): Promise<JsonObject> {
     const headers = new Headers({ accept: "application/json", cookie: this.cookie });
     if (input.body !== undefined) {
       headers.set("content-type", "application/json");
@@ -86,15 +90,32 @@ export class RealmAuthorityHttpClient {
       redirect: "error",
       ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
     });
-    const parsed: unknown = await response.json().catch(() => ({}));
-    const payload = object(parsed, "response");
-    const allowedStatus = (input.allowStatuses ?? []).includes(response.status) && (!input.allowBlocked || payload.status === "blocked");
+    const parsed: unknown = await response.json().catch(() => undefined);
+    const payload = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as JsonObject : undefined;
+    const allowedStatus = payload !== undefined && (input.allowStatuses ?? []).includes(response.status) && (!input.allowBlocked || payload.status === "blocked");
+    const forwardedSession = this.cookie.slice("anyam_owner_session=".length);
+    if (!response.ok && allowedStatus && unsafeDiagnostic(payload, forwardedSession)) {
+      throw new RealmAuthorityRequestError({
+        status: response.status,
+        code: "realm_authority_response_unsafe",
+        recoveryAction: "inspect the customer Realm receipt; the outcome is unconfirmed; retry a mutation only explicitly with its original idempotency key when safe",
+        receipt: `httpStatus=${response.status}; response=unsafe-diagnostics; outcome=unconfirmed; credentialMaterialStored=false`,
+      });
+    }
     if (!response.ok && !allowedStatus) {
       throw new RealmAuthorityRequestError({
         status: response.status,
-        code: safeField(payload.code, `http_${response.status}`),
-        recoveryAction: safeField(payload.recoveryAction, "inspect the customer Realm receipt and retry only the same idempotent request when safe"),
-        receipt: safeField(payload.receipt, "receipt=not-returned; credentialMaterialStored=false"),
+        code: safeField(payload?.code, `http_${response.status}`, forwardedSession),
+        recoveryAction: safeField(payload?.recoveryAction, "inspect the customer Realm receipt and retry only the same idempotent request when safe", forwardedSession),
+        receipt: safeField(payload?.receipt, "receipt=not-returned; credentialMaterialStored=false", forwardedSession),
+      });
+    }
+    if (payload === undefined || input.requireSuccessReceipt && (typeof payload.receipt !== "string" || payload.receipt.trim().length === 0)) {
+      throw new RealmAuthorityRequestError({
+        status: response.status,
+        code: "realm_authority_response_invalid",
+        recoveryAction: "inspect the customer Realm receipt; the outcome is unconfirmed; retry a mutation only explicitly with its original idempotency key when safe",
+        receipt: `httpStatus=${response.status}; response=${payload === undefined ? "invalid-json-object" : "invalid-success-receipt"}; outcome=unconfirmed; credentialMaterialStored=false`,
       });
     }
     return payload;
@@ -116,7 +137,7 @@ export class RealmAuthorityHttpClient {
   inspectIntent(intentId: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}`, { method: "GET" }); }
   createIntent(body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request("/api/intents", { method: "POST", body, idempotencyKey }); }
   assignIntent(intentId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}/assign`, { method: "POST", body, idempotencyKey }); }
-  commentIntent(intentId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}/comment`, { method: "POST", body, idempotencyKey }); }
+  commentIntent(intentId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}/comment`, { method: "POST", body, idempotencyKey, requireSuccessReceipt: true }); }
   closeIntent(intentId: string, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}/close`, { method: "POST", body: {}, idempotencyKey }); }
   reopenIntent(intentId: string, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/intents/${encodeURIComponent(intentId)}/reopen`, { method: "POST", body: {}, idempotencyKey }); }
   listPullRequests(projectId?: string): Promise<JsonObject> { return this.request(`/api/pull-requests${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`, { method: "GET" }); }

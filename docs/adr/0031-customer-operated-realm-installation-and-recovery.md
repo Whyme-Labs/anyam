@@ -102,7 +102,12 @@ recorded.
 The bundle is verified before restore. Verification fails closed when the
 protocol/version, ownership boundary, Realm identity, state digest, command
 list, audit list, Project Export digest, lineage, or credential-free property
-does not match. Unknown credentials are not silently ignored.
+does not match. Verification uses the shared credential-material scanner for
+supported key aliases and recognizable text forms, including nested data.
+Detected material is rejected before persistence or restore. Producers must
+keep all credentials out of Recovery; a no-match result has bounded coverage
+and does not establish exhaustive absence of secrets in arbitrary data. The
+receipt records the scanner protocol, known-pattern scope and `exhaustive=false`.
 
 Restore has two separate transitions:
 

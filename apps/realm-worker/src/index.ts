@@ -74,6 +74,7 @@ const REALM_OAUTH_CONSENT_PREFIX = "anyam/realm-oauth-consent/v1:";
 const REALM_OAUTH_GRANT_PREFIX = "anyam/realm-oauth-grant/v1:";
 const REALM_AUTHORITY_SNAPSHOT_KEY = "anyam/realm-authority/snapshot/v1";
 const REALM_AUTHORITY_RECOVERY_STATUS_KEY = "anyam/realm-authority/recovery-status/v1";
+const REALM_AUTHORITY_RECOVERY_CURRENT_KEY = "anyam/realm-authority/recovery-current/v1";
 const REALM_AUTHORITY_RECOVERY_RESTORE_PREFIX = "anyam/realm-authority/recovery-restore/v1:";
 const REALM_MIRROR_HANDOFF_NONCE_PREFIX = "anyam/realm-mirror-handoff-nonce/v1:";
 const REALM_GITHUB_ACTIONS_BRIDGE_SNAPSHOT_KEY = "anyam/github-actions-bridge/snapshot/v1";
@@ -122,6 +123,13 @@ type StoredAuthorityRecoveryRestore = {
   snapshotVersion: number;
   restoredAt: string;
   activatedAt?: string;
+};
+
+type StoredAuthorityRecoveryCurrent = {
+  bundleId: string;
+  bundleDigest: string;
+  snapshotVersion: number;
+  snapshotDigest: string;
 };
 
 type StoredPasskeyChallenge = {
@@ -1088,6 +1096,8 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         const existing = await this.ctx.storage.get<StoredAuthorityRecoveryRestore>(restoreKey);
         if (existing) {
           if (existing.bundleDigest !== bundle.bundleDigest) throw new AuthorityPlaneError({ code: "conflict", message: "Authority recovery bundle identity was already used with a different digest.", recoveryAction: "use a fresh export bundle identity; the existing quarantined state was not changed", receipt: `authorityRecovery=replay-conflict; bundleId=${bundle.bundleId}; restore=not-applied` });
+          const currentRecovery = await this.ctx.storage.get<StoredAuthorityRecoveryCurrent>(REALM_AUTHORITY_RECOVERY_CURRENT_KEY);
+          if (!currentRecovery || currentRecovery.bundleId !== bundle.bundleId || currentRecovery.bundleDigest !== bundle.bundleDigest) throw new AuthorityPlaneError({ code: "conflict", message: "Authority recovery replay does not identify the current recovery generation.", recoveryAction: "use the current restore receipt; if the existing quarantine predates generation binding, export and restore a fresh signed bundle before activation", receipt: `authorityRecovery=replay-superseded-or-unbound; bundleId=${bundle.bundleId}; restore=not-applied; state=unchanged` });
           const recoveryStatus = await this.authorityRecoveryStatus();
           return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: recoveryStatus === "quarantined" ? "recovery-quarantined" : "recovery-already-active", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: existing.snapshotVersion, recoveryStatus, credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=replay-idempotent; bundleId=${bundle.bundleId}; recoveryStatus=${recoveryStatus}; state=unchanged; credentialMaterialStored=false` });
         }
@@ -1104,8 +1114,10 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
             if (!current) throw new AuthorityPlaneError({ code: "stale_state", message: "Legacy recovery requires an intact current Authority SQL baseline.", recoveryAction: "retain the signed checkpoint and recover the authoritative SQL baseline before retrying; missing additive collections cannot be inferred from legacy KV", receipt: "authorityRecovery=legacy-baseline-missing; restore=not-applied; additiveCollections=not-defaulted; credentialMaterialStored=false" });
             if (current.version !== bundle.expectedVersion && (qualificationId === undefined || !authorityQualificationCleanupAllowed({ current, exported: bundle.snapshot, qualificationId }))) throw new AuthorityPlaneError({ code: "stale_state", message: "Authority recovery bundle is stale for the current Authority version.", recoveryAction: "export a fresh bundle from the current Authority and retry; no snapshot was replaced", receipt: `authorityRecovery=stale; expectedVersion=${bundle.expectedVersion}; currentVersion=${current.version}; restore=not-applied` });
             const result = await authorityRecoverySnapshot({ snapshot: bundle.snapshot }, realmId, current);
+            const snapshotDigest = await authorityRecoverySnapshotDigest(result.snapshot);
             await this.replaceAuthoritySnapshot(result.snapshot);
             await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_STATUS_KEY, "quarantined" satisfies AuthorityRecoveryStatus);
+            await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_CURRENT_KEY, { bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: result.snapshot.version, snapshotDigest } satisfies StoredAuthorityRecoveryCurrent);
             await this.ctx.storage.put(restoreKey, { protocol: AUTHORITY_RECOVERY_PROTOCOL, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: result.snapshot.version, restoredAt: new Date().toISOString() } satisfies StoredAuthorityRecoveryRestore);
             return result;
           });
@@ -1134,11 +1146,18 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         const identitySession = this.requireIdentity().getRecoverySnapshot().sessions[humanSessionId];
         if (!identitySession || identitySession.strength !== "passkey") throw new AuthorityPlaneError({ code: "blocked", message: "Authority recovery activation requires a passkey-authenticated owner session.", recoveryAction: "authenticate the Realm owner with a passkey and retry activation", receipt: "authorityRecovery=activation-passkey-required; activation=not-applied" });
         const status = await this.authorityRecoveryStatus();
-        if (status !== "quarantined") return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "already-active", ownerPrincipalId: session.principalId, recoveryStatus: "active", credentialFree: true, canonicalWrite: false, receipt: "authorityRecovery=activation-idempotent; recoveryStatus=active; state=unchanged; credentialMaterialStored=false" });
+        const currentRecovery = await this.ctx.storage.get<StoredAuthorityRecoveryCurrent>(REALM_AUTHORITY_RECOVERY_CURRENT_KEY);
+        if (status === "active" && !currentRecovery && bundleId === undefined && bundleDigest === undefined) return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "already-active", ownerPrincipalId: session.principalId, recoveryStatus: "active", credentialFree: true, canonicalWrite: false, receipt: "authorityRecovery=activation-idempotent; recoveryStatus=active; state=unchanged; credentialMaterialStored=false" });
         if (bundleId === undefined || bundleDigest === undefined) throw new AuthorityPlaneError({ code: "invalid_request", message: "Authority recovery activation requires the exact bundle ID and digest.", recoveryAction: "use the bundle ID and digest returned by the recovery restore receipt", receipt: "authorityRecovery=activation-bundle-required; activation=not-applied" });
+        if (!currentRecovery || currentRecovery.bundleId !== bundleId || currentRecovery.bundleDigest !== bundleDigest) throw new AuthorityPlaneError({ code: "conflict", message: "Authority recovery activation does not identify the current recovery generation.", recoveryAction: "use the current restore receipt; if the existing quarantine predates generation binding, export and restore a fresh signed bundle before activation", receipt: `authorityRecovery=activation-bundle-mismatch; generation=superseded-or-unbound; bundleId=${bundleId}; activation=not-applied; state=unchanged` });
         const restoreKey = `${REALM_AUTHORITY_RECOVERY_RESTORE_PREFIX}${bundleId}`;
         const stored = await this.ctx.storage.get<StoredAuthorityRecoveryRestore>(restoreKey);
         if (!stored || stored.bundleDigest !== bundleDigest) throw new AuthorityPlaneError({ code: "conflict", message: "Authority recovery activation does not match the quarantined bundle.", recoveryAction: "use the exact bundle ID and digest returned by the recovery restore receipt", receipt: `authorityRecovery=activation-bundle-mismatch; bundleId=${bundleId}; activation=not-applied` });
+        if (status === "active") return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "already-active", ownerPrincipalId: session.principalId, bundleId, snapshotVersion: stored.snapshotVersion, recoveryStatus: "active", credentialFree: true, canonicalWrite: false, receipt: "authorityRecovery=activation-idempotent; recoveryStatus=active; state=unchanged; credentialMaterialStored=false" });
+        // Version alone cannot distinguish two restored checkpoints at the same
+        // counter. Bind activation to the exact normalized SQL state as well.
+        const snapshot = this.authoritySqliteStore().readExisting(this.requireIdentity().realm.id);
+        if (!snapshot || snapshot.version !== currentRecovery.snapshotVersion || await authorityRecoverySnapshotDigest(snapshot) !== currentRecovery.snapshotDigest) throw new AuthorityPlaneError({ code: "stale_state", message: "Authority recovery activation snapshot no longer matches its current restore binding.", recoveryAction: "inspect the changed Authority state and export and restore a fresh signed bundle before activation", receipt: "authorityRecovery=activation-snapshot-mismatch; activation=not-applied; state=unchanged" });
         try {
           await this.ctx.storage.transaction(async () => {
             await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_STATUS_KEY, "active" satisfies AuthorityRecoveryStatus);

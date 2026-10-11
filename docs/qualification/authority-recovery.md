@@ -28,10 +28,24 @@ invent empty maps or deploy older code against a newer Authority schema.
 Restore holds the Durable Object concurrency gate across fresh authorization,
 replay inspection, validation, and replacement. One SQLite-backed storage
 transaction covers Authority SQL replacement, legacy KV deletion, quarantine
-status, and the restore receipt. It also covers complete-bundle initialization
+status, the current recovery binding, and the restore receipt. It also covers
+complete-bundle initialization
 or migration if needed. Activation checks the owner and passkey under the gate,
 then commits active status and the activation receipt together. The storage API
 [includes SQL and KV in the same transaction](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#transaction).
+
+The current binding uses the existing bundle ID/digest as the recovery generation
+and records the normalized restored snapshot's version and digest. Activation
+must match that generation and the exact quarantined SQL snapshot. An older
+receipt cannot activate a newer restore, even when both have the same version or
+identical snapshot content. A superseded restore replay is also rejected without
+changing the binding. Current restore and activation replays remain idempotent;
+normal mutations after activation do not invalidate its harmless replay.
+
+Older quarantines have no current binding and stay closed. Use the existing
+owner export to obtain a fresh signed bundle, restore it, then activate its exact
+ID/digest with a passkey Session. The Coordinator does not infer the current
+generation from a historical receipt. This adds no new authorization ceremony.
 
 A transaction that cannot be confirmed returns HTTP 503 with `indeterminate`
 and an `outcome=unconfirmed` receipt, without exposing the storage exception.
@@ -51,11 +65,15 @@ The actual Coordinator executes SQLite and KV in isolated Miniflare/workerd
 storage. Synthetic keys and identity fixtures remain local; outbound traffic is
 denied except the owned failure/concurrency control binding. Faults follow SQL
 replacement, KV deletion, quarantine, restore receipt, active status, and
-activation receipt writes, with a non-storage await between the write and fault.
+activation receipt writes, including the current binding write, with a
+non-storage await between the write and fault.
 Checks compare every Authority SQL row, every KV key, operational identity and
 credential state, then retry the identical request and verify its replay.
 Historical fixtures also cover lost baselines, mismatched state, invalid
 signatures, and a competing mutation held behind the real concurrency gate.
+Generation regressions cover superseded activation/restore replay, identical
+snapshots with distinct bundle identities, changed quarantined SQL state, and
+fresh signed restore of an older unbound quarantine.
 
 These checks qualify transaction rollback and retry locally. They do not prove
 production backup availability, a live restore drill, crash or account disaster

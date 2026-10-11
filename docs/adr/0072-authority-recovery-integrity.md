@@ -31,11 +31,17 @@ explain the rollback.
 7. Realm identity recovery remains a separate ceremony; this protocol does
    not restore or revoke identity, passkeys, sessions, or OAuth grants.
 8. On the SQLite-backed Realm Durable Object, restore commits Authority rows,
-   legacy KV removal, quarantine status, and the replay receipt in one storage
-   transaction. Activation commits active status and its receipt together.
+   legacy KV removal, quarantine status, current bundle/snapshot binding, and
+   the replay receipt in one storage transaction. Activation commits active
+   status and its receipt together.
    Authorization and state checks remain inside the concurrency gate.
    An unconfirmed transaction returns a sanitized retryable failure; callers
    retain the exact bundle and inspect its replay receipt before continuing.
+9. Activation matches the currently bound bundle ID/digest and the exact
+   quarantined normalized snapshot version/digest. Superseded receipts and
+   unbound older quarantines fail closed. A fresh signed export/restore uses the
+   existing owner ceremony to establish a binding; no historical receipt is
+   silently promoted to the current recovery generation.
 
 The [Authority recovery qualification boundary](../qualification/authority-recovery.md)
 documents supported historical field sets and the limits of local rollback tests.

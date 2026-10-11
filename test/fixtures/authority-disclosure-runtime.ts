@@ -35,12 +35,13 @@ export class LocalDisclosureRealm extends AnyamRealmCoordinator {
     if (typeof persistIdentity !== "function") throw new Error("missing actual identity persistence");
     await Reflect.apply(persistIdentity, this, []);
     for (const key of (await this.ctx.storage.list({ prefix: "anyam/realm-authority/recovery-restore/v1:" })).keys()) await this.ctx.storage.delete(key);
+    await this.ctx.storage.delete("anyam/realm-authority/recovery-current/v1");
     await this.ctx.storage.put("anyam/realm-authority/recovery-status/v1", "active");
     await this.ctx.storage.put("anyam/realm-authority/snapshot/v1", fixture.state);
     return { recoverySeeded: true };
   }
   async failRecoveryWriteOnce(stage: string) {
-    const stages = ["after-sql", "after-legacy-delete", "after-quarantine", "after-restore-receipt", "after-activation-status", "after-activation-receipt"];
+    const stages = ["after-sql", "after-legacy-delete", "after-quarantine", "after-current-binding", "after-restore-receipt", "after-activation-status", "after-activation-receipt"];
     if (!stages.includes(stage)) throw new Error("unknown owned recovery fault stage");
     const control: unknown = Reflect.get(this.env, "FIXTURE_RECOVERY_CONTROL");
     if (!control || typeof Reflect.get(control, "fetch") !== "function") throw new Error("missing owned recovery fault barrier");
@@ -64,12 +65,17 @@ export class LocalDisclosureRealm extends AnyamRealmCoordinator {
     Reflect.set(storage, "put", async (...args: unknown[]) => {
       const [key, value] = args;
       const statusMatches = key === "anyam/realm-authority/recovery-status/v1" && ((stage === "after-quarantine" && value === "quarantined") || (stage === "after-activation-status" && value === "active"));
+      const bindingMatches = key === "anyam/realm-authority/recovery-current/v1" && stage === "after-current-binding";
       const receiptMatches = typeof key === "string" && key.startsWith("anyam/realm-authority/recovery-restore/v1:") && typeof value === "object" && value !== null && ((stage === "after-restore-receipt" && !Object.hasOwn(value, "activatedAt")) || (stage === "after-activation-receipt" && Object.hasOwn(value, "activatedAt")));
       const result = await Reflect.apply(originalPut, storage, args);
-      if (statusMatches || receiptMatches) await fault();
+      if (statusMatches || bindingMatches || receiptMatches) await fault();
       return result;
     });
     return { recoveryFaultArmed: stage };
+  }
+  async removeRecoveryBinding() {
+    await this.ctx.storage.delete("anyam/realm-authority/recovery-current/v1");
+    return { recoveryBindingRemoved: true };
   }
   async removeAuthorityMeta(legacy: AuthorityPlaneSnapshot) {
     this.ctx.storage.sql.exec("DELETE FROM anyam_authority_meta");
@@ -146,6 +152,7 @@ export default { async fetch(request: Request, bindings: { REALM_COORDINATOR: Du
   if (url.pathname === "/fixture/seed") return Response.json(await realm.seed(await request.json() as Fixture));
   if (url.pathname === "/fixture/seed-recovery") return Response.json(await realm.seedRecovery(await request.json() as Fixture));
   if (url.pathname === "/fixture/fail-recovery-write-once") return Response.json(await realm.failRecoveryWriteOnce((await request.json() as { stage: string }).stage));
+  if (url.pathname === "/fixture/remove-recovery-binding") return Response.json(await realm.removeRecoveryBinding());
   if (url.pathname === "/fixture/replace-authority") return Response.json(await realm.replaceAuthority(await request.json() as AuthorityPlaneSnapshot));
   if (url.pathname === "/fixture/remove-authority-meta") return Response.json(await realm.removeAuthorityMeta(await request.json() as AuthorityPlaneSnapshot));
   if (url.pathname === "/fixture/pause-legacy-digest-once") return Response.json(await realm.pauseLegacyDigestOnce());

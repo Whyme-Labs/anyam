@@ -202,8 +202,8 @@ test("public disclosed write lifecycle, atomic retries and sealed owner detail u
     const legacy = structuredClone(sealedCheckpoint.authority); delete legacy.runDetails;
     const legacyBundle = await createAuthorityRecoveryBundle({ snapshot: legacy, bundleId: "bundle:synthetic-legacy", recoveryKeyId: "key:synthetic-runtime-only", secret: "synthetic-runtime-recovery-only" });
     await restore(legacyBundle);
-    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value.authority.runDetails, {}, "old signed bytes verify before new additive collection is defaulted");
-    assert.equal((await invoke(path, undefined, "owner")).status, 404, "legacy restore cannot fabricate accepted detail");
+    assert.deepEqual((await invoke("/fixture/checkpoint", {})).value.authority.runDetails, sealedCheckpoint.authority.runDetails, "old signed bytes verify before available authoritative run detail is preserved");
+    assert.deepEqual(await invoke(path, undefined, "owner"), rich, "legacy restore retains the existing accepted detail against the matching baseline");
     await invoke("/fixture/seed", { ...fixture, state: sealedCheckpoint.authority, identity: sealedCheckpoint.identity });
     for (const member of ["public", "private", "projectOwner", "unrelated"]) {
       const denied = await invoke(path, undefined, member); assert.equal(denied.status, 404, member);

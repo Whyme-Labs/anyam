@@ -30,6 +30,15 @@ and delegated MCP retain their coarse disclosure.
 Start with the [Anyam Quickstart](https://github.com/Whyme-Labs/anyam/blob/main/docs/guides/quickstart.md). Read the
 [documentation index](https://github.com/Whyme-Labs/anyam/blob/main/docs/README.md) for the design, Realm, and example guides.
 
+Hosted owner recovery uses `realm recovery inspect|export|restore|activate` with
+an existing human Session on stdin. Export and restore require a new `--output`
+file; restore and activation require `--input` and a stable `--idempotency-key`.
+The signed checkpoint and exact restore receipt are saved privately, without
+printing the snapshot or automatically activating it. Local installation
+`realm export/restore` is a separate record. Follow the
+[scoped pilot runbook](https://github.com/Whyme-Labs/anyam/blob/main/docs/runbooks/scoped-pilot.md)
+for the checkpoint, retry, Source boundaries and cutover sequence.
+
 ## Scaffold a Project
 
 All of these forms use the same package and produce the same local template:

@@ -107,6 +107,14 @@ The local restore records a `recovery-pending` checkpoint. Owner
 reauthentication and provider reconciliation remain separate steps. A restore receipt does not claim that
 provider resources or production authority were restored.
 
+For the hosted signed Authority checkpoint, use the separate
+`anyam realm recovery export|restore|activate` commands with an existing human
+Session on stdin. Export and restore save new private files; activation consumes
+the exact restore receipt and never runs automatically. The
+[scoped pilot runbook](../runbooks/scoped-pilot.md) gives the checkpoint,
+quarantine, retry and cutover sequence. Identity and provider state remain
+separate recovery boundaries.
+
 ## Production boundary
 
 The local repository gate and disposable qualification Workers are not

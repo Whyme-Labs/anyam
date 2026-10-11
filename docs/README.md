@@ -43,6 +43,9 @@ losing ordinary Git workflows.
 
 ## Operate and extend
 
+- [Scoped customer-operated pilot](runbooks/scoped-pilot.md) connects pinned
+  local CLI/agent journeys, signed Authority checkpoints and the reviewed
+  production cutover checklist.
 - [Offline Intent drafts](qualification/offline-intent-drafts.md) explains how
   to keep a local note, inspect current discussion, and publish it explicitly.
 - [Production operations and recovery](adr/0092-production-operations-control-room.md)

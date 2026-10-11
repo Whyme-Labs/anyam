@@ -45,9 +45,10 @@ Progress and completion use a new entity collection in the existing SQLite
 row store; older persisted Authority snapshots normalize the collection to empty
 and retain the Landing block. The SQL table schema and storage engine are
 unchanged. Current signed recovery bundles cover this collection, including its
-completion epoch. Hosted restore still requires every current snapshot field;
-a legacy signed bundle without this collection needs a fresh current export.
-Legacy hosted recovery compatibility is not qualified by this offline slice.
+completion epoch. Current signed hosted restores cover every snapshot field;
+a historical omission may use only the narrow intact-SQL compatibility path in
+the [Authority recovery qualification](authority-recovery.md). This offline
+slice does not reconstruct lost records or independently qualify that path.
 
 A qualified `FencedCanonicalRefProvider` must durably compare expected provider
 generation and ref OID, reject lower epochs and same-epoch selection reuse,

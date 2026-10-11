@@ -155,8 +155,8 @@ export class RealmAuthorityHttpClient {
   syncMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/mirrors/${encodeURIComponent(mirrorId)}/sync`, { method: "POST", body, idempotencyKey, allowStatuses: [409], allowBlocked: true }); }
   reconcileMirror(mirrorId: string, body: JsonObject, idempotencyKey: string): Promise<JsonObject> { return this.request(`/api/mirrors/${encodeURIComponent(mirrorId)}/reconcile`, { method: "POST", body, idempotencyKey, allowStatuses: [409], allowBlocked: true }); }
   exportAuthorityRecovery(): Promise<JsonObject> { return this.request("/api/authority/recovery/export", { method: "POST", body: {}, idempotencyKey: "qualification:authority-recovery-export" }); }
-  restoreAuthorityRecovery(bundle: JsonObject): Promise<JsonObject> { return this.request("/api/authority/recovery/restore", { method: "POST", body: { bundle }, idempotencyKey: "qualification:authority-recovery-restore" }); }
-  activateAuthorityRecovery(bundleId: string, bundleDigest: string): Promise<JsonObject> { return this.request("/api/authority/recovery/activate", { method: "POST", body: { bundleId, bundleDigest }, idempotencyKey: `qualification:authority-recovery-activate:${bundleId}` }); }
+  restoreAuthorityRecovery(bundle: JsonObject, idempotencyKey = "qualification:authority-recovery-restore"): Promise<JsonObject> { return this.request("/api/authority/recovery/restore", { method: "POST", body: { bundle }, idempotencyKey }); }
+  activateAuthorityRecovery(bundleId: string, bundleDigest: string, idempotencyKey = `qualification:authority-recovery-activate:${bundleId}`): Promise<JsonObject> { return this.request("/api/authority/recovery/activate", { method: "POST", body: { bundleId, bundleDigest }, idempotencyKey }); }
   command(input: { command: string; payload: JsonObject; idempotencyKey: string; expectedVersion?: number; allowStatuses?: readonly number[] }): Promise<JsonObject> {
     return this.request("/api/authority/command", {
       method: "POST",

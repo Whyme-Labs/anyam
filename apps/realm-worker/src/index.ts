@@ -40,7 +40,7 @@ import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } f
 import { handleAuthorityRequest } from "./authority-edge.ts";
 import { GITHUB_PRODUCER_CONTEXT_BODY_BYTES_LIMIT, GITHUB_PRODUCER_CONTEXT_BODY_SIZING_RECEIPT, handleGitHubWebhookRequest, readBoundedRequestBody } from "./github-webhook-route.ts";
 import { isMcpDeliveryOperation, mcpDeliveryScope, parseMcpDeliveryBinding, MCP_DELIVERY_OPERATIONS, type McpDeliveryOperation } from "./mcp-delivery-grant.ts";
-import { AUTHORITY_RECOVERY_PROTOCOL, AUTHORITY_RECOVERY_SNAPSHOT_FIELDS, createAuthorityRecoveryBundle, verifyAuthorityRecoveryBundle, type AuthorityRecoveryBundle } from "../../../src/cloudflare/authority-recovery.ts";
+import { AUTHORITY_RECOVERY_PROTOCOL, AUTHORITY_RECOVERY_SNAPSHOT_FIELDS, authorityRecoverySnapshotDigest, createAuthorityRecoveryBundle, verifyAuthorityRecoveryBundle, type AuthorityRecoveryBundle } from "../../../src/cloudflare/authority-recovery.ts";
 import { GitHubActionsBridgeAuthority, type GitHubActionsBridgeConnectionInput, type GitHubActionsEventName, type GitHubActionsBridgeOperation, type GitHubActionsBridgeSnapshot, type GitHubActionsOidcVerification } from "../../../src/portability/github-actions-bridge.ts";
 import { GitHubActionsBridgeImportCoordinator, MemoryGitHubActionsBridgeImportLedger, type GitHubActionsBridgeImportSnapshot, type GitHubActionsBridgeOwnerConfirmation, type GitHubActionsBridgeRepositoryImportReceipt } from "../../../src/portability/github-actions-bridge-import.ts";
 import { GitHubActionsBridgeOutboundCoordinator, MemoryGitHubActionsBridgeOutboundReplayLedger, type GitHubActionsBridgeOutboundSnapshot } from "../../../src/portability/github-actions-bridge-outbound.ts";
@@ -586,7 +586,7 @@ function authorityRecoveryCredentialField(value: unknown): string | undefined {
   return scanCredentialMaterial(value, "snapshot")?.path;
 }
 
-function authorityRecoverySnapshot(body: CoordinatorRequestBody, realmId: string): AuthorityPlaneSnapshot {
+async function authorityRecoverySnapshot(body: CoordinatorRequestBody, realmId: string, current: AuthorityPlaneSnapshot): Promise<{ snapshot: AuthorityPlaneSnapshot; compatibilityReceipt: string }> {
   const value = body.snapshot;
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new AuthorityPlaneError({
@@ -606,9 +606,13 @@ function authorityRecoverySnapshot(body: CoordinatorRequestBody, realmId: string
       receipt: `authorityRecoverySnapshot=unsupported-field; field=${unknownField}; restore=not-applied; credentialMaterialStored=false`,
     });
   }
-  // Previously signed bundles predate accepted Run detail. Verify the exact
-  // signed bytes first, then normalize this additive collection to empty.
-  const missingField = AUTHORITY_RECOVERY_SNAPSHOT_FIELDS.find((field) => field !== "runDetails" && !Object.prototype.hasOwnProperty.call(raw, field));
+  // The v1 wire format has no exporter/schema version. Recognize its known
+  // field sets only after signature verification in the restore caller.
+  // Absent additive maps can inherit current authoritative data, never empty
+  // defaults, and only when the entire normalized state/version still match.
+  const missingRunDetails = !Object.prototype.hasOwnProperty.call(raw, "runDetails");
+  const missingCanonical = !Object.prototype.hasOwnProperty.call(raw, "canonicalRefProjections");
+  const missingField = AUTHORITY_RECOVERY_SNAPSHOT_FIELDS.find((field) => field !== "runDetails" && !(field === "canonicalRefProjections" && missingRunDetails) && !Object.prototype.hasOwnProperty.call(raw, field));
   if (missingField) {
     throw new AuthorityPlaneError({
       code: "invalid_request",
@@ -642,8 +646,22 @@ function authorityRecoverySnapshot(body: CoordinatorRequestBody, realmId: string
       receipt: "authorityRecoverySnapshot=version-invalid; restore=not-applied; credentialMaterialStored=false",
     });
   }
+  for (const field of AUTHORITY_RECOVERY_SNAPSHOT_FIELDS) {
+    if (field === "protocol" || field === "realmId" || field === "version" || !Object.prototype.hasOwnProperty.call(raw, field)) continue;
+    const value = raw[field];
+    if (field === "audit" ? !Array.isArray(value) : value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new AuthorityPlaneError({ code: "invalid_request", message: `Authority recovery snapshot has an invalid ${field} collection.`, recoveryAction: "submit complete snapshot collections with their exported object/array shape; the existing Authority state is unchanged", receipt: `authorityRecoverySnapshot=collection-invalid; field=${field}; restore=not-applied; credentialMaterialStored=false` });
+    }
+  }
   try {
-    return normalizeAuthorityPlaneSnapshot(raw as AuthorityPlaneSnapshot);
+    const snapshot = normalizeAuthorityPlaneSnapshot({ ...raw, ...(missingRunDetails ? { runDetails: structuredClone(current.runDetails) } : {}), ...(missingCanonical ? { canonicalRefProjections: structuredClone(current.canonicalRefProjections) } : {}) } as AuthorityPlaneSnapshot);
+    if (missingRunDetails || missingCanonical) {
+      if (snapshot.version !== current.version || await authorityRecoverySnapshotDigest(snapshot) !== await authorityRecoverySnapshotDigest(current)) {
+        throw new AuthorityPlaneError({ code: "stale_state", message: "Legacy recovery cannot reconstruct missing additive collections from a different Authority state.", recoveryAction: "retain this signed checkpoint; recover matching authoritative collections and common state before retrying, or use a complete current export", receipt: "authorityRecoverySnapshot=legacy-baseline-mismatch; restore=not-applied; additiveCollections=not-defaulted; credentialMaterialStored=false" });
+      }
+      return { snapshot, compatibilityReceipt: `backupFieldSet=${missingCanonical ? "v1-pre-canonical-and-run-detail" : "v1-pre-run-detail"}; stateVersion=matched; normalizedStateDigest=matched; additiveCollections=preserved-current` };
+    }
+    return { snapshot, compatibilityReceipt: "backupFieldSet=v1-complete; additiveCollections=signed" };
   } catch (error) {
     if (error instanceof AuthorityPlaneError) throw error;
     throw new AuthorityPlaneError({
@@ -1050,28 +1068,45 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const humanSessionId = coordinatorString(body, "sessionId");
     coordinatorString(body, "idempotencyKey");
     const qualificationId = body.qualificationId === undefined ? undefined : coordinatorString(body, "qualificationId");
-    const session = this.authorityOwnerSession(humanSessionId);
+    this.authorityOwnerSession(humanSessionId);
     const recoveryKey = this.authorityRecoveryKey();
     const verification = await verifyAuthorityRecoveryBundle({ value: body.bundle, realmId: this.requireIdentity().realm.id, recoveryKeyId: recoveryKey.keyId, secret: recoveryKey.secret });
     if (!verification.valid) throw new AuthorityPlaneError({ code: verification.code === "bundle_digest_mismatch" ? "conflict" : "invalid_request", message: "Authority recovery bundle verification failed.", recoveryAction: verification.recoveryAction, receipt: `${verification.receipt}; credentialMaterialStored=false` });
     const bundle: AuthorityRecoveryBundle = verification.bundle;
     if (bundle.snapshot.version !== bundle.expectedVersion) throw new AuthorityPlaneError({ code: "invalid_request", message: "Authority recovery bundle version does not match its snapshot.", recoveryAction: "export a fresh recovery bundle and submit it unchanged", receipt: `authorityRecovery=version-mismatch; bundle=${bundle.expectedVersion}; snapshot=${bundle.snapshot.version}; restore=not-applied` });
-    const restoreKey = `${REALM_AUTHORITY_RECOVERY_RESTORE_PREFIX}${bundle.bundleId}`;
-    const existing = await this.ctx.storage.get<StoredAuthorityRecoveryRestore>(restoreKey);
-    if (existing) {
-      if (existing.bundleDigest !== bundle.bundleDigest) throw new AuthorityPlaneError({ code: "conflict", message: "Authority recovery bundle identity was already used with a different digest.", recoveryAction: "use a fresh export bundle identity; the existing quarantined state was not changed", receipt: `authorityRecovery=replay-conflict; bundleId=${bundle.bundleId}; restore=not-applied` });
-      const recoveryStatus = await this.authorityRecoveryStatus();
-      return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: recoveryStatus === "quarantined" ? "recovery-quarantined" : "recovery-already-active", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: existing.snapshotVersion, recoveryStatus, credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=replay-idempotent; bundleId=${bundle.bundleId}; recoveryStatus=${recoveryStatus}; state=unchanged; credentialMaterialStored=false` });
-    }
-    const current = await this.authoritySnapshot();
-    if (current.version !== bundle.expectedVersion && (qualificationId === undefined || !authorityQualificationCleanupAllowed({ current, exported: bundle.snapshot, qualificationId }))) throw new AuthorityPlaneError({ code: "stale_state", message: "Authority recovery bundle is stale for the current Authority version.", recoveryAction: "export a fresh bundle from the current Authority and retry; no snapshot was replaced", receipt: `authorityRecovery=stale; expectedVersion=${bundle.expectedVersion}; currentVersion=${current.version}; restore=not-applied` });
-    const snapshot = authorityRecoverySnapshot({ snapshot: bundle.snapshot }, this.requireIdentity().realm.id);
-    await this.ctx.blockConcurrencyWhile(async () => {
-      await this.replaceAuthoritySnapshot(snapshot);
-      await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_STATUS_KEY, "quarantined" satisfies AuthorityRecoveryStatus);
-      await this.ctx.storage.put(restoreKey, { protocol: AUTHORITY_RECOVERY_PROTOCOL, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: snapshot.version, restoredAt: new Date().toISOString() } satisfies StoredAuthorityRecoveryRestore);
+    return this.ctx.blockConcurrencyWhile(async () => {
+      // Hold the gate across replay lookup, fresh authorization, digest awaits,
+      // and replacement. A mutation accepted during validation must not be lost.
+      // Expected denials stay inside the gate so they do not reset the DO.
+      try {
+        const session = this.authorityOwnerSession(humanSessionId);
+        const restoreKey = `${REALM_AUTHORITY_RECOVERY_RESTORE_PREFIX}${bundle.bundleId}`;
+        const existing = await this.ctx.storage.get<StoredAuthorityRecoveryRestore>(restoreKey);
+        if (existing) {
+          if (existing.bundleDigest !== bundle.bundleDigest) throw new AuthorityPlaneError({ code: "conflict", message: "Authority recovery bundle identity was already used with a different digest.", recoveryAction: "use a fresh export bundle identity; the existing quarantined state was not changed", receipt: `authorityRecovery=replay-conflict; bundleId=${bundle.bundleId}; restore=not-applied` });
+          const recoveryStatus = await this.authorityRecoveryStatus();
+          return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: recoveryStatus === "quarantined" ? "recovery-quarantined" : "recovery-already-active", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: existing.snapshotVersion, recoveryStatus, credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=replay-idempotent; bundleId=${bundle.bundleId}; recoveryStatus=${recoveryStatus}; state=unchanged; credentialMaterialStored=false` });
+        }
+        const realmId = this.requireIdentity().realm.id;
+        const additiveOmission = !Object.hasOwn(bundle.snapshot, "runDetails") || !Object.hasOwn(bundle.snapshot, "canonicalRefProjections");
+        // Legacy KV hydration/empty initialization would invent absent maps and
+        // may delete orphaned SQL rows. Legacy compatibility needs an existing
+        // schema-qualified SQL baseline; this read neither initializes nor migrates.
+        const current = additiveOmission ? this.authoritySqliteStore().readExisting(realmId) : await this.authoritySnapshot();
+        if (!current) throw new AuthorityPlaneError({ code: "stale_state", message: "Legacy recovery requires an intact current Authority SQL baseline.", recoveryAction: "retain the signed checkpoint and recover the authoritative SQL baseline before retrying; missing additive collections cannot be inferred from legacy KV", receipt: "authorityRecovery=legacy-baseline-missing; restore=not-applied; additiveCollections=not-defaulted; credentialMaterialStored=false" });
+        if (current.version !== bundle.expectedVersion && (qualificationId === undefined || !authorityQualificationCleanupAllowed({ current, exported: bundle.snapshot, qualificationId }))) throw new AuthorityPlaneError({ code: "stale_state", message: "Authority recovery bundle is stale for the current Authority version.", recoveryAction: "export a fresh bundle from the current Authority and retry; no snapshot was replaced", receipt: `authorityRecovery=stale; expectedVersion=${bundle.expectedVersion}; currentVersion=${current.version}; restore=not-applied` });
+        const { snapshot, compatibilityReceipt } = await authorityRecoverySnapshot({ snapshot: bundle.snapshot }, realmId, current);
+        await this.replaceAuthoritySnapshot(snapshot);
+        await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_STATUS_KEY, "quarantined" satisfies AuthorityRecoveryStatus);
+        await this.ctx.storage.put(restoreKey, { protocol: AUTHORITY_RECOVERY_PROTOCOL, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: snapshot.version, restoredAt: new Date().toISOString() } satisfies StoredAuthorityRecoveryRestore);
+        return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-quarantined", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: snapshot.version, recoveryStatus: "quarantined", credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=restored; version=${snapshot.version}; state=quarantined; auditChain=signed; qualificationCleanup=${qualificationId === undefined ? "false" : "authorized"}; ${compatibilityReceipt}; credentialMaterialStored=false; canonicalWrite=false` });
+      } catch (error) {
+        if (error instanceof AuthorityPlaneError || error instanceof RealmIdentityError) return coordinatorError(error);
+        // Unexpected storage/crypto failures retain the existing reset behavior;
+        // they are not input denials or proof that restore bookkeeping is atomic.
+        throw error;
+      }
     });
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-quarantined", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: snapshot.version, recoveryStatus: "quarantined", credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=restored; version=${snapshot.version}; state=quarantined; auditChain=signed; qualificationCleanup=${qualificationId === undefined ? "false" : "authorized"}; credentialMaterialStored=false; canonicalWrite=false` });
   }
 
   private async authorityRecoveryActivate(body: CoordinatorRequestBody): Promise<Response> {

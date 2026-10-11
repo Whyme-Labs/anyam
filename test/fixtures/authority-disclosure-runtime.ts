@@ -29,12 +29,43 @@ export class LocalDisclosureRealm extends AnyamRealmCoordinator {
     store.replace(state);
     return { replaced: true };
   }
+  async removeAuthorityMeta(legacy: AuthorityPlaneSnapshot) {
+    this.ctx.storage.sql.exec("DELETE FROM anyam_authority_meta");
+    await this.ctx.storage.put("anyam/realm-authority/snapshot/v1", legacy);
+    return { metaRemoved: true };
+  }
+  async pauseLegacyDigestOnce() {
+    await this.ctx.storage.put("anyam/realm-authority/recovery-status/v1", "active");
+    const control: unknown = Reflect.get(this.env, "FIXTURE_RECOVERY_CONTROL");
+    if (!control || typeof Reflect.get(control, "fetch") !== "function") throw new Error("missing owned recovery barrier");
+    const originalGate = this.ctx.blockConcurrencyWhile;
+    let gateActive = false;
+    Reflect.set(this.ctx, "blockConcurrencyWhile", <T>(callback: () => Promise<T>) => originalGate.call(this.ctx, async () => {
+      gateActive = true;
+      try { return await callback(); } finally { gateActive = false; }
+    }));
+    const originalDigest = crypto.subtle.digest;
+    Reflect.set(crypto.subtle, "digest", async (algorithm: AlgorithmIdentifier, data: BufferSource) => {
+      const text = new TextDecoder().decode(data);
+      // The original legacy signature has no additive maps. Pause only the
+      // normalized-state SHA, after real signature verification has completed.
+      if (text.startsWith("{") && text.includes('"protocol":"anyam.authority-plane/v1"') && text.includes('"projection:retained"') && !text.includes('"bundleDigest"')) {
+        Reflect.set(crypto.subtle, "digest", originalDigest);
+        try {
+          await (control as Fetcher).fetch(`http://fixture-control/legacy-digest?gateActive=${gateActive}`);
+        } finally { Reflect.set(this.ctx, "blockConcurrencyWhile", originalGate); }
+      }
+      return originalDigest.call(crypto.subtle, algorithm, data);
+    });
+    return { digestPauseArmed: true };
+  }
   async members() { return await this.ctx.storage.get<Fixture["members"]>("fixture-members"); }
   async checkpoint() {
     const identity: unknown = Reflect.get(this, "identity");
     if (!(identity instanceof RealmIdentityPolicy)) throw new Error("missing current identity");
     const store = new AuthoritySQLiteStore(this.ctx.storage as unknown as AuthoritySqlHost, { empty: emptyAuthorityPlaneSnapshot, normalize: normalizeAuthorityPlaneSnapshot });
-    return { identity: identity.getRecoverySnapshot(), operationalCredentialRecords: identity.snapshot().credentials, authority: store.load(identity.realm.id), keys: Object.fromEntries(await this.ctx.storage.list()) };
+    const sqlRows = Object.fromEntries(["meta", "entities", "audit_events", "idempotency", "migrations"].map(name => [name, this.ctx.storage.sql.exec(`SELECT * FROM anyam_authority_${name} ORDER BY 1, 2`).toArray()]));
+    return { identity: identity.getRecoverySnapshot(), operationalCredentialRecords: identity.snapshot().credentials, authority: store.readExisting(identity.realm.id), keys: Object.fromEntries(await this.ctx.storage.list()), sqlRows };
   }
   async issueSyntheticCredential() {
     const identity: unknown = Reflect.get(this, "identity");
@@ -67,11 +98,19 @@ export class LocalDisclosureRealm extends AnyamRealmCoordinator {
     return { revoked: true };
   }
 }
-export default { async fetch(request: Request, bindings: { REALM_COORDINATOR: DurableObjectNamespace<LocalDisclosureRealm> }) {
+export default { async fetch(request: Request, bindings: { REALM_COORDINATOR: DurableObjectNamespace<LocalDisclosureRealm>; FIXTURE_RECOVERY_CONTROL?: Fetcher }) {
   const url = new URL(request.url);
   const realm = bindings.REALM_COORDINATOR.get(bindings.REALM_COORDINATOR.idFromName("realm:disclosure-local"));
   if (url.pathname === "/fixture/seed") return Response.json(await realm.seed(await request.json() as Fixture));
   if (url.pathname === "/fixture/replace-authority") return Response.json(await realm.replaceAuthority(await request.json() as AuthorityPlaneSnapshot));
+  if (url.pathname === "/fixture/remove-authority-meta") return Response.json(await realm.removeAuthorityMeta(await request.json() as AuthorityPlaneSnapshot));
+  if (url.pathname === "/fixture/pause-legacy-digest-once") return Response.json(await realm.pauseLegacyDigestOnce());
+  if (url.pathname === "/fixture/competing-authority-command") {
+    const forwarded = new Request("http://localhost/authority/command/internal", request);
+    const pending = realm.fetch(forwarded);
+    await bindings.FIXTURE_RECOVERY_CONTROL!.fetch("http://fixture-control/competing-dispatched");
+    return pending;
+  }
   if (url.pathname === "/fixture/revoke") return Response.json(await realm.revoke((await request.json() as { sessionId: string }).sessionId));
   if (url.pathname === "/fixture/checkpoint") return Response.json(await realm.checkpoint());
   if (url.pathname === "/fixture/fail-identity-write-once") return Response.json(await realm.failIdentityWriteOnce());

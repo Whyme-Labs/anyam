@@ -1,0 +1,132 @@
+{
+  "exporterSourceSha": "188e1d64b294c0eb8d8ecbabfad947e2eee24164",
+  "synthetic": true,
+  "signedBundle": {
+    "protocol": "anyam.authority-recovery/v1",
+    "bundleId": "authentic-pre-additive-v1",
+    "realmId": "realm:disclosure-local",
+    "expectedVersion": 1,
+    "snapshotDigest": "sha256:01030dc7b7bb4fc1e97cc6f1190aaad4ec14d079bf83a73a9c74b8d98aee27a6",
+    "auditChainDigest": "sha256:d943aeda95244f27d573b6d30d4c145003056a22eee298d21fd9ba8bf423c195",
+    "recoveryKeyId": "synthetic-key",
+    "issuedAt": "2026-10-11T08:00:00Z",
+    "snapshot": {
+      "protocol": "anyam.authority-plane/v1",
+      "realmId": "realm:disclosure-local",
+      "version": 1,
+      "projects": {
+        "project:legacy": {
+          "protocol": "anyam.project/v1",
+          "id": "project:legacy",
+          "name": "Historical signed fixture",
+          "referenceType": "git",
+          "sourceSpaceIds": [
+            "source:legacy"
+          ]
+        }
+      },
+      "sourceSpaces": {
+        "source:legacy": {
+          "protocol": "anyam.source-space/v1",
+          "id": "source:legacy",
+          "name": "Historical source",
+          "classification": "public",
+          "repositoryId": "repository:legacy"
+        }
+      },
+      "projectRevisions": {
+        "revision:legacy-base": {
+          "protocol": "anyam.kernel/v1",
+          "id": "revision:legacy-base",
+          "projectId": "project:legacy",
+          "sourceSpaceSnapshots": {
+            "source:legacy": "1111111111111111111111111111111111111111"
+          }
+        }
+      },
+      "intents": {},
+      "intentComments": {},
+      "pullRequests": {},
+      "projectViews": {},
+      "workspaces": {},
+      "changes": {},
+      "changeRevisions": {},
+      "runs": {},
+      "runnerProfiles": {},
+      "runnerAttempts": {},
+      "evidence": {},
+      "artifacts": {},
+      "landings": {},
+      "releases": {},
+      "targets": {},
+      "promotions": {},
+      "mirrors": {},
+      "mirrorOperations": {},
+      "mirrorCheckpoints": {},
+      "externalProposals": {},
+      "mirrorDeliveries": {},
+      "canonicalByProject": {
+        "project:legacy": "revision:legacy-base"
+      },
+      "idempotency": {
+        "legacy-project-create": {
+          "fingerprint": "{\"protocol\":\"anyam.authority-command/v1\",\"command\":\"project.create\",\"idempotencyKey\":\"legacy-project-create\",\"payload\":{\"projectId\":\"project:legacy\",\"name\":\"Historical signed fixture\",\"referenceType\":\"git\",\"projectRevisionId\":\"revision:legacy-base\",\"sourceSpaces\":[{\"id\":\"source:legacy\",\"name\":\"Historical source\",\"classification\":\"public\",\"repositoryId\":\"repository:legacy\",\"snapshotId\":\"1111111111111111111111111111111111111111\"}]}}",
+          "result": {
+            "protocol": "anyam.authority-plane/v1",
+            "command": "project.create",
+            "status": "succeeded",
+            "version": 1,
+            "value": {
+              "project": {
+                "protocol": "anyam.project/v1",
+                "id": "project:legacy",
+                "name": "Historical signed fixture",
+                "referenceType": "git",
+                "sourceSpaceIds": [
+                  "source:legacy"
+                ]
+              },
+              "canonicalRevision": {
+                "protocol": "anyam.kernel/v1",
+                "id": "revision:legacy-base",
+                "projectId": "project:legacy",
+                "sourceSpaceSnapshots": {
+                  "source:legacy": "1111111111111111111111111111111111111111"
+                }
+              },
+              "sourceSpaces": [
+                {
+                  "protocol": "anyam.source-space/v1",
+                  "id": "source:legacy",
+                  "name": "Historical source",
+                  "classification": "public",
+                  "repositoryId": "repository:legacy"
+                }
+              ]
+            },
+            "receipt": "project=project:legacy; canonicalRevision=revision:legacy-base; sourceTransfer=not-performed; authority=coordinator"
+          }
+        }
+      },
+      "audit": [
+        {
+          "id": "authority-audit:5a2bcee9-f3ad-408d-a164-17d82bf78cea",
+          "command": "project.create",
+          "idempotencyKey": "legacy-project-create",
+          "actor": {
+            "principalId": "principal:legacy-owner",
+            "actorId": "actor:legacy-owner",
+            "sessionId": "session:legacy-owner",
+            "clientId": "client:legacy-fixture"
+          },
+          "outcome": "succeeded",
+          "stateVersion": 1,
+          "occurredAt": "2026-10-11T07:50:03.672Z",
+          "receipt": "project=project:legacy; canonicalRevision=revision:legacy-base; sourceTransfer=not-performed; authority=coordinator"
+        }
+      ]
+    },
+    "bundleDigest": "sha256:902c7bcfabd7f71144abf71c47a28ef257dd27bdbb437f35980656330b5703c0",
+    "signature": "HujAm2Yr65E4TPeGARSejUOaOmeTVMn6uo0MpZHQHIA"
+  }
+}

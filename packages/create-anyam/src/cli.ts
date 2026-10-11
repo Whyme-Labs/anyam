@@ -13,6 +13,7 @@ import type { Readable } from "node:stream";
 import { runRealmSourceCommand } from "./realm-source-command.js";
 import { executeThroughWorkspaceBroker, removeWorkspaceBrokerLocator, startWorkspaceCommandBroker } from "./workspace-broker.js";
 import { evaluateNativeRecording } from "./native-recording.js";
+import { runRealmRecoveryCommand } from "./realm-recovery-command.js";
 
 const valueFlags = new Set([
   "--resource-policy", "--allow-path", "--allow-action", "--type", "--name", "--agent", "--directory", "--mode", "--session", "--method",
@@ -20,7 +21,7 @@ const valueFlags = new Set([
   "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--body-file",
   "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key",
   "--remote-repository", "--review-state", "--review-digest", "--revision", "--id", "--scope", "--client-id", "--recording", "--thread", "--candidate-commit",
-  "--recording-root", "--input",
+  "--recording-root", "--input", "--output",
 ]);
 
 function optionIndices(args: readonly string[], flag: string): readonly number[] {
@@ -140,6 +141,7 @@ function printHelp(): void {
   console.log("realm plan|install|upgrade|doctor|export|restore|destroy  customer-operated lifecycle");
   console.log("realm project|workspace|change|revision|run inspect --realm <url> --id <id> --session-stdin [--json]  disclosed hosted reads");
   console.log("realm run detail --realm <url> --id <run-id> --session-stdin [--json]  accepted signed detail for a current Realm owner");
+  console.log("realm recovery inspect|export|restore|activate --realm <url> --session-stdin [--json]  signed Authority checkpoints; export/restore require --output, restore/activate require --input and --idempotency-key");
   console.log("realm workspace create|change create|revision publish|run request --realm <url> --input <json-file> --idempotency-key <key> --session-stdin [--json]  disclosed hosted writes");
   console.log("intent list|inspect|create|assign|comment|close|reopen  hosted Realm Intent lifecycle (--realm, --owner-session or ANYAM_OWNER_SESSION)");
   console.log("intent comment <id> --body <text>|--body-file <path>  explicitly publish a saved Intent note (use the same --idempotency-key when retrying)");
@@ -267,6 +269,11 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
   }
 
   if (command === "realm") {
+    if (subcommand === "recovery") {
+      const result = await runRealmRecoveryCommand(args, input, cwd);
+      printResult(result, json, JSON.stringify(result, null, 2));
+      return 0;
+    }
     if (["project", "workspace", "change", "revision", "run"].includes(subcommand ?? "")) {
       const result = await runRealmSourceCommand(args, input);
       printResult(result, json, JSON.stringify(result, null, 2));

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { build } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
@@ -9,6 +10,59 @@ import { disclosureFixture } from "./fixtures/authority-disclosure-state.ts";
 import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } from "../apps/realm-worker/src/coordinator-protocol.ts";
 import { emptyAuthorityPlaneSnapshot, normalizeAuthorityPlaneSnapshot } from "../src/cloudflare/authority-plane.ts";
 import { createAuthorityRecoveryBundle, verifyAuthorityRecoveryBundle } from "../src/cloudflare/authority-recovery.ts";
+
+test("actual operator CLI exports, restores, restarts, refuses stale activation and recovers an unconfirmed restore", { timeout: 120_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "anyam-recovery-operator-cli-")); let runtime;
+  try {
+    const worker = await build({ entryPoints: ["test/fixtures/authority-disclosure-runtime.ts"], bundle: true, write: false, format: "esm", platform: "browser", target: "es2022", external: ["cloudflare:workers", "node:*"] });
+    const cliFile = resolve("packages/create-anyam/src/anyam.ts");
+    const loader = resolve("node_modules/tsx/dist/loader.mjs");
+    const options = convertV4MiniflareOptions({ name: "recovery-operator-owned-local", modules: true, script: worker.outputFiles[0].text, compatibilityDate: "2026-07-27", compatibilityFlags: ["nodejs_compat", "global_fetch_strictly_public"], bindings: { ANYAM_AUTHORITY_RECOVERY_KEY_ID: "synthetic-key", ANYAM_AUTHORITY_RECOVERY_SECRET: "synthetic-local-only" }, durableObjects: { REALM_COORDINATOR: { className: "LocalDisclosureRealm", useSQLite: true } }, serviceBindings: { FIXTURE_RECOVERY_CONTROL: () => new Response("owned fault barrier") }, outboundService: () => new Response("outbound disabled", { status: 403 }) });
+    options.telemetry = { enabled: false }; options.resourcePersistencePath = join(directory, "storage");
+    runtime = new Miniflare(options); let base = (await runtime.ready).toString();
+    const invoke = async (path, body = {}) => { const response = await runtime.dispatchFetch(`http://localhost${path}`, { method: "POST", headers: { "content-type": "application/json", [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE }, body: JSON.stringify(body) }); return { status: response.status, value: await response.json() }; };
+    const checkpoint = async () => (await invoke("/fixture/checkpoint")).value;
+    const cli = (operation, flags = [], member = "owner") => new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ["--import", loader, cliFile, "realm", "recovery", operation, "--realm", base, "--session-stdin", "--json", ...flags], { cwd: directory, env: { PATH: process.env.PATH, ANYAM_STATE_HOME: join(directory, "state") }, stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = ""; let stderr = "";
+      child.stdout.on("data", chunk => { stdout += chunk; }); child.stderr.on("data", chunk => { stderr += chunk; });
+      child.once("error", reject); child.once("close", code => resolve({ code, stdout, stderr, value: stdout.trim() ? JSON.parse(stdout) : undefined }));
+      child.stdin.end(`synthetic-${member}\n`);
+    });
+    const accepted = async action => { const result = await action; assert.equal(result.code, 0, result.stderr || result.stdout); assert.doesNotMatch(result.stdout + result.stderr, /synthetic-local-only|synthetic-owner/u); return result.value; };
+    const output = name => join(directory, name + ".json");
+    const exportFile = async name => { const path = output(name); const receipt = await accepted(cli("export", ["--output", path])); assert.equal((await stat(path)).mode & 0o777, 0o600); const signed = JSON.parse(await readFile(path, "utf8")); assert.equal(receipt.bundleId, signed.bundleId); assert.equal((await verifyAuthorityRecoveryBundle({ value: signed, realmId: signed.realmId, recoveryKeyId: "synthetic-key", secret: "synthetic-local-only" })).valid, true); assert.equal(Object.hasOwn(receipt, "snapshot"), false); assert.equal(Object.hasOwn(receipt, "bundle"), false); return path; };
+    const restoreFile = async (path, name, key = name) => { const target = output(name); const value = await accepted(cli("restore", ["--input", path, "--output", target, "--idempotency-key", key])); const saved = JSON.parse(await readFile(target, "utf8")); assert.equal(value.bundleId, saved.bundleId); assert.equal(value.bundleDigest, saved.bundleDigest); assert.equal((await stat(target)).mode & 0o777, 0o600); return target; };
+    const activateFile = path => cli("activate", ["--input", path, "--idempotency-key", "activate-exact"]);
+    const f = disclosureFixture();
+    // The seed clock is synthetic; restarted production code uses wall time.
+    // Keep these pre-existing fixture sessions valid across the owned restart.
+    for (const session of Object.values(f.identity.sessions)) session.expiresAt = "2099-01-01T00:00:00Z";
+    for (const member of Object.values(f.members)) member.session.expiresAt = "2099-01-01T00:00:00Z";
+    await invoke("/fixture/seed-recovery", f);
+    const initial = await checkpoint(); const a = await exportFile("A"); assert.deepEqual(await checkpoint(), initial);
+    const aReceipt = await restoreFile(a, "restore-A"); await accepted(activateFile(aReceipt));
+    assert.equal((await accepted(cli("inspect"))).recoveryStatus, "active");
+    const b = await exportFile("B"); const bReceipt = await restoreFile(b, "restore-B"); const quarantined = await checkpoint();
+    assert.equal((await accepted(cli("inspect"))).recoveryStatus, "quarantined");
+    assert.equal((await activateFile(aReceipt)).code, 1); assert.deepEqual(await checkpoint(), quarantined);
+    const superseded = await cli("restore", ["--input", a, "--output", output("superseded"), "--idempotency-key", "restore-A"]);
+    assert.equal(superseded.code, 1); await assert.rejects(stat(output("superseded")), { code: "ENOENT" }); assert.deepEqual(await checkpoint(), quarantined);
+    // Reopen the same real SQLite/KV storage without reseeding Authority or identity.
+    await runtime.dispose(); runtime = new Miniflare(options); base = (await runtime.ready).toString();
+    await accepted(activateFile(bReceipt)); const activeB = await checkpoint();
+    assert.equal((await accepted(activateFile(bReceipt))).status, "already-active"); assert.deepEqual(await checkpoint(), activeB);
+    const c = await exportFile("C"); await invoke("/fixture/fail-recovery-write-once", { stage: "after-current-binding" });
+    const failed = await cli("restore", ["--input", c, "--output", output("failed-C"), "--idempotency-key", "restore-C"]);
+    assert.equal(failed.code, 1); assert.match(failed.stderr, /unconfirmed/u); assert.doesNotMatch(failed.stderr, /owned recovery fault|synthetic-local-only/u);
+    await assert.rejects(stat(output("failed-C")), { code: "ENOENT" }); assert.deepEqual(await checkpoint(), activeB);
+    const cReceipt = await restoreFile(c, "restore-C-retry", "restore-C"); await accepted(activateFile(cReceipt));
+    const activeC = await checkpoint(); const tampered = JSON.parse(await readFile(c, "utf8")); tampered.snapshot.projects["project:fixture"].name = "Tampered"; await writeFile(output("tampered"), JSON.stringify(tampered));
+    assert.equal((await cli("restore", ["--input", output("tampered"), "--output", output("tampered-receipt"), "--idempotency-key", "tampered"])).code, 1);
+    await assert.rejects(stat(output("tampered-receipt")), { code: "ENOENT" }); assert.deepEqual(await checkpoint(), activeC);
+    assert.equal((await cli("export", ["--output", output("project-owner")], "projectOwner")).code, 1); await assert.rejects(stat(output("project-owner")), { code: "ENOENT" }); assert.deepEqual(await checkpoint(), activeC);
+  } finally { await runtime?.dispose(); await rm(directory, { recursive: true, force: true }); }
+});
 
 test("recovery activation binds the current bundle and exact quarantined snapshot, with safe replay and legacy upgrade", { timeout: 120_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "anyam-recovery-generation-")); let runtime;

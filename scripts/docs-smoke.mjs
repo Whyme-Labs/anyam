@@ -7,6 +7,7 @@ const required = [
   "docs/README.md",
   "docs/guides/quickstart.md",
   "docs/guides/customer-realm.md",
+  "docs/runbooks/scoped-pilot.md",
   "docs/product/design-philosophy.md",
   "docs/design/architecture.md",
   "docs/examples/README.md",

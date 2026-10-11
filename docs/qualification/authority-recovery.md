@@ -47,6 +47,16 @@ owner export to obtain a fresh signed bundle, restore it, then activate its exac
 ID/digest with a passkey Session. The Coordinator does not infer the current
 generation from a historical receipt. This adds no new authorization ceremony.
 
+The operator CLI exposes `realm recovery inspect|export|restore|activate` using
+only an explicit existing human Session on stdin. Export preserves the signed
+bundle in a new private file; restore preserves its exact returned receipt in
+another new private file. Activation consumes that receipt's bundle ID/digest
+with an explicit idempotency key. It does not automatically retry or activate,
+and local installation `realm export/restore` remains a separate record. Follow
+the [scoped pilot runbook](../runbooks/scoped-pilot.md) for the file, retry and
+cutover procedures. The CLI does not locally attest the HMAC or full backup
+coverage; the Coordinator remains the authority.
+
 A transaction that cannot be confirmed returns HTTP 503 with `indeterminate`
 and an `outcome=unconfirmed` receipt, without exposing the storage exception.
 Keep the exact bundle, bundle ID/digest, and idempotency key; retry with a valid

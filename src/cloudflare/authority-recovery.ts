@@ -136,6 +136,9 @@ export async function verifyAuthorityRecoveryBundle(input: {
 }): Promise<AuthorityRecoveryVerification> {
   if (!isRecord(input.value)) return { valid: false, code: "bundle_invalid", recoveryAction: "submit the exact signed recovery bundle returned by Authority export", receipt: "authorityRecovery=bundle-object-required; restore=not-applied" };
   const value = input.value;
+  if (value.protocol !== AUTHORITY_RECOVERY_PROTOCOL) return { valid: false, code: "bundle_invalid", recoveryAction: "submit an unchanged supported Authority recovery bundle", receipt: "authorityRecovery=bundle-protocol-unsupported; restore=not-applied" };
+  const unknownField = Object.keys(value).find((field) => !["protocol", "bundleId", "realmId", "expectedVersion", "snapshotDigest", "auditChainDigest", "recoveryKeyId", "issuedAt", "snapshot", "bundleDigest", "signature"].includes(field));
+  if (unknownField) return { valid: false, code: "bundle_invalid", recoveryAction: "submit only the fields in the signed Authority recovery export", receipt: `authorityRecovery=bundle-field-unsupported; field=${unknownField}; restore=not-applied` };
   const finding = scanCredentialMaterial(value, "authorityRecovery");
   if (finding) return { valid: false, code: "credential_material", recoveryAction: "export a credential-free Authority recovery bundle and retry without provider secrets", receipt: `authorityRecovery=credential-material-rejected; field=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; restore=not-applied` };
   const snapshot = value.snapshot;

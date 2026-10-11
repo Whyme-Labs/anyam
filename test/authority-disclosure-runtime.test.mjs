@@ -10,6 +10,67 @@ import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } f
 import { emptyAuthorityPlaneSnapshot, normalizeAuthorityPlaneSnapshot } from "../src/cloudflare/authority-plane.ts";
 import { createAuthorityRecoveryBundle, verifyAuthorityRecoveryBundle } from "../src/cloudflare/authority-recovery.ts";
 
+test("recovery activation binds the current bundle and exact quarantined snapshot, with safe replay and legacy upgrade", { timeout: 120_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "anyam-recovery-generation-")); let runtime;
+  try {
+    const bundled = await build({ entryPoints: ["test/fixtures/authority-disclosure-runtime.ts"], bundle: true, write: false, format: "esm", platform: "browser", target: "es2022", external: ["cloudflare:workers", "node:*"] });
+    const options = convertV4MiniflareOptions({ name: "recovery-generation-owned-local", modules: true, script: bundled.outputFiles[0].text, compatibilityDate: "2026-07-27", compatibilityFlags: ["nodejs_compat", "global_fetch_strictly_public"], bindings: { ANYAM_AUTHORITY_RECOVERY_KEY_ID: "synthetic-key", ANYAM_AUTHORITY_RECOVERY_SECRET: "synthetic-local-only" }, durableObjects: { REALM_COORDINATOR: { className: "LocalDisclosureRealm", useSQLite: true } }, serviceBindings: { FIXTURE_RECOVERY_CONTROL: () => new Response("owned binding-write fault") }, outboundService: () => new Response("outbound disabled", { status: 403 }) });
+    options.telemetry = { enabled: false }; options.resourcePersistencePath = join(directory, "storage"); runtime = new Miniflare(options);
+    const invoke = async (path, body = {}) => { const response = await runtime.dispatchFetch(`http://localhost${path}`, { method: "POST", headers: { "content-type": "application/json", [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE }, body: JSON.stringify(body) }); return { status: response.status, value: await response.json() }; };
+    const f = disclosureFixture(); const sessionId = f.members.owner.session.id;
+    const seed = async () => { assert.equal((await invoke("/fixture/seed-recovery", f)).status, 200); };
+    const checkpoint = async () => (await invoke("/fixture/checkpoint")).value;
+    const make = async (id, state = f.state) => { const snapshot = normalizeAuthorityPlaneSnapshot(structuredClone(state)); if (state === f.state) snapshot.projects["project:fixture"].name = `Checkpoint ${id}`; return createAuthorityRecoveryBundle({ snapshot, bundleId: id, recoveryKeyId: "synthetic-key", secret: "synthetic-local-only" }); };
+    const restore = signed => invoke("/authority/recovery/restore/internal", { sessionId, idempotencyKey: `restore-${signed.bundleId}`, bundle: signed });
+    const activate = signed => invoke("/authority/recovery/activate/internal", { sessionId, idempotencyKey: `activate-${signed.bundleId}`, bundleId: signed.bundleId, bundleDigest: signed.bundleDigest });
+    const accepted = async action => { const result = await action; assert.equal(result.status, 200, JSON.stringify(result)); return result; };
+    await seed(); const a = await make("A"); const b = await make("B"); assert.equal(a.expectedVersion, b.expectedVersion);
+    await accepted(restore(a)); await accepted(activate(a)); const activeA = await checkpoint();
+    assert.equal((await accepted(activate(a))).value.status, "already-active"); assert.deepEqual(await checkpoint(), activeA);
+    await accepted(restore(b)); const quarantinedB = await checkpoint();
+    assert.equal(quarantinedB.authority.projects["project:fixture"].name, "Checkpoint B");
+    assert.equal(quarantinedB.keys["anyam/realm-authority/recovery-current/v1"].bundleId, "B");
+    // The reproduced A/activate-A/B/activate-A sequence must refuse before
+    // status or either receipt changes, even though both state counters match.
+    const staleActivation = await activate(a); assert.equal(staleActivation.status, 409); assert.match(staleActivation.value.receipt, /generation=superseded-or-unbound/u);
+    assert.deepEqual(await checkpoint(), quarantinedB);
+    const staleRestoreReplay = await restore(a); assert.equal(staleRestoreReplay.status, 409); assert.match(staleRestoreReplay.value.receipt, /replay-superseded-or-unbound/u);
+    assert.deepEqual(await checkpoint(), quarantinedB);
+    await accepted(restore(b)); assert.deepEqual(await checkpoint(), quarantinedB);
+    await accepted(activate(b)); const activeB = await checkpoint();
+    assert.equal((await accepted(activate(b))).value.status, "already-active"); assert.deepEqual(await checkpoint(), activeB);
+    // Distinct bundles over identical snapshots are distinct generations.
+    const c = await make("C", b.snapshot);
+    await accepted(invoke("/fixture/fail-recovery-write-once", { stage: "after-current-binding" }));
+    assert.equal((await restore(c)).status, 503); assert.deepEqual(await checkpoint(), activeB, "failed binding overwrite retains the previous generation");
+    await accepted(restore(c)); const quarantinedC = await checkpoint();
+    assert.deepEqual(quarantinedC.authority, quarantinedB.authority);
+    assert.equal((await activate(b)).status, 409); assert.deepEqual(await checkpoint(), quarantinedC);
+    await accepted(activate(c)); const activeC = await checkpoint();
+    assert.equal((await activate(a)).status, 409); assert.deepEqual(await checkpoint(), activeC);
+    // Legitimate mutations after activation do not invalidate its harmless replay.
+    await accepted(invoke("/authority/command/internal", { sessionId, command: "project.create", idempotencyKey: "post-activation-project", payload: { projectId: "project:later", name: "Later", referenceType: "git", projectRevisionId: "revision:later", sourceSpaces: [{ id: "source:later", name: "Later", classification: "public", repositoryId: "repository:later", snapshotId: "2222222222222222222222222222222222222222" }] } }));
+    const advanced = await checkpoint(); assert.ok(advanced.authority.version > c.expectedVersion);
+    assert.equal((await accepted(activate(c))).value.status, "already-active"); assert.deepEqual(await checkpoint(), advanced);
+    for (const kind of ["same-version-different-state", "advanced-version"]) {
+      await seed(); const signed = await make(kind); await accepted(restore(signed));
+      const changed = structuredClone((await checkpoint()).authority);
+      if (kind === "advanced-version") changed.version++; else changed.projects["project:fixture"].name = "Changed without a version increment";
+      await accepted(invoke("/fixture/replace-authority", changed)); const before = await checkpoint();
+      const refused = await activate(signed); assert.equal(refused.status, 409); assert.match(refused.value.receipt, /activation-snapshot-mismatch/u); assert.deepEqual(await checkpoint(), before);
+    }
+    // Old quarantines have no trustworthy generation binding. Do not select a
+    // historical receipt; the existing owner export/restore path establishes it.
+    await seed(); const old = await make("old-unbound"); await accepted(restore(old)); await accepted(invoke("/fixture/remove-recovery-binding"));
+    const unbound = await checkpoint(); assert.equal((await activate(old)).status, 409); assert.deepEqual(await checkpoint(), unbound);
+    assert.equal((await restore(old)).status, 409); assert.deepEqual(await checkpoint(), unbound);
+    const exported = await accepted(invoke("/authority/recovery/export/internal", { sessionId })); const fresh = exported.value.bundle;
+    assert.notEqual(fresh.bundleId, old.bundleId); assert.deepEqual(await checkpoint(), unbound);
+    await accepted(restore(fresh)); await accepted(activate(fresh)); const freshActive = await checkpoint();
+    assert.equal((await accepted(activate(fresh))).value.status, "already-active"); assert.deepEqual(await checkpoint(), freshActive);
+  } finally { await runtime?.dispose(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("recovery SQL and KV writes roll back together and exact restore or activation retries succeed", { timeout: 120_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "anyam-recovery-transaction-")); let runtime;
   const crossed = [];
@@ -20,7 +81,7 @@ test("recovery SQL and KV writes roll back together and exact restore or activat
     options.telemetry = { enabled: false }; options.resourcePersistencePath = join(directory, "storage"); runtime = new Miniflare(options);
     const invoke = async (path, body = {}) => { const response = await runtime.dispatchFetch(`http://localhost${path}`, { method: "POST", headers: { "content-type": "application/json", [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE }, body: JSON.stringify(body) }); return { status: response.status, value: await response.json() }; };
     const f = disclosureFixture(); const recovered = normalizeAuthorityPlaneSnapshot(f.state); recovered.projects["project:fixture"].name = "Recovered checkpoint";
-    const stages = ["after-sql", "after-legacy-delete", "after-quarantine", "after-restore-receipt", "after-activation-status", "after-activation-receipt"];
+    const stages = ["after-sql", "after-legacy-delete", "after-quarantine", "after-current-binding", "after-restore-receipt", "after-activation-status", "after-activation-receipt"];
     for (const stage of stages) {
       assert.equal((await invoke("/fixture/seed-recovery", f)).status, 200);
       const signed = await createAuthorityRecoveryBundle({ snapshot: recovered, bundleId: `transaction-${stage}`, recoveryKeyId: "synthetic-key", secret: "synthetic-local-only" });
@@ -45,6 +106,8 @@ test("recovery SQL and KV writes roll back together and exact restore or activat
       assert.deepEqual(after.authority, recovered); assert.deepEqual(after.identity, before.identity);
       assert.equal(Object.hasOwn(after.keys, "anyam/realm-authority/snapshot/v1"), false);
       assert.equal(receipt.bundleDigest, signed.bundleDigest); assert.equal(receipt.snapshotVersion, signed.expectedVersion);
+      assert.equal(after.keys["anyam/realm-authority/recovery-current/v1"].bundleId, signed.bundleId);
+      assert.equal(after.keys["anyam/realm-authority/recovery-current/v1"].bundleDigest, signed.bundleDigest);
       assert.equal(after.keys["anyam/realm-authority/recovery-status/v1"], activation ? "active" : "quarantined");
       assert.equal(Object.hasOwn(receipt, "activatedAt"), activation);
       assert.equal((await invoke(path, body)).status, 200);

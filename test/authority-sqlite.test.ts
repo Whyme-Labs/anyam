@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { CollaborationCoordinator } from "../src/change-control/collaboration.ts";
 
 import { AuthorityPlaneCoordinator, AuthorityPlaneError, AUTHORITY_COMMAND_PROTOCOL, emptyAuthorityPlaneSnapshot, normalizeAuthorityPlaneSnapshot, type AuthorityPlaneSnapshot, type AuthorityCommandName, type AuthoritySession } from "../src/cloudflare/authority-plane.ts";
-import { AUTHORITY_LEGACY_JSON_VALUE_TRIPWIRE_BYTES, AuthoritySQLiteStore, authorityCommandLatencyReceipt, authoritySnapshotJsonBytes, type AuthoritySqlHost, type AuthoritySqlStorage } from "../src/cloudflare/authority-sqlite.ts";
+import { AUTHORITY_LEGACY_JSON_VALUE_TRIPWIRE_BYTES, AUTHORITY_SQLITE_SCHEMA_VERSION, AuthoritySQLiteStore, authorityCommandLatencyReceipt, authoritySnapshotJsonBytes, type AuthoritySqlHost, type AuthoritySqlStorage } from "../src/cloudflare/authority-sqlite.ts";
 import { PROMOTION_EXECUTION_PROTOCOL, type PromotionExecutionContext, type PromotionExecutionResult } from "../src/cloudflare/promotion-execution.ts";
 import { CONTRACT_VERSIONS } from "../src/kernel/contracts.ts";
 
@@ -82,7 +82,7 @@ test("AuthoritySQLiteStore round-trips normalized entity, audit, and idempotency
     assert.doesNotThrow(() => persistence.commit(restored, replay.snapshot()), "a same-fingerprint replay must be a persisted no-op");
     assert.throws(() => persistence.commit({ ...restored, version: 0 }, restored));
     const receipt = persistence.receipt();
-    assert.equal(receipt.schemaVersion, 1);
+    assert.equal(receipt.schemaVersion, AUTHORITY_SQLITE_SCHEMA_VERSION);
     assert.equal(receipt.entityRows, 4);
     assert.equal(receipt.auditRows, 1);
     assert.equal(receipt.idempotencyRows, 1);
@@ -320,5 +320,62 @@ test("one two-space Change survives an interrupted SQLite Landing and lost-respo
   } finally {
     database.close();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("AuthoritySQLiteStore fences schema-one replacement before it loses newer collections", () => {
+  const database = new DatabaseSync(":memory:");
+  try {
+    const persistence = store(database);
+    const snapshot = emptyAuthorityPlaneSnapshot(session.realmId);
+    // Opaque storage fixtures: domain validation is outside this compatibility test.
+    Object.assign(snapshot.runDetails, { "run:compatibility": { runId: "run:compatibility", fixture: "accepted-detail" } });
+    Object.assign(snapshot.canonicalRefProjections, { "projection:compatibility": { id: "projection:compatibility", fixture: "canonical-ref" } });
+    persistence.replace(snapshot);
+    const rows = () => database.prepare("SELECT collection, entity_id, payload FROM anyam_authority_entities ORDER BY collection, entity_id").all();
+    const before = rows();
+
+    // The schema-one predecessor checks this marker before replacement, then
+    // rewrites only collections it knows. Capture that destructive compatibility
+    // path without depending on Git history or importing another source tree.
+    const schemaOneReplacement = () => new NodeSqlHost(database).transactionSync(() => {
+      const latest = database.prepare("SELECT MAX(version) AS version FROM anyam_authority_migrations").get() as { version: number };
+      if (latest.version > 1) throw new Error("authority_sqlite_schema_version_unsupported");
+      const knownRows = before.filter(row => row.collection !== "runDetails" && row.collection !== "canonicalRefProjections");
+      database.exec("DELETE FROM anyam_authority_entities");
+      const insert = database.prepare("INSERT INTO anyam_authority_entities (collection, entity_id, payload) VALUES (?, ?, ?)");
+      for (const row of knownRows) insert.run(row.collection!, row.entity_id!, row.payload!);
+    });
+
+    assert.throws(schemaOneReplacement, /authority_sqlite_schema_version_unsupported/);
+    assert.deepEqual(rows(), before, "downgrade refusal must preserve both newer collections");
+    assert.deepEqual(persistence.load(session.realmId), snapshot);
+  } finally {
+    database.close();
+  }
+});
+
+test("AuthoritySQLiteStore upgrades schema-one metadata without rewriting persisted data", () => {
+  const database = new DatabaseSync(":memory:");
+  try {
+    const persistence = store(database);
+    const snapshot = emptyAuthorityPlaneSnapshot(session.realmId);
+    Object.assign(snapshot.projects, { "project:compatibility": { id: "project:compatibility", fixture: "legacy-project" } });
+    persistence.replace(snapshot);
+    // Fixture an existing schema-one database. No external database is opened.
+    database.exec("DELETE FROM anyam_authority_migrations");
+    database.prepare("INSERT INTO anyam_authority_migrations (version, applied_at) VALUES (?, ?)").run(1, "2026-08-31T00:00:00.000Z");
+    const entities = () => database.prepare("SELECT collection, entity_id, payload FROM anyam_authority_entities ORDER BY collection, entity_id").all();
+    const before = entities();
+
+    assert.throws(() => persistence.readExisting(session.realmId), /authority_sqlite_schema_version_unsupported/, "authorization reads cannot upgrade schema metadata");
+    assert.deepEqual(database.prepare("SELECT version FROM anyam_authority_migrations ORDER BY version").all().map(row => row.version), [1]);
+    assert.deepEqual(entities(), before);
+    assert.deepEqual(persistence.load(session.realmId), snapshot);
+    assert.deepEqual(database.prepare("SELECT version FROM anyam_authority_migrations ORDER BY version").all().map(row => row.version), [1, 2]);
+    assert.deepEqual(entities(), before, "forward initialization changes only the migration marker");
+    assert.deepEqual(persistence.readExisting(session.realmId), snapshot);
+  } finally {
+    database.close();
   }
 });

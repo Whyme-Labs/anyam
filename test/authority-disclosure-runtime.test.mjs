@@ -10,6 +10,65 @@ import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } f
 import { emptyAuthorityPlaneSnapshot, normalizeAuthorityPlaneSnapshot } from "../src/cloudflare/authority-plane.ts";
 import { createAuthorityRecoveryBundle, verifyAuthorityRecoveryBundle } from "../src/cloudflare/authority-recovery.ts";
 
+test("recovery SQL and KV writes roll back together and exact restore or activation retries succeed", { timeout: 120_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "anyam-recovery-transaction-")); let runtime;
+  const crossed = [];
+  try {
+    const bundled = await build({ entryPoints: ["test/fixtures/authority-disclosure-runtime.ts"], bundle: true, write: false, format: "esm", platform: "browser", target: "es2022", external: ["cloudflare:workers", "node:*"] });
+    const control = request => { const url = new URL(request.url); assert.equal(url.pathname, "/recovery-fault"); crossed.push(url.searchParams.get("stage")); return new Response("owned await boundary"); };
+    const options = convertV4MiniflareOptions({ name: "recovery-transaction-owned-local", modules: true, script: bundled.outputFiles[0].text, compatibilityDate: "2026-07-27", compatibilityFlags: ["nodejs_compat", "global_fetch_strictly_public"], bindings: { ANYAM_AUTHORITY_RECOVERY_KEY_ID: "synthetic-key", ANYAM_AUTHORITY_RECOVERY_SECRET: "synthetic-local-only" }, durableObjects: { REALM_COORDINATOR: { className: "LocalDisclosureRealm", useSQLite: true } }, serviceBindings: { FIXTURE_RECOVERY_CONTROL: control }, outboundService: () => new Response("outbound disabled", { status: 403 }) });
+    options.telemetry = { enabled: false }; options.resourcePersistencePath = join(directory, "storage"); runtime = new Miniflare(options);
+    const invoke = async (path, body = {}) => { const response = await runtime.dispatchFetch(`http://localhost${path}`, { method: "POST", headers: { "content-type": "application/json", [REALM_COORDINATOR_INTERNAL_HEADER]: REALM_COORDINATOR_INTERNAL_VALUE }, body: JSON.stringify(body) }); return { status: response.status, value: await response.json() }; };
+    const f = disclosureFixture(); const recovered = normalizeAuthorityPlaneSnapshot(f.state); recovered.projects["project:fixture"].name = "Recovered checkpoint";
+    const stages = ["after-sql", "after-legacy-delete", "after-quarantine", "after-restore-receipt", "after-activation-status", "after-activation-receipt"];
+    for (const stage of stages) {
+      assert.equal((await invoke("/fixture/seed-recovery", f)).status, 200);
+      const signed = await createAuthorityRecoveryBundle({ snapshot: recovered, bundleId: `transaction-${stage}`, recoveryKeyId: "synthetic-key", secret: "synthetic-local-only" });
+      const restoreBody = { sessionId: f.members.owner.session.id, idempotencyKey: `restore-${stage}`, bundle: signed };
+      const activateBody = { sessionId: f.members.owner.session.id, idempotencyKey: `activate-${stage}`, bundleId: signed.bundleId, bundleDigest: signed.bundleDigest };
+      const activation = stage.startsWith("after-activation");
+      if (activation) assert.equal((await invoke("/authority/recovery/restore/internal", restoreBody)).status, 200);
+      const before = (await invoke("/fixture/checkpoint")).value;
+      assert.equal((await invoke("/fixture/fail-recovery-write-once", { stage })).status, 200);
+      const path = activation ? "/authority/recovery/activate/internal" : "/authority/recovery/restore/internal";
+      const body = activation ? activateBody : restoreBody;
+      const fault = await invoke(path, body);
+      assert.equal(fault.status, 503, `${stage}: ${JSON.stringify(fault)}`); assert.equal(fault.value.code, "indeterminate");
+      assert.match(fault.value.receipt, /write-unconfirmed; storage=transaction; outcome=unconfirmed; retry=exact-bundle/u);
+      assert.doesNotMatch(JSON.stringify(fault), /owned recovery fault|synthetic-local-only/u);
+      // Compare actual SQL rows, every KV key, operational identity and credential
+      // state. An unchanged Authority snapshot alone would miss bookkeeping loss.
+      assert.deepEqual((await invoke("/fixture/checkpoint")).value, before, stage);
+      assert.equal((await invoke(path, body)).status, 200, `exact retry: ${stage}`);
+      const after = (await invoke("/fixture/checkpoint")).value;
+      const receipt = after.keys[`anyam/realm-authority/recovery-restore/v1:${signed.bundleId}`];
+      assert.deepEqual(after.authority, recovered); assert.deepEqual(after.identity, before.identity);
+      assert.equal(Object.hasOwn(after.keys, "anyam/realm-authority/snapshot/v1"), false);
+      assert.equal(receipt.bundleDigest, signed.bundleDigest); assert.equal(receipt.snapshotVersion, signed.expectedVersion);
+      assert.equal(after.keys["anyam/realm-authority/recovery-status/v1"], activation ? "active" : "quarantined");
+      assert.equal(Object.hasOwn(receipt, "activatedAt"), activation);
+      assert.equal((await invoke(path, body)).status, 200);
+      assert.deepEqual((await invoke("/fixture/checkpoint")).value, after, `idempotent retry: ${stage}`);
+      if (!activation) {
+        const wrong = await invoke("/authority/recovery/activate/internal", { ...activateBody, bundleDigest: "wrong-digest" });
+        assert.equal(wrong.status, 409); assert.match(wrong.value.receipt, /activation-bundle-mismatch/u);
+        const unauthorized = await invoke("/authority/recovery/activate/internal", { ...activateBody, sessionId: f.members.projectOwner.session.id });
+        assert.equal(unauthorized.status, 422); assert.equal(unauthorized.value.code, "authority.owner_denied");
+        assert.deepEqual((await invoke("/fixture/checkpoint")).value, after);
+      }
+    }
+    assert.deepEqual(crossed, stages, "every injected failure follows an actual storage write and non-storage await");
+    const weak = structuredClone(f); weak.identity.sessions[f.members.owner.session.id].strength = "oidc";
+    assert.equal((await invoke("/fixture/seed-recovery", weak)).status, 200);
+    const signed = await createAuthorityRecoveryBundle({ snapshot: recovered, bundleId: "activation-passkey-control", recoveryKeyId: "synthetic-key", secret: "synthetic-local-only" });
+    assert.equal((await invoke("/authority/recovery/restore/internal", { sessionId: f.members.owner.session.id, idempotencyKey: "weak-restore", bundle: signed })).status, 200);
+    const before = (await invoke("/fixture/checkpoint")).value;
+    const denied = await invoke("/authority/recovery/activate/internal", { sessionId: f.members.owner.session.id, idempotencyKey: "weak-activate", bundleId: signed.bundleId, bundleDigest: signed.bundleDigest });
+    assert.equal(denied.status, 409); assert.match(denied.value.receipt, /activation-passkey-required/u);
+    assert.deepEqual((await invoke("/fixture/checkpoint")).value, before);
+  } finally { await runtime?.dispose(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("actual local Coordinator SQLite REST and MCP enforce current Source disclosure, stable projections and owner recovery boundary", async () => {
   const directory = await mkdtemp(join(tmpdir(), "anyam-disclosure-runtime-"));
   let runtime;

@@ -29,6 +29,48 @@ export class LocalDisclosureRealm extends AnyamRealmCoordinator {
     store.replace(state);
     return { replaced: true };
   }
+  async seedRecovery(fixture: Fixture) {
+    await this.seed(fixture);
+    const persistIdentity: unknown = Reflect.get(this, "persistIdentity");
+    if (typeof persistIdentity !== "function") throw new Error("missing actual identity persistence");
+    await Reflect.apply(persistIdentity, this, []);
+    for (const key of (await this.ctx.storage.list({ prefix: "anyam/realm-authority/recovery-restore/v1:" })).keys()) await this.ctx.storage.delete(key);
+    await this.ctx.storage.put("anyam/realm-authority/recovery-status/v1", "active");
+    await this.ctx.storage.put("anyam/realm-authority/snapshot/v1", fixture.state);
+    return { recoverySeeded: true };
+  }
+  async failRecoveryWriteOnce(stage: string) {
+    const stages = ["after-sql", "after-legacy-delete", "after-quarantine", "after-restore-receipt", "after-activation-status", "after-activation-receipt"];
+    if (!stages.includes(stage)) throw new Error("unknown owned recovery fault stage");
+    const control: unknown = Reflect.get(this.env, "FIXTURE_RECOVERY_CONTROL");
+    if (!control || typeof Reflect.get(control, "fetch") !== "function") throw new Error("missing owned recovery fault barrier");
+    const storage = this.ctx.storage;
+    const originalDelete = storage.delete;
+    const originalPut = storage.put;
+    const fault = async () => {
+      Reflect.set(storage, "delete", originalDelete); Reflect.set(storage, "put", originalPut);
+      // Non-storage I/O makes the actual preceding write cross an await
+      // boundary. The explicit production transaction must still roll it back.
+      await (control as Fetcher).fetch(`http://fixture-control/recovery-fault?stage=${stage}`);
+      throw new Error(`owned recovery fault: ${stage}`);
+    };
+    Reflect.set(storage, "delete", async (...args: unknown[]) => {
+      const matches = args[0] === "anyam/realm-authority/snapshot/v1";
+      if (matches && stage === "after-sql") await fault();
+      const result = await Reflect.apply(originalDelete, storage, args);
+      if (matches && stage === "after-legacy-delete") await fault();
+      return result;
+    });
+    Reflect.set(storage, "put", async (...args: unknown[]) => {
+      const [key, value] = args;
+      const statusMatches = key === "anyam/realm-authority/recovery-status/v1" && ((stage === "after-quarantine" && value === "quarantined") || (stage === "after-activation-status" && value === "active"));
+      const receiptMatches = typeof key === "string" && key.startsWith("anyam/realm-authority/recovery-restore/v1:") && typeof value === "object" && value !== null && ((stage === "after-restore-receipt" && !Object.hasOwn(value, "activatedAt")) || (stage === "after-activation-receipt" && Object.hasOwn(value, "activatedAt")));
+      const result = await Reflect.apply(originalPut, storage, args);
+      if (statusMatches || receiptMatches) await fault();
+      return result;
+    });
+    return { recoveryFaultArmed: stage };
+  }
   async removeAuthorityMeta(legacy: AuthorityPlaneSnapshot) {
     this.ctx.storage.sql.exec("DELETE FROM anyam_authority_meta");
     await this.ctx.storage.put("anyam/realm-authority/snapshot/v1", legacy);
@@ -102,6 +144,8 @@ export default { async fetch(request: Request, bindings: { REALM_COORDINATOR: Du
   const url = new URL(request.url);
   const realm = bindings.REALM_COORDINATOR.get(bindings.REALM_COORDINATOR.idFromName("realm:disclosure-local"));
   if (url.pathname === "/fixture/seed") return Response.json(await realm.seed(await request.json() as Fixture));
+  if (url.pathname === "/fixture/seed-recovery") return Response.json(await realm.seedRecovery(await request.json() as Fixture));
+  if (url.pathname === "/fixture/fail-recovery-write-once") return Response.json(await realm.failRecoveryWriteOnce((await request.json() as { stage: string }).stage));
   if (url.pathname === "/fixture/replace-authority") return Response.json(await realm.replaceAuthority(await request.json() as AuthorityPlaneSnapshot));
   if (url.pathname === "/fixture/remove-authority-meta") return Response.json(await realm.removeAuthorityMeta(await request.json() as AuthorityPlaneSnapshot));
   if (url.pathname === "/fixture/pause-legacy-digest-once") return Response.json(await realm.pauseLegacyDigestOnce());

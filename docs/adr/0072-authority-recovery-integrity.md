@@ -30,6 +30,15 @@ explain the rollback.
    passkey-authenticated owner session. Activation is idempotent.
 7. Realm identity recovery remains a separate ceremony; this protocol does
    not restore or revoke identity, passkeys, sessions, or OAuth grants.
+8. On the SQLite-backed Realm Durable Object, restore commits Authority rows,
+   legacy KV removal, quarantine status, and the replay receipt in one storage
+   transaction. Activation commits active status and its receipt together.
+   Authorization and state checks remain inside the concurrency gate.
+   An unconfirmed transaction returns a sanitized retryable failure; callers
+   retain the exact bundle and inspect its replay receipt before continuing.
+
+The [Authority recovery qualification boundary](../qualification/authority-recovery.md)
+documents supported historical field sets and the limits of local rollback tests.
 
 ## Consequences
 

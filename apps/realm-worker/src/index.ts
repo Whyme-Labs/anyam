@@ -744,6 +744,10 @@ function coordinatorError(error: unknown): Response {
   return coordinatorJson({ protocol: REALM_COORDINATOR_PROTOCOL, code: "realm.coordinator.invalid_request", recoveryAction: "inspect the coordinator input and retry; no partial identity transition was accepted", receipt: `coordinator=exception; message=${message}` }, 422);
 }
 
+function authorityRecoveryWriteUnconfirmed(operation: "restore" | "activation"): Response {
+  return coordinatorError(new AuthorityPlaneError({ code: "indeterminate", message: `Authority recovery ${operation} storage transaction could not be confirmed.`, recoveryAction: "retry the exact recovery bundle ID and digest with the same idempotency key and a valid owner session; inspect the replay receipt before continuing", receipt: `authorityRecovery=${operation}-write-unconfirmed; storage=transaction; outcome=unconfirmed; retry=exact-bundle; credentialMaterialStored=false` }));
+}
+
 /**
  * The coordinator is exported so Wrangler can provision the SQLite-backed
  * Durable Object namespace. Its routes are intentionally narrow: they only
@@ -1087,23 +1091,33 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
           const recoveryStatus = await this.authorityRecoveryStatus();
           return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: recoveryStatus === "quarantined" ? "recovery-quarantined" : "recovery-already-active", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: existing.snapshotVersion, recoveryStatus, credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=replay-idempotent; bundleId=${bundle.bundleId}; recoveryStatus=${recoveryStatus}; state=unchanged; credentialMaterialStored=false` });
         }
-        const realmId = this.requireIdentity().realm.id;
-        const additiveOmission = !Object.hasOwn(bundle.snapshot, "runDetails") || !Object.hasOwn(bundle.snapshot, "canonicalRefProjections");
-        // Legacy KV hydration/empty initialization would invent absent maps and
-        // may delete orphaned SQL rows. Legacy compatibility needs an existing
-        // schema-qualified SQL baseline; this read neither initializes nor migrates.
-        const current = additiveOmission ? this.authoritySqliteStore().readExisting(realmId) : await this.authoritySnapshot();
-        if (!current) throw new AuthorityPlaneError({ code: "stale_state", message: "Legacy recovery requires an intact current Authority SQL baseline.", recoveryAction: "retain the signed checkpoint and recover the authoritative SQL baseline before retrying; missing additive collections cannot be inferred from legacy KV", receipt: "authorityRecovery=legacy-baseline-missing; restore=not-applied; additiveCollections=not-defaulted; credentialMaterialStored=false" });
-        if (current.version !== bundle.expectedVersion && (qualificationId === undefined || !authorityQualificationCleanupAllowed({ current, exported: bundle.snapshot, qualificationId }))) throw new AuthorityPlaneError({ code: "stale_state", message: "Authority recovery bundle is stale for the current Authority version.", recoveryAction: "export a fresh bundle from the current Authority and retry; no snapshot was replaced", receipt: `authorityRecovery=stale; expectedVersion=${bundle.expectedVersion}; currentVersion=${current.version}; restore=not-applied` });
-        const { snapshot, compatibilityReceipt } = await authorityRecoverySnapshot({ snapshot: bundle.snapshot }, realmId, current);
-        await this.replaceAuthoritySnapshot(snapshot);
-        await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_STATUS_KEY, "quarantined" satisfies AuthorityRecoveryStatus);
-        await this.ctx.storage.put(restoreKey, { protocol: AUTHORITY_RECOVERY_PROTOCOL, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: snapshot.version, restoredAt: new Date().toISOString() } satisfies StoredAuthorityRecoveryRestore);
+        let restored: Awaited<ReturnType<typeof authorityRecoverySnapshot>>;
+        try {
+          // SQLite-backed DO transactions cover both SQL and KV, including
+          // initialization/migration on the complete-bundle read path.
+          restored = await this.ctx.storage.transaction(async () => {
+            const realmId = this.requireIdentity().realm.id;
+            const additiveOmission = !Object.hasOwn(bundle.snapshot, "runDetails") || !Object.hasOwn(bundle.snapshot, "canonicalRefProjections");
+            // Legacy KV hydration/empty initialization would invent absent maps
+            // and may delete orphaned SQL rows. Require the existing SQL baseline.
+            const current = additiveOmission ? this.authoritySqliteStore().readExisting(realmId) : await this.authoritySnapshot();
+            if (!current) throw new AuthorityPlaneError({ code: "stale_state", message: "Legacy recovery requires an intact current Authority SQL baseline.", recoveryAction: "retain the signed checkpoint and recover the authoritative SQL baseline before retrying; missing additive collections cannot be inferred from legacy KV", receipt: "authorityRecovery=legacy-baseline-missing; restore=not-applied; additiveCollections=not-defaulted; credentialMaterialStored=false" });
+            if (current.version !== bundle.expectedVersion && (qualificationId === undefined || !authorityQualificationCleanupAllowed({ current, exported: bundle.snapshot, qualificationId }))) throw new AuthorityPlaneError({ code: "stale_state", message: "Authority recovery bundle is stale for the current Authority version.", recoveryAction: "export a fresh bundle from the current Authority and retry; no snapshot was replaced", receipt: `authorityRecovery=stale; expectedVersion=${bundle.expectedVersion}; currentVersion=${current.version}; restore=not-applied` });
+            const result = await authorityRecoverySnapshot({ snapshot: bundle.snapshot }, realmId, current);
+            await this.replaceAuthoritySnapshot(result.snapshot);
+            await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_STATUS_KEY, "quarantined" satisfies AuthorityRecoveryStatus);
+            await this.ctx.storage.put(restoreKey, { protocol: AUTHORITY_RECOVERY_PROTOCOL, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: result.snapshot.version, restoredAt: new Date().toISOString() } satisfies StoredAuthorityRecoveryRestore);
+            return result;
+          });
+        } catch (error) {
+          if (error instanceof AuthorityPlaneError || error instanceof RealmIdentityError) throw error;
+          return authorityRecoveryWriteUnconfirmed("restore");
+        }
+        const { snapshot, compatibilityReceipt } = restored;
         return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-quarantined", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: snapshot.version, recoveryStatus: "quarantined", credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=restored; version=${snapshot.version}; state=quarantined; auditChain=signed; qualificationCleanup=${qualificationId === undefined ? "false" : "authorized"}; ${compatibilityReceipt}; credentialMaterialStored=false; canonicalWrite=false` });
       } catch (error) {
         if (error instanceof AuthorityPlaneError || error instanceof RealmIdentityError) return coordinatorError(error);
-        // Unexpected storage/crypto failures retain the existing reset behavior;
-        // they are not input denials or proof that restore bookkeeping is atomic.
+        // Unexpected failures outside the transaction retain reset behavior.
         throw error;
       }
     });
@@ -1112,20 +1126,31 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
   private async authorityRecoveryActivate(body: CoordinatorRequestBody): Promise<Response> {
     const humanSessionId = coordinatorString(body, "sessionId");
     coordinatorString(body, "idempotencyKey");
-    const session = this.authorityOwnerSession(humanSessionId);
-    const identitySession = this.requireIdentity().getRecoverySnapshot().sessions[humanSessionId];
-    if (!identitySession || identitySession.strength !== "passkey") throw new AuthorityPlaneError({ code: "blocked", message: "Authority recovery activation requires a passkey-authenticated owner session.", recoveryAction: "authenticate the Realm owner with a passkey and retry activation", receipt: "authorityRecovery=activation-passkey-required; activation=not-applied" });
-    const status = await this.authorityRecoveryStatus();
-    if (status !== "quarantined") return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "already-active", ownerPrincipalId: session.principalId, recoveryStatus: "active", credentialFree: true, canonicalWrite: false, receipt: "authorityRecovery=activation-idempotent; recoveryStatus=active; state=unchanged; credentialMaterialStored=false" });
-    const bundleId = coordinatorString(body, "bundleId");
-    const bundleDigest = coordinatorString(body, "bundleDigest");
-    const stored = await this.ctx.storage.get<StoredAuthorityRecoveryRestore>(`${REALM_AUTHORITY_RECOVERY_RESTORE_PREFIX}${bundleId}`);
-    if (!stored || stored.bundleDigest !== bundleDigest) throw new AuthorityPlaneError({ code: "conflict", message: "Authority recovery activation does not match the quarantined bundle.", recoveryAction: "use the exact bundle ID and digest returned by the recovery restore receipt", receipt: `authorityRecovery=activation-bundle-mismatch; bundleId=${bundleId}; activation=not-applied` });
-    await this.ctx.blockConcurrencyWhile(async () => {
-      await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_STATUS_KEY, "active" satisfies AuthorityRecoveryStatus);
-      await this.ctx.storage.put(`${REALM_AUTHORITY_RECOVERY_RESTORE_PREFIX}${bundleId}`, { ...stored, activatedAt: new Date().toISOString() });
+    const bundleId = body.bundleId === undefined ? undefined : coordinatorString(body, "bundleId");
+    const bundleDigest = body.bundleDigest === undefined ? undefined : coordinatorString(body, "bundleDigest");
+    return this.ctx.blockConcurrencyWhile(async () => {
+      try {
+        const session = this.authorityOwnerSession(humanSessionId);
+        const identitySession = this.requireIdentity().getRecoverySnapshot().sessions[humanSessionId];
+        if (!identitySession || identitySession.strength !== "passkey") throw new AuthorityPlaneError({ code: "blocked", message: "Authority recovery activation requires a passkey-authenticated owner session.", recoveryAction: "authenticate the Realm owner with a passkey and retry activation", receipt: "authorityRecovery=activation-passkey-required; activation=not-applied" });
+        const status = await this.authorityRecoveryStatus();
+        if (status !== "quarantined") return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "already-active", ownerPrincipalId: session.principalId, recoveryStatus: "active", credentialFree: true, canonicalWrite: false, receipt: "authorityRecovery=activation-idempotent; recoveryStatus=active; state=unchanged; credentialMaterialStored=false" });
+        if (bundleId === undefined || bundleDigest === undefined) throw new AuthorityPlaneError({ code: "invalid_request", message: "Authority recovery activation requires the exact bundle ID and digest.", recoveryAction: "use the bundle ID and digest returned by the recovery restore receipt", receipt: "authorityRecovery=activation-bundle-required; activation=not-applied" });
+        const restoreKey = `${REALM_AUTHORITY_RECOVERY_RESTORE_PREFIX}${bundleId}`;
+        const stored = await this.ctx.storage.get<StoredAuthorityRecoveryRestore>(restoreKey);
+        if (!stored || stored.bundleDigest !== bundleDigest) throw new AuthorityPlaneError({ code: "conflict", message: "Authority recovery activation does not match the quarantined bundle.", recoveryAction: "use the exact bundle ID and digest returned by the recovery restore receipt", receipt: `authorityRecovery=activation-bundle-mismatch; bundleId=${bundleId}; activation=not-applied` });
+        try {
+          await this.ctx.storage.transaction(async () => {
+            await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_STATUS_KEY, "active" satisfies AuthorityRecoveryStatus);
+            await this.ctx.storage.put(restoreKey, { ...stored, activatedAt: new Date().toISOString() });
+          });
+        } catch { return authorityRecoveryWriteUnconfirmed("activation"); }
+        return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-activated", ownerPrincipalId: session.principalId, bundleId, snapshotVersion: stored.snapshotVersion, recoveryStatus: "active", credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=activated; bundleId=${bundleId}; recoveryStatus=active; passkey=verified; credentialMaterialStored=false; canonicalWrite=false` });
+      } catch (error) {
+        if (error instanceof AuthorityPlaneError || error instanceof RealmIdentityError) return coordinatorError(error);
+        throw error;
+      }
     });
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-activated", ownerPrincipalId: session.principalId, bundleId, snapshotVersion: stored.snapshotVersion, recoveryStatus: "active", credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=activated; bundleId=${bundleId}; recoveryStatus=active; passkey=verified; credentialMaterialStored=false; canonicalWrite=false` });
   }
 
   private authorityDisclosure(snapshot: AuthorityPlaneSnapshot, session: AuthoritySession) {

@@ -1,6 +1,11 @@
 import type { AuthorityPlaneSnapshot } from "./authority-plane.ts";
 
-export const AUTHORITY_SQLITE_SCHEMA_VERSION = 1 as const;
+/** Version 2 covers runDetails and canonicalRefProjections even though their
+ * rows use the existing entity table. Earlier schema-one readers omit those
+ * collections and replacement would erase them. Record this boundary so
+ * their existing newer-version guard rejects reads/writes before data loss.
+ * Future collection coverage changes must advance this version as well. */
+export const AUTHORITY_SQLITE_SCHEMA_VERSION = 2 as const;
 /** Cloudflare's SQLite-backed Durable Object key/value API has a 2 MiB
  * combined key/value tripwire. The SQL path is qualified against snapshots
  * beyond this measured legacy representation size; remeasure before

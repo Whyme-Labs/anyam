@@ -1,6 +1,8 @@
 import type { AuthoritySqlHost } from "./authority-sqlite.ts";
 import type { ArtifactsWorkspaceContext, ArtifactsWorkspaceSelection } from "./artifacts-workspace.ts";
 
+export const ARTIFACTS_WORKSPACE_SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS anyam_artifacts_workspaces (row_key TEXT PRIMARY KEY, account_id TEXT NOT NULL, namespace TEXT NOT NULL, target_name TEXT NOT NULL, repository_id TEXT UNIQUE, payload TEXT NOT NULL, UNIQUE(account_id, namespace, target_name))";
+
 export type ArtifactsWorkspaceRecord = {
   selection: ArtifactsWorkspaceSelection;
   context?: ArtifactsWorkspaceContext;
@@ -56,7 +58,7 @@ export class SQLiteArtifactsWorkspaceStore implements ArtifactsWorkspaceStore {
   constructor(private readonly host: AuthoritySqlHost) {}
   reserve(selection: ArtifactsWorkspaceSelection): boolean {
     return this.host.transactionSync(() => {
-      this.host.sql.exec("CREATE TABLE IF NOT EXISTS anyam_artifacts_workspaces (row_key TEXT PRIMARY KEY, account_id TEXT NOT NULL, namespace TEXT NOT NULL, target_name TEXT NOT NULL, repository_id TEXT UNIQUE, payload TEXT NOT NULL, UNIQUE(account_id, namespace, target_name))");
+      this.host.sql.exec(ARTIFACTS_WORKSPACE_SCHEMA_SQL);
       return this.host.sql.exec(
         "INSERT INTO anyam_artifacts_workspaces (row_key, account_id, namespace, target_name, payload) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING RETURNING row_key",
         key(selection), selection.sourceRepository.accountId, selection.sourceRepository.namespace, selection.targetName, JSON.stringify({ selection, tokenIds: [], blocked: false, unknownTokenInventory: false, pendingOperation: "none" }),

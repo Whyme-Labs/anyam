@@ -7,7 +7,7 @@ import { ArtifactsRealmAccessError, authorizeRealmArtifactsSelection, currentArt
 import { WORKSPACE_REPOSITORY_PROTOCOL, type WorkspaceRepositoryInput, type WorkspaceObservationInput } from "./workspace-repository-contract.ts";
 
 import { ArtifactsObservationPublisher, ArtifactsObservationPublicationError } from "./artifacts-observation-publisher.ts";
-import { REPOSITORY_DRIVER_SNAPSHOT_PROTOCOL } from "../../repository-driver/src/index.ts";
+import { REPOSITORY_DRIVER_SNAPSHOT_PROTOCOL } from "../../../src/portability/repository-snapshot.ts";
 type Options = ArtifactsRealmAccess & { artifacts: ArtifactsNamespace; sql: AuthoritySqlHost; repositoryState?: R2Bucket; repositoryStatePrefix?: string; now?: () => number };
 export type WorkspaceRepositoryResult = { status: number; body: Record<string, unknown> };
 /** Ordinary owner lifecycle; existing Task/Grant required. Provider effects

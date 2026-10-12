@@ -1,11 +1,39 @@
 # Authority recovery qualification boundary
 
-The Realm Coordinator restores the exact signed `anyam.authority-recovery/v1`
-bundle after checking its Realm, independent recovery key, snapshot and audit
+The Realm Coordinator restores an exact signed `anyam.authority-recovery/v1`
+or v2 bundle after checking its Realm, independent recovery key, snapshot and audit
 digests, signature, and expected Authority version. Identity, passkeys, Sessions,
 Grants, and provider state remain separate recovery boundaries. A complete bundle
 must include every current Authority collection; malformed present collections
 are rejected before replacement.
+
+Export selects v2 when either Artifacts auxiliary table has rows. It signs
+`authoritySchemaVersion: 2` and an `anyam.artifacts-recovery/v1` checkpoint with
+`schemaVersion: 1`. The existing Authority database schema remains version 2;
+this adds no migration. Unsupported auxiliary column types, primary keys or
+unique constraints fail closed before writing. The v2 envelope requires every
+Authority collection and does not apply the historical v1 omissions below.
+
+The checkpoint includes custody rows from `anyam_artifacts_workspaces` and
+immutable generation rows from `anyam_artifacts_observations`. It preserves
+pending fork/mint effects, blocked status, unknown token inventory and token
+IDs, with no credential values. Decoded metadata must match the signed account,
+namespace, Source UUID, Workspace, view, exact base and observation generation.
+Unknown or credential-bearing fields are refused. The original JSON strings
+are retained, including whitespace in immutable manifests.
+
+Restore fills missing rows; it cannot delete or overwrite an existing row.
+Every current auxiliary row must occur exactly in the incoming checkpoint.
+This check covers new generations and changed custody even though Artifacts
+operations do not increment Authority version. A v1 checkpoint cannot restore
+over nonempty Artifacts tables. The current recovery binding records the
+auxiliary digest, which activation and quarantined restore replay verify.
+
+These are SQL metadata backups. They contain no R2 snapshot objects/indexes,
+Git objects/refs, provider repositories or credentials. Back up and qualify
+those boundaries separately. Restored pending effects remain pending; neither
+restore nor activation retries a fork/mint, renews a credential, reconciles the
+provider or upgrades a live qualification claim.
 
 Two historical field sets are supported: both `canonicalRefProjections` and
 `runDetails` absent, or only `runDetails` absent. Their original signature is
@@ -27,7 +55,7 @@ invent empty maps or deploy older code against a newer Authority schema.
 
 Restore holds the Durable Object concurrency gate across fresh authorization,
 replay inspection, validation, and replacement. One SQLite-backed storage
-transaction covers Authority SQL replacement, legacy KV deletion, quarantine
+transaction covers auxiliary metadata inserts, Authority SQL replacement, legacy KV deletion, quarantine
 status, the current recovery binding, and the restore receipt. It also covers
 complete-bundle initialization
 or migration if needed. Activation checks the owner and passkey under the gate,
@@ -47,7 +75,8 @@ owner export to obtain a fresh signed bundle, restore it, then activate its exac
 ID/digest with a passkey Session. The Coordinator does not infer the current
 generation from a historical receipt. This adds no new authorization ceremony.
 
-The operator CLI exposes `realm recovery inspect|export|restore|activate` using
+The operator CLI accepts both supported envelopes and exposes
+`realm recovery inspect|export|restore|activate` using
 only an explicit existing human Session on stdin. Export preserves the signed
 bundle in a new private file; restore preserves its exact returned receipt in
 another new private file. Activation consumes that receipt's bundle ID/digest
@@ -69,6 +98,7 @@ dependencies:
 
 ```sh
 node_modules/.bin/tsx --test test/authority-disclosure-runtime.test.mjs
+node_modules/.bin/tsx --test --test-concurrency=1 test/artifacts-recovery.test.ts test/artifacts-recovery-runtime.test.mjs
 ```
 
 The actual Coordinator executes SQLite and KV in isolated Miniflare/workerd
@@ -84,6 +114,11 @@ signatures, and a competing mutation held behind the real concurrency gate.
 Generation regressions cover superseded activation/restore replay, identical
 snapshots with distinct bundle identities, changed quarantined SQL state, and
 fresh signed restore of an older unbound quarantine.
+Artifacts checks additionally round-trip exact custody and generation bytes,
+retain uncertain effects across restart, reject correctly signed malformed or
+inconsistent metadata, refuse same-version stale generations, and roll back
+auxiliary inserts with SQL/KV faults. The actual operator CLI exports/restores
+v2 through private files and activates after reopening the same local storage.
 
 These checks qualify transaction rollback and retry locally. They do not prove
 production backup availability, a live restore drill, crash or account disaster

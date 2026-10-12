@@ -1,7 +1,10 @@
+import { parseArtifactsRecoverySnapshot, type ArtifactsRecoverySnapshot } from "./artifacts-recovery.ts";
+import { AUTHORITY_SQLITE_SCHEMA_VERSION } from "./authority-sqlite.ts";
 import type { AuthorityPlaneSnapshot } from "./authority-plane.ts";
 import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial } from "../security/credential-material.ts";
 
 export const AUTHORITY_RECOVERY_PROTOCOL = "anyam.authority-recovery/v1" as const;
+export const AUTHORITY_ARTIFACTS_RECOVERY_PROTOCOL = "anyam.authority-recovery/v2" as const;
 
 /** Every Authority Plane snapshot field is part of the signed recovery
  * contract. Keep this list adjacent to the bundle protocol so restore
@@ -41,8 +44,7 @@ export const AUTHORITY_RECOVERY_SNAPSHOT_FIELDS = [
   "audit",
 ] as const;
 
-export type AuthorityRecoveryBundle = {
-  protocol: typeof AUTHORITY_RECOVERY_PROTOCOL;
+type AuthorityRecoveryFields = {
   bundleId: string;
   realmId: string;
   expectedVersion: number;
@@ -52,8 +54,12 @@ export type AuthorityRecoveryBundle = {
   issuedAt: string;
   snapshot: AuthorityPlaneSnapshot;
   bundleDigest: string;
-  signature: string;
 };
+type AuthorityRecoveryUnsigned = AuthorityRecoveryFields & (
+  { protocol: typeof AUTHORITY_RECOVERY_PROTOCOL } |
+  { protocol: typeof AUTHORITY_ARTIFACTS_RECOVERY_PROTOCOL; authoritySchemaVersion: typeof AUTHORITY_SQLITE_SCHEMA_VERSION; artifacts: ArtifactsRecoverySnapshot }
+);
+export type AuthorityRecoveryBundle = AuthorityRecoveryUnsigned & { signature: string };
 
 export type AuthorityRecoveryVerification =
   | { valid: true; bundle: AuthorityRecoveryBundle }
@@ -96,7 +102,7 @@ export async function authorityRecoveryAuditChainDigest(snapshot: AuthorityPlane
   return previous;
 }
 
-function signedMessage(bundle: Omit<AuthorityRecoveryBundle, "signature">): string {
+function signedMessage(bundle: AuthorityRecoveryUnsigned): string {
   const { bundleDigest: _bundleDigest, ...unsigned } = bundle;
   return stableJson(unsigned);
 }
@@ -107,6 +113,7 @@ export async function createAuthorityRecoveryBundle(input: {
   recoveryKeyId: string;
   issuedAt?: string;
   secret: string;
+  artifacts?: ArtifactsRecoverySnapshot;
 }): Promise<AuthorityRecoveryBundle> {
   const bundleId = input.bundleId.trim();
   const recoveryKeyId = input.recoveryKeyId.trim();
@@ -116,9 +123,18 @@ export async function createAuthorityRecoveryBundle(input: {
   const issuedAt = input.issuedAt ?? new Date().toISOString();
   const snapshotDigest = await authorityRecoverySnapshotDigest(input.snapshot);
   const auditChainDigest = await authorityRecoveryAuditChainDigest(input.snapshot);
-  const unsignedWithoutDigest = { protocol: AUTHORITY_RECOVERY_PROTOCOL, bundleId, realmId: input.snapshot.realmId, expectedVersion: input.snapshot.version, snapshotDigest, auditChainDigest, recoveryKeyId, issuedAt, snapshot: input.snapshot };
+  const common = { bundleId, realmId: input.snapshot.realmId, expectedVersion: input.snapshot.version, snapshotDigest, auditChainDigest, recoveryKeyId, issuedAt, snapshot: input.snapshot };
+  let unsignedWithoutDigest: Omit<AuthorityRecoveryFields, "bundleDigest"> & (
+    { protocol: typeof AUTHORITY_RECOVERY_PROTOCOL } | { protocol: typeof AUTHORITY_ARTIFACTS_RECOVERY_PROTOCOL; authoritySchemaVersion: typeof AUTHORITY_SQLITE_SCHEMA_VERSION; artifacts: ArtifactsRecoverySnapshot }
+  );
+  if (input.artifacts === undefined) unsignedWithoutDigest = { protocol: AUTHORITY_RECOVERY_PROTOCOL, ...common };
+  else {
+    const artifacts = parseArtifactsRecoverySnapshot(input.artifacts, input.snapshot);
+    if (!artifacts || AUTHORITY_RECOVERY_SNAPSHOT_FIELDS.some(field => !Object.hasOwn(input.snapshot, field))) throw new Error("artifact recovery invalid_snapshot; export complete compatible metadata");
+    unsignedWithoutDigest = { protocol: AUTHORITY_ARTIFACTS_RECOVERY_PROTOCOL, authoritySchemaVersion: AUTHORITY_SQLITE_SCHEMA_VERSION, artifacts, ...common };
+  }
   const bundleDigest = await sha256(stableJson(unsignedWithoutDigest));
-  const unsigned: Omit<AuthorityRecoveryBundle, "signature"> = { ...unsignedWithoutDigest, bundleDigest };
+  const unsigned: AuthorityRecoveryUnsigned = { ...unsignedWithoutDigest, bundleDigest };
   const key = await hmacKey(input.secret, ["sign"]);
   const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signedMessage(unsigned)));
   return { ...unsigned, signature: base64Url(new Uint8Array(signature)) };
@@ -136,8 +152,8 @@ export async function verifyAuthorityRecoveryBundle(input: {
 }): Promise<AuthorityRecoveryVerification> {
   if (!isRecord(input.value)) return { valid: false, code: "bundle_invalid", recoveryAction: "submit the exact signed recovery bundle returned by Authority export", receipt: "authorityRecovery=bundle-object-required; restore=not-applied" };
   const value = input.value;
-  if (value.protocol !== AUTHORITY_RECOVERY_PROTOCOL) return { valid: false, code: "bundle_invalid", recoveryAction: "submit an unchanged supported Authority recovery bundle", receipt: "authorityRecovery=bundle-protocol-unsupported; restore=not-applied" };
-  const unknownField = Object.keys(value).find((field) => !["protocol", "bundleId", "realmId", "expectedVersion", "snapshotDigest", "auditChainDigest", "recoveryKeyId", "issuedAt", "snapshot", "bundleDigest", "signature"].includes(field));
+  if (value.protocol !== AUTHORITY_RECOVERY_PROTOCOL && value.protocol !== AUTHORITY_ARTIFACTS_RECOVERY_PROTOCOL) return { valid: false, code: "bundle_invalid", recoveryAction: "submit an unchanged supported Authority recovery bundle", receipt: "authorityRecovery=bundle-protocol-unsupported; restore=not-applied" };
+  const unknownField = Object.keys(value).find((field) => !["protocol", "bundleId", "realmId", "expectedVersion", "snapshotDigest", "auditChainDigest", "recoveryKeyId", "issuedAt", "snapshot", "bundleDigest", "signature", ...(value.protocol === AUTHORITY_ARTIFACTS_RECOVERY_PROTOCOL ? ["authoritySchemaVersion", "artifacts"] : [])].includes(field));
   if (unknownField) return { valid: false, code: "bundle_invalid", recoveryAction: "submit only the fields in the signed Authority recovery export", receipt: `authorityRecovery=bundle-field-unsupported; field=${unknownField}; restore=not-applied` };
   const finding = scanCredentialMaterial(value, "authorityRecovery");
   if (finding) return { valid: false, code: "credential_material", recoveryAction: "export a credential-free Authority recovery bundle and retry without provider secrets", receipt: `authorityRecovery=credential-material-rejected; field=${finding.path}; scanner=${CREDENTIAL_MATERIAL_SCANNER_PROTOCOL}; restore=not-applied` };
@@ -162,7 +178,16 @@ export async function verifyAuthorityRecoveryBundle(input: {
   const snapshotDigest = await authorityRecoverySnapshotDigest(typedSnapshot);
   const auditChainDigest = await authorityRecoveryAuditChainDigest(typedSnapshot);
   if (snapshotDigestValue !== snapshotDigest || auditChainDigestValue !== auditChainDigest) return { valid: false, code: "bundle_digest_mismatch", recoveryAction: "do not edit the exported snapshot; export a fresh bundle and retry", receipt: `authorityRecovery=digest-mismatch; snapshotDigest=${snapshotDigestValue === snapshotDigest ? "matched" : "mismatched"}; auditChain=${auditChainDigestValue === auditChainDigest ? "matched" : "mismatched"}; restore=not-applied` };
-  const unsignedWithoutDigest = { protocol: AUTHORITY_RECOVERY_PROTOCOL, bundleId, realmId, expectedVersion, snapshotDigest: snapshotDigestValue, auditChainDigest: auditChainDigestValue, recoveryKeyId, issuedAt, snapshot: typedSnapshot };
+  const common = { bundleId, realmId, expectedVersion, snapshotDigest: snapshotDigestValue, auditChainDigest: auditChainDigestValue, recoveryKeyId, issuedAt, snapshot: typedSnapshot };
+  let unsignedWithoutDigest: Omit<AuthorityRecoveryFields, "bundleDigest"> & (
+    { protocol: typeof AUTHORITY_RECOVERY_PROTOCOL } | { protocol: typeof AUTHORITY_ARTIFACTS_RECOVERY_PROTOCOL; authoritySchemaVersion: typeof AUTHORITY_SQLITE_SCHEMA_VERSION; artifacts: ArtifactsRecoverySnapshot }
+  );
+  if (value.protocol === AUTHORITY_RECOVERY_PROTOCOL) unsignedWithoutDigest = { protocol: AUTHORITY_RECOVERY_PROTOCOL, ...common };
+  else {
+    const artifacts = parseArtifactsRecoverySnapshot(value.artifacts, typedSnapshot);
+    if (value.authoritySchemaVersion !== AUTHORITY_SQLITE_SCHEMA_VERSION || !artifacts || AUTHORITY_RECOVERY_SNAPSHOT_FIELDS.some(field => !Object.hasOwn(snapshot, field))) return { valid: false, code: "bundle_invalid", recoveryAction: "use a complete signed checkpoint with supported Authority and Artifact schemas", receipt: "authorityRecovery=artifacts-schema-or-state-invalid; restore=not-applied" };
+    unsignedWithoutDigest = { protocol: AUTHORITY_ARTIFACTS_RECOVERY_PROTOCOL, authoritySchemaVersion: AUTHORITY_SQLITE_SCHEMA_VERSION, artifacts, ...common };
+  }
   const bundleDigest = await sha256(stableJson(unsignedWithoutDigest));
   if (bundleDigestValue !== bundleDigest) return { valid: false, code: "bundle_digest_mismatch", recoveryAction: "export a fresh bundle; the supplied bundle digest does not match its contents", receipt: "authorityRecovery=bundle-digest-mismatch; restore=not-applied" };
   try {
@@ -173,5 +198,5 @@ export async function verifyAuthorityRecoveryBundle(input: {
   } catch {
     return { valid: false, code: "signature_invalid", recoveryAction: "export a fresh bundle through the configured Authority recovery key; no restore was applied", receipt: `authorityRecovery=signature-invalid; keyId=${input.recoveryKeyId}; restore=not-applied` };
   }
-  return { valid: true, bundle: value as unknown as AuthorityRecoveryBundle };
+  return { valid: true, bundle: { ...unsignedWithoutDigest, bundleDigest, signature: signatureValue } };
 }

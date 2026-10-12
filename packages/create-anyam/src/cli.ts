@@ -21,7 +21,7 @@ const valueFlags = new Set([
   "--domain", "--version", "--path", "--installation", "--owner-session", "--idempotency-key", "--title", "--description", "--body", "--body-file",
   "--assignee", "--disclosure", "--label", "--pull-request", "--head-ref", "--base-ref", "--head-commit", "--base-commit", "--provider", "--external-key",
   "--remote-repository", "--review-state", "--review-digest", "--revision", "--id", "--scope", "--client-id", "--recording", "--thread", "--candidate-commit",
-  "--recording-root", "--input", "--output",
+  "--recording-root", "--input", "--output", "--cli-path",
 ]);
 
 function optionIndices(args: readonly string[], flag: string): readonly number[] {
@@ -135,6 +135,7 @@ function subcommandPositionals(args: readonly string[]): readonly string[] {
 }
 
 function printHelp(): void {
+  console.log("agent setup <agent> [--cli-path <built-anyam.js>]  configure stdio clients with a selected local build instead of a global anyam executable");
   console.log("agent evaluate-recording --recording <jsonl> --thread <id> --base-commit <sha> --candidate-commit <sha> [--recording-root <original-workspace>] [--directory <project>] [--json]  inspect recorded Codex claims against local Git; no harness launch");
   console.log("connect github --method actions  generate a reviewable GitHub Actions Bridge workflow");
   console.log("Bridge options: --realm <url> --project <id> --connection <id> --action-ref <owner/repo@sha> [--workflow-path <path>] [--remote <name>] [--schedule <cron>]");
@@ -427,8 +428,10 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
     const agent = agentValue(args, "cli");
     const setupPositionals = subcommandPositionals(args);
     const directory = valueAfter(args, "--directory") ?? setupPositionals[1] ?? cwd;
-    const result = await setupAgent({ directory, agent });
-    printResult(result, json, `${result.agent} agent setup is ready in ${result.directory}.\nBroker: anyam mcp serve --stdio --agent ${result.agent}\nCredentials: memory-only; canonical write: denied\n${result.files.length > 0 ? `Created:\n${result.files.map((file) => `  ${file}`).join("\n")}` : "No files changed."}`);
+    const selected = valueAfter(args, "--cli-path");
+    if (hasCliOption(args, "--cli-path") && (!selected?.trim() || selected.startsWith("--") || optionIndices(args, "--cli-path").length !== 1)) throw new Error("--cli-path requires one explicit built CLI file; no setup files were written.");
+    const result = await setupAgent({ directory, agent, ...(selected ? { cliPath: resolve(cwd, selected) } : {}) });
+    printResult(result, json, `${result.agent} agent setup is ready in ${result.directory}.\nBroker: ${JSON.stringify(result.broker)}\nCredentials: memory-only; canonical write: denied\n${result.files.length > 0 ? `Created:\n${result.files.map((file) => `  ${file}`).join("\n")}` : "No files changed."}`);
     return 0;
   }
 

@@ -25,5 +25,8 @@
     "build": "tsc -p tsconfig.json",
     "prepare": "npm run build",
     "prepack": "npm run build"
+  },
+  "dependencies": {
+    "smol-toml": "1.9.1"
   }
 }

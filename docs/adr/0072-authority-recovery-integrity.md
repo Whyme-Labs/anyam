@@ -14,7 +14,10 @@ explain the rollback.
 
 ## Decision
 
-1. Authority export returns a signed `anyam.authority-recovery/v1` bundle.
+1. Authority export returns a signed `anyam.authority-recovery/v1` bundle when
+   no Artifacts operational rows exist. Otherwise it returns v2, which also
+   signs Authority schema version 2 and an `anyam.artifacts-recovery/v1`
+   metadata checkpoint at auxiliary schema version 1.
 2. The bundle binds the Realm, exact Authority version, canonical snapshot
    digest, hash-linked audit-chain digest, issuance time, and customer-owned
    recovery key ID.
@@ -42,6 +45,20 @@ explain the rollback.
    unbound older quarantines fail closed. A fresh signed export/restore uses the
    existing owner ceremony to establish a binding; no historical receipt is
    silently promoted to the current recovery generation.
+10. The v2 checkpoint covers `anyam_artifacts_workspaces` custody metadata and
+    `anyam_artifacts_observations` immutable generation manifests, including
+    pending fork/mint effects, unknown inventory, blocked status and token IDs.
+    Decoded rows must match the signed Authority source, Workspace, view and
+    base bindings. Raw payload/manifest JSON bytes remain unchanged. Credentials
+    and unknown fields are refused.
+11. Restore fills missing auxiliary rows in the same SQL/KV transaction.
+    Existing rows must occur byte-for-byte in the checkpoint; a stale backup
+    cannot erase or replace custody or generations even at the same Authority
+    version. A v1 restore refuses nonempty auxiliary tables. Activation and
+    quarantined replay also match the restored auxiliary digest.
+12. This checkpoint contains metadata only. Provider reconciliation, R2 objects
+    and indexes, Git objects and refs, credentials and live qualification remain
+    separate operator recovery boundaries. Restore performs no provider effect.
 
 The [Authority recovery qualification boundary](../qualification/authority-recovery.md)
 documents supported historical field sets and the limits of local rollback tests.

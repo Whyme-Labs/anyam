@@ -82,6 +82,35 @@ export class LocalArtifactsWorkspaceRealm extends LocalDisclosureRealm {
     super(ctx, { ...env, ...(repositoryState ? { ANYAM_REPOSITORY_STATE: repositoryState } : {}), ...(observerBinding ? { ANYAM_REPOSITORY_OBSERVER: observerBinding } : {}), ANYAM_ARTIFACTS_ACCOUNT_ID: "account-a", ANYAM_ARTIFACTS_NAMESPACE: "private", ANYAM_ARTIFACTS: artifacts as unknown as Artifacts });
     this.provider = fixture; this.providerReady = ready; this.providerSave = save; this.providerGraph = graph;
   }
+  async recoveryArtifactsRows() {
+    const read = (table: string) => this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).toArray().length ? this.ctx.storage.sql.exec(`SELECT * FROM ${table} ORDER BY row_key`).toArray() : [];
+    return { workspaces: read("anyam_artifacts_workspaces"), observations: read("anyam_artifacts_observations") };
+  }
+  async recoveryArtifactsFixture(operation: string, opaqueToken?: string) {
+    if (operation === "drop") {
+      this.ctx.storage.sql.exec("DROP TABLE IF EXISTS anyam_artifacts_observations"); this.ctx.storage.sql.exec("DROP TABLE IF EXISTS anyam_artifacts_workspaces");
+    } else if (operation === "tamper-generation") {
+      const row = this.ctx.storage.sql.exec<{ row_key: string; manifest: string }>("SELECT row_key, manifest FROM anyam_artifacts_observations ORDER BY row_key LIMIT 1").toArray()[0];
+      if (!row) throw new Error("owned generation missing");
+      const value: unknown = JSON.parse(row.manifest);
+      if (!value || typeof value !== "object" || !("receipt" in value) || typeof value.receipt !== "string") throw new Error("owned generation malformed");
+      Reflect.set(value, "receipt", value.receipt + "; fixtureChanged=true"); this.ctx.storage.sql.exec("UPDATE anyam_artifacts_observations SET manifest=? WHERE row_key=?", JSON.stringify(value), row.row_key);
+    } else if (operation === "escaped-custody" || operation === "escaped-generation") {
+      if (!opaqueToken) throw new Error("owned synthetic credential missing");
+      const table = operation === "escaped-custody" ? "anyam_artifacts_workspaces" : "anyam_artifacts_observations";
+      const field = operation === "escaped-custody" ? "payload" : "manifest";
+      const row = this.ctx.storage.sql.exec(`SELECT ${field} AS value FROM ${table} ORDER BY row_key LIMIT 1`).toArray()[0];
+      if (!row || typeof row.value !== "string") throw new Error("owned metadata missing");
+      const value: unknown = JSON.parse(row.value);
+      if (!value || typeof value !== "object") throw new Error("owned metadata malformed");
+      if (field === "payload") Reflect.set(value, "tokenIds", [opaqueToken]);
+      else { const receipt: unknown = Reflect.get(value, "receipt"); if (typeof receipt !== "string") throw new Error("owned receipt missing"); Reflect.set(value, "receipt", receipt + "; note=" + opaqueToken); }
+      const escaped = [...opaqueToken].map(char => String.fromCharCode(92) + "u" + char.charCodeAt(0).toString(16).padStart(4, "0")).join("");
+      const raw = JSON.stringify(value).replace(opaqueToken, escaped);
+      this.ctx.storage.sql.exec(`UPDATE ${table} SET ${field}=?`, raw);
+    } else throw new Error("unknown owned recovery operation");
+    return { changed: true };
+  }
   async configureGraph(commits: ArtifactsCommit[], head: string, sourceBase?: string) {
     await this.providerReady();
     for (const commit of commits) this.providerGraph.set(commit.hash, commit);
@@ -113,6 +142,8 @@ export class LocalArtifactsWorkspaceRealm extends LocalDisclosureRealm {
 export default { async fetch(request: Request, env: { REALM_COORDINATOR: DurableObjectNamespace<LocalArtifactsWorkspaceRealm>; ANYAM_REPOSITORY_STATE?: R2Bucket }) {
   const path = new URL(request.url).pathname;
   const stub = env.REALM_COORDINATOR.get(env.REALM_COORDINATOR.idFromName("realm:disclosure-local"));
+  if (path === "/fixture/artifact-recovery-rows") return Response.json(await stub.recoveryArtifactsRows());
+  if (path === "/fixture/artifact-recovery-mutate") { const value: unknown = await request.json(); if (!value || typeof value !== "object" || !("operation" in value) || typeof value.operation !== "string") return new Response("operation required", { status: 400 }); const token: unknown = Reflect.get(value, "opaqueToken"); return Response.json(await stub.recoveryArtifactsFixture(value.operation, typeof token === "string" ? token : undefined)); }
   if (path === "/fixture/observation-state") {
     if (!env.ANYAM_REPOSITORY_STATE) return Response.json({ objects: [] });
     const listed = await env.ANYAM_REPOSITORY_STATE.list();

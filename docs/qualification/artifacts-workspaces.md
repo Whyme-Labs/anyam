@@ -6,6 +6,14 @@ exact base commit/tree and bound to the provider's account, namespace and UUID.
 Canonical source and Anyam Authority remain separate. Only Landing can publish
 canonical state under the existing authority and reconciliation contracts.
 
+Authority recovery v2 now includes the Workspace custody and observation journal
+SQL tables in one signed metadata checkpoint. It preserves pending effects and
+immutable generation bytes, refuses stale replacement at the same Authority
+version, and restores missing rows in the existing SQL/KV quarantine transaction.
+R2 objects/indexes, Git data, provider state and credentials remain separate
+recovery boundaries. See the [recovery qualification](authority-recovery.md)
+for schema compatibility, operator CLI checks and local-only evidence.
+
 ## Reproduce the local contract
 
 Use a disposable checkout with Node, npm and Git. Install the locked dependencies

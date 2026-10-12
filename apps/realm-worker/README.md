@@ -623,11 +623,17 @@ The production Authority recovery surface is separate from the disposable
 identity qualification controls. Configure the non-secret
 `ANYAM_AUTHORITY_RECOVERY_KEY_ID` and customer secret
 `ANYAM_AUTHORITY_RECOVERY_SECRET`. `POST /api/authority/recovery/export`
-returns a signed `anyam.authority-recovery/v1` bundle; restore accepts only
-that bundle, checks its expected Authority version and audit-chain digest, and
+returns a signed `anyam.authority-recovery/v1` bundle, or v2 when Artifacts
+custody/journal rows exist. V2 includes those credential-free SQL metadata rows
+and their schema versions; it preserves pending effects and immutable generations.
+Restore accepts the unchanged signed bundle, checks its expected Authority version and audit-chain digest, and
 enters quarantine. `POST /api/authority/recovery/activate` requires a fresh
 passkey-authenticated owner session plus the exact quarantined bundle ID and
 digest. Normal Authority mutations fail closed while quarantined.
+Restore cannot erase or overwrite existing Artifacts metadata. V1 restores
+refuse nonempty auxiliary tables. R2 objects, Git data, provider reconciliation
+and credentials require separate recovery. See the
+[qualification boundary](../../docs/qualification/authority-recovery.md).
 
 The qualification surface now includes a minimal browser ceremony and retains
 the JSON contract for automation. The server-side verifier uses

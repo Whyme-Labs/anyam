@@ -10,7 +10,7 @@ function record(value: unknown): value is RecordValue { return value !== null &&
 function text(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
 
 function bundle(value: unknown): RecordValue {
-  if (!record(value) || value.protocol !== "anyam.authority-recovery/v1" || !text(value.bundleId) || !text(value.bundleDigest) || !text(value.signature) || !record(value.snapshot)) {
+  if (!record(value) || (value.protocol !== "anyam.authority-recovery/v1" && value.protocol !== "anyam.authority-recovery/v2") || !text(value.bundleId) || !text(value.bundleDigest) || !text(value.signature) || !record(value.snapshot)) {
     throw new Error("realm_recovery_bundle_invalid; use the unchanged signed Authority checkpoint; no request was sent");
   }
   return value;

@@ -1,4 +1,5 @@
-import { parseRepositoryDriverSnapshotIndex, parseRepositoryDriverSnapshotManifest, repositoryDriverSnapshotDigest, repositoryDriverSnapshotIndexKey, repositoryDriverSnapshotManifestKey, REPOSITORY_DRIVER_SNAPSHOT_INDEX_PROTOCOL, type RepositoryDriverSnapshotManifest } from "../../repository-driver/src/index.ts";
+import { parseRepositoryDriverSnapshotIndex, parseRepositoryDriverSnapshotManifest, repositoryDriverSnapshotDigest, repositoryDriverSnapshotIndexKey, repositoryDriverSnapshotManifestKey, REPOSITORY_DRIVER_SNAPSHOT_INDEX_PROTOCOL, type RepositoryDriverSnapshotManifest } from "../../../src/portability/repository-snapshot.ts";
+import { ARTIFACTS_OBSERVATION_SCHEMA_SQL } from "../../../src/cloudflare/artifacts-recovery.ts";
 import type { AuthoritySqlHost } from "../../../src/cloudflare/authority-sqlite.ts";
 import { scanCredentialMaterial } from "../../../src/security/credential-material.ts";
 
@@ -21,7 +22,7 @@ export class ArtifactsObservationPublisher {
     const manifestKey = repositoryDriverSnapshotManifestKey(this.options.prefix, fresh.repositoryId, fresh.context, fresh.generation);
     const key = JSON.stringify([indexKey, fresh.sourceSpaceId, fresh.generation]);
     this.options.sql.transactionSync(() => {
-      this.options.sql.sql.exec("CREATE TABLE IF NOT EXISTS anyam_artifacts_observations (row_key TEXT PRIMARY KEY, manifest TEXT NOT NULL)");
+      this.options.sql.sql.exec(ARTIFACTS_OBSERVATION_SCHEMA_SQL);
       this.options.sql.sql.exec("INSERT INTO anyam_artifacts_observations (row_key, manifest) VALUES (?, ?) ON CONFLICT DO NOTHING", key, JSON.stringify(fresh));
     });
     const stored = this.options.sql.sql.exec<{ manifest: string }>("SELECT manifest FROM anyam_artifacts_observations WHERE row_key = ?", key).toArray()[0];

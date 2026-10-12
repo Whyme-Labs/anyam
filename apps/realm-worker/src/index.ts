@@ -40,7 +40,7 @@ import { REALM_COORDINATOR_INTERNAL_HEADER, REALM_COORDINATOR_INTERNAL_VALUE } f
 import { handleAuthorityRequest } from "./authority-edge.ts";
 import { GITHUB_PRODUCER_CONTEXT_BODY_BYTES_LIMIT, GITHUB_PRODUCER_CONTEXT_BODY_SIZING_RECEIPT, handleGitHubWebhookRequest, readBoundedRequestBody } from "./github-webhook-route.ts";
 import { isMcpDeliveryOperation, mcpDeliveryScope, parseMcpDeliveryBinding, MCP_DELIVERY_OPERATIONS, type McpDeliveryOperation } from "./mcp-delivery-grant.ts";
-import { AUTHORITY_RECOVERY_PROTOCOL, AUTHORITY_RECOVERY_SNAPSHOT_FIELDS, authorityRecoverySnapshotDigest, createAuthorityRecoveryBundle, verifyAuthorityRecoveryBundle, type AuthorityRecoveryBundle } from "../../../src/cloudflare/authority-recovery.ts";
+import { AUTHORITY_RECOVERY_PROTOCOL, AUTHORITY_ARTIFACTS_RECOVERY_PROTOCOL, AUTHORITY_RECOVERY_SNAPSHOT_FIELDS, authorityRecoverySnapshotDigest, createAuthorityRecoveryBundle, verifyAuthorityRecoveryBundle, type AuthorityRecoveryBundle } from "../../../src/cloudflare/authority-recovery.ts";
 import { GitHubActionsBridgeAuthority, type GitHubActionsBridgeConnectionInput, type GitHubActionsEventName, type GitHubActionsBridgeOperation, type GitHubActionsBridgeSnapshot, type GitHubActionsOidcVerification } from "../../../src/portability/github-actions-bridge.ts";
 import { GitHubActionsBridgeImportCoordinator, MemoryGitHubActionsBridgeImportLedger, type GitHubActionsBridgeImportSnapshot, type GitHubActionsBridgeOwnerConfirmation, type GitHubActionsBridgeRepositoryImportReceipt } from "../../../src/portability/github-actions-bridge-import.ts";
 import { GitHubActionsBridgeOutboundCoordinator, MemoryGitHubActionsBridgeOutboundReplayLedger, type GitHubActionsBridgeOutboundSnapshot } from "../../../src/portability/github-actions-bridge-outbound.ts";
@@ -56,6 +56,7 @@ import { GITHUB_WEBHOOK_INGRESS_PROTOCOL, type GitHubWebhookIngressEnvelope } fr
 import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial, containsKnownTextMaterial } from "../../../src/security/credential-material.ts";
 import { isAnyamOAuthPath } from "../../../src/cloudflare/oauth-path.ts";
 import { RealmArtifactsQualification, type RealmArtifactsQualificationRequest, type ArtifactsRealmAuthorization } from "./artifacts-qualification.ts";
+import { ArtifactsRecoveryStore, ArtifactsRecoveryError, artifactsRecoverySnapshotDigest } from "../../../src/cloudflare/artifacts-recovery.ts";
 import { RealmArtifactsWorkspaceControl, type WorkspaceRepositoryResult } from "./artifacts-workspace-control.ts";
 import { WORKSPACE_REPOSITORY_PROTOCOL, workspaceRepositoryInput, workspaceObservationInput } from "./workspace-repository-contract.ts";
 
@@ -121,7 +122,7 @@ const CUSTOMER_PROVIDER_FAILURE_MODES: readonly CustomerProviderFailureMode[] = 
 type CoordinatorRequestBody = Record<string, unknown>;
 
 type StoredAuthorityRecoveryRestore = {
-  protocol: typeof AUTHORITY_RECOVERY_PROTOCOL;
+  protocol: AuthorityRecoveryBundle["protocol"];
   bundleId: string;
   bundleDigest: string;
   snapshotVersion: number;
@@ -134,6 +135,7 @@ type StoredAuthorityRecoveryCurrent = {
   bundleDigest: string;
   snapshotVersion: number;
   snapshotDigest: string;
+  artifactsDigest?: string;
 };
 
 type StoredPasskeyChallenge = {
@@ -1099,15 +1101,34 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: recoveryStatus === "active" ? "ready" : "quarantined", authority: complete ? authorityStateSummary(snapshot) : disclosure.summary(), recoveryStatus, ...(complete ? { storage: this.authoritySqliteStore().receipt() } : {}), session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: "authority=coordinator; operation=state.inspect; credentialFree=true; canonicalWrite=landing-only" });
   }
 
+  private artifactsRecoveryStore() { return new ArtifactsRecoveryStore(this.ctx.storage as unknown as AuthoritySqlHost, value => this.requireIdentity().containsKnownCredentialMaterial(value)); }
+  private artifactsRecoveryFailure(error: ArtifactsRecoveryError): AuthorityPlaneError {
+    return new AuthorityPlaneError({ code: error.code === "conflict" ? "conflict" : "invalid_request", message: "Artifact recovery metadata is inconsistent or unsupported.", recoveryAction: "retain the complete signed checkpoint and reconcile custody and immutable generations; no provider effect was performed", receipt: `artifactsRecovery=${error.code}; state=unchanged; credentialMaterialStored=false` });
+  }
+  private async checkRecoveryArtifacts(snapshot: AuthorityPlaneSnapshot, expectedDigest?: string) {
+    try {
+      const artifacts = this.artifactsRecoveryStore().capture(snapshot);
+      if (expectedDigest === undefined ? artifacts.workspaces.length || artifacts.observations.length : await artifactsRecoverySnapshotDigest(artifacts) !== expectedDigest) throw new ArtifactsRecoveryError("conflict");
+    } catch (error) { throw error instanceof ArtifactsRecoveryError ? this.artifactsRecoveryFailure(error) : error; }
+  }
   private async authorityRecoveryExport(humanSessionId: string): Promise<Response> {
-    // This exports only the Authority Plane. Identity recovery remains a
-    // separate owner ceremony and is intentionally not touched here.
-    const session = this.authorityOwnerSession(humanSessionId);
-    const snapshot = await this.authoritySnapshot();
-    if (!this.authorityDisclosure(snapshot, session).completeRealm()) this.authorityReadNotFound();
-    const recoveryKey = this.authorityRecoveryKey();
-    const bundle = await createAuthorityRecoveryBundle({ snapshot, bundleId: crypto.randomUUID(), recoveryKeyId: recoveryKey.keyId, secret: recoveryKey.secret });
-    return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-exported", ownerPrincipalId: session.principalId, bundle, recoveryKeyId: recoveryKey.keyId, snapshotVersion: snapshot.version, credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=exported; protocol=${AUTHORITY_RECOVERY_PROTOCOL}; version=${snapshot.version}; auditChain=signed; recoveryKeyId=${recoveryKey.keyId}; credentialMaterialStored=false; canonicalWrite=false` });
+    // Identity credentials remain separate. The gate binds Authority and
+    // auxiliary metadata even though provider operations do not bump its version.
+    return this.ctx.blockConcurrencyWhile(async () => {
+      try {
+        const session = this.authorityOwnerSession(humanSessionId);
+        const snapshot = await this.authoritySnapshot();
+        if (!this.authorityDisclosure(snapshot, session).completeRealm()) this.authorityReadNotFound();
+        const artifacts = this.artifactsRecoveryStore().capture(snapshot);
+        const recoveryKey = this.authorityRecoveryKey();
+        const bundle = await createAuthorityRecoveryBundle({ snapshot, bundleId: crypto.randomUUID(), recoveryKeyId: recoveryKey.keyId, secret: recoveryKey.secret, ...(artifacts.workspaces.length || artifacts.observations.length ? { artifacts } : {}) });
+        return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-exported", ownerPrincipalId: session.principalId, bundle, recoveryKeyId: recoveryKey.keyId, snapshotVersion: snapshot.version, credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=exported; protocol=${bundle.protocol}; version=${snapshot.version}; auditChain=signed; recoveryKeyId=${recoveryKey.keyId}; credentialMaterialStored=false` });
+      } catch (error) {
+        if (error instanceof ArtifactsRecoveryError) return coordinatorError(this.artifactsRecoveryFailure(error));
+        if (error instanceof AuthorityPlaneError || error instanceof RealmIdentityError) return coordinatorError(error);
+        throw error;
+      }
+    });
   }
 
   private async authorityRecoveryRestore(body: CoordinatorRequestBody): Promise<Response> {
@@ -1135,6 +1156,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
           const currentRecovery = await this.ctx.storage.get<StoredAuthorityRecoveryCurrent>(REALM_AUTHORITY_RECOVERY_CURRENT_KEY);
           if (!currentRecovery || currentRecovery.bundleId !== bundle.bundleId || currentRecovery.bundleDigest !== bundle.bundleDigest) throw new AuthorityPlaneError({ code: "conflict", message: "Authority recovery replay does not identify the current recovery generation.", recoveryAction: "use the current restore receipt; if the existing quarantine predates generation binding, export and restore a fresh signed bundle before activation", receipt: `authorityRecovery=replay-superseded-or-unbound; bundleId=${bundle.bundleId}; restore=not-applied; state=unchanged` });
           const recoveryStatus = await this.authorityRecoveryStatus();
+          if (recoveryStatus === "quarantined") { const current = this.authoritySqliteStore().readExisting(this.requireIdentity().realm.id); if (!current) throw new ArtifactsRecoveryError("conflict"); await this.checkRecoveryArtifacts(current, currentRecovery.artifactsDigest); }
           return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: recoveryStatus === "quarantined" ? "recovery-quarantined" : "recovery-already-active", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: existing.snapshotVersion, recoveryStatus, credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=replay-idempotent; bundleId=${bundle.bundleId}; recoveryStatus=${recoveryStatus}; state=unchanged; credentialMaterialStored=false` });
         }
         let restored: Awaited<ReturnType<typeof authorityRecoverySnapshot>>;
@@ -1151,10 +1173,21 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
             if (current.version !== bundle.expectedVersion && (qualificationId === undefined || !authorityQualificationCleanupAllowed({ current, exported: bundle.snapshot, qualificationId }))) throw new AuthorityPlaneError({ code: "stale_state", message: "Authority recovery bundle is stale for the current Authority version.", recoveryAction: "export a fresh bundle from the current Authority and retry; no snapshot was replaced", receipt: `authorityRecovery=stale; expectedVersion=${bundle.expectedVersion}; currentVersion=${current.version}; restore=not-applied` });
             const result = await authorityRecoverySnapshot({ snapshot: bundle.snapshot }, realmId, current);
             const snapshotDigest = await authorityRecoverySnapshotDigest(result.snapshot);
+            let artifactsDigest: string | undefined;
+            try {
+              const store = this.artifactsRecoveryStore();
+              if (bundle.protocol === AUTHORITY_ARTIFACTS_RECOVERY_PROTOCOL) {
+                store.restore(bundle.artifacts, { currentAuthority: current, targetAuthority: result.snapshot });
+                artifactsDigest = await artifactsRecoverySnapshotDigest(store.capture(result.snapshot));
+              } else {
+                const artifacts = store.capture(current);
+                if (artifacts.workspaces.length || artifacts.observations.length) throw new ArtifactsRecoveryError("conflict");
+              }
+            } catch (error) { throw error instanceof ArtifactsRecoveryError ? this.artifactsRecoveryFailure(error) : error; }
             await this.replaceAuthoritySnapshot(result.snapshot);
             await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_STATUS_KEY, "quarantined" satisfies AuthorityRecoveryStatus);
-            await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_CURRENT_KEY, { bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: result.snapshot.version, snapshotDigest } satisfies StoredAuthorityRecoveryCurrent);
-            await this.ctx.storage.put(restoreKey, { protocol: AUTHORITY_RECOVERY_PROTOCOL, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: result.snapshot.version, restoredAt: new Date().toISOString() } satisfies StoredAuthorityRecoveryRestore);
+            await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_CURRENT_KEY, { bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: result.snapshot.version, snapshotDigest, ...(artifactsDigest ? { artifactsDigest } : {}) } satisfies StoredAuthorityRecoveryCurrent);
+            await this.ctx.storage.put(restoreKey, { protocol: bundle.protocol, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: result.snapshot.version, restoredAt: new Date().toISOString() } satisfies StoredAuthorityRecoveryRestore);
             return result;
           });
         } catch (error) {
@@ -1164,6 +1197,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         const { snapshot, compatibilityReceipt } = restored;
         return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-quarantined", ownerPrincipalId: session.principalId, bundleId: bundle.bundleId, bundleDigest: bundle.bundleDigest, snapshotVersion: snapshot.version, recoveryStatus: "quarantined", credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=restored; version=${snapshot.version}; state=quarantined; auditChain=signed; qualificationCleanup=${qualificationId === undefined ? "false" : "authorized"}; ${compatibilityReceipt}; credentialMaterialStored=false; canonicalWrite=false` });
       } catch (error) {
+        if (error instanceof ArtifactsRecoveryError) return coordinatorError(this.artifactsRecoveryFailure(error));
         if (error instanceof AuthorityPlaneError || error instanceof RealmIdentityError) return coordinatorError(error);
         // Unexpected failures outside the transaction retain reset behavior.
         throw error;
@@ -1194,6 +1228,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         // counter. Bind activation to the exact normalized SQL state as well.
         const snapshot = this.authoritySqliteStore().readExisting(this.requireIdentity().realm.id);
         if (!snapshot || snapshot.version !== currentRecovery.snapshotVersion || await authorityRecoverySnapshotDigest(snapshot) !== currentRecovery.snapshotDigest) throw new AuthorityPlaneError({ code: "stale_state", message: "Authority recovery activation snapshot no longer matches its current restore binding.", recoveryAction: "inspect the changed Authority state and export and restore a fresh signed bundle before activation", receipt: "authorityRecovery=activation-snapshot-mismatch; activation=not-applied; state=unchanged" });
+        await this.checkRecoveryArtifacts(snapshot, currentRecovery.artifactsDigest);
         try {
           await this.ctx.storage.transaction(async () => {
             await this.ctx.storage.put(REALM_AUTHORITY_RECOVERY_STATUS_KEY, "active" satisfies AuthorityRecoveryStatus);

@@ -62,6 +62,11 @@ test("actual owner bootstrap makes declared Source metadata readable without an 
     assert.equal(created.status, 200, JSON.stringify(created.value));
     assert.equal(created.value.sourceAccess, "owner-read");
     const after = (await invoke("/fixture/checkpoint")).value;
+    const stale = await invoke("/api/projects", { ...payload, expectedVersion: 0 }, "owner", "stale-owner-source");
+    assert.equal(stale.status, 409);
+    assert.equal(stale.value.code, "bootstrap_conflict");
+    assert.match(stale.value.recoveryAction, /read the current Authority version/iu);
+    assert.deepEqual((await invoke("/fixture/checkpoint")).value, after, "stale registration leaves SQL, identity KV and memory unchanged");
     const identity = record(after.identity);
     const priorIdentity = record(before.identity);
     const policy = record(record(identity.sourceSpacePolicies)["source:owner-readable"]);

@@ -1706,6 +1706,12 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         });
       } catch (error) {
         rollback();
+        if (error instanceof AuthorityPlaneError && error.code === "stale_state") {
+          return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "conflict",
+            message: "Authority state changed before Source registration was accepted.",
+            recoveryAction: "read the current Authority version; reconcile the request and retry with that expectedVersion and a fresh idempotency key",
+            receipt: "ownerSourceBootstrap=stale; transition=not-applied; details=not-disclosed" }, 409);
+        }
         const code = error instanceof RealmIdentityError ? "not_found" : error instanceof AuthorityPlaneError
           ? error.code === "idempotency_conflict" ? "conflict" : error.code === "not_found" || error.code === "invalid_request" || error.code === "conflict" ? error.code : undefined
           : undefined;

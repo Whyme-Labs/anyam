@@ -36,7 +36,7 @@ export function artifactsBindingFixture() {
   fixture.binding = { async get(name) {
     events.push(`get:${name}`);
     if (fixture.unavailableName === name) throw new Error("provider error contains usable-secret");
-    if (!infos.has(name)) throw new Error("NOT_FOUND");
+    if (!infos.has(name)) throw Object.assign(new Error("NOT_FOUND"), { code: "NOT_FOUND" });
     const repo: ArtifactsRepository = {
       [Symbol.dispose]() { events.push(`dispose:${name}`); },
       async info() { events.push(`info:${name}`); return { ...infos.get(name)! }; },

@@ -301,3 +301,50 @@ credential path, named mutations/cleanup, harnesses and measured cost envelope.
 Do not migrate canonical storage, deploy, license or submit as part of this
 contract exercise. Treat October 13 Malaysia as the internal buffer; confirm the
 official deadline and terms independently before submission.
+
+## Ordinary owner Workspace materialization
+
+`PUT /api/workspaces/{workspaceId}/repositories/{sourceSpaceId}` materializes
+one declared Source for an existing active Workspace through the ordinary owner
+API. Authenticate the existing Realm owner and supply only:
+
+```json
+{
+  "taskId": "<current scoped Task>",
+  "grantId": "<current scoped Grant>",
+  "sourceRepositoryName": "<enrolled Artifacts source name>",
+  "targetName": "<unused Workspace repository name>",
+  "baseTreeOid": "<exact SHA-1 base tree>"
+}
+```
+
+The Task/Grant must already permit `source.read` and `workspace.write`, including
+those effects, for the selected Workspace and Source. The caller cannot select
+the account, namespace, provider UUID, base commit, Project or Project View.
+The Coordinator derives those from current Authority state and rechecks the
+human Workspace creator, Source policy and grant before and after provider
+access. A read-only Source registration is insufficient for this operation.
+
+The source name must resolve to the Source's recorded provider UUID. Both source
+and fork readbacks must have the exact base commit/tree. An existing target is
+refused before forking. The initial fork token is retired before the binding is
+released; no read/write token or new Task/Grant is issued by this route. Custody
+uses the existing SQLite store and authorization decisions are persisted in the
+identity audit. The provider effects are outside that identity transaction, so
+an audit-write failure cannot erase fork custody.
+
+A repeated identical PUT rechecks current authorization and the provider UUID,
+then returns the existing binding without another fork. Ordinary edits to the
+Workspace's branch do not invalidate that replay. A changed selection, recreated
+repository, pending fork or unknown token inventory is refused. A lost provider
+reply or failed initial-token retirement retains its reservation across restart
+and requires explicit reconciliation; retry does not adopt or replace the named
+repository. Name-only deletion remains unavailable.
+
+This owner materialization path differs from the one-shot qualification runner:
+it preserves the usable Workspace binding instead of creating, revoking and
+cleaning a disposable trial. Local Miniflare tests exercise the actual public
+edge and Coordinator with a fake provider and real SQLite persistence. They do
+not establish live Artifacts service conformance, transport durability, token
+scope, a trusted hosted publication path, or native-agent concurrency. Hosted
+revision publication still requires the separately installed RepositoryObserver.

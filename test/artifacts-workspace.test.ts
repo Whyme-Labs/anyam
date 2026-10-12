@@ -7,6 +7,46 @@ function adapter(fixture = artifactsBindingFixture()) {
   return { fixture, workspace: new ArtifactsWorkspaceAdapter({ artifacts: fixture.binding, accountId: "account-a", namespace: "private", authorize: fixture.authorize, now: () => fixture.now }) };
 }
 
+test("Artifacts materialization replays the exact binding after edits and refuses changed or recreated targets", async () => {
+  const { fixture, workspace } = adapter();
+  const first = await workspace.materializeWorkspace(artifactsSelection);
+  fixture.heads.set(artifactsSelection.targetName, [{ hash: "3".repeat(40), treeHash: "4".repeat(40) }]);
+  assert.deepEqual(await workspace.materializeWorkspace(artifactsSelection), first);
+  assert.equal(fixture.events.filter(event => event.startsWith("fork:")).length, 1);
+  assert.equal(fixture.activeTokens.size, 0);
+  assert.equal(fixture.mintedCount, 0);
+  await assert.rejects(workspace.materializeWorkspace({ ...artifactsSelection, targetName: "different" }), { code: "artifacts.workspace_already_bound" });
+  fixture.infos.set(artifactsSelection.targetName, { ...fixture.infos.get(artifactsSelection.targetName)!, id: "uuid-recreated" });
+  await assert.rejects(workspace.materializeWorkspace(artifactsSelection), { code: "artifacts.repository_identity_mismatch" });
+  assert.equal(fixture.events.filter(event => event.startsWith("fork:")).length, 1);
+});
+
+test("Artifacts materialization preserves uncertain custody and never repeats an unconfirmed fork", async () => {
+  const { fixture, workspace } = adapter();
+  fixture.forkFails = true;
+  await assert.rejects(workspace.materializeWorkspace(artifactsSelection), { code: "artifacts.provider_effect_unqualified" });
+  fixture.forkFails = false;
+  await assert.rejects(workspace.materializeWorkspace(artifactsSelection), { code: "artifacts.workspace_operation_pending" });
+  assert.equal(fixture.events.filter(event => event.startsWith("fork:")).length, 1);
+  fixture.granted = false;
+  await assert.rejects(workspace.materializeWorkspace(artifactsSelection), { code: "artifacts.authorization_denied" });
+});
+
+test("Artifacts materialization withholds provider metadata containing the initial fork credential", async () => {
+  const { fixture, workspace } = adapter();
+  fixture.forkedRepositoryId = "uuid-initial-secret-workspace-a";
+  await assert.rejects(workspace.materializeWorkspace(artifactsSelection), { code: "artifacts.fork_metadata_mismatch" });
+  assert.equal(fixture.activeTokens.size, 0, "known initial token is retired even when metadata is rejected");
+});
+
+test("Artifacts materialization refuses a pre-existing provider target before any fork", async () => {
+  const { fixture, workspace } = adapter();
+  fixture.infos.set("workspace-a", { id: "uuid-unrelated", name: "workspace-a", defaultBranch: "main", remote: "https://account-a.artifacts.cloudflare.net/git/private/workspace-a.git", readOnly: false });
+  await assert.rejects(workspace.materializeWorkspace(artifactsSelection), { code: "artifacts.workspace_already_bound" });
+  assert.equal(fixture.events.filter(event => event.startsWith("fork:")).length, 0);
+  assert.equal(fixture.infos.get("workspace-a")!.id, "uuid-unrelated");
+});
+
 test("Artifacts forks independent credential-free Workspace repositories at the exact selected base", async () => {
   const { fixture, workspace } = adapter();
   const [first, second] = await Promise.all([

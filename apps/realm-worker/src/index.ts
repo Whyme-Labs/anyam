@@ -56,6 +56,8 @@ import { GITHUB_WEBHOOK_INGRESS_PROTOCOL, type GitHubWebhookIngressEnvelope } fr
 import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial, containsKnownTextMaterial } from "../../../src/security/credential-material.ts";
 import { isAnyamOAuthPath } from "../../../src/cloudflare/oauth-path.ts";
 import { RealmArtifactsQualification, type RealmArtifactsQualificationRequest, type ArtifactsRealmAuthorization } from "./artifacts-qualification.ts";
+import { RealmArtifactsWorkspaceControl } from "./artifacts-workspace-control.ts";
+import { WORKSPACE_REPOSITORY_PROTOCOL, workspaceRepositoryInput } from "./workspace-repository-contract.ts";
 
 export type Env = AnyamRealmOAuthEnv & {
   /** Attempt-scoped Runner outputs; Realm reads only after proof validation. */
@@ -815,13 +817,44 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const accountId = this.env.ANYAM_ARTIFACTS_ACCOUNT_ID?.trim();
     const namespace = this.env.ANYAM_ARTIFACTS_NAMESPACE?.trim();
     if (!artifacts || !accountId || !namespace) return undefined;
-    return new RealmArtifactsQualification({ artifacts, accountId, namespace, sql: this.ctx.storage as unknown as AuthoritySqlHost, current: async () => {
-      const recoveryActive = this.recoveryStatus === "active" && await this.authorityRecoveryStatus() === "active";
-      const identity = this.requireIdentity();
-      const authority = this.authoritySqliteStore().readExisting(identity.realm.id);
-      if (!authority) throw new Error("artifacts.authority_unconfigured");
-      return { identity, authority, active: recoveryActive };
-    } });
+    return new RealmArtifactsQualification({ artifacts, accountId, namespace, sql: this.ctx.storage as unknown as AuthoritySqlHost, current: () => this.artifactsCurrent() });
+  }
+
+  private async artifactsCurrent() {
+    const active = this.recoveryStatus === "active" && await this.authorityRecoveryStatus() === "active";
+    const identity = this.requireIdentity();
+    const authority = this.authoritySqliteStore().readExisting(identity.realm.id);
+    if (!authority) throw new Error("artifacts.authority_unconfigured");
+    return { identity, authority, active };
+  }
+
+  private async authorityWorkspaceRepository(body: CoordinatorRequestBody): Promise<Response> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const failure = (code: string, status: number) => coordinatorJson({ protocol: WORKSPACE_REPOSITORY_PROTOCOL, status: "blocked", code, recoveryAction: "inspect current Workspace authorization, Artifacts configuration and custody before retrying", receipt: "workspaceRepository=not-released; details=not-disclosed; canonicalWrite=false" }, status);
+      let input; let sessionId;
+      try {
+        const { sessionId: handle, ...fields } = body;
+        sessionId = coordinatorString({ sessionId: handle }, "sessionId");
+        input = workspaceRepositoryInput(fields);
+      } catch { return failure("invalid_request", 422); }
+      const artifacts = this.env.ANYAM_ARTIFACTS;
+      const accountId = this.env.ANYAM_ARTIFACTS_ACCOUNT_ID?.trim();
+      const namespace = this.env.ANYAM_ARTIFACTS_NAMESPACE?.trim();
+      if (!artifacts || !accountId || !namespace) return failure("provider_unavailable", 503);
+      const control = new RealmArtifactsWorkspaceControl({ artifacts, accountId, namespace, sql: this.ctx.storage as unknown as AuthoritySqlHost, current: () => this.artifactsCurrent() });
+      try {
+        const identity = this.requireIdentity();
+        const rollback = identity.captureOperationalRollback();
+        const priorAudit = identity.getRecoverySnapshot().audit.length;
+        const result = await control.materialize(sessionId, input);
+        try {
+          // Provider effects/custody precede this separate identity transaction.
+          // Failed audit persistence must never erase a fork reservation.
+          if (identity.getRecoverySnapshot().audit.length !== priorAudit) await this.ctx.storage.transaction(() => this.persistIdentity());
+        } catch { rollback(); return failure("provider_unavailable", 503); }
+        return coordinatorJson(result.body, result.status);
+      } catch { return failure("provider_unavailable", 503); }
+    });
   }
 
   private requireGitHubActionsBridge(): GitHubActionsBridgeAuthority {
@@ -2136,6 +2169,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/authority/runner-complete/internal") return await this.authorityRunnerComplete(body);
       if (url.pathname === "/public-gateway/authorize") return await this.publicGatewayAuthorize(body);
       if (url.pathname === "/authority/command/internal") return await this.authorityCommand(body);
+      if (url.pathname === "/authority/workspace-repository/internal") return await this.authorityWorkspaceRepository(body);
       if (url.pathname === "/authority/view-command/internal") return await this.authorityViewCommand(body);
       if (url.pathname === "/authority/run-details/internal") return await this.authorityRunDetails(body);
 

@@ -22,3 +22,18 @@ test("typed REST bootstrap applies the shared Workspace mount validator before A
       && String(error.recoveryAction).includes("unique"),
   );
 });
+
+const ownerSourcePayload = {
+  projectId: "project:owner-readable", name: "Owner-readable source", sourceAccess: "owner-read",
+  sourceSpaces: [{ id: "source:owner-readable", name: "Selected repository", classification: "restricted", repositoryId: "repository:synthetic", snapshotId: "1111111111111111111111111111111111111111" }],
+};
+
+test("typed Project bootstrap accepts only the explicit owner-read Source access profile", () => {
+  const path = bootstrapPath("/api/projects");
+  assert.equal(bootstrapCommand(path, ownerSourcePayload, "source-registration").payload.sourceAccess, "owner-read");
+  for (const value of [null, true, "public", "owner-write", " owner-read", []]) {
+    assert.throws(() => bootstrapCommand(path, { ...ownerSourcePayload, sourceAccess: value }, "source-registration"));
+  }
+  const { sourceAccess: _access, ...legacy } = ownerSourcePayload;
+  assert.equal(bootstrapCommand(path, legacy, "legacy").payload.sourceAccess, undefined);
+});

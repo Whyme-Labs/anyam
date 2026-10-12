@@ -114,11 +114,13 @@ export function bootstrapCommand(path: BootstrapPath, body: Record<string, unkno
   if (!idempotencyKey) throw bootstrapRequestError(operation, "The Idempotency-Key header is required.", "send one stable Idempotency-Key for this intent; no transition was accepted", `operation=${operation}; idempotencyKey=required; transition=not-applied`);
   const expectedVersion = bootstrapExpectedVersion(body, operation);
   if (operation === "project.create") {
-    assertBootstrapFields(body, operation, ["projectId", "name", "referenceType", "sourceSpaces", "projectRevisionId", "expectedVersion"]);
+    assertBootstrapFields(body, operation, ["projectId", "name", "referenceType", "sourceSpaces", "projectRevisionId", "expectedVersion", "sourceAccess"]);
+    const sourceAccess = body.sourceAccess;
+    if (sourceAccess !== undefined && sourceAccess !== "owner-read") throw bootstrapRequestError(operation, "sourceAccess must be owner-read when provided.", "choose owner-read to register Source metadata for the current owner only, or omit sourceAccess; no transition was accepted", "operation=project.create; sourceAccess=unsupported; transition=not-applied");
     const projectId = safeBodyIdentifier(body, operation, "projectId");
     const projectRevisionId = safeBodyIdentifier(body, operation, "projectRevisionId");
     const referenceType = optionalBootstrapString(body, operation, "referenceType");
-    return { command: operation, idempotencyKey, ...(expectedVersion === undefined ? {} : { expectedVersion }), payload: { ...(projectId ? { projectId } : {}), name: requiredBootstrapString(body, operation, "name"), ...(referenceType ? { referenceType } : {}), sourceSpaces: bootstrapSourceSpaces(body, operation), ...(projectRevisionId ? { projectRevisionId } : {}) } };
+    return { command: operation, idempotencyKey, ...(expectedVersion === undefined ? {} : { expectedVersion }), payload: { ...(projectId ? { projectId } : {}), name: requiredBootstrapString(body, operation, "name"), ...(referenceType ? { referenceType } : {}), sourceSpaces: bootstrapSourceSpaces(body, operation), ...(projectRevisionId ? { projectRevisionId } : {}), ...(sourceAccess === "owner-read" ? { sourceAccess } : {}) } };
   }
   assertBootstrapFields(body, operation, operation === "workspace.create" ? ["workspaceId", "projectRevisionId", "sourceSpaceIds", "mounts", "projectionId", "classification", "expectedVersion"] : ["changeId", "intentId", "baseProjectRevisionId", "workspaceId", "expectedVersion"]);
   const projectId = path.projectId;
@@ -207,7 +209,7 @@ function safeChange(value: unknown): Record<string, unknown> {
 export function projectBootstrapValue(result: Record<string, unknown>, command: BootstrapMutation, idempotencyKey: string): Record<string, unknown> {
   const value = recordValue(result.value, "value");
   const base = { protocol: AUTHORITY_PLANE_PROTOCOL, status: result.status, version: result.version, idempotencyKey, credentialFree: true, canonicalWrite: command === "project.create" ? "initialization-only" : false, receipt: `operation=${command}; typedRest=true; credentialFree=true; canonicalWrite=${command === "project.create" ? "initialization-only" : "false"}; authorityResult=projected` };
-  if (command === "project.create") return { ...base, project: safeProject(value.project), canonicalRevision: safeCanonicalRevision(value.canonicalRevision), sourceSpaces: safeSourceSpaces(value.sourceSpaces) };
+  if (command === "project.create") return { ...base, ...(result.sourceAccess === "owner-read" ? { sourceAccess: "owner-read" } : {}), project: safeProject(value.project), canonicalRevision: safeCanonicalRevision(value.canonicalRevision), sourceSpaces: safeSourceSpaces(value.sourceSpaces) };
   if (command === "workspace.create") return { ...base, workspace: safeWorkspace(value.workspace), view: safeProjectView(value.view) };
   return { ...base, change: safeChange(value.change) };
 }

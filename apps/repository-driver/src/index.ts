@@ -127,7 +127,7 @@ function sameContext(left: RepositoryDriverSnapshotContext, right: RepositoryDri
   return false;
 }
 
-function parseManifest(value: unknown): RepositoryDriverSnapshotManifest | undefined {
+export function parseRepositoryDriverSnapshotManifest(value: unknown): RepositoryDriverSnapshotManifest | undefined {
   const record = object(value);
   const protocol = record?.protocol;
   const repositoryId = nonEmpty(record?.repositoryId);
@@ -150,7 +150,7 @@ function parseManifest(value: unknown): RepositoryDriverSnapshotManifest | undef
   return { protocol, repositoryId, sourceSpaceId, context, objectFormat, symbolicRef, commitOid, treeOid, baseCommitOid, ancestorCommitOids, generation, state, observedAt: observedAt.value, expiresAt: expiresAt.value, receipt };
 }
 
-function parseIndex(value: unknown): RepositoryDriverSnapshotIndex | undefined {
+export function parseRepositoryDriverSnapshotIndex(value: unknown): RepositoryDriverSnapshotIndex | undefined {
   const record = object(value);
   const protocol = record?.protocol;
   const repositoryId = nonEmpty(record?.repositoryId);
@@ -287,7 +287,7 @@ async function observe(request: Request, env: Env, config: DriverConfiguration):
   const indexResult = await readJson(config.bucket, indexKey, config.limit);
   if (indexResult.state === "missing") return failure("unavailable", "repository_driver_snapshot_index_missing", "publish the context-specific RepositoryDriver snapshot index before observing the Workspace", `repositoryDriver=${REPOSITORY_DRIVER_PROTOCOL}; repository=${observationRequest.repositoryId}; context=workspace:${observationRequest.workspaceId}; state=index-missing; providerMutation=false`, 503);
   if (indexResult.state === "invalid") return failure("unavailable", "repository_driver_snapshot_index_unavailable", "restore the context-specific RepositoryDriver snapshot index and retry the same immutable observation", `repositoryDriver=${REPOSITORY_DRIVER_PROTOCOL}; repository=${observationRequest.repositoryId}; context=workspace:${observationRequest.workspaceId}; state=index-unavailable; error=${indexResult.error}; providerMutation=false`, 503);
-  const index = parseIndex(indexResult.value);
+  const index = parseRepositoryDriverSnapshotIndex(indexResult.value);
   if (!index) return failure("unavailable", "repository_driver_snapshot_index_invalid", "repair or republish the context-specific snapshot index with a monotonic generation and credential-free receipt", `repositoryDriver=${REPOSITORY_DRIVER_PROTOCOL}; repository=${observationRequest.repositoryId}; context=workspace:${observationRequest.workspaceId}; state=index-invalid; providerMutation=false`, 502);
   if (index.repositoryId !== observationRequest.repositoryId || index.sourceSpaceId !== observationRequest.sourceSpaceId || index.context.kind !== "workspace" || index.context.workspaceId !== observationRequest.workspaceId || index.context.projectViewId !== observationRequest.projectViewId) return failure("blocked", "repository_driver_context_mismatch", "publish a snapshot index bound to the exact Repository, Source Space, Workspace, and Project View requested by the Realm", `repositoryDriver=${REPOSITORY_DRIVER_PROTOCOL}; repository=${observationRequest.repositoryId}; context=workspace:${observationRequest.workspaceId}; state=identity-mismatch; providerMutation=false`, 409);
   const expectedManifestKey = repositoryDriverSnapshotManifestKey(config.prefix, index.repositoryId, index.context, index.latestGeneration);
@@ -298,7 +298,7 @@ async function observe(request: Request, env: Env, config: DriverConfiguration):
     const budget = manifestResult.error.startsWith("repository_driver_body_budget_exceeded:");
     return failure("unavailable", budget ? "repository_driver_state_budget_exceeded" : "repository_driver_snapshot_unavailable", budget ? "reduce the indexed snapshot manifest to the configured driver budget or remeasure the tripwire" : "restore the indexed snapshot manifest and retry the same immutable observation", `repositoryDriver=${REPOSITORY_DRIVER_PROTOCOL}; repository=${index.repositoryId}; context=workspace:${observationRequest.workspaceId}; generation=${index.latestGeneration}; state=${budget ? "manifest-budget-exceeded" : "manifest-unavailable"}; error=${manifestResult.error}; providerMutation=false`, 502);
   }
-  const manifest = parseManifest(manifestResult.value);
+  const manifest = parseRepositoryDriverSnapshotManifest(manifestResult.value);
   if (!manifest) return failure("unavailable", "repository_driver_state_invalid", "repair or republish the indexed snapshot manifest with the supported context, Git identities, expiry, and receipt fields", `repositoryDriver=${REPOSITORY_DRIVER_PROTOCOL}; repository=${observationRequest.repositoryId}; context=workspace:${observationRequest.workspaceId}; state=manifest-invalid; providerMutation=false`, 502);
   if (manifest.repositoryId !== observationRequest.repositoryId || manifest.sourceSpaceId !== observationRequest.sourceSpaceId || !sameContext(manifest.context, index.context) || manifest.generation !== index.latestGeneration) return failure("blocked", "repository_driver_context_mismatch", "publish a snapshot manifest bound to the exact Repository, Source Space, Workspace, Project View, and generation requested by the Realm", `repositoryDriver=${REPOSITORY_DRIVER_PROTOCOL}; repository=${observationRequest.repositoryId}; context=workspace:${observationRequest.workspaceId}; generation=${index.latestGeneration}; state=identity-mismatch; providerMutation=false`, 409);
   const observedManifestDigest = await repositoryDriverSnapshotDigest(manifest);

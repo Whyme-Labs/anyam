@@ -43,6 +43,16 @@ test("Artifacts observes a fresh exact Workspace candidate and complete non-firs
   assert.doesNotMatch(JSON.stringify(result), /usable-secret|initial-secret/);
 });
 
+test("Artifacts snapshot production retains the complete independently read ancestry", async () => {
+  const { control, graph, request } = await observationFixture();
+  const result = await control.observeWorkspaceSnapshot(request);
+  assert.equal(result.status, "succeeded");
+  if (result.status !== "succeeded") return;
+  assert.deepEqual(result.value.ancestorCommitOids, [...graph.keys()].sort());
+  assert.equal(result.value.observation.commitOid, request.expectedCommitOid);
+  assert.equal(result.value.observation.manifestDigest, await repositoryObservationDigest(result.value.observation));
+});
+
 test("Artifacts observation rejects mismatched authority, exact candidate and incomplete ancestry", async () => {
   const outcomes: string[] = [];
   for (const condition of ["workspace", "view", "source", "account", "namespace", "grant", "ref", "commit", "tree", "format", "base", "missing-parent", "missing-parents", "cycle", "wrong-object"] as const) {

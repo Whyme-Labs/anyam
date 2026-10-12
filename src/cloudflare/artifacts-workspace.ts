@@ -102,6 +102,13 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
 
   /** Trusted observer seam. Provider reads never rely on a local checkout. */
   async observeRepository(input: Parameters<RepositoryDriver["observeRepository"]>[0]): Promise<RepositoryDriverResult<RepositoryObservation>> {
+    const result = await this.observeWorkspaceSnapshot(input);
+    return result.status === "succeeded" ? { status: "succeeded", value: result.value.observation } : result;
+  }
+
+  /** Snapshot producer retains every independently read parent for the
+   * existing trusted RepositoryDriver manifest contract. */
+  async observeWorkspaceSnapshot(input: Parameters<RepositoryDriver["observeRepository"]>[0]): Promise<RepositoryDriverResult<{ observation: RepositoryObservation; ancestorCommitOids: readonly string[] }>> {
     const request = { ...input, repository: { ...input.repository } };
     try {
       const context = this.custody("unenrolled", () => this.store.repository(request.repository.repositoryId)?.context);
@@ -158,7 +165,7 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
         throw this.error(selection, "artifacts.observation_candidate_mismatch", "none", "the selected branch moved during observation; publish a fresh exact candidate");
       }
       await this.authorize(selection, "none");
-      return { status: "succeeded", value: { ...claims, manifestDigest } };
+      return { status: "succeeded", value: { observation: { ...claims, manifestDigest }, ancestorCommitOids: [...commits].sort() } };
     } catch (error) {
       return { status: "failed", errorCode: error instanceof ArtifactsWorkspaceError ? error.code : "artifacts.observation_unqualified", message: "Fresh Workspace observation could not be qualified; inspect the exact named repository before retrying.", retryable: false };
     }

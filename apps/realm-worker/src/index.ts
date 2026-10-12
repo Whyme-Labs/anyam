@@ -56,8 +56,8 @@ import { GITHUB_WEBHOOK_INGRESS_PROTOCOL, type GitHubWebhookIngressEnvelope } fr
 import { CREDENTIAL_MATERIAL_SCANNER_PROTOCOL, scanCredentialMaterial, containsKnownTextMaterial } from "../../../src/security/credential-material.ts";
 import { isAnyamOAuthPath } from "../../../src/cloudflare/oauth-path.ts";
 import { RealmArtifactsQualification, type RealmArtifactsQualificationRequest, type ArtifactsRealmAuthorization } from "./artifacts-qualification.ts";
-import { RealmArtifactsWorkspaceControl } from "./artifacts-workspace-control.ts";
-import { WORKSPACE_REPOSITORY_PROTOCOL, workspaceRepositoryInput } from "./workspace-repository-contract.ts";
+import { RealmArtifactsWorkspaceControl, type WorkspaceRepositoryResult } from "./artifacts-workspace-control.ts";
+import { WORKSPACE_REPOSITORY_PROTOCOL, workspaceRepositoryInput, workspaceObservationInput } from "./workspace-repository-contract.ts";
 
 export type Env = AnyamRealmOAuthEnv & {
   /** Attempt-scoped Runner outputs; Realm reads only after proof validation. */
@@ -67,6 +67,8 @@ export type Env = AnyamRealmOAuthEnv & {
   ANYAM_ARTIFACTS?: Artifacts;
   ANYAM_ARTIFACTS_ACCOUNT_ID?: string;
   ANYAM_ARTIFACTS_NAMESPACE?: string;
+  ANYAM_REPOSITORY_STATE?: R2Bucket;
+  ANYAM_REPOSITORY_STATE_PREFIX?: string;
 };
 
 const REALM_IDENTITY_SNAPSHOT_KEY = "anyam/realm-identity/snapshot/v1";
@@ -828,25 +830,26 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return { identity, authority, active };
   }
 
-  private async authorityWorkspaceRepository(body: CoordinatorRequestBody): Promise<Response> {
+  private async authorityWorkspaceRepository(body: CoordinatorRequestBody, operation: "materialize" | "observe" = "materialize"): Promise<Response> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const failure = (code: string, status: number) => coordinatorJson({ protocol: WORKSPACE_REPOSITORY_PROTOCOL, status: "blocked", code, recoveryAction: "inspect current Workspace authorization, Artifacts configuration and custody before retrying", receipt: "workspaceRepository=not-released; details=not-disclosed; canonicalWrite=false" }, status);
-      let input; let sessionId;
+      let invoke: (control: RealmArtifactsWorkspaceControl) => Promise<WorkspaceRepositoryResult>;
       try {
         const { sessionId: handle, ...fields } = body;
-        sessionId = coordinatorString({ sessionId: handle }, "sessionId");
-        input = workspaceRepositoryInput(fields);
+        const sessionId = coordinatorString({ sessionId: handle }, "sessionId");
+        if (operation === "observe") { const input = workspaceObservationInput(fields); invoke = control => control.observe(sessionId, input); }
+        else { const input = workspaceRepositoryInput(fields); invoke = control => control.materialize(sessionId, input); }
       } catch { return failure("invalid_request", 422); }
       const artifacts = this.env.ANYAM_ARTIFACTS;
       const accountId = this.env.ANYAM_ARTIFACTS_ACCOUNT_ID?.trim();
       const namespace = this.env.ANYAM_ARTIFACTS_NAMESPACE?.trim();
       if (!artifacts || !accountId || !namespace) return failure("provider_unavailable", 503);
-      const control = new RealmArtifactsWorkspaceControl({ artifacts, accountId, namespace, sql: this.ctx.storage as unknown as AuthoritySqlHost, current: () => this.artifactsCurrent() });
+      const control = new RealmArtifactsWorkspaceControl({ artifacts, accountId, namespace, sql: this.ctx.storage as unknown as AuthoritySqlHost, current: () => this.artifactsCurrent(), ...(this.env.ANYAM_REPOSITORY_STATE ? { repositoryState: this.env.ANYAM_REPOSITORY_STATE } : {}), ...(this.env.ANYAM_REPOSITORY_STATE_PREFIX ? { repositoryStatePrefix: this.env.ANYAM_REPOSITORY_STATE_PREFIX } : {}) });
       try {
         const identity = this.requireIdentity();
         const rollback = identity.captureOperationalRollback();
         const priorAudit = identity.getRecoverySnapshot().audit.length;
-        const result = await control.materialize(sessionId, input);
+        const result = await invoke(control);
         try {
           // Provider effects/custody precede this separate identity transaction.
           // Failed audit persistence must never erase a fork reservation.
@@ -2170,6 +2173,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       if (url.pathname === "/public-gateway/authorize") return await this.publicGatewayAuthorize(body);
       if (url.pathname === "/authority/command/internal") return await this.authorityCommand(body);
       if (url.pathname === "/authority/workspace-repository/internal") return await this.authorityWorkspaceRepository(body);
+      if (url.pathname === "/authority/workspace-observation/internal") return await this.authorityWorkspaceRepository(body, "observe");
       if (url.pathname === "/authority/view-command/internal") return await this.authorityViewCommand(body);
       if (url.pathname === "/authority/run-details/internal") return await this.authorityRunDetails(body);
 

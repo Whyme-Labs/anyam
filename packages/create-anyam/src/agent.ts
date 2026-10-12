@@ -9,6 +9,7 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { basename, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import { parse as parseToml } from "smol-toml";
 import { gitCommitIdentity, gitProjectRevisionId, gitTreeIdentity, inspectGitSource, isGitAncestor, LocalGitSourceError, trackedGitPaths } from "./git-source.js";
 import { createWorkspaceBoundary, removeWorkspaceBoundary, runWorkspaceCommand, terminateWorkspaceProcess, WorkspaceBoundaryError, type WorkspaceBoundary, type WorkspaceBoundaryEnforcement, type WorkspaceBoundaryMode, type WorkspaceResourceLimits } from "./workspace-boundary.js";
 import { createTrustedGitMetadata, trustedGitArgs, trustedGitEnvironment } from "./trusted-git.js";
@@ -264,7 +265,7 @@ export type AgentSetupResult = {
   directory: string;
   agent: AgentKind;
   files: readonly string[];
-  broker: { command: "anyam"; args: readonly string[]; transport: "stdio" };
+  broker: { command: string; args: readonly string[]; transport: "stdio" };
   credentialStorage: "memory-only";
   canonicalWrite: false;
 };
@@ -754,9 +755,54 @@ async function validateAgentSetupPaths(directory: string, paths: readonly string
   }
 }
 
-export async function setupAgent(input: { directory: string; agent: string }): Promise<AgentSetupResult> {
+function codexConfigInvalid(): LocalAgentError {
+  return new LocalAgentError({
+    code: "agent.setup.config_invalid",
+    message: "The Codex configuration must be valid TOML with an extendable mcp_servers table; no setup files were written.",
+    affectedObject: ".codex/config.toml",
+    recoveryAction: "repair the TOML configuration and use a [mcp_servers] table instead of an inline table when adding the Anyam server",
+    receipt: "existing-config=preserved; setup-written=false",
+  });
+}
+
+function isTomlTable(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+}
+
+function codexSetupConfig(current: string, broker: AgentSetupResult["broker"], selectedCli: boolean): string | undefined {
+  const parseConfig = (text: string) => {
+    try {
+      return parseToml(text, { integersAsBigInt: "asNeeded" });
+    } catch {
+      // Parser diagnostics may contain unrelated credentials from the file.
+      throw codexConfigInvalid();
+    }
+  };
+  const configured = parseConfig(current).mcp_servers;
+  if (configured !== undefined && !isTomlTable(configured)) throw codexConfigInvalid();
+  const existing = configured?.anyam;
+  if (existing !== undefined) {
+    if (selectedCli && (!isTomlTable(existing) || existing.command !== broker.command || !Array.isArray(existing.args) || existing.args.length !== broker.args.length || !existing.args.every((arg: unknown, index: number) => arg === broker.args[index]))) {
+      throw new LocalAgentError({ code: "agent.setup.broker_conflict", message: "The existing Codex Anyam server differs from the selected CLI launcher; no setup files were written.", affectedObject: ".codex/config.toml", recoveryAction: "keep the existing server by omitting --cli-path, or explicitly reconcile its Anyam command and args before rerunning setup", receipt: "selectedCLI=configuration-conflict; existing-config=preserved; setup-written=false" });
+    }
+    return undefined;
+  }
+  const appended = `${current}${current.length > 0 && !current.endsWith("\n") ? "\n" : ""}\n[mcp_servers.anyam]\ncommand = ${JSON.stringify(broker.command)}\nargs = ${JSON.stringify(broker.args)}\n`;
+  // Inline tables cannot be extended by later table definitions. Check the
+  // complete proposed file before any setup write, preserving existing bytes.
+  parseConfig(appended);
+  return appended;
+}
+
+export async function setupAgent(input: { directory: string; agent: string; cliPath?: string }): Promise<AgentSetupResult> {
   const directory = resolve(input.directory);
   const agent = ensureAgent(input.agent);
+  const selectedCli = input.cliPath === undefined ? undefined : resolve(input.cliPath);
+  const broker: AgentSetupResult["broker"] = {
+    command: selectedCli ? process.execPath : "anyam",
+    args: [...(selectedCli ? [selectedCli] : []), "mcp", "serve", "--stdio", "--agent", agent],
+    transport: "stdio",
+  };
   if (!(await exists(join(directory, "anyam.json")))) {
     throw new LocalAgentError({
       code: "project.missing",
@@ -764,6 +810,15 @@ export async function setupAgent(input: { directory: string; agent: string }): P
       recoveryAction: `run anyam init ${directory} before configuring an agent`,
       receipt: "anyam.json was not found",
     });
+  }
+
+  if (selectedCli) {
+    try {
+      if (!(await stat(selectedCli)).isFile()) throw new Error("not a file");
+      await access(selectedCli, constants.R_OK);
+    } catch {
+      throw new LocalAgentError({ code: "agent.setup.cli_unavailable", message: `The selected CLI at ${selectedCli} must be a readable regular file; no setup files were written.`, affectedObject: selectedCli, recoveryAction: "build create-anyam and select its dist/anyam.js with --cli-path", receipt: "selectedCLI=unavailable; setup-written=false; credential-created=false" });
+    }
   }
 
   await validateAgentSetupPaths(directory, [
@@ -776,13 +831,17 @@ export async function setupAgent(input: { directory: string; agent: string }): P
     ...(agent === "codex" ? [".codex/config.toml"] : agent === "claude" ? [".mcp.json"] : agent === "cursor" ? [".cursor/mcp.json"] : []),
   ]);
 
+  const codexPath = join(directory, ".codex", "config.toml");
+  const codexCurrent = agent === "codex" && await exists(codexPath) ? await readFile(codexPath, "utf8") : "";
+  const codexNext = agent === "codex" ? codexSetupConfig(codexCurrent, broker, selectedCli !== undefined) : undefined;
+
   const createdFiles: string[] = [];
   const agentsDirectory = join(directory, ".anyam", "agents");
   const skillDirectory = join(agentsDirectory, "skills", "anyam-change");
   if (await writeJsonIfAbsent(join(agentsDirectory, "manifest.json"), {
     protocol: AGENT_SETUP_PROTOCOL,
     agent,
-    broker: { command: "anyam", args: ["mcp", "serve", "--stdio", "--agent", agent], transport: "stdio" },
+    broker,
     credentialStorage: "memory-only",
     canonicalWrite: false,
   })) createdFiles.push(".anyam/agents/manifest.json");
@@ -801,11 +860,9 @@ export async function setupAgent(input: { directory: string; agent: string }): P
   if (await writeIfAbsent(rootInstructions, agentInstructions())) createdFiles.push("AGENTS.md");
 
   if (agent === "codex") {
-    const path = join(directory, ".codex", "config.toml");
-    const current = await exists(path) ? await readFile(path, "utf8") : "";
-    if (!current.includes("[mcp_servers.anyam]")) {
-      await mkdir(join(path, ".."), { recursive: true });
-      await writeFile(path, `${current}${current.length > 0 && !current.endsWith("\n") ? "\n" : ""}\n[mcp_servers.anyam]\ncommand = \"anyam\"\nargs = [\"mcp\", \"serve\", \"--stdio\", \"--agent\", \"codex\"]\n`, "utf8");
+    if (codexNext !== undefined) {
+      await mkdir(join(codexPath, ".."), { recursive: true });
+      await writeFile(codexPath, codexNext, "utf8");
       createdFiles.push(".codex/config.toml");
     }
   }
@@ -813,7 +870,7 @@ export async function setupAgent(input: { directory: string; agent: string }): P
     const path = join(directory, ".mcp.json");
     const current = await exists(path) ? await readJson<unknown>(path) : {};
     const merged = mergeJsonObject(current, "mcpServers", {
-      anyam: { command: "anyam", args: ["mcp", "serve", "--stdio", "--agent", "claude"] },
+      anyam: { command: broker.command, args: broker.args },
     });
     await mkdir(join(path, ".."), { recursive: true });
     await writeFile(path, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
@@ -823,7 +880,7 @@ export async function setupAgent(input: { directory: string; agent: string }): P
     const path = join(directory, ".cursor", "mcp.json");
     const current = await exists(path) ? await readJson<unknown>(path) : {};
     const merged = mergeJsonObject(current, "mcpServers", {
-      anyam: { command: "anyam", args: ["mcp", "serve", "--stdio", "--agent", "cursor"] },
+      anyam: { command: broker.command, args: broker.args },
     });
     await mkdir(join(path, ".."), { recursive: true });
     await writeFile(path, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
@@ -835,7 +892,7 @@ export async function setupAgent(input: { directory: string; agent: string }): P
     directory,
     agent,
     files: createdFiles,
-    broker: { command: "anyam", args: ["mcp", "serve", "--stdio", "--agent", agent], transport: "stdio" },
+    broker,
     credentialStorage: "memory-only",
     canonicalWrite: false,
   };

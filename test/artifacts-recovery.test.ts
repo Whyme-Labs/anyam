@@ -69,6 +69,7 @@ test("Artifact recovery rejects malformed schema, duplicate bindings and inconsi
       (s: typeof snapshot) => { s.workspaces.push({ ...s.workspaces[0]! }); },
       (s: typeof snapshot) => { s.workspaces[0]!.accountId = "other-account"; },
       (s: typeof snapshot) => { const value = JSON.parse(s.workspaces[0]!.payload); value.pendingOperation = ["fork"]; s.workspaces[0]!.payload = JSON.stringify(value); },
+      (s: typeof snapshot) => { const row = s.workspaces[0]!; row.payload = row.payload.slice(0, -1) + ',"\\u0074okenIds":[]}'; },
       (s: typeof snapshot) => { const value = JSON.parse(s.workspaces[0]!.payload); value.selection.baseCommitOid = "a".repeat(40); s.workspaces[0]!.payload = JSON.stringify(value); },
       (s: typeof snapshot) => { s.observations[0]!.rowKey = "[]"; },
       (s: typeof snapshot) => { const value = JSON.parse(s.observations[0]!.manifest); value.context.projectViewId = "view:other"; s.observations[0]!.manifest = JSON.stringify(value); },

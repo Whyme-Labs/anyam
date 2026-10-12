@@ -23,6 +23,9 @@ Unknown or credential-bearing fields are refused. The current Realm's known
 opaque credential scanner checks both raw strings and decoded payloads/manifests,
 so JSON escapes cannot conceal credential values. The original JSON strings
 are retained, including whitespace in immutable manifests.
+Duplicate decoded JSON member names are rejected in raw custody/manifests,
+including escaped key spellings, so earlier shadowed values cannot bypass the
+credential and metadata checks.
 
 Restore fills missing rows; it cannot delete or overwrite an existing row.
 Every current auxiliary row must occur exactly in the incoming checkpoint.

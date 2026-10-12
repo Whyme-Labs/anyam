@@ -20,7 +20,30 @@ function object(value: unknown): Record<string, unknown> {
 }
 function fields(value: Record<string, unknown>, names: string[]) { if (Object.keys(value).some(key => !names.includes(key))) fail(); }
 function text(value: unknown): string { if (typeof value !== "string" || !value || value.trim() !== value) return fail(); return value; }
-function decoded(value: string): Record<string, unknown> { return object(JSON.parse(value)); }
+function decoded(value: string): Record<string, unknown> {
+  const result = object(JSON.parse(value));
+  // JSON.parse discards earlier duplicate members. Reject ambiguity in the
+  // original bytes so a shadowed credential cannot evade decoded validation.
+  const containers: ({ kind: "object"; keys: Set<string>; expectingKey: boolean } | { kind: "array" })[] = [];
+  for (const match of value.matchAll(/"(?:[^"\\]|\\.)*"|[{}[\]:,]/gu)) {
+    const token = match[0];
+    if (token === "{") containers.push({ kind: "object", keys: new Set(), expectingKey: true });
+    else if (token === "[") containers.push({ kind: "array" });
+    else if (token === "}" || token === "]") containers.pop();
+    else {
+      const current = containers.at(-1);
+      if (current?.kind !== "object") continue;
+      if (token === ":") current.expectingKey = false;
+      else if (token === ",") current.expectingKey = true;
+      else if (current.expectingKey && token.startsWith('"')) {
+        const key: unknown = JSON.parse(token);
+        if (typeof key !== "string" || current.keys.has(key)) fail();
+        current.keys.add(key);
+      }
+    }
+  }
+  return result;
+}
 function selection(value: unknown): ArtifactsWorkspaceSelection {
   const record = object(value); fields(record, ["projectId", "projectRevisionId", "projectViewId", "workspaceId", "sourceSpaceId", "sourceRepository", "targetName", "baseCommitOid", "baseTreeOid"]);
   const source = object(record.sourceRepository); fields(source, ["accountId", "namespace", "repositoryId", "name"]);

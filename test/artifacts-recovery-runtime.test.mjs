@@ -113,10 +113,11 @@ test("native restore refuses escaped known opaque credentials in decoded custody
   assert.equal((await invoke(repositoryPath, input, "PUT")).status, 200); assert.equal((await observe(1)).status, 200); const signed = await exportBundle();
   const credential = (await invoke("/fixture/issue-synthetic-credential", {})).value; assert.equal(typeof credential.token, "string");
   await invoke("/fixture/artifact-recovery-mutate", { operation: "drop" }); const before = (await invoke("/fixture/checkpoint")).value; const provider = (await invoke("/fixture/provider")).value;
-  for (const field of ["payload", "manifest"]) {
+  for (const field of ["payload", "manifest"]) for (const shadowed of [false, true]) {
     const artifacts = structuredClone(signed.artifacts); const row = field === "payload" ? artifacts.workspaces[0] : artifacts.observations[0]; const value = JSON.parse(row[field]);
     if (field === "payload") value.tokenIds = [credential.token]; else value.receipt += "; note=" + credential.token;
     const escaped = [...credential.token].map(char => String.fromCharCode(92) + "u" + char.charCodeAt(0).toString(16).padStart(4, "0")).join(""); row[field] = JSON.stringify(value).replace(credential.token, escaped);
+    if (shadowed) row[field] = row[field].slice(0, -1) + (field === "payload" ? ',"tokenIds":[]}' : ',"receipt":' + JSON.stringify(JSON.parse(signed.artifacts.observations[0].manifest).receipt) + "}");
     assert.equal(row[field].includes(credential.token), false);
     const result = await restore(signArtifactRecoveryFixture({ ...signed, artifacts }, "synthetic-local-only"));
     assert.equal(result.status, 422, "decoded known credential must be refused before storage"); assert.equal(JSON.stringify(result.value).includes(credential.token), false);
@@ -125,7 +126,7 @@ test("native restore refuses escaped known opaque credentials in decoded custody
 }));
 
 test("native export refuses escaped known opaque credentials already present in raw metadata", async () => {
-  for (const operation of ["escaped-custody", "escaped-generation"]) await local(async ({ invoke, rows, observe, input, fixture }) => {
+  for (const operation of ["escaped-custody", "escaped-generation", "shadowed-custody", "shadowed-generation"]) await local(async ({ invoke, rows, observe, input, fixture }) => {
     assert.equal((await invoke(repositoryPath, input, "PUT")).status, 200); assert.equal((await observe(1)).status, 200);
     const credential = (await invoke("/fixture/issue-synthetic-credential", {})).value; assert.equal(typeof credential.token, "string");
     await invoke("/fixture/artifact-recovery-mutate", { operation, opaqueToken: credential.token }); const before = await rows(); const checkpoint = (await invoke("/fixture/checkpoint")).value;

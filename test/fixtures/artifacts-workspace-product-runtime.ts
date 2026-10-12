@@ -61,6 +61,15 @@ export class LocalArtifactsWorkspaceRealm extends LocalDisclosureRealm {
         if (result && ((fault === "manifest" && !args[0].endsWith("/index.json")) || (fault === "index" && args[0].endsWith("/index.json")))) {
           await ctx.storage.delete("fixture-observation-fault"); throw new Error("owned interruption after actual R2 commit");
         }
+        if (result && fault === "expire-after-index" && args[0].endsWith("/index.json") && typeof args[1] === "string") {
+          await ctx.storage.delete("fixture-observation-fault");
+          const index: unknown = JSON.parse(args[1]);
+          if (!index || typeof index !== "object" || !("latestManifestKey" in index) || typeof index.latestManifestKey !== "string") throw new Error("owned delayed index malformed");
+          const value: unknown = await (await target.get(index.latestManifestKey))?.json();
+          const manifest = parseRepositoryDriverSnapshotManifest(value);
+          if (!manifest) throw new Error("owned delayed manifest missing");
+          await new Promise(resolve => setTimeout(resolve, Math.max(0, Date.parse(manifest.expiresAt) - Date.now() + 50)));
+        }
         return result;
       };
       const value = Reflect.get(target, property);

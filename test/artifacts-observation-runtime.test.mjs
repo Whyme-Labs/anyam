@@ -6,6 +6,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { build } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
+import { ArtifactsObservationPublisher, ArtifactsObservationPublicationError } from "../apps/realm-worker/src/artifacts-observation-publisher.ts";
+import { REPOSITORY_DRIVER_SNAPSHOT_PROTOCOL } from "../apps/repository-driver/src/index.ts";
 import { RealmIdentityPolicy } from "../src/identity/realm.ts";
 import { AuthorityPlaneCoordinator, AUTHORITY_COMMAND_PROTOCOL, emptyAuthorityPlaneSnapshot } from "../src/cloudflare/authority-plane.ts";
 import { disclosureFixture } from "./fixtures/authority-disclosure-state.ts";
@@ -148,3 +150,22 @@ test("interrupted observation refuses a recreated provider repository and change
   assert.equal((await invoke(`${repositoryPath}/observations/1`, input, "PUT")).status, 404);
   assert.equal((await invoke("/fixture/observation-state")).value.objects.length, 1);
 }));
+
+test("successful index writes cannot return observation success after the deadline expires", async () => local(async ({ invoke, restart, input }) => {
+  await invoke("/fixture/observation-fault", { fault: "expire-after-index" });
+  assert.equal((await invoke(`${repositoryPath}/observations/1`, input, "PUT")).status, 404);
+  const before = (await invoke("/fixture/observation-state")).value;
+  assert.equal(before.objects.length, 2);
+  await restart();
+  assert.notEqual((await invoke(`${repositoryPath}/observations/1`, input, "PUT")).status, 200);
+  assert.deepEqual((await invoke("/fixture/observation-state")).value, before);
+}, 3500));
+
+test("malformed or credential-bearing fresh observations touch neither SQLite nor R2", async () => {
+  const unexpected = () => { throw new Error("invalid observations must not reach storage"); };
+  const producer = new ArtifactsObservationPublisher({ sql: { transactionSync: unexpected, sql: { exec: unexpected } }, bucket: { get: unexpected, put: unexpected }, prefix: "repositories/" });
+  const manifest = { protocol: REPOSITORY_DRIVER_SNAPSHOT_PROTOCOL, repositoryId: "repository:source", sourceSpaceId: "source:app", context: { kind: "workspace", workspaceId: "workspace:a", projectViewId: "view:a", workspaceRef: "refs/heads/main" }, objectFormat: "sha1", symbolicRef: "refs/heads/main", commitOid: "a".repeat(40), treeOid: "b".repeat(40), baseCommitOid: "a".repeat(40), ancestorCommitOids: ["a".repeat(40)], generation: 1, state: "active", observedAt: new Date().toISOString(), expiresAt: "2099-01-01T00:00:00Z", receipt: "credentialMaterialStored=false" };
+  for (const fresh of [{ ...manifest, protocol: "malformed" }, { ...manifest, receipt: "provider_token = actual-secret" }]) {
+    await assert.rejects(producer.publish(fresh, async () => {}), error => error instanceof ArtifactsObservationPublicationError && error.code === "conflict");
+  }
+});

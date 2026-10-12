@@ -15,6 +15,8 @@ export class ArtifactsObservationPublisher {
   constructor(private readonly options: { sql: AuthoritySqlHost; bucket: R2Bucket; prefix: string; now?: () => number }) {}
   async publish(fresh: RepositoryDriverSnapshotManifest, recheck: () => Promise<void>) {
     const fail: (code: "conflict" | "unavailable") => never = code => { throw new ArtifactsObservationPublicationError(code); };
+    const checked = parseRepositoryDriverSnapshotManifest(fresh);
+    if (!checked || scanCredentialMaterial(fresh) || Date.parse(checked.expiresAt) <= (this.options.now ?? Date.now)()) fail("conflict");
     const indexKey = repositoryDriverSnapshotIndexKey(this.options.prefix, fresh.repositoryId, fresh.context);
     const manifestKey = repositoryDriverSnapshotManifestKey(this.options.prefix, fresh.repositoryId, fresh.context, fresh.generation);
     const key = JSON.stringify([indexKey, fresh.sourceSpaceId, fresh.generation]);
@@ -55,6 +57,8 @@ export class ArtifactsObservationPublisher {
     const verifiedValue: unknown = verifiedObject ? await verifiedObject.json() : undefined;
     const verified = parseRepositoryDriverSnapshotIndex(verifiedValue);
     if (!verified || scanCredentialMaterial(verifiedValue) || verified.latestGeneration !== manifest.generation || verified.latestManifestDigest !== digest || verified.latestManifestKey !== manifestKey || verified.repositoryId !== manifest.repositoryId || verified.sourceSpaceId !== manifest.sourceSpaceId || JSON.stringify(verified.context) !== JSON.stringify(manifest.context)) fail("conflict");
+    await recheck();
+    if (Date.parse(manifest.expiresAt) <= (this.options.now ?? Date.now)()) fail("conflict");
     return { manifest, manifestDigest: digest };
   }
 }

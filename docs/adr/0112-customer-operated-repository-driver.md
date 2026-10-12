@@ -1,3 +1,28 @@
 # Customer-operated RepositoryDriver snapshot adapter
 
 Anyam ships a provider-neutral `apps/repository-driver` Worker as the default customer-operated RepositoryDriver. It reads provider-synchronized, credential-free snapshot manifests from the customer’s R2 bucket using the `anyam.repository-driver-snapshot/v2` contract. Each Workspace/View (or Mirror) has its own context prefix; an index pins the latest immutable generation object and digest. The Worker accepts requests only from the private RepositoryObserver service binding, then verifies exact Repository/Source Space identity, Workspace/View context, head, tree, base, object format, symbolic ref, ancestry, observation time, expiry, and monotonic generation metadata before returning the existing observation contract. Missing, revoked, explicitly stale, future, expired, mismatched, malformed, digest-inconsistent, or oversized state remains unavailable or blocked with a recovery receipt. Generation objects are write-once and retained, and the synchronizer advances the index with an R2 conditional write so a lower or repeated generation cannot become active. Provider-specific GitHub, Smart-HTTP, and Anyam-native synchronizers stay outside the Realm and can replace the snapshot writer without changing Authority or Observer contracts.
+
+
+## Authenticated Artifacts Workspace producer placement
+
+The owner Workspace path adds one narrow exception to the external synchronizer
+placement. The Realm may produce snapshots for an Artifacts repository that its
+existing materialization custody binds to the exact Workspace, Project View and
+Source base. This avoids introducing another orchestration service merely to
+pass those current authorization and custody checks to a provider writer.
+
+The producer requires the current human owner/Workspace creator, Source policy
+and existing Task/Grant for source.read and workspace.write actions and effects.
+It reads Git identities and all parents through the Artifacts binding. It
+validates credential-free metadata before reservation, journals one immutable
+generation, and writes the same private R2 manifest/index contract conditionally.
+Caller claims cannot supply authority, base, ancestry, time or expiry. Provider
+state and current authority are rechecked through final index read-back.
+
+This placement does not authorize direct hosted revision publication. The
+independent RepositoryObserver and RepositoryDriver still read and verify the
+snapshot through their private service boundary before Authority accepts a
+Change Revision. Other provider synchronizers remain separate. Native local
+SQLite/R2 tests cover actual write response loss, restart, stale replay and a
+final write response crossing expiry; remote Artifacts conformance is qualified
+separately.

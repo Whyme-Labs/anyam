@@ -71,6 +71,7 @@ export class RealmArtifactsWorkspaceControl {
       const manifest = { protocol: REPOSITORY_DRIVER_SNAPSHOT_PROTOCOL, repositoryId, sourceSpaceId: selection.sourceSpaceId, context: { kind: "workspace" as const, workspaceId: selection.workspaceId, projectViewId: selection.projectViewId, workspaceRef: value.symbolicRef },
         objectFormat: value.objectFormat, symbolicRef: value.symbolicRef, commitOid: value.commitOid, treeOid: value.treeOid, baseCommitOid: value.baseCommitOid, ancestorCommitOids: fresh.ancestorCommitOids, generation: request.generation, state: "active" as const,
         observedAt: value.observedAt, expiresAt: deadline.expiresAt, receipt: `${value.receipt}; sourceRepository=${repositoryId}; workspaceRepository=${record.context.binding.repositoryId}; producer=authenticated-artifacts` };
+      if (identity.containsKnownCredentialMaterial(manifest)) return this.failure("invalid_request", 422);
       const result = await new ArtifactsObservationPublisher({ sql: this.options.sql, bucket, prefix: this.options.repositoryStatePrefix?.trim() || "repositories/", ...(this.options.now ? { now: this.options.now } : {}) }).publish(manifest, async () => {
         const current = await authorize(selection);
         if (Date.parse(current.expiresAt) < Date.parse(manifest.expiresAt)) throw new ArtifactsObservationPublicationError("conflict");

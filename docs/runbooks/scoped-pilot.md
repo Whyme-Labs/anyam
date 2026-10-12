@@ -98,7 +98,7 @@ trusted-human-session-helper | anyam realm recovery export \
   --session-stdin --json
 ```
 
-Export writes the unchanged signed `anyam.authority-recovery/v1` bundle into a
+Export writes the unchanged signed Authority recovery v1 or v2 bundle into a
 new private file, reports its file digest and bundle identity, and omits the
 snapshot/signature from terminal output. The CLI preserves signed fields and
 does not verify the HMAC without the customer recovery key. Retain that key

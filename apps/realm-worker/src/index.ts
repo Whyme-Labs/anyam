@@ -1626,6 +1626,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     const payload = body.payload;
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new AuthorityPlaneError({ code: "invalid_request", message: "Authority command payload must be a JSON object.", recoveryAction: "send the command-specific payload as an object; no authority transition was accepted", receipt: `command=${command}; payload=object-required; transition=not-applied` });
     const payloadRecord = payload as Record<string, unknown>;
+    if (command === "project.create" && payloadRecord.sourceAccess !== undefined && payloadRecord.sourceAccess !== "owner-read") throw new AuthorityPlaneError({ code: "invalid_request", message: "sourceAccess must be owner-read when provided.", recoveryAction: "select the current-owner read profile or omit sourceAccess", receipt: "sourceAccess=unsupported; transition=not-applied" });
     const resource: ResourceRef = {
       realmId: this.requireIdentity().realm.id,
       ...(typeof payloadRecord.projectId === "string" ? { projectId: payloadRecord.projectId } : {}),
@@ -1650,6 +1651,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       payload: payloadRecord,
     };
     if (rawSourceCommand) return await this.authorityRawSourceCommand(envelope, session);
+    if (command === "project.create" && payloadRecord.sourceAccess === "owner-read") return await this.authorityOwnerReadableProject(envelope, session);
     return await this.ctx.blockConcurrencyWhile(async () => {
       const current = await this.authoritySnapshot();
       const coordinator = new AuthorityPlaneCoordinator(current);
@@ -1657,6 +1659,60 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
       const result = coordinator.execute(prepared, session);
       await this.persistAuthoritySnapshot(current, coordinator.snapshot());
       return coordinatorJson({ ...result, session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, credentialFree: true, canonicalWrite: "landing-only" }, result.status === "succeeded" ? 200 : result.status === "blocked" ? 409 : 503);
+    });
+  }
+
+  /** Explicit read registration for newly declared Sources. This creates no
+   * Agent, Task, Grant, provider credential or repository import operation. */
+  private async authorityOwnerReadableProject(command: AuthorityCommand, session: AuthoritySession): Promise<Response> {
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      const identity = this.requireIdentity();
+      const rollback = identity.captureOperationalRollback();
+      try {
+        return await this.ctx.storage.transaction(async () => {
+          await this.requireAuthorityActive();
+          const owner = this.authorityOwnerSession(session.sessionId);
+          if (scanCredentialMaterial(command, "ownerSourceBootstrap") || identity.containsKnownCredentialMaterial(command)) disclosedCommandError("invalid_request");
+          const current = await this.authoritySnapshot();
+          const coordinator = new AuthorityPlaneCoordinator(current);
+          const result = coordinator.execute(command, owner);
+          if (result.status !== "succeeded") return coordinatorJson(result, 409);
+          const next = coordinator.snapshot();
+          const value = result.value?.project;
+          if (!value || typeof value !== "object" || !("id" in value) || typeof value.id !== "string") disclosedCommandError("invalid_request");
+          const project = next.projects[value.id];
+          if (!project) disclosedCommandError("invalid_request");
+          if (next.version !== current.version) {
+            const policies = identity.getRecoverySnapshot().sourceSpacePolicies;
+            for (const sourceId of project.sourceSpaceIds) {
+              const source = next.sourceSpaces[sourceId];
+              if (!source || current.sourceSpaces[sourceId] || policies[sourceId]) disclosedCommandError("conflict");
+              identity.setSourceSpacePolicy({ sourceSpaceId: source.id, classification: source.classification,
+                allowedCapabilities: ["source.read"], readerPrincipalIds: [owner.principalId], discoverable: false });
+            }
+          }
+          // Replays observe current policy; they cannot restore revoked read
+          // access or return metadata to a different owner using the same key.
+          for (const sourceId of project.sourceSpaceIds) {
+            const source = next.sourceSpaces[sourceId];
+            if (!source || !identity.canReadSourceSpaceMetadata({ sessionId: owner.sessionId,
+              resource: { realmId: next.realmId, projectId: project.id, sourceSpaceId: sourceId }, classification: source.classification })) disclosedCommandError();
+          }
+          if (next.version !== current.version) {
+            await this.persistAuthoritySnapshot(current, next);
+            await this.persistIdentity();
+          }
+          return coordinatorJson({ ...result, credentialFree: true, canonicalWrite: "initialization-only", sourceAccess: "owner-read" });
+        });
+      } catch (error) {
+        rollback();
+        const code = error instanceof RealmIdentityError ? "not_found" : error instanceof AuthorityPlaneError
+          ? error.code === "idempotency_conflict" ? "conflict" : error.code === "not_found" || error.code === "invalid_request" || error.code === "conflict" ? error.code : undefined
+          : undefined;
+        if (!code) return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code: "command_unavailable", receipt: "ownerSourceBootstrap=unavailable; transition=not-applied; details=not-disclosed" }, 503);
+        const safe = disclosedCommandFailure(code);
+        return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "blocked", code, message: safe.message, recoveryAction: safe.recoveryAction, receipt: safe.receipt }, code === "not_found" ? 404 : code === "conflict" ? 409 : 422);
+      }
     });
   }
 

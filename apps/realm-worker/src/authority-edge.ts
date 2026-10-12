@@ -31,7 +31,7 @@ async function workspaceRepositoryMutation(request: Request, env: AnyamRealmOAut
     const detail = error instanceof Error ? error.message : "coordinator unavailable";
     if (detail.includes("not_found")) return failure(404, "not_found", "use an active owned Workspace, disclosed Artifacts Source and current Task/Grant permitting source.read and workspace.write");
     if (detail.includes("invalid_request")) return failure(422, "invalid_request", "send only credential-free documented fields");
-    return failure(503, "provider_unavailable", "inspect the named provider repository and durable custody; reconcile pending effects and initial token retirement before retrying");
+    return failure(503, "provider_unavailable", "generation" in path ? "inspect the exact snapshot generation, latest index and current candidate/Task/Grant before retrying" : "inspect the named provider repository and durable custody; reconcile pending effects and initial token retirement before retrying");
   }
 }
 

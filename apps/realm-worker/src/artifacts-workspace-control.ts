@@ -44,15 +44,15 @@ export class RealmArtifactsWorkspaceControl {
   async observe(sessionId: string, input: WorkspaceObservationInput): Promise<WorkspaceRepositoryResult> {
     try {
       const bucket = this.options.repositoryState;
-      if (!bucket) return this.failure("provider_unavailable", 503);
+      if (!bucket) return this.failure("provider_unavailable", 503, "observe");
       const request = Object.freeze({ ...input });
       const { identity, authority } = await currentArtifactsRealmOwner(this.options, sessionId);
-      if (scanCredentialMaterial(request) || identity.containsKnownCredentialMaterial(request)) return this.failure("invalid_request", 422);
+      if (scanCredentialMaterial(request) || identity.containsKnownCredentialMaterial(request)) return this.failure("invalid_request", 422, "observe");
       const store = new SQLiteArtifactsWorkspaceStore(this.options.sql);
       const record = store.read({ workspaceId: request.workspaceId, sourceSpaceId: request.sourceSpaceId, sourceRepository: { accountId: this.options.accountId, namespace: this.options.namespace } });
       const selection = record?.context?.selection;
       const repositoryId = authority.sourceSpaces[request.sourceSpaceId]?.repositoryId;
-      if (!record?.context || !selection || !repositoryId || record.pendingOperation !== "none" || record.blocked || record.unknownTokenInventory) return this.failure("not_found", 404);
+      if (!record?.context || !selection || !repositoryId || record.pendingOperation !== "none" || record.blocked || record.unknownTokenInventory) return this.failure("not_found", 404, "observe");
       const authorization = { sessionId, bindings: [{ workspaceId: request.workspaceId, sourceSpaceId: request.sourceSpaceId, taskId: request.taskId, grantId: request.grantId }] };
       const authorize = (selected: typeof selection) => authorizeRealmArtifactsSelection(this.options, authorization, selected, JSON.stringify({ selection: selected, request }));
       const deadline = await authorize(selection);
@@ -71,7 +71,7 @@ export class RealmArtifactsWorkspaceControl {
       const manifest = { protocol: REPOSITORY_DRIVER_SNAPSHOT_PROTOCOL, repositoryId, sourceSpaceId: selection.sourceSpaceId, context: { kind: "workspace" as const, workspaceId: selection.workspaceId, projectViewId: selection.projectViewId, workspaceRef: value.symbolicRef },
         objectFormat: value.objectFormat, symbolicRef: value.symbolicRef, commitOid: value.commitOid, treeOid: value.treeOid, baseCommitOid: value.baseCommitOid, ancestorCommitOids: fresh.ancestorCommitOids, generation: request.generation, state: "active" as const,
         observedAt: value.observedAt, expiresAt: deadline.expiresAt, receipt: `${value.receipt}; sourceRepository=${repositoryId}; workspaceRepository=${record.context.binding.repositoryId}; producer=authenticated-artifacts` };
-      if (identity.containsKnownCredentialMaterial(manifest)) return this.failure("invalid_request", 422);
+      if (identity.containsKnownCredentialMaterial(manifest)) return this.failure("invalid_request", 422, "observe");
       const result = await new ArtifactsObservationPublisher({ sql: this.options.sql, bucket, prefix: this.options.repositoryStatePrefix?.trim() || "repositories/", ...(this.options.now ? { now: this.options.now } : {}) }).publish(manifest, async () => {
         const current = await authorize(selection);
         if (Date.parse(current.expiresAt) < Date.parse(manifest.expiresAt)) throw new ArtifactsObservationPublicationError("conflict");
@@ -82,14 +82,14 @@ export class RealmArtifactsWorkspaceControl {
         commitOid: result.manifest.commitOid, treeOid: result.manifest.treeOid, baseCommitOid: result.manifest.baseCommitOid, manifestDigest: result.manifestDigest, expiresAt: result.manifest.expiresAt,
         receipt: "workspaceObservation=provider-read; snapshot=immutable; index=conditional-monotonic; credentialFree=true; canonicalWrite=false" } };
     } catch (error) {
-      if (error instanceof RealmIdentityError || error instanceof ArtifactsRealmAccessError && error.code === "denied") return this.failure("not_found", 404);
-      if (error instanceof ArtifactsObservationPublicationError && error.code === "conflict") return this.failure("conflict", 409);
-      return this.failure("provider_unavailable", 503);
+      if (error instanceof RealmIdentityError || error instanceof ArtifactsRealmAccessError && error.code === "denied") return this.failure("not_found", 404, "observe");
+      if (error instanceof ArtifactsObservationPublicationError && error.code === "conflict") return this.failure("conflict", 409, "observe");
+      return this.failure("provider_unavailable", 503, "observe");
     }
   }
-  private failure(code: "invalid_request" | "not_found" | "conflict" | "provider_unavailable", status: number) {
+  private failure(code: "invalid_request" | "not_found" | "conflict" | "provider_unavailable", status: number, operation: "materialize" | "observe" = "materialize") {
     return { status, body: { protocol: WORKSPACE_REPOSITORY_PROTOCOL, status: "blocked", code,
-      recoveryAction: code === "not_found" ? "use an active owned Workspace, disclosed Artifacts Source and current Task/Grant permitting source.read and workspace.write" : code === "invalid_request" ? "send only credential-free documented fields" : "inspect the existing binding and named provider repository/token retirement; reconcile pending effects before repeating materialization",
-      receipt: "workspaceRepository=not-released; providerEffect=inspect-custody; details=not-disclosed; canonicalWrite=false" } };
+      recoveryAction: code === "not_found" ? "use an active owned Workspace, disclosed Artifacts Source and current Task/Grant permitting source.read and workspace.write" : code === "invalid_request" ? "send only credential-free documented fields" : operation === "observe" ? "inspect the exact generation, latest index and current Git candidate; reconcile incomplete snapshot publication and current Task/Grant before retrying" : "inspect the existing binding and named provider repository/token retirement; reconcile pending effects before repeating materialization",
+      receipt: operation === "observe" ? "workspaceObservation=not-qualified; providerEffect=inspect-snapshot-custody; details=not-disclosed; canonicalWrite=false" : "workspaceRepository=not-released; providerEffect=inspect-custody; details=not-disclosed; canonicalWrite=false" } };
   }
 }

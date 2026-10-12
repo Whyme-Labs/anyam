@@ -108,3 +108,29 @@ test("actual operator CLI preserves and restores a v2 Artifact checkpoint throug
   await restart(); await accepted(cli("activate", ["--input", receipt, "--idempotency-key", "cli-activate-v2"])); assert.deepEqual(await rows(), before);
   assert.equal((await invoke("/fixture/provider")).value.events.filter(value => value.startsWith("fork:")).length, 1);
 }));
+
+test("native restore refuses escaped known opaque credentials in decoded custody and generations", async () => local(async ({ invoke, rows, exportBundle, restore, observe, input }) => {
+  assert.equal((await invoke(repositoryPath, input, "PUT")).status, 200); assert.equal((await observe(1)).status, 200); const signed = await exportBundle();
+  const credential = (await invoke("/fixture/issue-synthetic-credential", {})).value; assert.equal(typeof credential.token, "string");
+  await invoke("/fixture/artifact-recovery-mutate", { operation: "drop" }); const before = (await invoke("/fixture/checkpoint")).value; const provider = (await invoke("/fixture/provider")).value;
+  for (const field of ["payload", "manifest"]) {
+    const artifacts = structuredClone(signed.artifacts); const row = field === "payload" ? artifacts.workspaces[0] : artifacts.observations[0]; const value = JSON.parse(row[field]);
+    if (field === "payload") value.tokenIds = [credential.token]; else value.receipt += "; note=" + credential.token;
+    const escaped = [...credential.token].map(char => String.fromCharCode(92) + "u" + char.charCodeAt(0).toString(16).padStart(4, "0")).join(""); row[field] = JSON.stringify(value).replace(credential.token, escaped);
+    assert.equal(row[field].includes(credential.token), false);
+    const result = await restore(signArtifactRecoveryFixture({ ...signed, artifacts }, "synthetic-local-only"));
+    assert.equal(result.status, 422, "decoded known credential must be refused before storage"); assert.equal(JSON.stringify(result.value).includes(credential.token), false);
+    assert.deepEqual(await rows(), { workspaces: [], observations: [] }); assert.deepEqual((await invoke("/fixture/checkpoint")).value, before); assert.deepEqual((await invoke("/fixture/provider")).value, provider);
+  }
+}));
+
+test("native export refuses escaped known opaque credentials already present in raw metadata", async () => {
+  for (const operation of ["escaped-custody", "escaped-generation"]) await local(async ({ invoke, rows, observe, input, fixture }) => {
+    assert.equal((await invoke(repositoryPath, input, "PUT")).status, 200); assert.equal((await observe(1)).status, 200);
+    const credential = (await invoke("/fixture/issue-synthetic-credential", {})).value; assert.equal(typeof credential.token, "string");
+    await invoke("/fixture/artifact-recovery-mutate", { operation, opaqueToken: credential.token }); const before = await rows(); const checkpoint = (await invoke("/fixture/checkpoint")).value;
+    const result = await invoke("/authority/recovery/export/internal", { sessionId: fixture.members.owner.session.id });
+    assert.equal(result.status, 422, "decoded known credential must be refused before signing/export"); assert.equal(JSON.stringify(result.value).includes(credential.token), false); assert.equal(Object.hasOwn(result.value, "bundle"), false);
+    assert.deepEqual(await rows(), before); assert.deepEqual((await invoke("/fixture/checkpoint")).value, checkpoint);
+  });
+});

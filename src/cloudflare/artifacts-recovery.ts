@@ -39,12 +39,12 @@ function validateBinding(selected: ArtifactsWorkspaceSelection, authority: Autho
   const project = authority.projects[selected.projectId]; const revision = authority.projectRevisions[selected.projectRevisionId]; const view = authority.projectViews[selected.projectViewId];
   if (!workspace || !source || !project || !revision || !view || workspace.projectId !== selected.projectId || workspace.projectRevisionId !== selected.projectRevisionId || workspace.projectViewId !== selected.projectViewId || revision.projectId !== selected.projectId || view.projectId !== selected.projectId || view.projectRevisionId !== selected.projectRevisionId || !project.sourceSpaceIds.includes(selected.sourceSpaceId) || !view.visibleSourceSpaceIds.includes(selected.sourceSpaceId) || revision.sourceSpaceSnapshots[selected.sourceSpaceId] !== selected.baseCommitOid || view.disclosedSourceSpaceSnapshots[selected.sourceSpaceId] !== selected.baseCommitOid || !workspace.mounts.some(mount => mount.sourceSpaceId === selected.sourceSpaceId && mount.snapshotId === selected.baseCommitOid) || source.repositoryId !== `repository:artifacts:${selected.sourceRepository.accountId}:${selected.sourceRepository.namespace}:${selected.sourceRepository.repositoryId}`) fail();
 }
-function workspaceRow(value: unknown, authority: AuthorityPlaneSnapshot): { row: ArtifactWorkspaceRecoveryRow; selected: ArtifactsWorkspaceSelection; bindingId?: string } {
+function workspaceRow(value: unknown, authority: AuthorityPlaneSnapshot, containsKnownCredentialMaterial: (value: unknown) => boolean): { row: ArtifactWorkspaceRecoveryRow; selected: ArtifactsWorkspaceSelection; bindingId?: string } {
   const row = object(value); fields(row, ["rowKey", "accountId", "namespace", "targetName", "repositoryId", "payload"]);
   const repositoryId = row.repositoryId === null ? null : text(row.repositoryId);
   const result = { rowKey: text(row.rowKey), accountId: text(row.accountId), namespace: text(row.namespace), targetName: text(row.targetName), repositoryId, payload: text(row.payload) };
   const record = decoded(result.payload); fields(record, ["selection", "context", "tokenIds", "blocked", "unknownTokenInventory", "pendingOperation"]);
-  if (scanCredentialMaterial(record) || !Array.isArray(record.tokenIds) || record.tokenIds.some(id => typeof id !== "string" || !id) || new Set(record.tokenIds).size !== record.tokenIds.length || typeof record.blocked !== "boolean" || typeof record.unknownTokenInventory !== "boolean" || typeof record.pendingOperation !== "string" || !["none", "fork", "mint"].includes(record.pendingOperation)) fail();
+  if (scanCredentialMaterial(record) || containsKnownCredentialMaterial(record) || !Array.isArray(record.tokenIds) || record.tokenIds.some(id => typeof id !== "string" || !id) || new Set(record.tokenIds).size !== record.tokenIds.length || typeof record.blocked !== "boolean" || typeof record.unknownTokenInventory !== "boolean" || typeof record.pendingOperation !== "string" || !["none", "fork", "mint"].includes(record.pendingOperation)) fail();
   const selected = selection(record.selection); validateBinding(selected, authority);
   if (result.rowKey !== JSON.stringify([selected.sourceRepository.accountId, selected.sourceRepository.namespace, selected.workspaceId, selected.sourceSpaceId]) || result.accountId !== selected.sourceRepository.accountId || result.namespace !== selected.sourceRepository.namespace || result.targetName !== selected.targetName) fail();
   if (record.context === undefined) {
@@ -61,11 +61,11 @@ function workspaceRow(value: unknown, authority: AuthorityPlaneSnapshot): { row:
 }
 /** Validate decoded metadata as well as its raw SQL bytes. Raw JSON is retained
  * so an immutable journal generation cannot be reformatted during recovery. */
-export function parseArtifactsRecoverySnapshot(value: unknown, authority: AuthorityPlaneSnapshot): ArtifactsRecoverySnapshot | undefined {
+export function parseArtifactsRecoverySnapshot(value: unknown, authority: AuthorityPlaneSnapshot, containsKnownCredentialMaterial: (value: unknown) => boolean = () => false): ArtifactsRecoverySnapshot | undefined {
   try {
     const input = object(value); fields(input, ["protocol", "schemaVersion", "workspaces", "observations"]);
-    if (input.protocol !== ARTIFACTS_RECOVERY_PROTOCOL || input.schemaVersion !== 1 || !Array.isArray(input.workspaces) || !Array.isArray(input.observations) || scanCredentialMaterial(input)) return undefined;
-    const workspaces = input.workspaces.map(row => workspaceRow(row, authority));
+    if (input.protocol !== ARTIFACTS_RECOVERY_PROTOCOL || input.schemaVersion !== 1 || !Array.isArray(input.workspaces) || !Array.isArray(input.observations) || scanCredentialMaterial(input) || containsKnownCredentialMaterial(input)) return undefined;
+    const workspaces = input.workspaces.map(row => workspaceRow(row, authority, containsKnownCredentialMaterial));
     for (const keys of [workspaces.map(item => item.row.rowKey), workspaces.map(item => JSON.stringify([item.row.accountId, item.row.namespace, item.row.targetName])), workspaces.flatMap(item => item.bindingId ? [item.bindingId] : [])]) if (new Set(keys).size !== keys.length) fail();
     const observations: ArtifactObservationRecoveryRow[] = [];
     for (const value of input.observations) {
@@ -74,7 +74,7 @@ export function parseArtifactsRecoverySnapshot(value: unknown, authority: Author
       fields(raw, ["protocol", "repositoryId", "sourceSpaceId", "context", "objectFormat", "symbolicRef", "commitOid", "treeOid", "baseCommitOid", "ancestorCommitOids", "generation", "state", "observedAt", "expiresAt", "receipt"]);
       const context = object(raw.context); fields(context, ["kind", "workspaceId", "projectViewId", "workspaceRef"]);
       const manifest = parseRepositoryDriverSnapshotManifest(raw);
-      if (!manifest || scanCredentialMaterial(raw) || manifest.context.kind !== "workspace" || manifest.objectFormat !== "sha1" || new Set(manifest.ancestorCommitOids).size !== manifest.ancestorCommitOids.length || !manifest.ancestorCommitOids.includes(manifest.commitOid) || !manifest.ancestorCommitOids.includes(manifest.baseCommitOid)) fail();
+      if (!manifest || scanCredentialMaterial(raw) || containsKnownCredentialMaterial(raw) || manifest.context.kind !== "workspace" || manifest.objectFormat !== "sha1" || new Set(manifest.ancestorCommitOids).size !== manifest.ancestorCommitOids.length || !manifest.ancestorCommitOids.includes(manifest.commitOid) || !manifest.ancestorCommitOids.includes(manifest.baseCommitOid)) fail();
       const workspaceContext = manifest.context;
       const bound = workspaces.find(item => item.selected.workspaceId === workspaceContext.workspaceId && item.selected.sourceSpaceId === manifest.sourceSpaceId && item.selected.projectViewId === workspaceContext.projectViewId);
       if (!bound?.bindingId || manifest.repositoryId !== authority.sourceSpaces[manifest.sourceSpaceId]?.repositoryId || manifest.baseCommitOid !== bound.selected.baseCommitOid || !manifest.receipt.split(";").some(part => part.trim() === `workspaceRepository=${bound.bindingId}`)) fail();
@@ -96,7 +96,7 @@ export async function artifactsRecoverySnapshotDigest(snapshot: ArtifactsRecover
   return `sha256:${Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 export class ArtifactsRecoveryStore {
-  constructor(private readonly host: AuthoritySqlHost) {}
+  constructor(private readonly host: AuthoritySqlHost, private readonly containsKnownCredentialMaterial: (value: unknown) => boolean = () => false) {}
   capture(authority: AuthorityPlaneSnapshot): ArtifactsRecoverySnapshot {
     const exists = (table: string, expected: string[], unique: string[][]) => {
       if (!this.host.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", table).toArray().length) return false;
@@ -111,12 +111,12 @@ export class ArtifactsRecoveryStore {
     };
     const workspaces = exists("anyam_artifacts_workspaces", ["row_key", "account_id", "namespace", "target_name", "repository_id", "payload"], [["row_key"], ["repository_id"], ["account_id", "namespace", "target_name"]]) ? this.host.sql.exec<ArtifactWorkspaceRecoveryRow>("SELECT row_key AS rowKey, account_id AS accountId, namespace, target_name AS targetName, repository_id AS repositoryId, payload FROM anyam_artifacts_workspaces ORDER BY row_key").toArray() : [];
     const observations = exists("anyam_artifacts_observations", ["row_key", "manifest"], [["row_key"]]) ? this.host.sql.exec<ArtifactObservationRecoveryRow>("SELECT row_key AS rowKey, manifest FROM anyam_artifacts_observations ORDER BY row_key").toArray() : [];
-    const result = parseArtifactsRecoverySnapshot({ protocol: ARTIFACTS_RECOVERY_PROTOCOL, schemaVersion: 1, workspaces, observations }, authority);
+    const result = parseArtifactsRecoverySnapshot({ protocol: ARTIFACTS_RECOVERY_PROTOCOL, schemaVersion: 1, workspaces, observations }, authority, this.containsKnownCredentialMaterial);
     if (!result) throw new ArtifactsRecoveryError("invalid_snapshot");
     return result;
   }
   restore(value: unknown, options: { currentAuthority: AuthorityPlaneSnapshot; targetAuthority: AuthorityPlaneSnapshot }): void {
-    const incoming = parseArtifactsRecoverySnapshot(value, options.targetAuthority);
+    const incoming = parseArtifactsRecoverySnapshot(value, options.targetAuthority, this.containsKnownCredentialMaterial);
     if (!incoming) throw new ArtifactsRecoveryError("invalid_snapshot");
     this.host.transactionSync(() => {
       const current = this.capture(options.currentAuthority);

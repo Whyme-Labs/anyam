@@ -1101,7 +1101,7 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
     return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: recoveryStatus === "active" ? "ready" : "quarantined", authority: complete ? authorityStateSummary(snapshot) : disclosure.summary(), recoveryStatus, ...(complete ? { storage: this.authoritySqliteStore().receipt() } : {}), session: { principalId: session.principalId, actorId: session.actorId, authorizationEpoch: session.authorizationEpoch }, receipt: "authority=coordinator; operation=state.inspect; credentialFree=true; canonicalWrite=landing-only" });
   }
 
-  private artifactsRecoveryStore() { return new ArtifactsRecoveryStore(this.ctx.storage as unknown as AuthoritySqlHost); }
+  private artifactsRecoveryStore() { return new ArtifactsRecoveryStore(this.ctx.storage as unknown as AuthoritySqlHost, value => this.requireIdentity().containsKnownCredentialMaterial(value)); }
   private artifactsRecoveryFailure(error: ArtifactsRecoveryError): AuthorityPlaneError {
     return new AuthorityPlaneError({ code: error.code === "conflict" ? "conflict" : "invalid_request", message: "Artifact recovery metadata is inconsistent or unsupported.", recoveryAction: "retain the complete signed checkpoint and reconcile custody and immutable generations; no provider effect was performed", receipt: `artifactsRecovery=${error.code}; state=unchanged; credentialMaterialStored=false` });
   }
@@ -1120,7 +1120,6 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
         const snapshot = await this.authoritySnapshot();
         if (!this.authorityDisclosure(snapshot, session).completeRealm()) this.authorityReadNotFound();
         const artifacts = this.artifactsRecoveryStore().capture(snapshot);
-        if (this.requireIdentity().containsKnownCredentialMaterial(artifacts)) throw new ArtifactsRecoveryError("invalid_snapshot");
         const recoveryKey = this.authorityRecoveryKey();
         const bundle = await createAuthorityRecoveryBundle({ snapshot, bundleId: crypto.randomUUID(), recoveryKeyId: recoveryKey.keyId, secret: recoveryKey.secret, ...(artifacts.workspaces.length || artifacts.observations.length ? { artifacts } : {}) });
         return coordinatorJson({ protocol: AUTHORITY_PLANE_PROTOCOL, status: "recovery-exported", ownerPrincipalId: session.principalId, bundle, recoveryKeyId: recoveryKey.keyId, snapshotVersion: snapshot.version, credentialFree: true, canonicalWrite: false, receipt: `authorityRecovery=exported; protocol=${bundle.protocol}; version=${snapshot.version}; auditChain=signed; recoveryKeyId=${recoveryKey.keyId}; credentialMaterialStored=false` });
@@ -1178,7 +1177,6 @@ export class AnyamRealmCoordinator extends DurableObject<Env> {
             try {
               const store = this.artifactsRecoveryStore();
               if (bundle.protocol === AUTHORITY_ARTIFACTS_RECOVERY_PROTOCOL) {
-                if (this.requireIdentity().containsKnownCredentialMaterial(bundle.artifacts)) throw new ArtifactsRecoveryError("invalid_snapshot");
                 store.restore(bundle.artifacts, { currentAuthority: current, targetAuthority: result.snapshot });
                 artifactsDigest = await artifactsRecoverySnapshotDigest(store.capture(result.snapshot));
               } else {

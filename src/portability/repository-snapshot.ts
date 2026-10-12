@@ -169,4 +169,3 @@ export function repositoryDriverSnapshotIndexKey(prefix: string, repositoryId: s
 export function repositoryDriverSnapshotManifestKey(prefix: string, repositoryId: string, context: RepositoryDriverSnapshotContext, generation: number): string {
   return `${contextPrefix(prefix, repositoryId, context)}/generations/${generation}.json`;
 }
-

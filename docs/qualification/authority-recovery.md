@@ -19,7 +19,9 @@ immutable generation rows from `anyam_artifacts_observations`. It preserves
 pending fork/mint effects, blocked status, unknown token inventory and token
 IDs, with no credential values. Decoded metadata must match the signed account,
 namespace, Source UUID, Workspace, view, exact base and observation generation.
-Unknown or credential-bearing fields are refused. The original JSON strings
+Unknown or credential-bearing fields are refused. The current Realm's known
+opaque credential scanner checks both raw strings and decoded payloads/manifests,
+so JSON escapes cannot conceal credential values. The original JSON strings
 are retained, including whitespace in immutable manifests.
 
 Restore fills missing rows; it cannot delete or overwrite an existing row.
@@ -119,6 +121,8 @@ retain uncertain effects across restart, reject correctly signed malformed or
 inconsistent metadata, refuse same-version stale generations, and roll back
 auxiliary inserts with SQL/KV faults. The actual operator CLI exports/restores
 v2 through private files and activates after reopening the same local storage.
+Native regressions also refuse escaped known opaque credentials during export
+and signed restore without changing identity, SQL/KV or provider state.
 
 These checks qualify transaction rollback and retry locally. They do not prove
 production backup availability, a live restore drill, crash or account disaster

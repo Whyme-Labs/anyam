@@ -348,3 +348,40 @@ edge and Coordinator with a fake provider and real SQLite persistence. They do
 not establish live Artifacts service conformance, transport durability, token
 scope, a trusted hosted publication path, or native-agent concurrency. Hosted
 revision publication still requires the separately installed RepositoryObserver.
+
+## Authenticated Workspace observation snapshots
+
+After materialization, use
+`PUT /api/workspaces/{workspaceId}/repositories/{sourceSpaceId}/observations/{generation}`
+with the current `taskId`, `grantId`, `expectedSymbolicRef`, `expectedCommitOid`
+and optional `expectedTreeOid`. Generation is a positive safe integer in the
+path. The same owner/creator, Source policy and scoped Task/Grant checks apply.
+Callers cannot provide repository identity, base, ancestry, timestamps or expiry.
+
+The server reads the exact materialized repository through the Artifacts binding,
+checks commit/tree/ref, walks every reachable parent and verifies base ancestry.
+It produces the existing `anyam.repository-driver-snapshot/v2` manifest for the
+canonical Source repository identity, bound to the actual Workspace/View and
+provider repository. Expiry is bounded by the current Session and Grant.
+
+Bind `ANYAM_REPOSITORY_STATE` to the same private R2 bucket as the existing
+RepositoryDriver's `REPOSITORY_STATE`. Optional `ANYAM_REPOSITORY_STATE_PREFIX`
+must match `REPOSITORY_DRIVER_MANIFEST_PREFIX`; both default to `repositories/`.
+The existing Observer/driver service composition remains required for hosted
+publication. No provider credentials or caller-supplied observation are passed
+through that service boundary.
+
+An immutable generation is journaled in SQLite before conditional R2 publication.
+The generation object is write-once; the latest index advances with an ETag
+condition and read-back. A lost response after either R2 commit can retry the
+same generation across restart without replacing its manifest. Current
+permission and provider state are rechecked before activation. Changed claims,
+expired grants/manifests, a moved head, mismatched context or a newer index remain
+blocked. Higher generations preserve earlier immutable objects. Observation
+publication does not advance canonical Project state or issue credentials.
+
+Local tests use real disposable Git commits and native Miniflare SQLite/R2,
+including interruption after actual R2 commits and concurrent index advancement.
+The existing Observer then consumes the produced manifest in actual hosted
+revision publication. The Artifacts SDK itself remains a fake provider in these
+local checks; remote binding/service conformance is a separate live trial.

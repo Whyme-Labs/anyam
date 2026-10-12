@@ -13,19 +13,19 @@ import { PROMOTION_REQUEST_COMMAND, promotionRequestCommand, promotionRequestVal
 import { PROMOTION_EXECUTE_COMMAND, PROMOTION_RECONCILE_COMMAND, promotionExecutionCommand, promotionExecutionValue, promotionReconciliationCommand, promotionReconciliationValue, promotionStatusValue, PromotionExecutionInputError } from "./promotion-execution-contract.ts";
 import { mirrorCommand, mirrorMutationValue, mirrorPath, MirrorInputError, type MirrorMutation } from "./mirror-contract.ts";
 import { credentialMaterialReceipt, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
-import { WORKSPACE_REPOSITORY_PROTOCOL, workspaceRepositoryInput, workspaceRepositoryPath, type WorkspaceRepositoryPath } from "./workspace-repository-contract.ts";
+import { WORKSPACE_REPOSITORY_PROTOCOL, workspaceRepositoryInput, workspaceRepositoryPath, workspaceObservationInput, workspaceObservationPath, type WorkspaceRepositoryPath, type WorkspaceObservationPath } from "./workspace-repository-contract.ts";
 
-async function workspaceRepositoryMutation(request: Request, env: AnyamRealmOAuthEnv, path: WorkspaceRepositoryPath): Promise<Response> {
+async function workspaceRepositoryMutation(request: Request, env: AnyamRealmOAuthEnv, path: WorkspaceRepositoryPath | WorkspaceObservationPath): Promise<Response> {
   const failure = (status: number, code: string, recoveryAction: string) => json({ protocol: WORKSPACE_REPOSITORY_PROTOCOL, status: "blocked", code, recoveryAction, receipt: "workspaceRepository=not-released; details=not-disclosed; canonicalWrite=false" }, status);
   if ("malformed" in path) return failure(400, "invalid_request", "use one safe Workspace and Source Space identifier in the repository path");
-  if (request.method !== "PUT") return failure(405, "method_not_allowed", "use PUT with the documented materialization fields");
+  if (request.method !== "PUT") return failure(405, "method_not_allowed", "use PUT with the documented Workspace repository fields");
   const sessionId = await anyamRealmOwnerSessionId(request, env);
   if (!sessionId) return failure(401, "owner_authentication_required", "authenticate the existing Realm owner through /owner/login");
   let input;
-  try { input = workspaceRepositoryInput(await readBody(request), path); }
-  catch { return failure(422, "invalid_request", "send only repository names, exact base tree and the current Task/Grant identifiers"); }
+  try { input = "generation" in path ? workspaceObservationInput(await readBody(request), path) : workspaceRepositoryInput(await readBody(request), path); }
+  catch { return failure(422, "invalid_request", "generation" in path ? "send only the exact expected Git ref/commit/tree and current Task/Grant identifiers" : "send only repository names, exact base tree and the current Task/Grant identifiers"); }
   try {
-    const result = await requestAnyamRealmCoordinator(env, "/authority/workspace-repository/internal", { ...input, sessionId }, { allowBlocked: true });
+    const result = await requestAnyamRealmCoordinator(env, "generation" in path ? "/authority/workspace-observation/internal" : "/authority/workspace-repository/internal", { ...input, sessionId }, { allowBlocked: true });
     return json(result, result.status === "blocked" ? 409 : 200);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "coordinator unavailable";
@@ -823,6 +823,8 @@ async function revisionMutation(request: Request, env: AnyamRealmOAuthEnv, path:
  */
 export async function handleAuthorityRequest(request: Request, env: AnyamRealmOAuthEnv): Promise<Response | undefined> {
   const url = new URL(request.url);
+  const observationPath = workspaceObservationPath(url.pathname);
+  if (observationPath) return workspaceRepositoryMutation(request, env, observationPath);
   const repositoryPath = workspaceRepositoryPath(url.pathname);
   if (repositoryPath) return workspaceRepositoryMutation(request, env, repositoryPath);
   const bootstrap = bootstrapPath(url.pathname);

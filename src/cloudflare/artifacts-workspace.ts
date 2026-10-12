@@ -295,7 +295,7 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
   }
 
   private validateInfo(selection: ArtifactsWorkspaceSelection, info: ArtifactsRepositoryInfo, identity: ArtifactsRepositoryIdentity, effect: ProviderEffect): void {
-    if (!identity.repositoryId || info.id !== identity.repositoryId || info.name !== identity.name || info.remote !== expectedRemote(identity) || !info.defaultBranch) {
+    if ([identity.repositoryId, info.id, info.name, info.remote, info.defaultBranch].some(value => typeof value !== "string" || !value) || typeof info.readOnly !== "boolean" || info.id !== identity.repositoryId || info.name !== identity.name || info.remote !== expectedRemote(identity)) {
       throw this.error(selection, "artifacts.repository_identity_mismatch", effect, "provider UUID, name or credential-free account/namespace remote differs from enrollment");
     }
   }
@@ -308,6 +308,33 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
     }
   }
 
+  /** Idempotent product lifecycle. Pending provider effects stay reserved;
+   * replay checks identity but permits ordinary edits after the exact fork. */
+  async materializeWorkspace(input: ArtifactsWorkspaceSelection): Promise<ArtifactsWorkspaceContext> {
+    const selection = immutableArtifactsWorkspaceSelection(input);
+    assertArtifactsWorkspaceSelection(selection, this.options.accountId, this.options.namespace);
+    const record = this.custody(selection.targetName, () => this.store.read(selection));
+    if (!record) return this.forkWorkspace(selection);
+    if (JSON.stringify(immutableArtifactsWorkspaceSelection(record.selection)) !== JSON.stringify(selection)) {
+      throw this.error(selection, "artifacts.workspace_already_bound", "none", "the existing Workspace binding has a different immutable selection");
+    }
+    await this.authorize(selection, "none");
+    if (!record.context || record.pendingOperation !== "none" || record.unknownTokenInventory) {
+      throw this.error(selection, "artifacts.workspace_operation_pending", "unknown", "reconcile the durable pending provider effect before retrying materialization");
+    }
+    try {
+      using target = await this.options.artifacts.get(selection.targetName);
+      const info = await target.info();
+      this.validateInfo(selection, info, record.context.repository, "none");
+      if (info.readOnly) throw this.error(selection, "artifacts.fork_metadata_mismatch", "none", "the registered Workspace repository must remain writable");
+      await this.authorize(selection, "none");
+      return record.context;
+    } catch (error) {
+      if (error instanceof ArtifactsWorkspaceError) throw error;
+      throw this.error(selection, "artifacts.provider_effect_unqualified", "none", "registered repository identity could not be read; no fork was repeated");
+    }
+  }
+
   async forkWorkspace(input: ArtifactsWorkspaceSelection): Promise<ArtifactsWorkspaceContext> {
     const selection = immutableArtifactsWorkspaceSelection(input);
     assertArtifactsWorkspaceSelection(selection, this.options.accountId, this.options.namespace);
@@ -316,6 +343,12 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
     let effect: ProviderEffect = "none";
     try {
       await this.authorize(selection, effect);
+      try {
+        using existing = await this.options.artifacts.get(selection.targetName);
+        throw this.error(selection, "artifacts.workspace_already_bound", "none", "the target provider name already exists; do not adopt or replace it");
+      } catch (error) {
+        if (!(error && typeof error === "object" && "code" in error && error.code === "NOT_FOUND")) throw error;
+      }
       using source = await this.options.artifacts.get(selection.sourceRepository.name);
       const sourceInfo = await source.info();
       this.validateInfo(selection, sourceInfo, selection.sourceRepository, effect);
@@ -328,13 +361,17 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
         record.pendingOperation = "fork";
       });
       effect = "unknown";
-      const forked = await source.fork(selection.targetName, { readOnly: false, defaultBranchOnly: false });
+      const reply = await source.fork(selection.targetName, { readOnly: false, defaultBranchOnly: false });
+      const forked = { id: reply.id, name: reply.name, remote: reply.remote, defaultBranch: reply.defaultBranch, token: reply.token };
       effect = "fork-created";
       using target = await this.options.artifacts.get(selection.targetName);
-      if (!forked.token || !await target.revokeToken(forked.token)) throw this.error(selection, "artifacts.initial_token_unretired", effect, "initial fork token retirement was not confirmed");
+      const initialToken = forked.token;
+      if (typeof initialToken !== "string" || !initialToken || !await target.revokeToken(initialToken)) throw this.error(selection, "artifacts.initial_token_unretired", effect, "initial fork token retirement was not confirmed");
+      if ([forked.id, forked.name, forked.remote, forked.defaultBranch].some(value => typeof value !== "string" || !value || value.includes(initialToken))) throw this.error(selection, "artifacts.fork_metadata_mismatch", effect, "fork metadata must contain only primitive credential-free repository identity fields");
       const identity = { accountId: this.options.accountId, namespace: this.options.namespace, repositoryId: forked.id, name: selection.targetName };
       const targetInfo = await target.info();
       this.validateInfo(selection, targetInfo, identity, effect);
+      if ([targetInfo.id, targetInfo.name, targetInfo.remote, targetInfo.defaultBranch].some(value => value.includes(initialToken))) throw this.error(selection, "artifacts.fork_metadata_mismatch", effect, "returned repository metadata contains the initial credential");
       if (forked.id === sourceInfo.id || forked.name !== targetInfo.name || forked.remote !== targetInfo.remote || forked.defaultBranch !== sourceInfo.defaultBranch || targetInfo.defaultBranch !== sourceInfo.defaultBranch || targetInfo.readOnly) throw this.error(selection, "artifacts.fork_metadata_mismatch", effect, "returned fork must be the independent writable repository at the selected default branch");
       await this.validateBase(selection, target, targetInfo.defaultBranch, effect);
       await this.authorize(selection, effect);

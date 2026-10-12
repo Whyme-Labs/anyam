@@ -13,6 +13,27 @@ import { PROMOTION_REQUEST_COMMAND, promotionRequestCommand, promotionRequestVal
 import { PROMOTION_EXECUTE_COMMAND, PROMOTION_RECONCILE_COMMAND, promotionExecutionCommand, promotionExecutionValue, promotionReconciliationCommand, promotionReconciliationValue, promotionStatusValue, PromotionExecutionInputError } from "./promotion-execution-contract.ts";
 import { mirrorCommand, mirrorMutationValue, mirrorPath, MirrorInputError, type MirrorMutation } from "./mirror-contract.ts";
 import { credentialMaterialReceipt, scanCredentialMaterial } from "../../../src/security/credential-material.ts";
+import { WORKSPACE_REPOSITORY_PROTOCOL, workspaceRepositoryInput, workspaceRepositoryPath, type WorkspaceRepositoryPath } from "./workspace-repository-contract.ts";
+
+async function workspaceRepositoryMutation(request: Request, env: AnyamRealmOAuthEnv, path: WorkspaceRepositoryPath): Promise<Response> {
+  const failure = (status: number, code: string, recoveryAction: string) => json({ protocol: WORKSPACE_REPOSITORY_PROTOCOL, status: "blocked", code, recoveryAction, receipt: "workspaceRepository=not-released; details=not-disclosed; canonicalWrite=false" }, status);
+  if ("malformed" in path) return failure(400, "invalid_request", "use one safe Workspace and Source Space identifier in the repository path");
+  if (request.method !== "PUT") return failure(405, "method_not_allowed", "use PUT with the documented materialization fields");
+  const sessionId = await anyamRealmOwnerSessionId(request, env);
+  if (!sessionId) return failure(401, "owner_authentication_required", "authenticate the existing Realm owner through /owner/login");
+  let input;
+  try { input = workspaceRepositoryInput(await readBody(request), path); }
+  catch { return failure(422, "invalid_request", "send only repository names, exact base tree and the current Task/Grant identifiers"); }
+  try {
+    const result = await requestAnyamRealmCoordinator(env, "/authority/workspace-repository/internal", { ...input, sessionId }, { allowBlocked: true });
+    return json(result, result.status === "blocked" ? 409 : 200);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "coordinator unavailable";
+    if (detail.includes("not_found")) return failure(404, "not_found", "use an active owned Workspace, disclosed Artifacts Source and current Task/Grant permitting source.read and workspace.write");
+    if (detail.includes("invalid_request")) return failure(422, "invalid_request", "send only credential-free documented fields");
+    return failure(503, "provider_unavailable", "inspect the named provider repository and durable custody; reconcile pending effects and initial token retirement before retrying");
+  }
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
@@ -802,6 +823,8 @@ async function revisionMutation(request: Request, env: AnyamRealmOAuthEnv, path:
  */
 export async function handleAuthorityRequest(request: Request, env: AnyamRealmOAuthEnv): Promise<Response | undefined> {
   const url = new URL(request.url);
+  const repositoryPath = workspaceRepositoryPath(url.pathname);
+  if (repositoryPath) return workspaceRepositoryMutation(request, env, repositoryPath);
   const bootstrap = bootstrapPath(url.pathname);
   const projectRoute = projectIdFromPath(url.pathname);
   const changeRoute = changeIdFromPath(url.pathname);

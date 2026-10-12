@@ -146,7 +146,7 @@ export class LocalDisclosureRealm extends AnyamRealmCoordinator {
     return { revoked: true };
   }
 }
-export default { async fetch(request: Request, bindings: { REALM_COORDINATOR: DurableObjectNamespace<LocalDisclosureRealm>; FIXTURE_RECOVERY_CONTROL?: Fetcher }) {
+export default { async fetch<T extends LocalDisclosureRealm>(request: Request, bindings: { REALM_COORDINATOR: DurableObjectNamespace<T>; FIXTURE_RECOVERY_CONTROL?: Fetcher }) {
   const url = new URL(request.url);
   const realm = bindings.REALM_COORDINATOR.get(bindings.REALM_COORDINATOR.idFromName("realm:disclosure-local"));
   if (url.pathname === "/fixture/seed") return Response.json(await realm.seed(await request.json() as Fixture));

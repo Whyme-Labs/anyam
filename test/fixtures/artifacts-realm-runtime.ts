@@ -44,9 +44,8 @@ export class LocalArtifactsRealm extends DurableObject {
       await persist(); return Response.json({ recreated: true });
     }
     const get = fixture.binding.get.bind(fixture.binding);
-    const artifacts = { async get(name: string) {
-      let repo;
-      try { repo = await get(name); } catch { throw Object.assign(new Error("provider-secret"), { code: "NOT_FOUND" }); }
+    const artifacts = { list: fixture.binding.list, async get(name: string) {
+      const repo = await get(name);
       return { ...repo,
         async fork(target: string, options: { readOnly: boolean; defaultBranchOnly: boolean }) { const reply = await repo.fork(target, options); await persist(); return reply; },
         async readCommit(oid: string) { const value = await repo.readCommit(oid); return value && { ...value, parents: [] }; },

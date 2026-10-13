@@ -5,8 +5,9 @@ import { MemoryArtifactsWorkspaceStore } from "../src/cloudflare/artifacts-works
 import { repositoryObservationDigest } from "../src/portability/repository-observation.ts";
 import { artifactsBindingFixture, artifactsSelection } from "./fixtures/artifacts-binding.ts";
 
-async function observationFixture() {
+async function observationFixture(branch = "main") {
   const fixture = artifactsBindingFixture();
+  fixture.infos.get("source")!.defaultBranch = branch;
   const store = new MemoryArtifactsWorkspaceStore();
   const control = new ArtifactsWorkspaceAdapter({ artifacts: fixture.binding, accountId: "account-a", namespace: "private", authorize: fixture.authorize, now: () => fixture.now, store });
   const context = await control.forkWorkspace(artifactsSelection);
@@ -21,11 +22,11 @@ async function observationFixture() {
   fixture.binding.get = async name => {
     const repo = await get(name);
     return { ...repo,
-      async log(input) { assert.equal(input.ref, "refs/heads/main"); return [graph.get(head)!]; },
+      async log(input) { assert.equal(input.ref, branch); return [graph.get(head)!]; },
       async readCommit(oid) { reads.push(oid); return graph.get(oid) ?? null; },
     };
   };
-  const request = { repository: { repositoryId: context.binding.repositoryId, sourceSpaceId: "source:app" }, workspaceId: "workspace:a", projectViewId: "view:a", expectedSymbolicRef: "refs/heads/main", expectedCommitOid: "5".repeat(40), expectedTreeOid: "6".repeat(40), expectedBaseCommitOid: "1".repeat(40), expectedObjectFormat: "sha1" as const };
+  const request = { repository: { repositoryId: context.binding.repositoryId, sourceSpaceId: "source:app" }, workspaceId: "workspace:a", projectViewId: "view:a", expectedSymbolicRef: `refs/heads/${branch}`, expectedCommitOid: "5".repeat(40), expectedTreeOid: "6".repeat(40), expectedBaseCommitOid: "1".repeat(40), expectedObjectFormat: "sha1" as const };
   return { fixture, control, store, context, graph, reads, request, moveHead: (oid: string) => { head = oid; } };
 }
 
@@ -34,6 +35,7 @@ test("Artifacts observes a fresh exact Workspace candidate and complete non-firs
   const result = await control.observeRepository(request);
   assert.equal(result.status, "succeeded");
   if (result.status !== "succeeded") return;
+  assert.equal(result.value.symbolicRef, "refs/heads/main");
   assert.equal(result.value.commitOid, "5".repeat(40));
   assert.equal(result.value.treeOid, "6".repeat(40));
   assert.equal(result.value.baseCommitOid, "1".repeat(40));
@@ -106,7 +108,8 @@ test("Artifacts observation rechecks ref, provider identity and authority after 
     outcomes.push(`${condition}:${result.status}`);
     assert.doesNotMatch(JSON.stringify(result), /usable-secret|initial-secret/);
     if (condition === "caller-mutated" && result.status === "succeeded") {
-      assert.equal(result.value.commitOid, "5".repeat(40));
+      assert.equal(result.value.symbolicRef, "refs/heads/main");
+  assert.equal(result.value.commitOid, "5".repeat(40));
       assert.equal(result.value.sourceSpaceId, "source:app");
     }
   }
@@ -131,4 +134,42 @@ test("Artifacts observation snapshots provider head metadata before asynchronous
   const result = await control.observeRepository(request);
   assert.equal(result.status, "failed", "a reused mutable provider object must not authorize an untraversed candidate");
   assert.equal(reads.includes("7".repeat(40)), false);
+});
+
+test("Artifacts nested-branch observation preserves canonical refs and their digest", async () => {
+  const { control, request } = await observationFixture("feature/worker");
+  const result = await control.observeRepository(request);
+  assert.equal(result.status, "succeeded");
+  if (result.status !== "succeeded") return;
+  assert.equal(result.value.symbolicRef, "refs/heads/feature/worker");
+  assert.equal(result.value.manifestDigest, await repositoryObservationDigest(result.value));
+});
+
+test("Artifacts rejects non-branch and malformed canonical refs before any provider read", async () => {
+  for (const ref of ["main", "HEAD", "refs/tags/main", "refs/heads/", "refs/heads/../main", "refs/heads/main.lock"]) {
+    const { control, fixture, request } = await observationFixture();
+    fixture.events.length = 0;
+    const result = await control.observeRepository({ ...request, expectedSymbolicRef: ref });
+    assert.equal(result.status, "failed", ref);
+    if (result.status !== "failed") continue;
+    assert.equal(result.errorCode, "artifacts.observation_request_invalid", ref);
+    assert.deepEqual(fixture.events, [], ref);
+  }
+});
+
+test("Artifacts missing or unreadable short-branch heads never qualify an observation", async () => {
+  for (const condition of ["missing", "unreadable"]) {
+    const { fixture, control, request } = await observationFixture();
+    const get = fixture.binding.get.bind(fixture.binding);
+    fixture.binding.get = async name => {
+      const repo = await get(name);
+      return { ...repo, async log() {
+        if (condition === "unreadable") throw new Error("provider read contains usable-secret");
+        return [];
+      } };
+    };
+    const result = await control.observeRepository(request);
+    assert.equal(result.status, "failed");
+    assert.doesNotMatch(JSON.stringify(result), /usable-secret/);
+  }
 });

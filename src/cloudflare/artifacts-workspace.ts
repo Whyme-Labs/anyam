@@ -18,7 +18,11 @@ export type ArtifactsRepository = {
   createToken(scope: "read" | "write", ttl: number): Promise<{ id: string; plaintext: string; scope: "read" | "write"; expiresAt: string }>;
   revokeToken(tokenOrId: string): Promise<boolean>;
 };
-export type ArtifactsNamespace = { get(name: string): Promise<ArtifactsRepository> };
+export type ArtifactsNamespace = {
+  get(name: string): Promise<ArtifactsRepository>;
+  /** External inventory is parsed before it can prove target vacancy. */
+  list(options?: { cursor?: string }): Promise<unknown>;
+};
 export type ArtifactsRepositoryIdentity = { accountId: string; namespace: string; repositoryId: string; name: string };
 export type ArtifactsWorkspaceSelection = {
   projectId: string;
@@ -55,6 +59,38 @@ export class ArtifactsWorkspaceError extends Error {
     super(`${code}: ${detail}; target=${targetName}; effect=${providerEffect}; reconcile the named repository and its tokens before retrying uncertain effects`);
     this.name = "ArtifactsWorkspaceError";
   }
+}
+
+/** get() also throws for importing/forking repos and its RPC errors need not
+ * retain a code. Only a complete namespace inventory proves a name absent. */
+export async function assertArtifactsRepositoryAbsent(artifacts: Pick<ArtifactsNamespace, "list">, targetName: string, beforeRead: () => Promise<unknown>): Promise<void> {
+  const invalid = () => new ArtifactsWorkspaceError("artifacts.namespace_inventory_unqualified", targetName, "none", "a complete, stable namespace inventory is required before forking");
+  const names = new Set<string>();
+  const ids = new Set<string>();
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
+  let total: number | undefined;
+  do {
+    await beforeRead();
+    const page = await artifacts.list(cursor === undefined ? {} : { cursor });
+    if (!page || typeof page !== "object" || !("repos" in page) || !Array.isArray(page.repos) || !("total" in page) ||
+        typeof page.total !== "number" || !Number.isSafeInteger(page.total) || page.total < 0 || (total !== undefined && page.total !== total)) throw invalid();
+    total = page.total;
+    const repos: readonly unknown[] = page.repos;
+    for (const repo of repos) {
+      if (!repo || typeof repo !== "object" || !("name" in repo) || typeof repo.name !== "string" ||
+          !/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/u.test(repo.name) || repo.name.includes("..") ||
+          !("id" in repo) || typeof repo.id !== "string" || !repo.id.trim() || names.has(repo.name) || ids.has(repo.id)) throw invalid();
+      if (repo.name === targetName) throw new ArtifactsWorkspaceError("artifacts.workspace_already_bound", targetName, "none", "the target provider name already exists; do not adopt or replace it");
+      names.add(repo.name); ids.add(repo.id);
+    }
+    if (names.size > total) throw invalid();
+    const next = "cursor" in page ? page.cursor : undefined;
+    if (next !== undefined && (typeof next !== "string" || !next || cursors.has(next) || repos.length === 0 || names.size >= total)) throw invalid();
+    cursor = next;
+    if (cursor !== undefined) cursors.add(cursor);
+  } while (cursor !== undefined);
+  if (names.size !== total) throw invalid();
 }
 
 function repositoryId(identity: ArtifactsRepositoryIdentity): string {
@@ -128,7 +164,8 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
       await this.authorize(selection, "none");
       using repo = await this.options.artifacts.get(selection.targetName);
       this.validateInfo(selection, await repo.info(), context.repository, "none");
-      const heads = await repo.log({ ref: symbolicRef, limit: 1 });
+      const branch = symbolicRef.slice("refs/heads/".length);
+      const heads = await repo.log({ ref: branch, limit: 1 });
       const head = { hash: heads[0]?.hash, treeHash: heads[0]?.treeHash };
       if (heads.length !== 1 || head.hash !== request.expectedCommitOid || !oid(head.treeHash) || (request.expectedTreeOid !== undefined && head.treeHash !== request.expectedTreeOid)) {
         throw this.error(selection, "artifacts.observation_candidate_mismatch", "none", "fresh branch head must match the exact expected commit and tree");
@@ -160,7 +197,7 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
       };
       const manifestDigest = await repositoryObservationDigest(claims);
       this.validateInfo(selection, await repo.info(), context.repository, "none");
-      const currentHeads = await repo.log({ ref: symbolicRef, limit: 1 });
+      const currentHeads = await repo.log({ ref: branch, limit: 1 });
       if (currentHeads.length !== 1 || currentHeads[0]?.hash !== head.hash || currentHeads[0]?.treeHash !== head.treeHash) {
         throw this.error(selection, "artifacts.observation_candidate_mismatch", "none", "the selected branch moved during observation; publish a fresh exact candidate");
       }
@@ -308,7 +345,7 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
   }
 
   private async validateBase(selection: ArtifactsWorkspaceSelection, repo: ArtifactsRepository, branch: string, effect: ProviderEffect): Promise<void> {
-    const head = await repo.log({ ref: `refs/heads/${branch}`, limit: 1 });
+    const head = await repo.log({ ref: branch, limit: 1 });
     const commit = await repo.readCommit(selection.baseCommitOid);
     if (head.length !== 1 || head[0]?.hash !== selection.baseCommitOid || head[0].treeHash !== selection.baseTreeOid || commit?.hash !== selection.baseCommitOid || commit.treeHash !== selection.baseTreeOid) {
       throw this.error(selection, "artifacts.base_mismatch", effect, "fresh default-branch head and commit/tree readback must match the selected base exactly");
@@ -350,12 +387,7 @@ export class ArtifactsWorkspaceAdapter implements SmartHttpCredentialIssuer {
     let effect: ProviderEffect = "none";
     try {
       await this.authorize(selection, effect);
-      try {
-        using existing = await this.options.artifacts.get(selection.targetName);
-        throw this.error(selection, "artifacts.workspace_already_bound", "none", "the target provider name already exists; do not adopt or replace it");
-      } catch (error) {
-        if (!(error && typeof error === "object" && "code" in error && error.code === "NOT_FOUND")) throw error;
-      }
+      await assertArtifactsRepositoryAbsent(this.options.artifacts, selection.targetName, () => this.authorize(selection, effect));
       using source = await this.options.artifacts.get(selection.sourceRepository.name);
       const sourceInfo = await source.info();
       this.validateInfo(selection, sourceInfo, selection.sourceRepository, effect);

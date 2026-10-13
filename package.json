@@ -72,6 +72,8 @@
     "qualification:artifacts-workspaces": "tsx --test test/artifacts-workspace.test.ts test/artifacts-workspace-custody.test.ts test/artifacts-workspace-observation.test.ts test/artifacts-workspace-qualification.test.ts test/smart-http-repository.test.ts test/smart-http-state-model.test.ts",
     "qualification:artifacts-realm-local": "tsx --test test/artifacts-realm-runtime.test.mjs",
     "qualification:disclosure-local": "tsx --test test/authority-disclosure.test.ts test/authority-disclosure-runtime.test.mjs",
+    "qualification:git-disclosure": "tsx --test test/hybrid-source.test.ts test/hybrid-git-disclosure.test.ts test/exact-revision-query.test.ts",
+    "experiment:exact-query": "tsx scripts/experiments/benchmark-exact-revision-query.ts",
     "qualification:disclosed-writes-local": "tsx --test test/authority-view-command.test.ts test/realm-identity.test.ts test/credential-material.test.ts test/runner-authority-completion.test.ts test/disclosed-authority-writes-runtime.test.mjs",
     "qualification:selector-clients-local": "tsx --test test/selector-cli-mcp-runtime.test.mjs",
     "qualification:scm-credential-model": "tsx scripts/qualify-scm-credential-model.ts",

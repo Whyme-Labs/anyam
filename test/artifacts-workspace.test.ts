@@ -63,7 +63,7 @@ test("Artifacts forks independent credential-free Workspace repositories at the 
   assert.equal(first.canonicalPublication, "unqualified");
   assert.doesNotMatch(JSON.stringify([first, second, fixture.events]), /initial-secret|usable-secret/);
   assert.ok(fixture.events.includes("fork:source:workspace-a:false:false"));
-  assert.ok(fixture.events.includes("head:workspace-a:refs/heads/main:1"));
+  assert.ok(fixture.events.includes("head:workspace-a:main:1"));
   assert.ok(fixture.events.includes("dispose:source"));
   assert.ok(fixture.events.includes("dispose:workspace-a"));
   await assert.rejects(workspace.forkWorkspace(artifactsSelection), { code: "artifacts.workspace_already_bound" });

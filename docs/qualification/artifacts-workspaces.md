@@ -393,3 +393,31 @@ including interruption after actual R2 commits and concurrent index advancement.
 The existing Observer then consumes the produced manifest in actual hosted
 revision publication. The Artifacts SDK itself remains a fake provider in these
 local checks; remote binding/service conformance is a separate live trial.
+
+## Workers binding compatibility
+
+The Artifacts adapter sends short branch names such as `main` or `feature/worker`
+to `log`. Observation requests and stored manifests retain canonical
+`refs/heads/...` refs. Both observation head reads use the same short branch;
+Source and fork validation use the provider's exact `defaultBranch`. Unresolved
+refs, mismatched commit/tree readbacks and branch movement remain failures.
+
+Namespace vacancy is proven by a complete paginated `list` result. Every page
+must agree on the total, provide unique repository names/UUIDs and advance its
+cursor without a cycle or an empty continuing page; a continuation after the
+total is reached is refused. The completed inventory must match the total. Any
+occupied target is refused, including importing or forking repositories. Read
+errors and malformed/incomplete inventory fail before a fork. No exception text
+is interpreted as permission to create a repository. Fork races still retain
+uncertain custody and require reconciliation rather than adoption or retry.
+
+The [official binding documentation](https://developers.cloudflare.com/artifacts/api/workers-binding/)
+defines these methods and demonstrates short branch inputs. Sanitized Oct13
+trial observations exposed a no-code missing-repository exception and empty
+full-ref/HEAD results despite a valid short-branch head and commit readback.
+Local fixtures now reproduce those shapes, and native SQLite/R2 tests exercise
+the ordinary materialization/observation/recovery paths. These regressions and
+Workers type conformance do not qualify live Artifacts forks, pagination, token
+retirement, observation or replay. A new authorized bounded live trial remains
+required; the completed trial's deleted resources must not be recreated under
+its expired scope.

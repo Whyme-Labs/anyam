@@ -1,5 +1,5 @@
 import {
-  ArtifactsWorkspaceAdapter, assertArtifactsWorkspaceSelection, immutableArtifactsWorkspaceSelection,
+  ArtifactsWorkspaceAdapter, assertArtifactsWorkspaceSelection, assertArtifactsRepositoryAbsent, immutableArtifactsWorkspaceSelection,
   type ArtifactsNamespace, type ArtifactsRepository, type ArtifactsWorkspaceOptions, type ArtifactsWorkspaceSelection,
 } from "./artifacts-workspace.ts";
 import type { AuthoritySqlHost } from "./authority-sqlite.ts";
@@ -9,7 +9,7 @@ import type { RepositoryObservation } from "../kernel/contracts.ts";
 type QualificationRepository = ArtifactsRepository & {
   listTokens(): Promise<{ tokens: readonly { id: string; state: "active" | "expired" | "revoked" }[]; total: number }>;
 };
-type QualificationNamespace = { get(name: string): Promise<QualificationRepository> };
+type QualificationNamespace = Pick<ArtifactsNamespace, "list"> & { get(name: string): Promise<QualificationRepository> };
 export type ArtifactsQualificationInput = {
   runId: string;
   execution: "local-fixture" | "live-approved";
@@ -122,13 +122,10 @@ export class ArtifactsWorkspaceQualification {
       if (!reserved) return this.receipt(request, false, "required", "qualification.run_already_recorded", false, inputDigest);
       failure = "qualification.target_unavailable";
       for (const selection of request.selections) {
-        this.operation(request.runId, "preflight:get");
-        try {
-          using existing = await this.options.artifacts.get(selection.targetName);
-          throw new Error("qualification target already exists");
-        } catch (error) {
-          if (!(error && typeof error === "object" && "code" in error && error.code === "NOT_FOUND")) throw error;
-        }
+        await assertArtifactsRepositoryAbsent(this.options.artifacts, selection.targetName, async () => {
+          await this.options.authorizeRun(request);
+          this.operation(request.runId, "preflight:list");
+        });
       }
       failure = "qualification.binding_failed";
       for (const selection of request.selections) {
@@ -324,7 +321,10 @@ export class ArtifactsWorkspaceQualification {
       try { await this.rememberCredential(runId, name, plaintext); pendingPlaintext.delete(name); }
       catch (error) { if (error instanceof QualificationFailure && error.code === "qualification.ledger_unavailable") onLedgerFailure(); throw error; }
     };
-    return { get: async name => {
+    return { list: async options => {
+      operation("list");
+      return this.options.artifacts.list(options);
+    }, get: async name => {
       operation("get");
       const repo = await this.options.artifacts.get(name);
       return {

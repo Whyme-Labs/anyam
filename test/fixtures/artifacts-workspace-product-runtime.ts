@@ -32,13 +32,15 @@ export class LocalArtifactsWorkspaceRealm extends LocalDisclosureRealm {
       loaded = true;
     };
     const save = async () => ctx.storage.put("fixture-artifacts-provider", { infos: [...fixture.infos], commits: [...fixture.commits], heads: [...fixture.heads], activeTokens: [...fixture.activeTokens], events: fixture.events, forkFails: fixture.forkFails, revokeSucceeds: fixture.revokeSucceeds, graph: [...graph] });
-    const artifacts = { async get(name: string) {
+    const artifacts = {
+      async list(options?: { cursor?: string }) { await ready(); try { return await fixture.binding.list(options); } finally { await save(); } },
+      async get(name: string) {
       await ready();
       const repo = await fixture.binding.get(name);
       return { ...repo,
         async info() { try { return await repo.info(); } finally { await save(); } },
         async readCommit(hash: string) { try { const value = graph.get(hash) ?? await repo.readCommit(hash); return value && { ...value, parents: value.parents ?? [] }; } finally { await save(); } },
-        async log(options: { ref: string; limit: number }) { try { const info = await repo.info(); return options.ref === `refs/heads/${info.defaultBranch}` ? await repo.log(options) : []; } finally { await save(); } },
+        async log(options: { ref: string; limit: number }) { try { const info = await repo.info(); return options.ref === info.defaultBranch ? await repo.log(options) : []; } finally { await save(); } },
         async fork(target: string, options: { readOnly: boolean; defaultBranchOnly: boolean }) { try { return await repo.fork(target, options); } finally { await save(); } },
         async revokeToken(token: string) { try { return await repo.revokeToken(token); } finally { await save(); } },
       };

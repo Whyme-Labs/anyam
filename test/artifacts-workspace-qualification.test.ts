@@ -39,13 +39,8 @@ async function openQualification() {
   const fixture = artifactsBindingFixture();
   const get = fixture.binding.get.bind(fixture.binding);
   const tokenOwners = new Map<string, string>();
-  const artifacts = { async get(name: string) {
-    let repo;
-    try { repo = await get(name); }
-    catch (error) {
-      if (error instanceof Error && error.message === "NOT_FOUND") throw Object.assign(new Error("missing provider repository with usable-secret"), { code: "NOT_FOUND" });
-      throw error;
-    }
+  const artifacts = { list: fixture.binding.list, async get(name: string) {
+    const repo = await get(name);
     return { ...repo,
       async readCommit(oid: string) { const commit = await repo.readCommit(oid); return commit && { ...commit, parents: [] }; },
       async createToken(scope: "read" | "write", ttl: number) {
@@ -110,7 +105,7 @@ test("Artifacts qualification rolls back failed ledger writes, preserves uncerta
     await qualificationFixture(async ({ fixture, control, artifacts, deleted, metadata, record, reopen, failWriteOnce }) => {
       const get = artifacts.get.bind(artifacts);
       let listings = 0;
-      const provider = { async get(name: string) {
+      const provider = { list: artifacts.list, async get(name: string) {
         const repo = await get(name);
         return { ...repo, async listTokens() {
           const inventory = await repo.listTokens();
@@ -195,7 +190,7 @@ test("Artifacts qualification reconciles an initial-token lost reply and continu
       }
       const get = artifacts.get.bind(artifacts);
       let initialReplyLost = false;
-      const provider = { async get(name: string) {
+      const provider = { list: artifacts.list, async get(name: string) {
         const repo = await get(name);
         return { ...repo,
           async createToken(scope: "read" | "write", ttl: number) {
@@ -231,7 +226,7 @@ test("Artifacts cleanup reconciles complete token inventory after lost mint repl
       if (condition !== "two-resources" && condition !== "unknown-fork") fixture.mintFails = true;
       if (condition === "retirement-denied") fixture.afterMint = () => { fixture.revokeSucceeds = false; };
       const get = artifacts.get.bind(artifacts);
-      const provider = { async get(name: string) {
+      const provider = { list: artifacts.list, async get(name: string) {
         const repo = await get(name);
         return { ...repo, async listTokens() {
           const inventory = await repo.listTokens();
@@ -266,7 +261,7 @@ test("Artifacts qualification refuses denied, empty, duplicate or pre-existing s
       if (condition === "empty") selections.length = 0;
       if (condition === "duplicate") selections.push({ ...artifactsSelection, workspaceId: "workspace:peer" });
       if (condition === "existing") fixture.infos.set("workspace-a", { id: "pre-existing-uuid", name: "workspace-a", defaultBranch: "main", remote: "https://account-a.artifacts.cloudflare.net/git/private/workspace-a.git", readOnly: false });
-      if (condition === "lookup-error") fixture.unavailableName = "workspace-a";
+      if (condition === "lookup-error") fixture.inventoryUnavailable = true;
       const result = await control({ async authorizeRun(input) {
         assert.equal(Object.isFrozen(input), true);
         if (condition === "denied") throw new Error("owner denial contains usable-secret");
@@ -292,7 +287,7 @@ test("Artifacts qualification validates every selection and redacts secret-alias
       if (condition === "fork-id-secret") fixture.forkedRepositoryId = "initial-secret-workspace-a";
       if (condition === "canonical-alias") fixture.forkedRepositoryId = "uuid-source";
       const get = artifacts.get.bind(artifacts);
-      const provider = { async get(name: string) {
+      const provider = { list: artifacts.list, async get(name: string) {
         const repo = await get(name);
         return { ...repo, async createToken(scope: "read" | "write", ttl: number) { const reply = await repo.createToken(scope, ttl); return condition === "mint-id-secret" ? { ...reply, id: reply.plaintext } : reply; } };
       } };
@@ -313,7 +308,7 @@ test("Artifacts acquisition and cleanup never journal identities that alias prev
     await qualificationFixture(async ({ fixture, control, artifacts, metadata, deleted }) => {
       const get = artifacts.get.bind(artifacts);
       let previousPlaintext = "";
-      const provider = { async get(name: string) {
+      const provider = { list: artifacts.list, async get(name: string) {
         const repo = await get(name);
         return { ...repo,
           async createToken(scope: "read" | "write", ttl: number) {
@@ -363,7 +358,7 @@ test("Artifacts complete inventory reconciles a completed token retirement whose
   await qualificationFixture(async ({ fixture, control, artifacts, deleted, metadata, record, reopen }) => {
     const get = artifacts.get.bind(artifacts);
     let lost = false;
-    const provider = { async get(name: string) {
+    const provider = { list: artifacts.list, async get(name: string) {
       const repo = await get(name);
       return { ...repo, async revokeToken(id: string) {
         const retired = await repo.revokeToken(id);
@@ -393,7 +388,7 @@ test("Artifacts redaction rejects plaintext in branch metadata and persists alia
       const get = artifacts.get.bind(artifacts);
       const branch = condition === "branch" ? "initial-secret-workspace-a" : "feature/initial-secret-workspace-a";
       if (condition.startsWith("branch")) fixture.infos.get("source")!.defaultBranch = branch;
-      const provider = { async get(name: string) {
+      const provider = { list: artifacts.list, async get(name: string) {
         const repo = await get(name);
         return { ...repo, async fork(target: string, options: { readOnly: boolean; defaultBranchOnly: boolean }) {
           const reply = await repo.fork(target, options);
@@ -406,7 +401,7 @@ test("Artifacts redaction rejects plaintext in branch metadata and persists alia
       if (condition.startsWith("branch")) assert.equal(result.bindingContract, "blocked");
       else {
         reopen();
-        const malicious = { async get(name: string) {
+        const malicious = { list: artifacts.list, async get(name: string) {
           const repo = await get(name);
           return { ...repo, async listTokens() { return { tokens: [{ id: `${condition === "restart-substring-id" ? "metadata-" : ""}usable-secret-token-id-0`, state: "active" as const }], total: 1 }; } };
         } };
@@ -445,7 +440,7 @@ test("Artifacts acquisition rejects non-string branch and credential fields befo
       const branch = ["initial-secret-workspace-a"];
       if (condition === "branch-array") Object.assign(fixture.infos.get("source")!, { defaultBranch: branch });
       const get = artifacts.get.bind(artifacts);
-      const provider = { async get(name: string) {
+      const provider = { list: artifacts.list, async get(name: string) {
         const repo = await get(name);
         return { ...repo,
           async fork(target: string, options: { readOnly: boolean; defaultBranchOnly: boolean }) {
@@ -472,7 +467,7 @@ test("Artifacts acquisition rejects non-string branch and credential fields befo
 test("Artifacts missing fingerprint coverage blocks metadata adoption across the entire run after restart", async () => {
   await qualificationFixture(async ({ fixture, control, artifacts, metadata, reopen, blockLedgerWrites, record, deleted }) => {
     const get = artifacts.get.bind(artifacts);
-    const provider = { async get(name: string) {
+    const provider = { list: artifacts.list, async get(name: string) {
       const repo = await get(name);
       return { ...repo, async createToken(scope: "read" | "write", ttl: number) {
         if (name === "workspace-b") fixture.afterMint = () => blockLedgerWrites(true);
@@ -485,7 +480,7 @@ test("Artifacts missing fingerprint coverage blocks metadata adoption across the
     assert.deepEqual(result.resources.map(resource => resource.credentialGuardPending), [false, true]);
     blockLedgerWrites(false);
     reopen();
-    const malicious = { async get(name: string) {
+    const malicious = { list: artifacts.list, async get(name: string) {
       const repo = await get(name);
       return { ...repo, async listTokens() { return { tokens: [{ id: "usable-secret-token-id-2", state: "active" as const }], total: 1 }; } };
     } };
@@ -506,7 +501,7 @@ test("Artifacts public cleanup refuses to overlap a running qualification and it
     let release!: () => void;
     const entered = new Promise<void>(resolve => { enter = resolve; });
     const pause = new Promise<void>(resolve => { release = resolve; });
-    const provider = { async get(name: string) {
+    const provider = { list: artifacts.list, async get(name: string) {
       if (name === "source" && ++sourceReads === 2) { enter(); await pause; }
       return get(name);
     } };

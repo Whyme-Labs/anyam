@@ -116,6 +116,35 @@ test("resource policy file options require one explicit value", async () => {
   } finally { await f.cleanup(); }
 });
 
+test("resource policy rejects unreadable, non-file and invalid UTF-8 inputs without exposing their contents", async () => {
+  const f = await fixture();
+  try {
+    const bytes = Buffer.from(JSON.stringify({ ...policy, receipt: "measurement=PRIVATE-policy-content:invalid" }));
+    bytes[bytes.indexOf("invalid")] = 0xff;
+    await writeFile(f.policyPath, bytes);
+    for (const path of [f.policyPath, f.root, join(f.root, "missing.json")]) {
+      await assert.rejects(f.run(["agent", "start", "--agent", "cli", "--mode", "supervised", "--resource-policy", path]), (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /--resource-policy requires a readable UTF-8 regular JSON file; no session or process was started/);
+        assert.doesNotMatch(error.message, /PRIVATE-policy-content/);
+        return true;
+      });
+    }
+    assert.deepEqual(await readFile(f.policyPath), bytes, "rejected policy bytes remain unchanged");
+    await assert.rejects(access(localAgentStatePath(f.directory, f.stateDirectory)), "invalid files must not create Session authority");
+  } finally { await f.cleanup(); }
+});
+
+test("resource policy rejects an owned named pipe without waiting for a writer", { skip: process.platform === "win32" ? "requires POSIX named pipes" : false }, async () => {
+  const f = await fixture();
+  try {
+    const pipe = join(f.root, "policy.pipe");
+    await execFile("mkfifo", [pipe]);
+    await assert.rejects(f.run(["workspace", "start", "--agent", "cli", "--mode", "supervised", "--resource-policy", pipe]), /--resource-policy requires a readable UTF-8 regular JSON file; no session or process was started/);
+    await assert.rejects(access(localAgentStatePath(f.directory, f.stateDirectory)), "a named pipe must not create Session authority");
+  } finally { await f.cleanup(); }
+});
+
 test("policy parsing retains measured fields without copying unrelated file content", () => {
   assert.deepEqual(parseWorkspaceResourceLimits({ ...policy, environment: { token: "synthetic-unrelated-value" }, extra: "synthetic" }), policy);
 });

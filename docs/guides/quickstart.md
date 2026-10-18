@@ -34,6 +34,11 @@ passing Node test, and a `dist/index.js` output file.
 If the doctor reports a blocker, read the `budget`, `limit`, `asked`, `receipt`,
 and `fix` fields. The error names the boundary that needs attention.
 
+To inspect a Project from another directory, use `anyam doctor --directory
+./demo` (or its `check` alias). The explicit option takes precedence over a
+positional Project path. Relative paths resolve from the shell's current
+directory; without either path, the doctor inspects the current directory.
+
 ## Start a Change
 
 Commit the checked scaffold, then create a stable Change before editing the next

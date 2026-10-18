@@ -92,7 +92,15 @@ async function resourcePolicyOptions(args: readonly string[], cwd: string): Prom
   if (!hasCliOption(args, "--resource-policy")) return {};
   const path = valueAfter(args, "--resource-policy");
   if (!path?.trim() || path.startsWith("--") || optionIndices(args, "--resource-policy").length !== 1) throw new Error("--resource-policy requires one explicit JSON file; no session or process was started.");
-  const source = await readFile(resolve(cwd, path), "utf8");
+  let file: Awaited<ReturnType<typeof open>> | undefined;
+  let source: string;
+  try {
+    file = await open(resolve(cwd, path), constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+    if (!(await file.stat()).isFile()) throw new Error("resource_policy_source_not_file");
+    source = new TextDecoder("utf-8", { fatal: true }).decode(await file.readFile());
+  } catch {
+    throw new Error("--resource-policy requires a readable UTF-8 regular JSON file; no session or process was started.");
+  } finally { await file?.close(); }
   let value: unknown;
   try { value = JSON.parse(source) as unknown; }
   catch { throw new Error("--resource-policy must contain valid JSON; no session or process was started."); }
@@ -258,7 +266,7 @@ export async function main(inputArgs: readonly string[], cwd = process.cwd(), in
   }
 
   if (command === "check" || command === "doctor") {
-    const directory = positionalArgs(args, command)[0] ?? cwd;
+    const directory = resolve(cwd, valueAfter(args, "--directory") ?? positionalArgs(args, command)[0] ?? cwd);
     const result = await runLocalCheck(directory);
     if (json) console.log(JSON.stringify(result, null, 2));
     else {
